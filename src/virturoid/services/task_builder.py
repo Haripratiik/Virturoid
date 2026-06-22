@@ -75,6 +75,40 @@ def build_task_graph(requirements: RequirementsRecord) -> TaskGraph:
             metrics=["success_rate", "collision_count", "route_time", "path_error_m", "tip_over_rate"],
         )
 
+    if any(token in prompt for token in ["stack", "tower", "pile", "stacking"]):
+        return TaskGraph(
+            id=f"task_{requirements.id}",
+            name="Stack blocks into a tower",
+            prompt=requirements.prompt,
+            task_type="stack",
+            required_skills=["reach", "grasp", "lift", "place"],
+            objects=["block_0", "block_1", "block_2", "stack_target"],
+            success_criteria=[Criterion(name="tower_built", expression="blocks stacked at stack_target")],
+            failure_criteria=[
+                Criterion(name="toppled", expression="tower topples"),
+                Criterion(name="timeout", expression="episode_time > 60"),
+            ],
+            safety_constraints=["no_joint_limit_violation"],
+            metrics=["success_rate", "drop_rate", "timeout_rate"],
+        )
+
+    if any(token in prompt for token in ["push", "slide", "shove", "nudge"]):
+        return TaskGraph(
+            id=f"task_{requirements.id}",
+            name="Push object to a target",
+            prompt=requirements.prompt,
+            task_type="push",
+            required_skills=["reach", "push"],
+            objects=["puck", "target_zone"],
+            success_criteria=[Criterion(name="object_at_target", expression="puck inside target_zone")],
+            failure_criteria=[
+                Criterion(name="off_table", expression="puck outside workspace"),
+                Criterion(name="timeout", expression="episode_time > 60"),
+            ],
+            safety_constraints=["no_joint_limit_violation"],
+            metrics=["success_rate", "path_error_m", "timeout_rate"],
+        )
+
     return TaskGraph(
         id=f"task_{requirements.id}",
         name=requirements.task_summary or "User task",

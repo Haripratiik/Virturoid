@@ -164,6 +164,10 @@ def _generate_scene(task: TaskGraph, index: int, purpose: str) -> SceneGraph:
         return _generate_navigation_scene(task, index, purpose)
     if task.task_type == "pick_place_box":
         return _generate_box_scene(task, index, purpose)
+    if task.task_type == "stack":
+        return _generate_stack_scene(task, index, purpose)
+    if task.task_type == "push":
+        return _generate_push_scene(task, index, purpose)
     return _generate_sorting_scene(task, index, purpose)
 
 
@@ -329,6 +333,51 @@ def _generate_box_scene(task: TaskGraph, index: int, purpose: str) -> SceneGraph
         variation_parameters=variation_parameters,
         requirement_trace=[task.task_type, purpose, "box_handling", f"difficulty_{difficulty}"],
     )
+
+
+def _generate_stack_scene(task: TaskGraph, index: int, purpose: str) -> SceneGraph:
+    """STACK task: several stackable blocks scattered in reach + a target pad to build the tower on (NO bins —
+    a tower scene, not a sort scene). Block count grows with difficulty."""
+    rng = random.Random(_scene_seed(task, purpose, index))
+    difficulty = _DIFFICULTY.get(purpose, 2)
+    dr = _domain_randomization(rng, difficulty)
+    spread = dr["position_jitter_m"]
+    n = 3 + (1 if purpose in {"stress", "edge_case"} else 0)
+    mats = ["matte_red", "matte_blue", "matte_green", "matte_yellow"]
+    bases = [(0.32, -0.12), (0.34, 0.0), (0.32, 0.12), (0.40, -0.06)]
+    objects = [_jittered_block(rng, f"block_{i}", bases[i % len(bases)], mats[i % len(mats)], spread)
+               for i in range(n)]
+    objects.append(SceneObject(name="stack_target", object_type="zone",
+                               pose_xyz_rpy=(0.38, 0.0, 0.002, 0.0, 0.0, 0.0), material="matte_green", scale=0.6))
+    vp = {"index": index, "purpose": purpose, "n_blocks": n, "seed": _scene_seed(task, purpose, index)}
+    vp.update(dr)
+    return SceneGraph(id=f"scene_{task.id}_{purpose}_{index:03d}", name=f"{task.name} {purpose} scene {index + 1}",
+                      backend_targets=["mujoco"], robot_spawn_xyz_rpy=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+                      objects=objects, variation_parameters=vp,
+                      requirement_trace=[task.task_type, purpose, "tabletop", f"difficulty_{difficulty}"])
+
+
+def _generate_push_scene(task: TaskGraph, index: int, purpose: str) -> SceneGraph:
+    """PUSH task: one puck to push + a target zone to push it into (NO bins). Harder tiers add an obstacle in
+    the path so the push must steer around it."""
+    rng = random.Random(_scene_seed(task, purpose, index))
+    difficulty = _DIFFICULTY.get(purpose, 2)
+    dr = _domain_randomization(rng, difficulty)
+    spread = dr["position_jitter_m"]
+    objects = [
+        _jittered_block(rng, "puck", (0.32, -0.06), "matte_orange", spread),
+        SceneObject(name="target_zone", object_type="zone",
+                    pose_xyz_rpy=(0.42, 0.12, 0.002, 0.0, 0.0, 0.0), material="matte_green", scale=0.9),
+    ]
+    if purpose in {"variation", "edge_case", "stress"}:
+        objects.append(SceneObject(name="obstacle_0", object_type="obstacle",
+                                   pose_xyz_rpy=(0.38, 0.03, 0.04, 0.0, 0.0, 0.0), material="matte_gray", scale=0.7))
+    vp = {"index": index, "purpose": purpose, "seed": _scene_seed(task, purpose, index)}
+    vp.update(dr)
+    return SceneGraph(id=f"scene_{task.id}_{purpose}_{index:03d}", name=f"{task.name} {purpose} scene {index + 1}",
+                      backend_targets=["mujoco"], robot_spawn_xyz_rpy=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+                      objects=objects, variation_parameters=vp,
+                      requirement_trace=[task.task_type, purpose, "tabletop", f"difficulty_{difficulty}"])
 
 
 def _generate_navigation_scene(task: TaskGraph, index: int, purpose: str) -> SceneGraph:
