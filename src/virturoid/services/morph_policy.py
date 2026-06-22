@@ -443,17 +443,23 @@ def _trot_cpg_tokens(model, graph, params: dict):
                 amp[k] = ca_a; phase[k] = leg_phase[tok_leg[k]] + ca_ph
         return amp, phase, True
 
-    # PATH 2 — BIPED / HUMANOID by anatomical naming: left/right hip-PITCH (thigh) + knee (calf), L/R anti-phase.
+    # PATH 2 — BIPED / HUMANOID by anatomical naming: left/right hip-PITCH (thigh) + knee/shin (calf), L/R
+    # anti-phase. Side is matched by full word ("left"/"right") OR by the ``l_``/``r_`` prefix our generated
+    # humanoid uses (``l_thigh_joint`` / ``r_shin_joint``), and the calf by knee/calf/shin — so OUR generated
+    # humanoid gets the stepping prior too (without it, CPU-ES can only stand-and-drift, never step).
     side_phase = {"left": 0.0, "right": np.pi}                # alternating-leg gait
     found = {"left": False, "right": False}
     for k in range(n):
         nm = qadr2name.get(int(graph.qadr[k]), "").lower()
-        side = "left" if "left" in nm else ("right" if "right" in nm else None)
-        if side is None:
+        if "left" in nm or nm.startswith("l_"):
+            side = "left"
+        elif "right" in nm or nm.startswith("r_"):
+            side = "right"
+        else:
             continue
         if ("hip" in nm and "pitch" in nm) or "thigh" in nm:  # thigh-equivalent (sagittal hip swing)
             amp[k] = th_a; phase[k] = side_phase[side]; found[side] = True
-        elif "knee" in nm or "calf" in nm:                    # calf-equivalent
+        elif "knee" in nm or "calf" in nm or "shin" in nm:    # calf-equivalent (knee / shin)
             amp[k] = ca_a; phase[k] = side_phase[side] + ca_ph; found[side] = True
     if found["left"] and found["right"]:
         return amp, phase, True

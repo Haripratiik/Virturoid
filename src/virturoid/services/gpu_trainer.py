@@ -102,7 +102,8 @@ _REWARD_FLAGS = ("prog_w", "clear_w", "swing_w", "slip_w", "alt_w", "smooth_w", 
 
 def train_gene_on_gpu(gene, *, out_path: str, iters: int = 80, envs: int = 1024, progress=None,
                       timeout: float = 2400.0, reward_weights: dict | None = None,
-                      cpg: bool = False, dr: bool = False, init_npz: str | None = None) -> str | None:
+                      cpg: bool = False, dr: bool = False, init_npz: str | None = None,
+                      adaptive: bool = False, ep_len: int | None = None) -> str | None:
     """Sync repo+gene to the box, run MJX PPO, fetch the trained policy to ``out_path``. Returns the local
     npz path, or ``None`` on any failure so the caller can fall back to CPU. ``reward_weights`` (the AI gait
     critic's redesigned weights) are passed as trainer flags; ``cpg``/``dr`` enable the trot-CPG prior and
@@ -115,6 +116,9 @@ def train_gene_on_gpu(gene, *, out_path: str, iters: int = 80, envs: int = 1024,
         _ssh("cat > ~/app_gene.json", timeout=60, stdin=json.dumps(gene.to_dict()).encode("utf-8"))
         extra = " --cpg" if cpg else ""
         extra += " --dr" if dr else ""
+        extra += " --adaptive" if adaptive else ""           # inertia-scaled per-joint PD gains — needed to train a humanoid
+        if ep_len:
+            extra += f" --ep-len {int(ep_len)}"
         if init_npz:
             extra += f" --init-npz {init_npz}"
         for k, v in (reward_weights or {}).items():          # critic weights -> --clear-w / --prog-w / ... flags
