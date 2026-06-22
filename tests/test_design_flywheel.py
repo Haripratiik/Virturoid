@@ -1,0 +1,37 @@
+"""Design flywheel (Theme 3 moat): the SECOND build of a morphology+task warm-starts from the first
+build's banked, co-designed body — so designs improve (never regress) across builds. CPU MuJoCo."""
+
+import importlib.util
+import tempfile
+import unittest
+from pathlib import Path
+
+_MUJOCO = importlib.util.find_spec("mujoco") is not None
+
+
+def _quad():
+    from virturoid.services.morphology_composer import compose_from_spec, morphology_from_requirements
+    return compose_from_spec(morphology_from_requirements(0.65, 0.25, prompt="q", robot_class="quadruped"))
+
+
+@unittest.skipUnless(_MUJOCO, "MuJoCo not installed.")
+class DesignFlywheelTests(unittest.TestCase):
+    def test_second_build_warm_starts_and_does_not_regress(self):
+        from virturoid.services.design_flywheel import co_design_with_memory
+        from virturoid.services.memory_db import MemoryDB
+
+        with tempfile.TemporaryDirectory() as td:
+            with MemoryDB(Path(td) / "mem.db") as db:
+                r1 = co_design_with_memory(_quad(), "a quadruped that walks", db,
+                                           iterations=2, population=4, seed=0)
+                self.assertFalse(r1["warm_started"])               # nothing banked yet
+                r2 = co_design_with_memory(_quad(), "a quadruped that walks", db,
+                                           iterations=2, population=4, seed=1)
+                self.assertTrue(r2["warm_started"])                # warm-started from r1's banked design
+                self.assertIsNotNone(r2["prior_best"])
+                # the flywheel: the 2nd build starts from the 1st's improved design -> never below it
+                self.assertGreaterEqual(r2["best_value"], r1["best_value"] - 1e-6)
+
+
+if __name__ == "__main__":
+    unittest.main()

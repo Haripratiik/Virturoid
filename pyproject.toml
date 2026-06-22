@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "virturoid"
+version = "0.1.0"
+description = "AI-native robot creation, simulation, training, and export platform."
+requires-python = ">=3.10"
+# Core import surface (schemas, services, CLIs) needs only numpy at runtime; the heavy engines are extras so
+# `pip install -e .` gives an importable package and runnable CLIs without forcing a multi-GB install.
+dependencies = ["numpy>=1.24"]
+
+[project.optional-dependencies]
+# Physics simulation + evaluation (MuJoCo is the engine, not a custom physics core).
+sim = ["mujoco>=3.0", "Pillow>=10.0"]
+# Real CAD geometry (build123d / OpenCascade) for STEP/STL B-rep export.
+cad = ["build123d>=0.5"]
+# Web app / local UI server.
+web = ["fastapi>=0.110", "uvicorn>=0.27"]
+# RL / learning stack (policy training, morphology-aware policies).
+rl = ["jax>=0.4", "jaxlib>=0.4", "torch>=2.0"]
+# Standalone native desktop app (PySide6).  Install with:  pip install -e ".[desktop]"
+desktop = ["PySide6-Essentials>=6.6", "mujoco>=3.0"]
+# Everything for full local development.
+all = ["mujoco>=3.0", "Pillow>=10.0", "build123d>=0.5", "fastapi>=0.110", "uvicorn>=0.27",
+       "jax>=0.4", "jaxlib>=0.4", "torch>=2.0", "PySide6-Essentials>=6.6"]
+
+# Console entry points so the CLIs run after `pip install -e .` WITHOUT needing PYTHONPATH=src.
+[project.scripts]
+virturoid = "virturoid.build:main"
+virturoid-build = "virturoid.build:main"
+virturoid-autobuild = "virturoid.autobuild:main"
+virturoid-compose = "virturoid.compose:main"
+virturoid-import = "virturoid.import_robot:main"
+virturoid-mvp = "virturoid.mvp:main"
+virturoid-studio = "virturoid.desktop:main"
+virturoid-desktop = "virturoid.desktop:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]

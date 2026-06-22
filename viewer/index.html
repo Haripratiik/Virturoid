@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Virturoid 3D Viewer</title>
+    <link rel="stylesheet" href="/viewer/styles.css" />
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "/viewer/vendor/three/build/three.module.js",
+          "three/addons/": "/viewer/vendor/three/examples/jsm/",
+          "three/examples/jsm/": "/viewer/vendor/three/examples/jsm/",
+          "urdf-loader": "/viewer/vendor/urdf-loader/src/URDFLoader.js"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div class="shell">
+      <aside>
+        <div class="brand">
+          <strong>Virturoid 3D</strong>
+          <span>URDF robot meshes and MuJoCo scene preview</span>
+        </div>
+
+        <label for="packageSelect">Build package</label>
+        <select id="packageSelect"></select>
+
+        <label for="modeSelect">View mode</label>
+        <select id="modeSelect">
+          <option value="robot">Robot (URDF + STL meshes)</option>
+          <option value="scene">Simulation scene (MuJoCo XML)</option>
+        </select>
+
+        <label for="sceneSelect">Scene</label>
+        <select id="sceneSelect" disabled></select>
+
+        <div class="actions">
+          <button id="reloadButton" type="button">Reload view</button>
+        </div>
+
+        <p id="status" class="status">Loading packages...</p>
+
+        <section id="jointPanel" class="joint-panel" hidden>
+          <h2>Joint angles</h2>
+          <div id="jointSliders"></div>
+        </section>
+
+        <section class="help">
+          <h2>Controls</h2>
+          <ul>
+            <li>Drag to orbit</li>
+            <li>Scroll to zoom</li>
+            <li>Right-drag to pan</li>
+          </ul>
+          <p>
+            <strong>Arm packages:</strong> use Robot mode for STL meshes.
+            <strong>Mobile-base packages:</strong> use Simulation scene mode (their URDF has no meshes).
+          </p>
+          <p>
+            Direct links:
+            <a href="/?package=cv_world_arm&amp;mode=robot">arm robot</a> ·
+            <a href="/?package=ui_workbench/ui_mobile_base&amp;mode=scene">mobile scene</a>
+          </p>
+        </section>
+      </aside>
+
+      <main>
+        <canvas id="viewport" aria-label="3D viewport"></canvas>
+      </main>
+    </div>
+
+    <script type="module">
+      try {
+        await import("/viewer/app.js");
+      } catch (error) {
+        const status = document.getElementById("status");
+        status.textContent = `Viewer failed to start: ${error.message}`;
+        status.classList.add("error");
+        console.error(error);
+      }
+    </script>
+  </body>
+</html>

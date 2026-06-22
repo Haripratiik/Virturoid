@@ -1,0 +1,266 @@
+"""Build + write the Product Readiness Ledger by running HONEST per-stage probes over a built package.
+
+Each probe answers "is this stage provably real?" by inspecting artifacts on disk (and, for physics, the
+gene). Probes REUSE existing checks rather than reinventing: ``cad_geometry.is_real_cad`` for CAD, a rendered-
+pixel scan for CV, ``gene_validation.validate_gene_design`` + a spawn-penetration check for physics. Probes
+are best-effort: a missing optional dependency yields an honest non-real status (scaffolded/not_run), never a
+crash and never a false 'attained'. The default landing is EMIT-ONLY (``enforce=False``): the ledger reports
+the truth; flipping ``enforce=True`` later turns a dishonest 'ready' into a build-time error.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from virturoid.schemas.readiness_ledger import (
+    ATTAINED, BELOW_GATE, COLLISION, DRY_RUN_ONLY, NOT_REQUIRED, NOT_RUN, PLACEHOLDER, SCAFFOLDED,
+    ProductReadinessLedger, StageRecord,
+)
+
+# CV artifacts that count as REAL rendered data (not JSON manifests).
+_PIXEL_SUFFIXES = (".png", ".exr", ".pcd", ".npy", ".npz", ".jpg", ".jpeg")
+
+# ALLOWLIST of grasp models that count as a REAL (non-idealized) physics grasp. The honesty gate fails CLOSED:
+# only these certify; an idealized pin, a missing disclosure, or an unknown value reads BELOW_GATE.
+_REAL_GRASP_MODELS = {"contact"}
+
+# the 'actually walked' distance bar — shared with gene_build._WALK_MIN_FORWARD_M so the readiness gate and the
+# build's own 'walked' label can never disagree (the gate used to be more lenient at 0.1 m).
+_WALK_MIN_FORWARD_M = 0.15
+
+
+def build_product_readiness_ledger(package_dir, *, robot_class: str = "", gene=None,
+                                   require=None, enforce: bool = False) -> ProductReadinessLedger:
+    """Probe a package directory and return its honest ledger. ``gene`` (a RobotGene) enables the real
+    physics/spawn probe on the gene path. ``require`` overrides which stages gate ``safe_to_export``."""
+    pkg = Path(package_dir)
+    if require is None:
+        # Default required gates: a build is 'safe' only with real CAD + a real (non-dry-run) physics pass on
+        # top of schema validity + compiled sim. CV + controller are required only when present/requested.
+        require = ["schema_valid", "sim_compiled", "real_cad_exported", "physics_evaluated"]
+    stages = [
+        _probe_schema_valid(pkg),
+        _probe_sim_compiled(pkg),
+        _probe_real_cad(pkg),
+        _probe_rendered_cv(pkg),
+        _probe_physics(pkg, gene),
+        _probe_controller(pkg),
+    ]
+    return ProductReadinessLedger(package_dir=str(pkg), robot_class=robot_class, stages=stages,
+                                  required=list(require), enforce=enforce)
+
+
+def write_product_readiness_ledger(package_dir, *, robot_class: str = "", gene=None,
+                                   require=None, enforce: bool = False) -> ProductReadinessLedger:
+    """Build the ledger, write ``reports/product_readiness_ledger.json``, and (when ``enforce``) RAISE if a
+    required stage is provably fake — the single honest chokepoint. Returns the ledger."""
+    ledger = build_product_readiness_ledger(package_dir, robot_class=robot_class, gene=gene,
+                                            require=require, enforce=enforce)
+    out = Path(package_dir) / "reports"
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "product_readiness_ledger.json").write_text(json.dumps(ledger.to_dict(), indent=2), encoding="utf-8")
+    if enforce:
+        issues = ledger.validate()
+        if issues:
+            raise ValueError("product readiness ledger BLOCKED export — dishonest 'ready' over fake stages: "
+                             + "; ".join(issues))
+    return ledger
+
+
+# --------------------------------------------------------------------------- probes
+
+def _probe_schema_valid(pkg: Path) -> StageRecord:
+    """Core artifacts exist + parse. Lenient across the MVP and gene package layouts."""
+    candidates = [pkg / "robot" / "robot_genome.json",
+                  pkg / "reports" / "package_validation_report.json"]
+    found = [c for c in candidates if c.is_file()]
+    if not found:
+        # any json that parses under the package is a minimal signal the build wrote structured artifacts
+        anyjson = next((p for p in pkg.rglob("*.json")), None)
+        if anyjson is None:
+            return StageRecord("schema_valid", SCAFFOLDED, "no structured artifacts written")
+    for c in found:
+        try:
+            json.loads(c.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            return StageRecord("schema_valid", PLACEHOLDER, f"{c.name} does not parse")
+    # If a package_validation_report exists, honor its ok flag.
+    pvr = pkg / "reports" / "package_validation_report.json"
+    if pvr.is_file():
+        try:
+            ok = bool(json.loads(pvr.read_text(encoding="utf-8")).get("ok"))
+            return StageRecord("schema_valid", ATTAINED if ok else PLACEHOLDER,
+                               "package_validation_report.ok" if ok else "package validation failed")
+        except Exception:  # noqa: BLE001
+            pass
+    return StageRecord("schema_valid", ATTAINED, "core artifacts parse")
+
+
+def _probe_sim_compiled(pkg: Path) -> StageRecord:
+    """Scenes compiled to MJCF. Attained if a compiled scene index lists scenes (and >=1 xml exists)."""
+    idx = next((p for p in pkg.rglob("compiled_scene_index.json")), None)
+    if idx is None:
+        return StageRecord("sim_compiled", NOT_RUN, "no compiled_scene_index.json")
+    try:
+        data = json.loads(idx.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return StageRecord("sim_compiled", PLACEHOLDER, "compiled_scene_index.json does not parse")
+    scenes = data.get("scenes") or []
+    xml_ok = any((pkg / s.get("mujoco_xml", "")).is_file() for s in scenes)
+    if scenes and xml_ok:
+        return StageRecord("sim_compiled", ATTAINED, f"{len(scenes)} compiled scenes",
+                           {"scene_count": len(scenes)})
+    return StageRecord("sim_compiled", PLACEHOLDER, "index lists no loadable scene xml")
+
+
+def _probe_real_cad(pkg: Path) -> StageRecord:
+    """Real B-rep STEP present (not the 479-byte placeholder). Uses cad_geometry.is_real_cad."""
+    steps = list(pkg.rglob("*.step"))
+    if not steps:
+        return StageRecord("real_cad_exported", NOT_RUN, "no .step files")
+    try:
+        from virturoid.services.cad_geometry import is_real_cad
+    except Exception:  # noqa: BLE001
+        return StageRecord("real_cad_exported", NOT_RUN, "cad checker unavailable")
+    real = [s for s in steps if is_real_cad(s)]
+    if real:
+        return StageRecord("real_cad_exported", ATTAINED, f"{len(real)}/{len(steps)} STEP files are real B-rep",
+                           {"real_step_count": len(real), "total_step_count": len(steps)})
+    return StageRecord("real_cad_exported", PLACEHOLDER,
+                       f"{len(steps)} STEP file(s) are placeholders/stubs (no real B-rep)")
+
+
+def _probe_rendered_cv(pkg: Path) -> StageRecord:
+    """Real rendered pixels/point-clouds on disk, not just a manifest. not_required when no CV was requested."""
+    obs_dirs = [p for p in pkg.rglob("synthetic_observations") if p.is_dir()]
+    obs_dirs += [p for p in pkg.rglob("observations") if p.is_dir()]
+    manifest = next((p for p in pkg.rglob("synthetic_observation_manifest.json")), None)
+    pixels = []
+    for d in obs_dirs:
+        for f in d.rglob("*"):
+            if f.suffix.lower() in _PIXEL_SUFFIXES and f.is_file() and f.stat().st_size > 256:
+                pixels.append(f)
+                break
+        if pixels:
+            break
+    if pixels:
+        return StageRecord("rendered_cv_data", ATTAINED, "rendered pixel/point-cloud files present")
+    if manifest is not None or obs_dirs:
+        return StageRecord("rendered_cv_data", PLACEHOLDER,
+                           "CV manifest/contract present but NO rendered pixel files on disk")
+    return StageRecord("rendered_cv_data", NOT_REQUIRED, "no perception/CV stage in this build")
+
+
+def _probe_physics(pkg: Path, gene) -> StageRecord:
+    """A REAL (non-dry-run) physics evaluation + a passed spawn-penetration check. Uses the gene when given."""
+    # spawn penetration via the gene-design gate (fatal/high stability/kinematic flags == not physics-ready).
+    if gene is not None:
+        try:
+            from virturoid.services.gene_validation import validate_gene_design
+            report = validate_gene_design(gene)
+            if report["checks"].get("stability") is False:
+                return StageRecord("physics_evaluated", COLLISION,
+                                   "rest pose is statically unstable / penetrates (gene_validation)")
+            bad = [f for f in report["risk_flags"] if f["severity"] in ("fatal", "high")]
+            if bad:
+                return StageRecord("physics_evaluated", COLLISION,
+                                   "gene_validation flagged: " + bad[0]["detail"], {"flags": len(bad)})
+        except Exception:  # noqa: BLE001
+            pass
+    # §15.3 EXPORT GATE (strongest signal): a gated EvaluationRun (evaluation_loop.gated_evaluation_run) wrote
+    # an explicit pass/fail. "Physics ran" is NOT "task passed" — if the real tiered run failed the gate
+    # (baseline/randomized below threshold), this stage is BELOW_GATE and blocks safe_to_export.
+    ev = next((p for p in pkg.rglob("evaluation_run.json")), None)
+    if ev is not None:
+        try:
+            data = json.loads(ev.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            data = None
+        if isinstance(data, dict) and "export_ready" in data:
+            evidence = {"tier_success": data.get("tier_success"),
+                        "regression_cause_confirmed_rate": data.get("regression_cause_confirmed_rate")}
+            if data.get("export_ready") is True:
+                return StageRecord("physics_evaluated", ATTAINED,
+                                   "real tiered evaluation cleared the §15.3 export gate", evidence)
+            return StageRecord("physics_evaluated", BELOW_GATE,
+                               "real physics ran but task success is below the export gate: "
+                               + "; ".join(data.get("export_blockers") or ["below threshold"]), evidence)
+
+    # A REAL (non-pinned) contact grasp+lift, certified by grasp_eval.evaluate_grasp_lift (closes the fingers and
+    # lifts the object by FRICTION — no _pin_block). This is the honest manipulation capability: if it passed, the
+    # physics stage ATTAINS on a real grasp even though the higher-level sort/transport demo still uses the pin.
+    grasp_rep = next((p for p in pkg.rglob("grasp_evaluation_report.json")), None)
+    if grasp_rep is not None:
+        try:
+            gd = json.loads(grasp_rep.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            gd = {}
+        gm = str(gd.get("grasp_model", "")); gsr = gd.get("success_rate")
+        if gm in _REAL_GRASP_MODELS and gsr is not None:
+            if float(gsr) >= 0.5:
+                return StageRecord("physics_evaluated", ATTAINED,
+                                   f"real CONTACT grasp+lift certified ({float(gsr):.0%} success, no pin) in {grasp_rep.name}",
+                                   {"success_rate": gsr, "grasp_model": gm, "mean_lift_m": gd.get("mean_lift_m")})
+            return StageRecord("physics_evaluated", BELOW_GATE,   # a real grasp ran but didn't clear the bar
+                               f"real contact grasp ran but only {float(gsr):.0%} success in {grasp_rep.name}",
+                               {"success_rate": gsr, "grasp_model": gm})
+
+    # a real evaluation report (gene path) or physics_evaluation_report (mvp path), NOT a dry-run.
+    gene_eval = next((p for p in pkg.rglob("gene_evaluation_report.json")), None)
+    phys = next((p for p in pkg.rglob("physics_evaluation_report.json")), None)
+    for rep in (phys, gene_eval):
+        if rep is None:
+            continue
+        try:
+            data = json.loads(rep.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            continue
+        adapter = str(data.get("adapter_name", "")).lower()
+        if adapter.startswith("dry_run"):
+            return StageRecord("physics_evaluated", DRY_RUN_ONLY, f"{rep.name} is a dry-run result")
+        # A REAL evaluation the robot FAILED is not export-ready physics. A walker that fell or drifted backward,
+        # or a task at ~0% success, must read BELOW_GATE, not ATTAINED — otherwise safe_to_export would be True
+        # over a robot that doesn't do its task.
+        if str(data.get("task_type", "")) == "locomotion":
+            fwd = float(data.get("forward_m", 0.0)); up = bool(data.get("upright", False))
+            status = str(data.get("status", ""))
+            # ATTAINED only for a GENUINE walk. Prefer the honest 'status' the build now writes (already gated on
+            # sustained-upright + a real foot cadence + distance >= _WALK_MIN_FORWARD_M); fall back to the shared
+            # distance bar for older reports. A 0.10-0.15 m drift or an upright slide no longer certifies (the gate
+            # was more lenient (0.1 m) than the build's own 'walked' label — now unified).
+            walked = (status == "walked") if status else (fwd >= _WALK_MIN_FORWARD_M and up)
+            if walked:
+                return StageRecord("physics_evaluated", ATTAINED, f"walked forward upright in {rep.name}",
+                                   {"forward_m": fwd, "upright": up, "status": status})
+            return StageRecord("physics_evaluated", BELOW_GATE,
+                               f"did not walk (forward {fwd:.2f} m, status '{status or up}') in {rep.name}",
+                               {"forward_m": fwd, "upright": up, "status": status})
+        sr = data.get("success_rate")
+        if sr is not None and float(sr) < 0.25:
+            return StageRecord("physics_evaluated", BELOW_GATE, f"task success only {float(sr):.0%} in {rep.name}",
+                               {"success_rate": sr})
+        # GRASP HONESTY GATE — fail CLOSED via an ALLOWLIST of known-real grasp models. A manipulation report
+        # ATTAINS only if it discloses a real (non-pinned) grasp; an IDEALIZED pin (block teleported to the gripper),
+        # a MISSING disclosure, or any unrecognized value reads BELOW_GATE. (A blocklist on just "idealized_pin"
+        # would silently ATTAIN a report that simply dropped the disclosure — the fail-OPEN hole the audit found.)
+        gm = str(data.get("grasp_model", "")); task = str(data.get("task_type", ""))
+        is_manip = bool(gm) or any(w in task for w in ("pick_place", "grasp", "sort", "place", "transport"))
+        if is_manip and gm not in _REAL_GRASP_MODELS:
+            why = ("the grasp is IDEALIZED (block pinned to the gripper on contact), not a real full-contact grasp"
+                   if gm == "idealized_pin" else
+                   f"the manipulation grasp model is undisclosed/unrecognized ('{gm or 'missing'}')")
+            return StageRecord("physics_evaluated", BELOW_GATE, f"real physics ran in {rep.name} but {why}",
+                               {"success_rate": sr, "grasp_model": gm or None})
+        return StageRecord("physics_evaluated", ATTAINED, f"real evaluation in {rep.name}",
+                           {"success_rate": sr})
+    return StageRecord("physics_evaluated", NOT_RUN, "no real physics evaluation report")
+
+
+def _probe_controller(pkg: Path) -> StageRecord:
+    """A trained/exported controller bundle. not_required when training wasn't requested (no bundle present)."""
+    bundle = next((p for p in pkg.rglob("controller_bundle.json")), None)
+    ctrl = next((p for p in pkg.rglob("controller.py")), None)
+    if bundle is not None or ctrl is not None:
+        return StageRecord("controller_exported", ATTAINED, "controller bundle present")
+    return StageRecord("controller_exported", NOT_REQUIRED, "no trained controller requested")
