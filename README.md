@@ -1,75 +1,173 @@
 # Virturoid
 
-**Describe a robot in plain language. Virturoid designs the body, sizes a real bill of materials, generates fabricable CAD, simulates the robot in real MuJoCo physics, and trains its controller. Every robot it builds makes the next one faster.**
+**An AI-native robot creation engine.** Describe a robot in plain language, and Virturoid designs its body, sizes a real bill of materials, generates fabricable CAD, simulates it in real physics, and trains its controller. Every robot it builds makes the next one faster to create.
 
-![Virturoid Studio: describe a robot, watch it build and come to life in real MuJoCo physics](assets/studio_ui.png)
+You write something like *"a four-legged robot that walks"* or *"a tabletop arm that sorts blocks"*, and the system composes an original body for it, chooses real motors and sensors to build it, runs it inside a physics simulator, and teaches it to move through reinforcement learning.
 
-Virturoid is an AI-native robot creation engine wrapped in a native desktop studio. You type what you want. It composes an original robot body, picks real off-the-shelf parts for it, builds the CAD and the bill of materials, drops it into a physics simulator, and teaches it to move.
+It runs as a native desktop studio with a live 3D viewport, and the whole engine is also scriptable from the command line. There are no hand-coded robot templates. One general pipeline takes any morphology from prompt to trained controller.
 
-## What it does
+## Table of contents
 
-- **Generative design from a prompt.** A language model composes an original robot body, and a general anatomy compiler turns it into real geometry. Ask for a dog and you get a dog, with no per-species templates.
-- **Real, buildable hardware.** Every joint is sized to a real actuator, with a full bill of materials covering actuators, sensors, compute, and power. The geometry exports to STEP and STL B-rep CAD you could hand to a fabricator.
-- **Learned control, not scripts.** Bodies are trained in real MuJoCo physics. A quadruped learns to walk on the GPU. A tabletop arm learns a contact grasp and sorts blocks by color. The controller is one morphology-agnostic policy, so what it learns on one robot carries to the next.
-- **A flywheel that compounds.** Every trained robot is banked in a cross-robot library, and the next similar robot warm-starts from it instead of training from scratch. On a sorting task, the second build of a robot reused prior work and cut the search by roughly 7.5x.
+- [Highlights](#highlights)
+- [How it works](#how-it-works)
+- [Project structure](#project-structure)
+- [Built with](#built-with)
+- [Installation](#installation)
+- [Usage](#usage)
+- [Configuration](#configuration)
+- [Roadmap](#roadmap)
+- [License](#license)
 
-![A quadruped gait learned in simulation and replayed in MuJoCo](assets/walk_learned.gif)
+## Highlights
 
-*A quadruped gait learned on the GPU and replayed in MuJoCo. The policy learns balance and propulsion on top of a gait prior, so the robot takes real steps and holds its posture.*
+- **Design from language.** A prompt becomes a structured robot anatomy, then real 3D geometry, through one compiler that handles any body plan.
+- **Buildable, not just renderable.** Every joint is matched to a real off-the-shelf actuator, and each design ships with a full bill of materials and B-rep CAD files you could hand to a fabricator.
+- **Controllers are learned.** Robots are trained in real MuJoCo physics. A quadruped learns to walk on the GPU, and arms learn a contact grasp. One morphology-agnostic policy architecture drives them all.
+- **A flywheel that compounds.** Every trained robot is banked and reused, so each new robot warm-starts from past work instead of training from scratch.
+- **AI in two places.** A language model designs the body, and a second language model tunes the training reward when a gait comes out wrong.
+- **Evidence-gated.** A readiness check verifies every stage against real artifacts before a design is marked ready to export.
 
 ## How it works
 
-Virturoid runs a clear, inspectable pipeline. Each stage produces a real artifact you can open and check.
+Virturoid is an explicit pipeline. Each stage produces a real, inspectable artifact, so the path from prompt to trained robot is transparent rather than a black box.
 
-```text
-prompt  ->  body + bill of materials  ->  CAD + MuJoCo model
-       ->  task and scenes  ->  physics simulation  ->  learned controller
-       ->  cross-robot flywheel  ->  export bundle
+```
+prompt  ->  design  ->  build  ->  simulate  ->  learn  ->  bank  ->  export
 ```
 
-- **Design.** A prompt becomes requirements, then an anatomy graph from a language model (or a deterministic composer when offline). One compiler realizes the geometry for any morphology.
-- **Build.** Parametric CAD produces B-rep geometry exported to STEP and STL. Each joint gets a real actuator, and the system assembles a complete bill of materials. Every robot is buildable, not just renderable.
-- **Simulate and learn.** The body compiles to a MuJoCo model and runs in real physics. Legged robots learn a gait, arms learn to grasp. Controllers are learned in the simulator.
-- **Bank and reuse.** The converged body and its learned skill join a morphology vector space and a linked project memory, so the next robot starts from prior work.
-- **Validate.** A readiness gate checks each stage against the artifacts on disk: real CAD, a real physics pass, measured task outcomes. A robot is marked export-ready only when the evidence is there.
+Every banked robot also warm-starts the next one, so the loop compounds over time. The stages are described below.
 
-Two AI loops run inside the system. One language model designs the body. A second reads how a gait turned out and tunes the training reward toward a cleaner result.
+### 1. From a prompt to a body
 
-## The flywheel
+You describe the robot in natural language. A language model interprets the request into an **anatomy graph**: the limbs, segments, and joints, their proportions, and how they connect. When no API key is set, a deterministic composer builds the same kind of graph offline.
 
-![Build, learn, bank, reuse, with a project memory that links what was learned](assets/flywheel_memory.png)
+A single **general anatomy compiler** then turns that graph into real 3D geometry. The same compiler handles a dog, a hexapod, or a robot arm, so there are no per-species templates to maintain. The output is a **Robot Genome**, the canonical specification that every later stage reads.
 
-Every build feeds the next. A learned gait, a converged body, a hard-won lesson: each one is banked and linked, so the next robot warm-starts instead of starting over. The longer Virturoid runs, the cheaper each new robot gets. That compounding library, not any single model, is the point.
+### 2. Real, buildable hardware
 
-## Quick start
+A design is only useful if you could actually build it, so Virturoid grounds every robot in real parts.
+
+- **Actuators.** Each joint is sized to a real off-the-shelf motor from a component catalog, matched to the torque and speed the joint needs.
+- **Bill of materials.** The system assembles a complete parts list covering actuators, sensors, compute, and power.
+- **CAD.** Geometry is real parametric CAD built with build123d on OpenCascade, exported as B-rep STEP and STL files.
+
+### 3. Learning to move
+
+The Robot Genome compiles to a MuJoCo model and runs in real physics. Control is **learned, not scripted**.
+
+Locomotion uses one **morphology-agnostic policy**: an attention network that reads one token per joint, so the same architecture controls a quadruped, a hexapod, or an arm, and what it learns on one body can transfer to another. Training runs **PPO on the GPU** through MJX, stepping thousands of simulated robots in parallel.
+
+Rather than learn a gait from a dead stop, the policy learns a **residual on top of a rhythmic gait prior**, using position control toward a default stance. A policy that starts from pure noise tends to collapse into a lunge, but giving it a rhythm to refine produces a robot that takes real steps and stays upright. Arms learn a **contact grasp** the same way and can sort objects by color.
+
+### 4. Two AI loops
+
+- **Body designer.** A language model turns the prompt into the anatomy graph.
+- **Reward critic.** A second language model reads a diagnosis of how a gait turned out, such as step cadence, balance, and foot clearance, and rewrites the training reward weights to push toward a cleaner result. This applies the language-to-rewards idea to gait quality.
+
+### 5. The flywheel
+
+Every trained body and skill is banked into a **morphology vector space** and a linked **project memory**. When you ask for a new robot, Virturoid finds its nearest neighbors and **warm-starts from their learned weights** instead of training from scratch.
+
+The effect compounds. On a block-sorting task, a second build of a robot reused prior work and cut the number of simulated candidates from 173 to 23, roughly a 7.5x saving. The longer the system runs, the cheaper each new robot becomes, and that growing library is the core asset.
+
+### 6. The readiness gate
+
+Each build is checked stage by stage against the artifacts actually on disk: real CAD geometry, a real physics pass, and measured task outcomes. A design is marked ready to export only when the evidence is present, which keeps the studio honest about what a given robot can really do.
+
+## Project structure
+
+```
+virturoid/
+├── src/virturoid/
+│   ├── schemas/         Typed data models: Robot Genome, BOM, CAD, scenes, training, readiness
+│   ├── services/        The engine: anatomy design and compiler, CAD, BOM, physics, training, flywheel
+│   ├── desktop.py       Native PySide6 studio with a live MuJoCo viewport (the product)
+│   ├── build.py         Generic builder CLI with morphology-aware routing
+│   ├── autobuild.py     One-command autonomous build, prompt to working robot
+│   ├── compose.py       Compose and co-design a body from building blocks
+│   ├── import_robot.py  Import an existing MJCF or URDF robot and train it
+│   └── webapp.py        Browser debug surface (not the product UI)
+├── scripts/             Training, evaluation, and utility scripts
+├── tests/               Test suite
+├── viewer/              Browser-based MuJoCo viewer
+├── pyproject.toml       Package, extras, and console entry points
+└── README.md
+```
+
+Good entry points into the engine: `anatomy_designer.py` and `anatomy_compiler.py` (prompt to geometry), `bom_builder.py` and `component_catalog.py` (real parts), `cad_geometry.py` (B-rep CAD), `morph_policy.py`, `learn_locomotion.py`, and `gpu_trainer.py` (learned control), `gait_critic.py` (the reward critic), `design_flywheel.py` and `skill_flywheel.py` (reuse), and `readiness_ledger.py` (the export gate).
+
+## Built with
+
+- **Python 3.10+**
+- **MuJoCo** and **MJX** for physics and GPU-parallel simulation
+- **JAX** for GPU training, with **PyTorch** for supporting models
+- **build123d** on OpenCascade for parametric B-rep CAD
+- **PySide6** for the native desktop studio
+- **NumPy** as the only required runtime dependency
+- Pluggable language-model backends: OpenAI, Claude, a local model through Ollama or vLLM, or a fully offline composer
+
+## Installation
 
 ```bash
-python -m venv .venv && . .venv/bin/activate          # Windows: .venv\Scripts\activate
-pip install -e ".[all]"                                # or ".[desktop,sim]" for just the studio
-python -m virturoid.desktop                            # launch Virturoid Studio
+python -m venv .venv
+. .venv/bin/activate            # Windows: .venv\Scripts\activate
+pip install -e ".[all]"         # full install, or ".[desktop,sim]" for just the studio
 ```
 
-Type a prompt in the studio. It composes the body, builds it, simulates it, trains a gait on request, and replays the real episode in an embedded 3D viewport.
+The core package needs only NumPy, so `pip install -e .` gives you an importable library and runnable CLIs without the heavy engines. The extras (`sim`, `cad`, `rl`, `desktop`, `web`, `all`) pull in MuJoCo, CAD, and the learning stack as needed.
 
-It runs fully offline by default. To enable language-model design, set `VIRTUROID_LLM_BACKEND=openai` and an `OPENAI_API_KEY` in a local `.env`.
+## Usage
 
-## Command line
+### Desktop studio
+
+```bash
+python -m virturoid.desktop
+```
+
+Type a prompt in the studio. It composes the body, builds it, simulates it, trains a gait on request, and replays the real episode in the embedded 3D viewport.
+
+### Command line
 
 The studio is the product, but the whole engine is scriptable.
 
 ```bash
-# Compose a robot, co-design it into a working body, build and evaluate in real physics
+# Compose a robot, co-design it into a working body, and evaluate it in real physics
 python -m virturoid.compose --prompt "warehouse arm to move 2 kg boxes with 0.9 m reach" --co-design --build build/arm
 
-# One command: prompt to a working, simulated robot
+# One command, prompt to a working simulated robot
 python -m virturoid.autobuild --prompt "a tabletop arm that sorts red and blue blocks into matching bins" --output build/sorter
 
 # Train and export a controller bundle, plus a runnable ROS 2 package
 python -m virturoid.build --train --prompt "a tabletop arm that sorts blocks" --output build/arm_train
+
+# Import an existing robot model and learn a controller for it
+python -m virturoid.import_robot --mjcf-file path/to/robot.xml --output build/imported
 ```
 
-Each build writes a full package: the robot model, generated task and scene sets, the bill of materials, parametric and B-rep CAD, training artifacts, a controller bundle, and browsable reports. Open `reports/index.html` in any package to explore everything it generated.
+Every build writes a complete package: the Robot Genome, the compiled MuJoCo model, generated task and scene sets, the bill of materials, parametric and B-rep CAD, training artifacts, a controller bundle, and browsable reports. Open `reports/index.html` in any package to explore everything it generated.
 
-## Where it's going
+## Configuration
 
-Virturoid today designs and builds original robots, trains a quadruped to walk and arms to grasp, and compounds every result through the flywheel. Next on the path: learned humanoid locomotion, onboard perception for unknown environments, and transfer from simulation to physical hardware.
+Virturoid runs fully offline by default. To enable language-model design, copy the template and set your backend:
+
+```bash
+cp .env.example .env
+```
+
+| Variable | Purpose |
+|---|---|
+| `VIRTUROID_LLM_BACKEND` | Which brain to use: `off`, `openai`, `claude`, or `local` |
+| `OPENAI_API_KEY` | Your key when the backend is `openai` |
+| `VIRTUROID_OPENAI_MODEL` | Model name for the OpenAI backend |
+| `VIRTUROID_GPU_SSH` | SSH target of a GPU box for training, for example `user@host` |
+
+## Roadmap
+
+- **Learned humanoid locomotion.** Bring the learning stack from quadrupeds to a balancing biped.
+- **Faster, command-conditioned gaits.** Steer a trained policy by target speed and direction.
+- **Onboard perception.** Range sensing and vision so robots can act in unknown environments.
+- **Sim-to-real transfer.** Carry trained controllers onto physical hardware.
+
+## License
+
+Released under the MIT License. See [LICENSE](LICENSE).
