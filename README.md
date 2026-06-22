@@ -1,6 +1,6 @@
 # Virturoid
 
-**An AI-native robot creation engine.** Describe a robot in plain language, and Virturoid designs its body, sizes a real bill of materials, generates fabricable CAD, simulates it in real physics, and trains its controller. Every robot it builds makes the next one faster to create.
+**An AI-native robot creation engine.** Describe a robot in plain language, and Virturoid designs its body, sizes a real bill of materials, generates fabrication-ready CAD, simulates it in real physics, and trains its controller. Every robot it builds makes the next one faster to create.
 
 You write something like *"a four-legged robot that walks"* or *"a tabletop arm that sorts blocks"*, and the system composes an original body for it, chooses real motors and sensors to build it, runs it inside a physics simulator, and teaches it to move through reinforcement learning.
 
@@ -31,17 +31,11 @@ It runs as a native desktop studio with a live 3D viewport, and the whole engine
 
 ## How it works
 
-Virturoid is an explicit pipeline. Each stage produces a real, inspectable artifact, so the path from prompt to trained robot is transparent rather than a black box.
-
-```
-prompt  ->  design  ->  build  ->  simulate  ->  learn  ->  bank  ->  export
-```
-
-Every banked robot also warm-starts the next one, so the loop compounds over time. The stages are described below.
+Virturoid runs as an explicit pipeline, the one in the diagram above. Every stage produces a real, inspectable artifact, so the path from prompt to trained robot stays transparent instead of hidden in a black box. Each stage, in order:
 
 ### 1. From a prompt to a body
 
-You describe the robot in natural language. A language model interprets the request into an **anatomy graph**: the limbs, segments, and joints, their proportions, and how they connect. When no API key is set, a deterministic composer builds the same kind of graph offline.
+You describe the robot in natural language. A language model interprets the request into an **anatomy graph**: its limbs, segments, and joints, their proportions, and how they connect. When no API key is set, a deterministic composer builds the same kind of graph offline.
 
 A single **general anatomy compiler** then turns that graph into real 3D geometry. The same compiler handles a dog, a hexapod, or a robot arm, so there are no per-species templates to maintain. The output is a **Robot Genome**, the canonical specification that every later stage reads.
 
@@ -158,7 +152,7 @@ cp .env.example .env
 
 | Variable | Purpose |
 |---|---|
-| `VIRTUROID_LLM_BACKEND` | Which brain to use: `off`, `openai`, `claude`, or `local` |
+| `VIRTUROID_LLM_BACKEND` | Which language-model backend to use: `off`, `openai`, `claude`, or `local` |
 | `OPENAI_API_KEY` | Your key when the backend is `openai` |
 | `VIRTUROID_OPENAI_MODEL` | Model name for the OpenAI backend |
 | `VIRTUROID_GPU_SSH` | SSH target of a GPU box for training, for example `user@host` |
