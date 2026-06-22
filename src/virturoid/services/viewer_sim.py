@@ -112,28 +112,38 @@ def _locomotion_episode(model, package_dir: Path, *, record_frames: list, steps:
     bq = gr.base_qadr
     z0 = float(data.qpos[bq + 2]) if bq >= 0 else 1.0
     x0 = float(data.qpos[bq]) if bq >= 0 else 0.0
-    pol = _load_locomotion_policy(package_dir, gr.feature_dim, models_dir) or MorphPolicy(gr.feature_dim, seed=0)
-    recipe = getattr(pol, "obs_mean", None) is not None
+    banked = _load_locomotion_policy(package_dir, gr.feature_dim, models_dir)
+    pol = banked if banked is not None else MorphPolicy(gr.feature_dim, seed=0)
+    has_policy = banked is not None                  # a real banked policy -> apply its LEARNED residual (propulsion)
+    normalizer = getattr(pol, "obs_mean", None) is not None  # a recipe policy MAY also carry an obs normalizer
     qadr = np.asarray(gr.qadr, int); vadr = np.asarray(gr.vadr, int); act_u = np.asarray(gr.act_u, int)
     clamps = np.asarray(gr.clamps, float); q_def = np.array([float(data.qpos[a]) for a in qadr])
     # Drive the replay with the SAME per-joint gains the policy was trained under (adaptive -> inertia-scaled),
     # else the scalar recipe — matches recipe_rollout_morph / rollout_view so the build replay == the trained gait.
-    if recipe and getattr(pol, "adaptive_gains", False):
+    if getattr(pol, "adaptive_gains", False):
         from virturoid.services.morph_policy import recipe_gains
         kp_v, kd_v, as_v = recipe_gains(model, gr)
     else:                                            # scalar recipe — share the source-of-truth constants with training
         from virturoid.services.morph_policy import _ASCALE, _KD_REF, _KP_REF
         kp_v = np.full(gr.n_tokens, _KP_REF); kd_v = np.full(gr.n_tokens, _KD_REF); as_v = np.full(gr.n_tokens, _ASCALE)
+    # TROT-CPG prior: the policy's own when CPG-trained, else the default. This feed-forward stepping rhythm is what
+    # makes the body WALK in the replay, so a quad with no exactly-matching banked policy still shows a real upright
+    # gait (bare CPG walks) instead of a random-policy collapse. Same control law as recipe_rollout_morph.
+    from virturoid.services.morph_policy import CPG_DEFAULT, _trot_cpg_tokens
+    cpg = getattr(pol, "cpg", None) or CPG_DEFAULT
+    cpg_amp, cpg_phase, cpg_gate = _trot_cpg_tokens(model, gr, cpg)
+    cpg_freq = float(cpg["freq"]); res_scale = float(cpg.get("residual_scale", 0.3))
+    two_pi = 2.0 * np.pi; dt = float(model.opt.timestep)
     for t in range(steps):
         obs = gr.observe(model, data)
-        if recipe:                                   # matches recipe_rollout_morph / rollout_view (kp/kd/ascale)
-            a = pol.act((obs - pol.obs_mean) / pol.obs_std)
-            for k in range(gr.n_tokens):
-                tgt = q_def[k] + as_v[k] * float(np.tanh(a[k]))
-                tau = kp_v[k] * (tgt - float(data.qpos[qadr[k]])) - kd_v[k] * float(data.qvel[vadr[k]])
-                data.ctrl[act_u[k]] = float(np.clip(tau, -clamps[k], clamps[k]))
-        else:
-            gr.apply(model, data, pol.act(obs), alpha=0.6)
+        a = (pol.act((obs - pol.obs_mean) / pol.obs_std) if normalizer else pol.act(obs)) if has_policy else None
+        cphase = two_pi * cpg_freq * t * dt if cpg_gate else 0.0
+        for k in range(gr.n_tokens):
+            cpg_off = float(cpg_amp[k] * np.sin(cphase + cpg_phase[k])) if cpg_gate else 0.0
+            resid = res_scale * as_v[k] * float(np.tanh(a[k])) if has_policy else 0.0
+            tgt = q_def[k] + cpg_off + resid
+            tau = kp_v[k] * (tgt - float(data.qpos[qadr[k]])) - kd_v[k] * float(data.qvel[vadr[k]])
+            data.ctrl[act_u[k]] = float(np.clip(tau, -clamps[k], clamps[k]))
         mujoco.mj_step(model, data)
         if t % frame_every == 0:
             record_frames.append(_capture_geom_frame(data, model))
@@ -144,7 +154,7 @@ def _locomotion_episode(model, package_dir: Path, *, record_frames: list, steps:
     status = "walked" if (forward > 0.15 and upright) else ("upright" if upright else "fell")
     return {"status": status, "failure_label": None if status == "walked" else status,
             "placed_count": 1 if status == "walked" else 0, "block_count": 1,
-            "forward_m": round(forward, 3), "upright": bool(upright), "learned": recipe}
+            "forward_m": round(forward, 3), "upright": bool(upright), "learned": has_policy}
 
 
 def render_episode_frames(package_dir: Path, scene_index: int = 0, width: int = 720, height: int = 540,

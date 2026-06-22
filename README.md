@@ -117,15 +117,14 @@ virturoid/
 ├── src/virturoid/
 │   ├── schemas/         Typed data models: Robot Genome, BOM, CAD, scenes, tasks, training, readiness
 │   ├── services/        The engine: anatomy design and compiler, CAD, BOM, physics, training, tasks, flywheel
-│   ├── desktop.py       Native PySide6 studio with a live MuJoCo viewport (the product)
+│   ├── ui_server.py     Build Console: the product UI (native window or browser), serves webui/
 │   ├── build.py         Generic builder CLI with morphology-aware routing
 │   ├── autobuild.py     One-command autonomous build, prompt to working robot
 │   ├── compose.py       Compose and co-design a body from building blocks
-│   ├── import_robot.py  Import an existing MJCF or URDF robot and train it
-│   └── webapp.py        Browser debug surface (not the product UI)
+│   └── import_robot.py  Import an existing MJCF or URDF robot and train it
+├── webui/               Build Console front end: 3D viewport, episode playback, outliner, memory
 ├── scripts/             Training, evaluation, and utility scripts
 ├── tests/               Test suite
-├── viewer/              Browser-based MuJoCo viewer
 ├── pyproject.toml       Package, extras, and console entry points
 └── README.md
 ```
@@ -138,7 +137,7 @@ Good entry points into the engine: `anatomy_designer.py` and `anatomy_compiler.p
 - **MuJoCo** and **MJX** for physics and GPU-parallel simulation
 - **JAX** for GPU training, with **PyTorch** for supporting models
 - **build123d** on OpenCascade for parametric B-rep CAD
-- **PySide6** for the native desktop studio
+- **Three.js** front end served by a built-in Python server, run as a native window or in the browser
 - **NumPy** as the only required runtime dependency
 - Pluggable language-model backends: OpenAI, Claude, a local model through Ollama or vLLM, or a fully offline composer
 
@@ -154,13 +153,14 @@ The core package needs only NumPy, so `pip install -e .` gives you an importable
 
 ## Usage
 
-### Desktop studio
+### Build Console (the studio)
 
 ```bash
-python -m virturoid.desktop
+python -m virturoid.ui_server                       # native window
+python -m virturoid.ui_server --web --port 8765     # or in the browser at http://127.0.0.1:8765
 ```
 
-Type a prompt in the studio. It composes the body, builds it, simulates it, trains a gait on request, and replays the real episode in the embedded 3D viewport.
+Describe a robot to the build assistant and it builds it in the live 3D viewport. Switch the viewport to **Episode** to replay the trained motion, open **Memory** for the cross-robot species tree, and **Analysis** for evaluation detail.
 
 ### Command line
 

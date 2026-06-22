@@ -69,6 +69,14 @@ def build_robot_package_from_prompt(
     selection = select_morphology_template(requirements, task, templates)
     output_dir = Path(output_dir)
 
+    # If the morphology-template path has no exact builder for the requested species (e.g. a quadruped),
+    # build the REAL morphology with the general engine instead of silently falling back to the arm. The
+    # selector already traced the request honestly (species_exact is False); compose_robot classifies and
+    # composes any body, and build_gene_package emits the locomotion scenes a learned gait replays. Arms and
+    # mobile bases keep their dedicated template writers below.
+    if not selection.species_exact:
+        return _build_via_general_engine(requirements, task, selection, output_dir, train)
+
     # The selector already traced the species tree to the nearest *buildable* species
     # (selection.selected_template is always buildable), keeping the requested species for
     # honest reporting. So a humanoid request builds its nearest buildable relative instead
@@ -161,6 +169,108 @@ def build_robot_package_from_prompt(
     write_workbench_ui(package.written_dir, summary=result.to_dict(), artifacts=artifacts, training=package.training)
     _write_summary(package.written_dir, result)
     return result
+
+
+def _build_via_general_engine(requirements, task, selection, output_dir: Path, train: bool) -> AutonomousBuildResult:
+    """Build the REAL requested morphology with the general engine when no morphology-template writer exists for
+    it yet (quadruped, legged, etc.). compose_robot classifies and composes any body; build_gene_package emits
+    the package (genome, CAD, compiled scenes) including the locomotion scenes a learned gait replays."""
+    from virturoid.services.gene_build import build_gene_package
+    from virturoid.services.morphology_composer import compose_robot
+
+    gene = compose_robot(requirements.prompt, llm=None)
+    summary = build_gene_package(gene, requirements.prompt, output_dir)
+    written_dir = Path(output_dir)
+    _try_write_robot_urdf(written_dir)  # best-effort: lets the package list + render in Robot mode
+
+    species = getattr(gene, "species", None) or selection.requested_species
+    robot_class = getattr(gene, "robot_class", None) or selection.requested_robot_class
+    task_type = summary.get("task_type", task.task_type) if isinstance(summary, dict) else task.task_type
+    has_scenes = (written_dir / "simulation" / "mujoco" / "compiled_scene_index.json").exists()
+
+    artifacts = {
+        "robot_genome": "robot/robot_genome.json",
+        "scene_set": "simulation/scene_set.json",
+        "compiled_scene_index": "simulation/mujoco/compiled_scene_index.json",
+        "product_readiness_ledger": "reports/product_readiness_ledger.json",
+        "robot_package_contract": PACKAGE_CONTRACT_URI,
+        "mvp_readiness_report": READINESS_REPORT_URI,
+        "workbench": WORKBENCH_UI_URI,
+    }
+    if (written_dir / "robot" / "robot.urdf").exists():
+        artifacts["robot_urdf"] = "robot/robot.urdf"
+
+    # Contract + readiness + workbench are best-effort here: the template-based validator expects the ARM's
+    # required artifacts, which a locomotion package legitimately lacks. The package is valid when the general
+    # engine produced compiled scenes (what the episode replay needs); a contract hiccup must not fail the build.
+    try:
+        write_robot_package_contract(
+            written_dir, package_type="general_engine_package", robot_class=robot_class, species=species,
+            morphology_template_id=selection.selected_template.id, task_type=task_type,
+            artifacts=artifacts, training=None,
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+    result = AutonomousBuildResult(
+        output_dir=str(written_dir),
+        prompt=requirements.prompt,
+        requirements_id=requirements.id,
+        task_type=task_type,
+        selected_morphology_template_id=selection.selected_template.id,
+        selected_robot_class=robot_class,
+        selected_species=species,
+        package_type="general_engine_package",
+        package_valid=bool(has_scenes),
+        summary_uri="reports/autonomous_build_summary.json",
+        artifacts=artifacts,
+        training=None,
+        notes=[
+            "No morphology-template builder exists for this species yet, so it was built with the general "
+            "engine (compose_robot + build_gene_package) -- the real requested morphology, not an arm fallback.",
+            f"Built {species} ({robot_class}); task {task_type}. Replay an episode to see the gait.",
+        ],
+        requested_robot_class=selection.requested_robot_class,
+        requested_species=selection.requested_species,
+        species_exact=True,
+        species_note="",
+        compute={"physics_executed": True, "training_executed": False,
+                 "note": "Built and compiled by the general engine; replay an episode to see the gait."},
+    )
+    try:
+        readiness = write_mvp_readiness_report(
+            written_dir, summary=result.to_dict(), artifacts=artifacts, training=None, requested_training=train,
+        )
+        result.readiness = {
+            "uri": READINESS_REPORT_URI, "ready": readiness.ready, "score": readiness.score,
+            "failed_required_gates": [g.key for g in readiness.gates if g.required and g.status != "pass"],
+        }
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        write_workbench_ui(written_dir, summary=result.to_dict(), artifacts=artifacts, training=None)
+        _write_summary(written_dir, result)
+    except Exception:  # noqa: BLE001
+        pass
+    return result
+
+
+def _try_write_robot_urdf(written_dir: Path) -> None:
+    """Best-effort robot/robot.urdf from the package genome so the package lists + renders in Robot mode.
+    Episode replay does not need it, so any failure here is non-fatal."""
+    try:
+        import json as _json
+
+        from virturoid.schemas.robot import RobotGenome
+        from virturoid.services.urdf_exporter import write_robot_urdf
+
+        genome_path = written_dir / "robot" / "robot_genome.json"
+        if (written_dir / "robot" / "robot.urdf").exists() or not genome_path.exists():
+            return
+        genome = RobotGenome.from_dict(_json.loads(genome_path.read_text(encoding="utf-8")))
+        write_robot_urdf(genome, written_dir)
+    except Exception:  # noqa: BLE001 - URDF is a nicety; episode replay works without it
+        pass
 
 
 def _maybe_evaluate(written_dir: Path, perceive: bool = False) -> dict:

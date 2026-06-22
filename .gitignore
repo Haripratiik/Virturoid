@@ -39,13 +39,6 @@ docs/
 virturoid_startup_plan.md
 AGENTS.md
 
-# Secondary/experimental web UI. The product UI is the desktop app; the documented browser debug surface
-# is webapp.py + viewer/ (kept). This newer web UI is kept LOCAL to keep the public repo's "desktop is the
-# product" story clean. Its test is excluded too, so a clone's suite never breaks importing an absent module.
-webui/
-src/virturoid/ui_server.py
-tests/test_ui_server.py
-
 # Local agent / tooling config (dev workflow, not product)
 .claude/
 .claude/settings.local.json
