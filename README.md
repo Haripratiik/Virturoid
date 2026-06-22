@@ -6,6 +6,8 @@ You write something like *"a four-legged robot that walks"* or *"a tabletop arm 
 
 It runs as a native desktop studio with a live 3D viewport, and the whole engine is also scriptable from the command line. There are no hand-coded robot templates. One general pipeline takes any morphology from prompt to trained controller.
 
+![Virturoid pipeline: from a prompt to a trained, buildable robot](assets/architecture.svg)
+
 ## Table of contents
 
 - [Highlights](#highlights)
