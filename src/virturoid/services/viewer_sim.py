@@ -32,9 +32,13 @@ def simulate_episode_for_viewer(package_dir: Path, scene_set_uri: str = "simulat
                                              or any(o["name"] == "goal_zone" for o in scene["objects"]))
 
     if is_locomotion:
-        # A walker replays its GAIT, not a pick/nav script: drive the legged model over the morph-graph
-        # interface with the banked policy for this species (recipe-aware: PD-to-default + obs-norm when the
-        # policy carries a normalizer), recording every geom pose per frame just like the other tasks.
+        # A walker replays its GAIT, not a pick/nav script. Replay on the robot's OWN model when the build saved
+        # it (simulation/robot_only.xml): the compiled SCENE model reorders geoms/joints, which mismaps the
+        # per-joint gait into a lurch, while the bare robot model matches what the gait was trained on -> it walks.
+        robot_only = package_dir / "simulation" / "robot_only.xml"
+        if robot_only.exists():
+            model = mujoco.MjModel.from_xml_path(str(robot_only))
+            geoms = _geom_metadata(model)
         outcome = _locomotion_episode(model, package_dir, record_frames=frames)
     elif is_navigation:
         from virturoid.services.navigation_controller import run_navigation_episode
@@ -174,7 +178,11 @@ def render_episode_frames(package_dir: Path, scene_index: int = 0, width: int = 
     view = simulate_episode_for_viewer(package_dir, scene_index=scene_index)
     compiled = json.loads((package_dir / "simulation" / "mujoco" / "compiled_scene_index.json").read_text(encoding="utf-8"))
     by_scene = {e["scene_id"]: e["mujoco_xml"] for e in compiled.get("scenes", [])}
-    model = mujoco.MjModel.from_xml_path(str(package_dir / by_scene[view["scene_id"]]))
+    robot_only = package_dir / "simulation" / "robot_only.xml"
+    if view.get("task") == "locomotion" and robot_only.exists():
+        model = mujoco.MjModel.from_xml_path(str(robot_only))   # match the model the locomotion episode ran on
+    else:
+        model = mujoco.MjModel.from_xml_path(str(package_dir / by_scene[view["scene_id"]]))
     renderer = mujoco.Renderer(model, height, width)
     data = mujoco.MjData(model)
     cam = mujoco.MjvCamera()

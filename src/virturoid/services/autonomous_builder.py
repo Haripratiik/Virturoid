@@ -182,6 +182,16 @@ def _build_via_general_engine(requirements, task, selection, output_dir: Path, t
     summary = build_gene_package(gene, requirements.prompt, output_dir)
     written_dir = Path(output_dir)
     _try_write_robot_urdf(written_dir)  # best-effort: lets the package list + render in Robot mode
+    # Save the bare-robot model so the locomotion replay runs on the SAME model the gait was trained on. The
+    # compiled SCENE model reorders geoms/joints, which mismaps the per-joint gait into a lurch; the bare model
+    # matches training, so the quad actually walks. Best-effort; replay falls back to the scene if absent.
+    try:
+        from virturoid.services.morph_policy import robot_mjcf
+
+        (written_dir / "simulation").mkdir(parents=True, exist_ok=True)
+        (written_dir / "simulation" / "robot_only.xml").write_text(robot_mjcf(gene), encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        pass
 
     species = getattr(gene, "species", None) or selection.requested_species
     robot_class = getattr(gene, "robot_class", None) or selection.requested_robot_class
