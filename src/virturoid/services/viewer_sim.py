@@ -63,7 +63,8 @@ def simulate_episode_for_viewer(package_dir: Path, scene_set_uri: str = "simulat
     return {
         "scene_id": scene["id"],
         "purpose": scene_set.get("purpose"),
-        "task": "locomotion" if is_locomotion else ("navigation" if is_navigation else "pick_place_sort"),
+        "task": "locomotion" if is_locomotion else (
+            "navigation" if is_navigation else (scene_set.get("task_type") or "pick_place_sort")),
         "geoms": geoms,
         "frames": frames,
         "frame_count": len(frames),

@@ -185,12 +185,15 @@ async function loadEpisode(refs, ctx) {
   v.sceneRoot = group;
 
   const oc = view.outcome || {};
+  const TASK_LABELS = { locomotion: "walk", navigation: "navigate", pick_place_sort: "sort",
+                        pick_place_box: "lift", stack: "stack", push: "push" };
+  const taskLabel = TASK_LABELS[view.task] || view.task;
   const summary =
     view.task === "locomotion"
-      ? `walk · ${oc.forward_m ?? "?"} m forward · ${oc.upright ? "upright" : "fell"}`
-      : view.task === "pick_place_sort"
-        ? `sort · ${oc.placed_count ?? 0}/${oc.block_count ?? 0} placed`
-        : view.task;
+      ? `${taskLabel} · ${oc.forward_m ?? "?"} m forward · ${oc.upright ? "upright" : "fell"}`
+      : view.task === "navigation"
+        ? `${taskLabel} · ${oc.status === "reached" ? "goal reached" : (oc.status || "in progress")}`
+        : `${taskLabel} · ${oc.placed_count ?? 0}/${oc.block_count ?? 0} placed`;
 
   v.episode = { frames: view.frames, meshes, idx: 0, playing: true, frameMs: 1000 / 30, lastTime: 0, onFrame: null };
   applyEpisodeFrame(v.episode, 0);
