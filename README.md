@@ -8,6 +8,10 @@ It runs as a native desktop studio with a live 3D viewport, and the whole engine
 
 ![Virturoid pipeline: from a prompt to a trained, buildable robot](assets/architecture.svg)
 
+Every body below was generated from a one-line prompt by the same pipeline — no per-species templates:
+
+![Robots generated from prompts: a manipulator, quadruped, hexapod, mobile base, humanoid, and octopod](assets/robot_gallery.png)
+
 ## Table of contents
 
 - [What makes it different](#what-makes-it-different)
@@ -93,7 +97,9 @@ Rather than learn a gait from a dead stop, the policy learns a **residual on top
 
 ### 4. Running a task
 
-A robot is judged by whether it can do the job, not just whether it stands up. From the prompt, Virturoid **proposes a verifiable task**, checks it against the robot's morphology so the task fits the body, generates scenes to test it, and runs the matching **real skill**: pick and place, sort, navigate, or locomote. The result is measured, and a build that fails its task is reported as such.
+A robot is judged by whether it can do the job, not just whether it stands up. From the prompt, Virturoid **proposes a verifiable task**, checks it against the robot's morphology so the task fits the body, **generates a scene specific to that task** — sorting bins, a stacking target, a push goal, a lift shelf, a navigation course, or a maze sized to the robot — and runs the matching **real skill**: pick and place, sort, navigate, or locomote. The result is measured, and a build that fails its task is reported as such.
+
+![Each task generates its own scene, sized to the robot: sort, stack, push, lift, navigate, maze](assets/scene_generation.png)
 
 ### 5. Two AI loops
 
