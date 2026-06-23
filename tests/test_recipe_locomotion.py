@@ -14,7 +14,9 @@ _MUJOCO = importlib.util.find_spec("mujoco") is not None
 
 def _quad():
     from virturoid.services.morphology_composer import compose_robot
-    return compose_robot("a robot dog that walks", llm=None)
+    # The recipe targets the gait-tuned parametric WALKER quad. Use a functional-walker prompt: a creature
+    # word ("dog") now correctly routes to the anatomy-creature body (a different morphology), not the walker.
+    return compose_robot("a quadruped walking robot", llm=None)
 
 
 @unittest.skipUnless(_MUJOCO, "MuJoCo not installed.")
