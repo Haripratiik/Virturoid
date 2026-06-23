@@ -38,7 +38,7 @@ LINKS.forEach(([a, b]) => {
 // tree (organic, like the full graph but species-only). The wider task/skill/training web is the "Full graph"
 // toggle. Ring radii differ per mode so tree mode reads as a clean root-out hierarchy. ----
 const TREE_GROUPS = new Set(["root", "class", "species"]);
-const TREE_RING = { root: 0, class: 175, species: 360 };
+const TREE_RING = { root: 0, class: 185, species: 390 };
 function ringFor(n) {
   return state.treeMode ? (TREE_RING[n.group] ?? 0) : (RING[n.group] ?? 280);
 }
@@ -72,7 +72,7 @@ function makeGraphPanel(icon) {
   let canvas, ctx2d, host, raf;
   const cam = { x: 0, y: 0, scale: 0.7 };
   const camTarget = { x: 0, y: 0, active: false };
-  let dragNode = null, dragging = false, panning = false, last = null, moved = 0;
+  let dragNode = null, dragging = false, panning = false, last = null, moved = 0, hoverId = null;
 
   function resize() {
     if (!canvas || !host) return;
@@ -87,12 +87,13 @@ function makeGraphPanel(icon) {
 
   function step() {
     const nodes = state.treeMode ? state.nodes.filter((n) => TREE_GROUPS.has(n.group)) : state.nodes;
+    const rep = state.treeMode ? 4200 : 2000;  // tree has few nodes -> spread harder so every label fits
     for (let i = 0; i < nodes.length; i++) {
       for (let j = i + 1; j < nodes.length; j++) {
         const a = nodes[i], b = nodes[j];
         let dx = a.x - b.x, dy = a.y - b.y;
         let d2 = dx * dx + dy * dy || 0.01;
-        const f = 1400 / d2;
+        const f = rep / d2;
         const d = Math.sqrt(d2);
         const ux = dx / d, uy = dy / d;
         a.vx += ux * f; a.vy += uy * f;
@@ -144,6 +145,8 @@ function makeGraphPanel(icon) {
       ctx2d.beginPath(); ctx2d.moveTo(pa.x, pa.y); ctx2d.lineTo(pb.x, pb.y); ctx2d.stroke();
     });
 
+    // Pass 1: draw node dots; collect label candidates for de-collision.
+    const labelCands = [];
     state.nodes.forEach((n) => {
       if (state.treeMode && !TREE_GROUPS.has(n.group)) return;
       const p = toScreen(n, w, h);
@@ -158,10 +161,27 @@ function makeGraphPanel(icon) {
       }
       ctx2d.beginPath(); ctx2d.arc(p.x, p.y, r, 0, Math.PI * 2);
       ctx2d.fillStyle = g.color; ctx2d.fill();
+      ctx2d.globalAlpha = 1;
+      const pr = isSel ? 0 : n.id === hoverId ? 1 : n.group === "root" ? 2 : n.group === "class" ? 3 : n.group === "species" ? 4 : 5;
+      labelCands.push({ n, p, r, isSel, dim, pr });
+    });
+
+    // Pass 2: greedy label placement -- draw labels in priority order, skipping any whose box would
+    // overlap an already-drawn one. The selected + hovered labels always win. This kills text overlap.
+    labelCands.sort((a, b) => a.pr - b.pr);
+    const boxes = [];
+    ctx2d.textAlign = "center";
+    labelCands.forEach(({ n, p, r, isSel, dim }) => {
+      ctx2d.font = `${isSel || n.group === "class" || n.group === "root" ? 600 : 400} 12px 'IBM Plex Mono', monospace`;
+      const tw = ctx2d.measureText(n.label).width;
+      const cx = p.x, cy = p.y + r + 14;
+      const box = { x0: cx - tw / 2 - 3, x1: cx + tw / 2 + 3, y0: cy - 11, y1: cy + 4 };
+      const always = isSel || n.id === hoverId;
+      if (!always && boxes.some((q) => box.x0 < q.x1 && box.x1 > q.x0 && box.y0 < q.y1 && box.y1 > q.y0)) return;
+      boxes.push(box);
+      ctx2d.globalAlpha = dim ? 0.5 : 1;
       ctx2d.fillStyle = isSel ? "#ffffff" : dim ? "rgba(220,228,233,0.55)" : "#eaf0f4";
-      ctx2d.font = `${isSel || n.group === "class" ? 600 : 400} 12px 'IBM Plex Mono', monospace`;
-      ctx2d.textAlign = "center";
-      ctx2d.fillText(n.label, p.x, p.y + r + 14);
+      ctx2d.fillText(n.label, cx, cy);
       ctx2d.globalAlpha = 1;
     });
   }
@@ -198,20 +218,24 @@ function makeGraphPanel(icon) {
       host.appendChild(canvas);
       const titleSub = el("span", { class: "mem-title-sub",
         text: "robot classes \u2192 species \u00b7 click a species for its build + train tips" });
-      host.appendChild(el("div", { class: "mem-title" }, [
-        el("span", { class: "mem-title-main", text: "Robot Species Tree" }),
-        titleSub,
-      ]));
-      const modeToggle = el("button", { class: "mem-mode-toggle", type: "button", text: "Full graph \u203a" });
-      modeToggle.addEventListener("click", () => {
-        state.treeMode = !state.treeMode;
-        modeToggle.textContent = state.treeMode ? "Full graph \u203a" : "\u2039 Species tree";
-        titleSub.textContent = state.treeMode
+      const titleMain = el("span", { class: "mem-title-main", text: "Robot Species Tree" });
+      host.appendChild(el("div", { class: "mem-title" }, [titleMain, titleSub]));
+      // Two-tab segmented control -- a clearer way to switch views than a single arrow button.
+      const segTree = el("button", { class: "mem-seg-btn is-active", type: "button", text: "Species tree" });
+      const segFull = el("button", { class: "mem-seg-btn", type: "button", text: "Full graph" });
+      function setMode(tree) {
+        state.treeMode = tree;
+        segTree.classList.toggle("is-active", tree);
+        segFull.classList.toggle("is-active", !tree);
+        titleMain.textContent = tree ? "Robot Species Tree" : "Full knowledge graph";
+        titleSub.textContent = tree
           ? "robot classes \u2192 species \u00b7 click a species for its build + train tips"
-          : "the full task / skill / training web \u00b7 click any node";
-        cam.x = 0; cam.y = 0; cam.scale = state.treeMode ? 0.7 : 1;
-      });
-      host.appendChild(modeToggle);
+          : "classes, species, tasks, skills + training methods \u00b7 click any node";
+        cam.x = 0; cam.y = 0; cam.scale = tree ? 0.7 : 0.8;
+      }
+      segTree.addEventListener("click", () => setMode(true));
+      segFull.addEventListener("click", () => setMode(false));
+      host.appendChild(el("div", { class: "mem-seg" }, [segTree, segFull]));
       host.appendChild(el("div", { class: "mem-graph-hint", text: "drag to pan \u00b7 scroll to zoom" }));
       const legendItems = [
         ["#e8c06b", "Root"],
@@ -263,7 +287,9 @@ function makeGraphPanel(icon) {
       }, { passive: false });
       canvas.addEventListener("mousemove", (e) => {
         if (dragging || panning) return;
-        canvas.style.cursor = pick(e.offsetX, e.offsetY) ? "pointer" : "grab";
+        const hn = pick(e.offsetX, e.offsetY);
+        hoverId = hn ? hn.id : null;
+        canvas.style.cursor = hn ? "pointer" : "grab";
       });
 
       // Gently center the camera on the selected node (from graph or index list).

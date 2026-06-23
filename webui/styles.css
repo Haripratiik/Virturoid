@@ -878,5 +878,7 @@ td code, .mono { color: var(--muted); }
 .mem-title-sub { font-family: var(--font-mono); font-size: 10px; color: var(--faint); }
 .mem-legend { top: auto; bottom: 12px; left: 14px; background: rgba(13, 18, 23, 0.55); }
 .mem-graph-hint { color: var(--faint); }
-.mem-mode-toggle { position: absolute; top: 12px; right: 12px; font-family: var(--font-mono); font-size: 11px; color: var(--ink); background: rgba(13, 18, 23, 0.82); border: 1px solid var(--line); border-radius: 8px; padding: 6px 11px; cursor: pointer; backdrop-filter: blur(6px); }
-.mem-mode-toggle:hover { border-color: #b8ff3a; color: #b8ff3a; }
+.mem-seg { position: absolute; top: 12px; right: 12px; display: flex; gap: 2px; background: rgba(13, 18, 23, 0.82); border: 1px solid var(--line); border-radius: 9px; padding: 3px; backdrop-filter: blur(6px); }
+.mem-seg-btn { font-family: var(--font-mono); font-size: 11px; color: var(--faint); background: transparent; border: none; border-radius: 6px; padding: 5px 12px; cursor: pointer; transition: color 0.12s, background 0.12s; }
+.mem-seg-btn:hover { color: var(--ink); }
+.mem-seg-btn.is-active { color: #0b0f12; background: #b8ff3a; font-weight: 600; }
