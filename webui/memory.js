@@ -34,31 +34,14 @@ LINKS.forEach(([a, b]) => {
   }
 });
 
-// ---- Species-tree layout: robot classes (top row) -> their species (below). Only these two groups show in
-// the default tree view; the wider task/skill/training web appears under the "Full graph" toggle. ----
-const TREE_GROUPS = new Set(["class", "species"]);
-function computeTreePositions() {
-  const speciesOf = new Map();
-  state.nodes.forEach((n) => { if (n.group === "class") speciesOf.set(n.id, []); });
-  LINKS.forEach(([a, b]) => {
-    const na = nodeById.get(a), nb = nodeById.get(b);
-    if (na && nb && na.group === "class" && nb.group === "species") speciesOf.get(a).push(b);
-  });
-  // Left-to-right: each robot class on the left, its species to the right, one row per pair. Long species
-  // ids fit as right-side labels instead of colliding in a wide top-down layout.
-  const CLASSX = -180, SPECIESX = 40, ROWY = 86;
-  const classes = state.nodes.filter((n) => n.group === "class");
-  const m = classes.length;
-  classes.forEach((c, i) => {
-    const y = (i - (m - 1) / 2) * ROWY;
-    c.treeX = CLASSX; c.treeY = y;
-    (speciesOf.get(c.id) || []).forEach((sid, k) => {
-      const s = nodeById.get(sid);
-      if (s) { s.treeX = SPECIESX; s.treeY = y + k * 42; }
-    });
-  });
+// ---- The default view is the ROBOT SPECIES TREE: root -> classes -> species, force-directed into a radial
+// tree (organic, like the full graph but species-only). The wider task/skill/training web is the "Full graph"
+// toggle. Ring radii differ per mode so tree mode reads as a clean root-out hierarchy. ----
+const TREE_GROUPS = new Set(["root", "class", "species"]);
+const TREE_RING = { root: 0, class: 175, species: 360 };
+function ringFor(n) {
+  return state.treeMode ? (TREE_RING[n.group] ?? 0) : (RING[n.group] ?? 280);
 }
-computeTreePositions();
 
 function select(id) {
   state.selected = id;
@@ -103,15 +86,7 @@ function makeGraphPanel(icon) {
   }
 
   function step() {
-    if (state.treeMode) {
-      state.nodes.forEach((n) => {
-        if (!TREE_GROUPS.has(n.group) || n === dragNode) return;
-        n.x += ((n.treeX ?? 0) - n.x) * 0.16;
-        n.y += ((n.treeY ?? 0) - n.y) * 0.16;
-      });
-      return;
-    }
-    const nodes = state.nodes;
+    const nodes = state.treeMode ? state.nodes.filter((n) => TREE_GROUPS.has(n.group)) : state.nodes;
     for (let i = 0; i < nodes.length; i++) {
       for (let j = i + 1; j < nodes.length; j++) {
         const a = nodes[i], b = nodes[j];
@@ -127,6 +102,7 @@ function makeGraphPanel(icon) {
     LINKS.forEach(([ai, bi]) => {
       const a = nodeById.get(ai), b = nodeById.get(bi);
       if (!a || !b) return;
+      if (state.treeMode && !(TREE_GROUPS.has(a.group) && TREE_GROUPS.has(b.group))) return;
       const dx = b.x - a.x, dy = b.y - a.y;
       const d = Math.sqrt(dx * dx + dy * dy) || 0.01;
       const f = (d - 120) * 0.015;
@@ -136,7 +112,7 @@ function makeGraphPanel(icon) {
     });
     nodes.forEach((n) => {
       // Gently hold each node near its hierarchy ring so the tree stays legible.
-      const target = RING[n.group] ?? 280;
+      const target = ringFor(n);
       const r = Math.hypot(n.x, n.y) || 0.01;
       const f = (target - r) * 0.004;
       n.vx += (n.x / r) * f;
@@ -174,7 +150,7 @@ function makeGraphPanel(icon) {
       const g = GROUPS[n.group] || { color: "#8aa0ad" };
       const isSel = n.id === state.selected;
       const dim = state.selected && !isSel && !(neighbors && neighbors.has(n.id));
-      const r = (n.group === "class" ? 10 : n.group === "species" ? 8 : 6) * (isSel ? 1.4 : 1);
+      const r = (n.group === "root" ? 13 : n.group === "class" ? 10 : n.group === "species" ? 8 : 6) * (isSel ? 1.4 : 1);
       ctx2d.globalAlpha = dim ? 0.22 : 1;
       if (isSel) {
         ctx2d.beginPath(); ctx2d.arc(p.x, p.y, r + 5, 0, Math.PI * 2);
@@ -184,13 +160,8 @@ function makeGraphPanel(icon) {
       ctx2d.fillStyle = g.color; ctx2d.fill();
       ctx2d.fillStyle = isSel ? "#ffffff" : dim ? "rgba(220,228,233,0.55)" : "#eaf0f4";
       ctx2d.font = `${isSel || n.group === "class" ? 600 : 400} 12px 'IBM Plex Mono', monospace`;
-      if (state.treeMode) {
-        if (n.group === "class") { ctx2d.textAlign = "right"; ctx2d.fillText(n.label, p.x - r - 8, p.y + 4); }
-        else { ctx2d.textAlign = "left"; ctx2d.fillText(n.label, p.x + r + 8, p.y + 4); }
-      } else {
-        ctx2d.textAlign = "center";
-        ctx2d.fillText(n.label, p.x, p.y + r + 14);
-      }
+      ctx2d.textAlign = "center";
+      ctx2d.fillText(n.label, p.x, p.y + r + 14);
       ctx2d.globalAlpha = 1;
     });
   }
@@ -243,6 +214,7 @@ function makeGraphPanel(icon) {
       host.appendChild(modeToggle);
       host.appendChild(el("div", { class: "mem-graph-hint", text: "drag to pan \u00b7 scroll to zoom" }));
       const legendItems = [
+        ["#e8c06b", "Root"],
         ["#b8ff3a", "Class"],
         ["#e3ebf0", "Species"],
         ["#7fb6c2", "Capability"],

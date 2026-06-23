@@ -8,6 +8,7 @@
 // Restrained palette: lime accent for classes, near-white for species,
 // steel for capabilities (task/skill), slate for method/meta (training/concept).
 export const GROUPS = {
+  root: { label: "Root", color: "#e8c06b" },
   class: { label: "Robot class", color: "#b8ff3a" },
   species: { label: "Species", color: "#e3ebf0" },
   task: { label: "Task", color: "#7fb6c2" },
@@ -17,6 +18,10 @@ export const GROUPS = {
 };
 
 export const NODES = [
+  // ---- Root (trunk of the species tree) ----
+  { id: "robots", label: "Robots", group: "root", tags: ["species-tree"],
+    note: "The robot **species tree**. Every robot class and the species the pipeline has produced branch from here — click a species to read its build + training tips, or use **Full graph** for the wider task / skill / training web." },
+
   // ---- Robot classes ----
   { id: "manipulator", label: "Manipulator", group: "class", tags: ["arm", "fixed-base"],
     note: "**Manipulators** are fixed-base arms. Arm prompts route here. Key levers: **degrees of freedom** (more DOF = larger workspace, harder control), **reach (m)**, and **payload (kg)**." },
@@ -91,6 +96,14 @@ export const NODES = [
 ];
 
 export const LINKS = [
+  // root -> classes (the trunk of the species tree)
+  ["robots", "manipulator"],
+  ["robots", "mobile_base"],
+  ["robots", "quadruped"],
+  ["robots", "hexapod"],
+  ["robots", "octopod"],
+  ["robots", "humanoid"],
+
   // class -> species (the species tree)
   ["manipulator", "fixed_arm.three_dof.tabletop"],
   ["mobile_base", "differential_drive.two_wheel.compact"],
