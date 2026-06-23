@@ -73,7 +73,10 @@ class AutonomousBuilderTests(unittest.TestCase):
 
             self.assertEqual("mobile_base", result.selected_robot_class)
             self.assertEqual("navigation", result.task_type)
-            self.assertEqual("mobile_base_foundation_package", result.package_type)
+            # Mobile bases now build through the general engine (clean nav package: no meshless URDF and a
+            # task_type-tagged scene set) instead of the old foundation-template writer, which rendered as
+            # Robot-mode placeholders. See build_robot_package_from_prompt.
+            self.assertEqual("general_engine_package", result.package_type)
             self.assertTrue(result.package_valid)
             self.assertTrue(result.readiness["ready"])
             self.assertTrue(contract["ok"])
@@ -85,23 +88,22 @@ class AutonomousBuilderTests(unittest.TestCase):
             self.assertFalse(by_gate["training_config_present"]["required"])
             self.assertIn("scene_generation", contract["capabilities"])
             self.assertIn("compiled_simulation_scenes", contract["capabilities"])
-            self.assertIn("cv_perception_contract", contract["capabilities"])
-            self.assertIn("world_model_contract", contract["capabilities"])
-            self.assertIn("synthetic_observation_dataset", contract["capabilities"])
-            self.assertIn("generated_cv_annotations", contract["capabilities"])
-            self.assertIn("generated_world_state_snapshots", contract["capabilities"])
+            # The clean gene navigation package does NOT ship the CV/world-model scaffolding the old
+            # foundation writer did. Perception is a roadmap item, and maze_nav -- the demo's wheeled base --
+            # is likewise a gene package without it, so fresh mobile-base builds now match it.
             self.assertIn("robot_package_contract", result.artifacts)
             self.assertIn("mvp_readiness_report", result.artifacts)
             self.assertIn("workbench", result.artifacts)
             workbench = (output_dir / "reports" / "workbench.html").read_text(encoding="utf-8")
             self.assertIn("Virturoid Build Workbench", workbench)
-            self.assertIn("mobile_base_foundation_package", workbench)
+            self.assertIn("general_engine_package", workbench)
             self.assertIn("goal_zone", workbench)
             self.assertIn("MVP Readiness", workbench)
             self.assertEqual("morph_mobile_base_differential", result.selected_morphology_template_id)
             self.assertEqual(result.selected_species, summary["selected_species"])
             self.assertTrue((output_dir / "robot" / "robot_genome.json").exists())
-            self.assertTrue((output_dir / "simulation" / "mujoco" / "mobile_base_scene.xml").exists())
+            # Gene navigation packages compile per-variation scenes (compiled_scene_index.json), not the
+            # foundation writer's single mobile_base_scene.xml.
             self.assertTrue((output_dir / "simulation" / "scene_set.json").exists())
             self.assertTrue((output_dir / "simulation" / "mujoco" / "compiled_scene_index.json").exists())
 

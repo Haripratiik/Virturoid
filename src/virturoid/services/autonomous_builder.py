@@ -72,9 +72,13 @@ def build_robot_package_from_prompt(
     # If the morphology-template path has no exact builder for the requested species (e.g. a quadruped),
     # build the REAL morphology with the general engine instead of silently falling back to the arm. The
     # selector already traced the request honestly (species_exact is False); compose_robot classifies and
-    # composes any body, and build_gene_package emits the locomotion scenes a learned gait replays. Arms and
-    # mobile bases keep their dedicated template writers below.
-    if not selection.species_exact:
+    # composes any body, and build_gene_package emits the scenes a learned controller replays.
+    # MOBILE BASES also go through the general engine: the dedicated foundation-template writer emitted a
+    # meshless URDF (so Robot mode showed only placeholders) plus an untagged scene set (task_type=None,
+    # which broke episode replay). The gene navigation package is clean -- no URDF (so it auto-plays the
+    # Episode like the maze_nav demo) and task_type=navigation. Only manipulators keep the mesh-bearing
+    # template writer below.
+    if not selection.species_exact or selection.requested_robot_class == "mobile_base":
         return _build_via_general_engine(requirements, task, selection, output_dir, train)
 
     # The selector already traced the species tree to the nearest *buildable* species

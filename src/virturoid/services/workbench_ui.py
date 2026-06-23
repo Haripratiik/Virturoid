@@ -403,10 +403,27 @@ def build_workbench_ui(
 def _validation_rows(report: dict | None) -> str:
     if not report:
         return '<tr><td>Route package validation</td><td><span class="status not_checked">not checked</span></td><td>No route-specific validation report.</td></tr>'
-    return "\n".join(
-        f"<tr><td>{escape(item.get('name', ''))}</td><td>{_status_pill(item.get('status', ''))}</td><td>{escape(item.get('message', ''))}</td></tr>"
-        for item in report.get("checks", [])[:40]
-    )
+    # `checks` is a list on the arm route but a name->result MAPPING on the gene route -- normalize both.
+    # (Slicing a dict here used to throw, and the caller's silent try/except dropped the WHOLE workbench
+    # report, so gene-engine builds -- mobile bases, quads -- had no reports/workbench.html.)
+    checks = report.get("checks", [])
+    if isinstance(checks, dict):
+        norm = []
+        for k, v in checks.items():
+            if isinstance(v, dict):
+                norm.append({"name": v.get("name", k), "status": v.get("status", ""), "message": v.get("message", "")})
+            elif isinstance(v, str):
+                norm.append({"name": k, "status": v, "message": ""})
+            else:
+                norm.append({"name": k, "status": "pass" if v else "fail", "message": ""})
+        checks = norm
+    if not isinstance(checks, list):
+        checks = []
+    rows = [
+        f"<tr><td>{escape(str(item.get('name', '')))}</td><td>{_status_pill(str(item.get('status', '')))}</td><td>{escape(str(item.get('message', '')))}</td></tr>"
+        for item in checks[:40] if isinstance(item, dict)
+    ]
+    return "\n".join(rows) or '<tr><td>Route package validation</td><td><span class="status not_checked">not checked</span></td><td>No checks reported.</td></tr>'
 
 
 def _readiness_rows(report: dict | None) -> str:
