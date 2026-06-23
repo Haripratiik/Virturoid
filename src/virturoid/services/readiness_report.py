@@ -113,7 +113,9 @@ def build_mvp_readiness_report(
             "robot_model_exported",
             "Robot model exported",
             _any_artifact_exists(package_dir, artifacts, ["robot_urdf", "mujoco_xml"])
-            or (package_dir / "robot" / "robot.urdf").exists(),
+            or (package_dir / "robot" / "robot.urdf").exists()
+            or (package_dir / "simulation" / "robot_only.xml").exists()
+            or len(compiled_scenes) > 0,
             "At least one simulator/robot model export exists.",
             artifacts.get("robot_urdf") or artifacts.get("mujoco_xml") or "robot/robot.urdf",
         ),
@@ -135,7 +137,8 @@ def build_mvp_readiness_report(
             "generic_package_boundary",
             "Package boundary is not arm-only",
             package_type in {"mvp_manipulator_training_package", "mobile_base_foundation_package",
-                             "gene_package", "gene_locomotion_package", "gene_navigation_package"},
+                             "gene_package", "gene_locomotion_package", "gene_navigation_package",
+                             "general_engine_package"},
             f"Current package type: {package_type or 'unknown'}.",
             "reports/robot_package_contract.json",
         ),
