@@ -545,6 +545,17 @@ def _generic_legged_graph(*, n_pairs: int, body=0.55, girth=0.16, leg=0.27, tail
 _WALKER_SIGNAL = re.compile(r"\b(walking robot|walker|quadruped|hexapod|octopod|biped|legged|"
                             r"\d+[ -]?legged|\d+ legs|walk|walks|walking|locomot\w*|trot|trots|trotting|"
                             r"gait|crawl|crawls|crawling|march|marches|marching|gallop|gallops|stroll)\b")
+# A NAMED CREATURE (animal noun) gets the anatomy body even when it ALSO says it "walks" -- a dog that walks
+# is still a dog. Only a PURE functional walker ("a quadruped walking robot", "a hexapod") with no creature
+# word routes to the gait-tuned parametric template. Without this, "a dog robot that walks" tripped the walk
+# verb and came out a flat generic quadruped instead of a dog.
+_CREATURE_WORDS = re.compile(
+    r"\b(frog|amphibian|dog|puppy|hound|canine|spider|arachnid|tarantula|insect|lizard|crab|crustacean|"
+    r"mantis|gecko|salamander|newt|scorpion|centipede|beetle|ant|turtle|tortoise|snake|serpent|creature|"
+    r"animal|octopus|cat|kitten|horse|pony|giraffe|bird|elephant|cow|goat|deer|donkey|sheep|pig|rabbit|fox|"
+    r"wolf|bear|tiger|lion|cheetah|leopard|camel|kangaroo|ostrich|penguin|chicken|duck|mammal|reptile|"
+    r"dinosaur|raptor|axolotl|rhino|hippo|zebra|antelope|gazelle|panther|puma|lynx|mule|llama|alpaca|moose|"
+    r"elk|bison|goose)\b")
 
 
 def generic_creature_gene(prompt: str, robot_class: str | None = None):
@@ -558,7 +569,7 @@ def generic_creature_gene(prompt: str, robot_class: str | None = None):
     cls = (robot_class or "").lower()
     if cls in ("manipulator", "mobile_base", "arm", "gripper", "biped", "humanoid"):
         return None
-    if _WALKER_SIGNAL.search(p):
+    if _WALKER_SIGNAL.search(p) and not _CREATURE_WORDS.search(p):
         return None
     try:
         g = build_from_anatomy(_generic_legged_graph(n_pairs=2))
