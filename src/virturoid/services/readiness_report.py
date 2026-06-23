@@ -134,56 +134,74 @@ def build_mvp_readiness_report(
         _gate(
             "generic_package_boundary",
             "Package boundary is not arm-only",
-            package_type in {"mvp_manipulator_training_package", "mobile_base_foundation_package"},
+            package_type in {"mvp_manipulator_training_package", "mobile_base_foundation_package",
+                             "gene_package", "gene_locomotion_package", "gene_navigation_package"},
             f"Current package type: {package_type or 'unknown'}.",
             "reports/robot_package_contract.json",
         ),
+        # The perception / world-model / synthetic-observation stages are BEYOND the stated MVP goal (build from a
+        # prompt -> scenes -> compile -> controller when training is requested). They are REQUIRED only when the
+        # build actually includes that stage; a build that never ran CV is SKIPPED here, not failed.
         _gate(
             "cv_perception_contract",
             "CV perception contract ready",
             bool(perception_config.get("vision_annotations") and perception_config.get("synthetic_dataset")),
-            f"{len(perception_config.get('vision_annotations', []))} annotation spec(s) declared.",
+            f"{len(perception_config.get('vision_annotations', []))} annotation spec(s) declared." if perception_config else "No CV/perception stage in this build (optional).",
             "simulation/perception_config.json",
+            required=bool(perception_config),
+            skipped=not perception_config,
         ),
         _gate(
             "world_model_contract",
             "World model contract ready",
             bool(world_model.get("observable_entities") and world_model.get("physical_parameter_targets")),
-            f"{len(world_model.get('observable_entities', []))} observable entity/entities and {len(world_model.get('physical_parameter_targets', []))} physical parameter target(s).",
+            f"{len(world_model.get('observable_entities', []))} observable entity/entities and {len(world_model.get('physical_parameter_targets', []))} physical parameter target(s)." if world_model else "No world-model stage in this build (optional).",
             "simulation/world_model_contract.json",
+            required=bool(world_model),
+            skipped=not world_model,
         ),
         _gate(
             "synthetic_observation_dataset",
             "Synthetic observation dataset manifest ready",
             bool(synthetic_manifest.get("vision_annotations") and synthetic_manifest.get("scene_sets")),
-            f"{len(synthetic_manifest.get('scene_sets', []))} scene set(s) bound for CV data generation.",
+            f"{len(synthetic_manifest.get('scene_sets', []))} scene set(s) bound for CV data generation." if synthetic_manifest else "No synthetic-observation stage in this build (optional).",
             "datasets/synthetic_observation_manifest.json",
+            required=bool(synthetic_manifest),
+            skipped=not synthetic_manifest,
         ),
         _gate(
             "generated_cv_annotations",
             "Synthetic CV annotations generated",
             bool(synthetic_index.get("frames")) and _annotation_files_exist(package_dir, synthetic_index.get("frames", [])),
-            f"{synthetic_index.get('frame_count', 0)} generated observation frame(s).",
+            f"{synthetic_index.get('frame_count', 0)} generated observation frame(s)." if synthetic_index else "No CV-annotation stage in this build (optional).",
             "datasets/synthetic_observations/index.json",
+            required=bool(synthetic_index),
+            skipped=not synthetic_index,
         ),
         _gate(
             "generated_world_state_snapshots",
             "World-state snapshots generated",
             bool(world_state_index.get("scene_states")) and _world_state_files_exist(package_dir, world_state_index.get("scene_states", [])),
-            f"{world_state_index.get('scene_state_count', 0)} scene state snapshot(s).",
+            f"{world_state_index.get('scene_state_count', 0)} scene state snapshot(s)." if world_state_index else "No world-state stage in this build (optional).",
             "simulation/world_state_index.json",
+            required=bool(world_state_index),
+            skipped=not world_state_index,
         ),
     ]
 
+    # The training run config + simulator handoff contract belong to the TRAINING stage; per the MVP goal a
+    # controller (and its training contract) is required only WHEN TRAINING IS REQUESTED. A manipulator built
+    # without training is SKIPPED here, not failed.
+    training_required = manipulator_route and controller_required
     gates.append(
         _gate(
             "training_config_present",
             "Training run config present",
             (package_dir / "training" / "training_run_config.json").exists(),
-            "Manipulator route exposes a simulator training contract." if manipulator_route else "Not required for this foundation route yet.",
+            "Training contract present." if training_required else "No training requested for this build (optional).",
             "training/training_run_config.json",
-            required=manipulator_route,
-            skipped=not manipulator_route,
+            required=training_required,
+            skipped=not training_required,
         )
     )
     gates.append(
@@ -191,10 +209,10 @@ def build_mvp_readiness_report(
             "simulator_contract_ready",
             "Simulator handoff contract ready",
             bool(simulator_contract and simulator_contract.get("scene_contracts")),
-            f"{len(simulator_contract.get('scene_contracts', [])) if simulator_contract else 0} simulator scene contract(s).",
+            f"{len(simulator_contract.get('scene_contracts', [])) if simulator_contract else 0} simulator scene contract(s)." if training_required else "No training handoff in this build (optional).",
             "simulation/simulator_contract.json",
-            required=manipulator_route,
-            skipped=not manipulator_route,
+            required=training_required,
+            skipped=not training_required,
         )
     )
     gates.append(

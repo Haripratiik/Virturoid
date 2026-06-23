@@ -344,6 +344,7 @@ def build_gene_package(gene: RobotGene, prompt: str, output_dir: Path, scene_cou
                                       "blockers": gr["decision"]["export_blockers"]}
         except Exception:  # noqa: BLE001 - the export gate is best-effort; never block a build
             pass
+    _emit_mvp_artifacts(gene, output_dir, task_type=_task.task_type, package_type="gene_package")
     summary["readiness"] = _emit_readiness(gene, output_dir)   # honest truth-gate (this path had NONE before)
     return summary
 
@@ -402,6 +403,51 @@ def _spec_from_scene(fallback_spec, scene):
         assignments[o.name] = tgt.name
     task_type = scene.requirement_trace[0] if getattr(scene, "requirement_trace", None) else fallback_spec.task_type
     return PickPlaceTaskSpec(task_type, [o.name for o in manip], [t.name for t in targets], assignments, materials)
+
+
+def _emit_mvp_artifacts(gene: RobotGene, output_dir: Path, *, task_type: str, package_type: str) -> None:
+    """Write the shared package artifacts a gene build previously skipped — package contract, file-level
+    validation, build summary, MVP readiness report, and MVP summary — so the Contract/Validation/Reports/
+    Artifacts tabs populate and the package carries an HONEST readiness report. The MVP readiness gates score
+    against the stated goal: the CV/world-model/training stages are optional and skipped (not failed) when this
+    build did not run them. Best-effort: never crashes the build."""
+    try:
+        from virturoid.services.package_contract_builder import PACKAGE_CONTRACT_URI, write_robot_package_contract
+        from virturoid.services.readiness_report import READINESS_REPORT_URI, write_mvp_readiness_report
+        output_dir = Path(output_dir)
+        artifacts = {
+            "robot_genome": "robot/robot_genome.json",
+            "scene_set": "simulation/scene_set.json",
+            "compiled_scene_index": "simulation/mujoco/compiled_scene_index.json",
+        }
+        idx_path = output_dir / "simulation" / "mujoco" / "compiled_scene_index.json"
+        if idx_path.exists():
+            scenes = json.loads(idx_path.read_text(encoding="utf-8")).get("scenes", [])
+            if scenes:
+                artifacts["mujoco_xml"] = scenes[0].get("mujoco_xml", "")
+        contract = write_robot_package_contract(
+            output_dir, package_type=package_type, robot_class=gene.robot_class, species=gene.species,
+            morphology_template_id=gene.id, task_type=task_type, artifacts=artifacts, training=None)
+        (output_dir / "reports").mkdir(parents=True, exist_ok=True)
+        checks = {k: (output_dir / v).exists() for k, v in artifacts.items()}
+        (output_dir / "reports" / "package_validation_report.json").write_text(json.dumps(
+            {"id": f"validation_{gene.id}", "ok": all(checks.values()) and contract.ok, "checks": checks,
+             "note": "gene package file-level validation: core artifacts exist + parse"}, indent=2), encoding="utf-8")
+        summary = {"selected_robot_class": gene.robot_class, "selected_species": gene.species,
+                   "selected_morphology_template_id": gene.id, "package_type": package_type,
+                   "package_valid": bool(contract.ok), "task_type": task_type,
+                   "artifacts": {**artifacts, "robot_package_contract": PACKAGE_CONTRACT_URI,
+                                 "mvp_readiness_report": READINESS_REPORT_URI}}
+        (output_dir / "reports" / "autonomous_build_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+        write_mvp_readiness_report(output_dir, summary=summary, artifacts=summary["artifacts"],
+                                   training=None, requested_training=False)
+        (output_dir / "reports" / "mvp_summary.md").write_text(
+            f"# {gene.id}\n\n- **robot_class:** {gene.robot_class}\n- **species:** {gene.species}\n"
+            f"- **task:** {task_type}\n- **package_type:** {package_type}\n\n"
+            "Gene-composed package: an original generated morphology with task scenes, compiled MuJoCo, and real "
+            "CAD. CV/perception and policy training are optional stages not run in this build.\n", encoding="utf-8")
+    except Exception:  # noqa: BLE001 - artifact emission is best-effort; never crash the build
+        pass
 
 
 def _build_navigation_package(gene: RobotGene, prompt: str, output_dir: Path, controller_params: dict | None,
@@ -471,6 +517,7 @@ def _build_navigation_package(gene: RobotGene, prompt: str, output_dir: Path, co
     (output_dir / "reports").mkdir(parents=True, exist_ok=True)
     (output_dir / "reports" / "gene_evaluation_report.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     summary["bom"] = _emit_bom(gene, output_dir, task=prompt)  # real per-joint actuators + sensors + materials
+    _emit_mvp_artifacts(gene, output_dir, task_type=task.task_type, package_type="gene_navigation_package")
     summary["readiness"] = _emit_readiness(gene, output_dir)
     return summary
 
@@ -563,6 +610,7 @@ def _build_legged_package(gene: RobotGene, prompt: str, output_dir: Path, contro
     (output_dir / "reports").mkdir(parents=True, exist_ok=True)
     (output_dir / "reports" / "gene_evaluation_report.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     summary["bom"] = _emit_bom(gene, output_dir, task=prompt)  # real per-joint actuators + sensors + materials
+    _emit_mvp_artifacts(gene, output_dir, task_type="locomotion", package_type="gene_locomotion_package")
     summary["readiness"] = _emit_readiness(gene, output_dir)
     return summary
 
