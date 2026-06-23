@@ -24,7 +24,7 @@ function seedNodes() {
   return NODES.map((n) => ({ ...n, ...placed.get(n.id), vx: 0, vy: 0 }));
 }
 
-const state = { selected: null, nodes: seedNodes(), treeMode: true };
+const state = { selected: null, nodes: seedNodes(), treeMode: true, builds: [] };
 const nodeById = new Map(state.nodes.map((n) => [n.id, n]));
 const adjacency = new Map(state.nodes.map((n) => [n.id, new Set()]));
 LINKS.forEach(([a, b]) => {
@@ -46,6 +46,74 @@ function ringFor(n) {
 function select(id) {
   state.selected = id;
   memBus.dispatchEvent(new CustomEvent("select", { detail: id }));
+}
+
+// ---- Live "studio memory": reflect the robots ACTUALLY built (from /api/packages) onto the species tree,
+// so building a robot visibly updates the memory -- the class it maps to gets a build-count badge and its
+// note lists the real instances. Refetched whenever the Memory tab is shown. ----
+async function loadBuilds() {
+  try {
+    const data = await fetch("/api/packages").then((r) => r.json());
+    state.builds = Array.isArray(data && data.packages) ? data.packages : [];
+  } catch (e) {
+    state.builds = [];
+  }
+  memBus.dispatchEvent(new CustomEvent("builds"));
+}
+
+function classNodeForBuild(b) {
+  const cls = String((b && b.robot_class) || "").toLowerCase();
+  const name = String((b && (b.id || b.name)) || "").toLowerCase();
+  if (cls === "manipulator") return "manipulator";
+  if (cls === "mobile_base") return "mobile_base";
+  if (cls === "humanoid") return "humanoid";
+  if (cls === "quadruped") return "quadruped";
+  if (cls === "legged") {
+    if (name.includes("hex") || name.includes("six")) return "hexapod";
+    if (name.includes("oct") || name.includes("eight")) return "octopod";
+    return "quadruped";
+  }
+  return null;
+}
+
+function classOf(node) {
+  if (node.group === "class") return node.id;
+  if (node.group === "species") {
+    for (const id of adjacency.get(node.id) || []) {
+      const n = nodeById.get(id);
+      if (n && n.group === "class") return n.id;
+    }
+  }
+  return null;
+}
+
+function buildsForNode(node) {
+  const cls = classOf(node);
+  if (!cls) return [];
+  return state.builds.filter((b) => classNodeForBuild(b) === cls);
+}
+
+function buildRow(b) {
+  const ok = b.valid === true || b.valid === "valid";
+  return el("div", { class: "mem-built-row" }, [
+    el("span", { class: "mem-built-dot", style: `background:${ok ? "#b8ff3a" : "#e8b765"}` }),
+    el("span", { class: "mem-built-name", text: b.id || b.name || "(unnamed)" }),
+    el("span", { class: "mem-built-cls", text: String(b.robot_class || "") }),
+  ]);
+}
+
+function appendBuiltSection(host, node) {
+  const bs = buildsForNode(node);
+  if (!bs.length) return;
+  host.appendChild(el("div", { class: "panel-section-title", text: `Built in this studio (${bs.length})` }));
+  host.appendChild(el("div", { class: "mem-built" }, bs.map(buildRow)));
+}
+
+function appendBuiltSummary(host) {
+  const bs = state.builds || [];
+  if (!bs.length) return;
+  host.appendChild(el("div", { class: "panel-section-title", text: `Built in this studio (${bs.length})` }));
+  host.appendChild(el("div", { class: "mem-built" }, bs.map(buildRow)));
 }
 
 function noteMarkdown(text) {
@@ -162,6 +230,19 @@ function makeGraphPanel(icon) {
       ctx2d.beginPath(); ctx2d.arc(p.x, p.y, r, 0, Math.PI * 2);
       ctx2d.fillStyle = g.color; ctx2d.fill();
       ctx2d.globalAlpha = 1;
+      // live build-count badge -- how many robots of this class the studio has actually built
+      if (n.group === "class") {
+        const nb = buildsForNode(n).length;
+        if (nb > 0) {
+          const bx = p.x + r + 3, by = p.y - r - 3;
+          ctx2d.beginPath(); ctx2d.arc(bx, by, 8, 0, Math.PI * 2);
+          ctx2d.fillStyle = "#b8ff3a"; ctx2d.fill();
+          ctx2d.fillStyle = "#0b0f12"; ctx2d.font = "700 11px 'IBM Plex Mono', monospace";
+          ctx2d.textAlign = "center"; ctx2d.textBaseline = "middle";
+          ctx2d.fillText(String(nb), bx, by + 0.5);
+          ctx2d.textBaseline = "alphabetic";
+        }
+      }
       const pr = isSel ? 0 : n.id === hoverId ? 1 : n.group === "root" ? 2 : n.group === "class" ? 3 : n.group === "species" ? 4 : 5;
       labelCands.push({ n, p, r, isSel, dim, pr });
     });
@@ -298,8 +379,9 @@ function makeGraphPanel(icon) {
         if (n) { camTarget.x = -n.x; camTarget.y = -n.y; camTarget.active = true; }
       });
       loop();
+      loadBuilds();
     },
-    onShow() { resize(); },
+    onShow() { resize(); loadBuilds(); },
     onResize() { resize(); },
   };
 }
@@ -313,6 +395,7 @@ function makeNotePanel(icon) {
     const node = state.selected ? nodeById.get(state.selected) : null;
     if (!node) {
       host.appendChild(el("div", { class: "empty", text: "Select a species in the tree to read its build + training tips." }));
+      appendBuiltSummary(host);
       return;
     }
     const g = GROUPS[node.group] || {};
@@ -324,6 +407,7 @@ function makeNotePanel(icon) {
       host.appendChild(el("div", { class: "mem-tags" }, node.tags.map((t) => el("span", { class: "mem-tag", text: `#${t}` }))));
     }
     host.appendChild(el("div", { class: "markdown mem-note-body", html: noteMarkdown(node.note || "") }));
+    appendBuiltSection(host, node);
     const links = Array.from(adjacency.get(node.id) || []);
     if (links.length) {
       host.appendChild(el("div", { class: "panel-section-title", text: "Linked notes" }));
@@ -335,7 +419,7 @@ function makeNotePanel(icon) {
   }
   return {
     id: "memoryNote", title: "Notes", icon, dependsOnPackage: false,
-    mount(elx) { clear(elx); host = el("div", { class: "mem-note" }); elx.appendChild(host); render(); memBus.addEventListener("select", render); },
+    mount(elx) { clear(elx); host = el("div", { class: "mem-note" }); elx.appendChild(host); render(); memBus.addEventListener("select", render); memBus.addEventListener("builds", render); },
     onShow() { render(); },
   };
 }

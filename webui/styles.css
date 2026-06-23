@@ -882,3 +882,8 @@ td code, .mono { color: var(--muted); }
 .mem-seg-btn { font-family: var(--font-mono); font-size: 11px; color: var(--faint); background: transparent; border: none; border-radius: 6px; padding: 5px 12px; cursor: pointer; transition: color 0.12s, background 0.12s; }
 .mem-seg-btn:hover { color: var(--ink); }
 .mem-seg-btn.is-active { color: #0b0f12; background: #b8ff3a; font-weight: 600; }
+.mem-built { display: flex; flex-direction: column; gap: 4px; margin-top: 4px; }
+.mem-built-row { display: flex; align-items: center; gap: 8px; font-family: var(--font-mono); font-size: 12px; padding: 4px 9px; background: rgba(184, 255, 58, 0.06); border: 1px solid var(--line); border-radius: 7px; }
+.mem-built-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.mem-built-name { color: var(--ink); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mem-built-cls { color: var(--faint); font-size: 10px; }
