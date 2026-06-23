@@ -47,6 +47,26 @@ function ringFor(n) {
   return state.treeMode ? (TREE_RING[n.group] ?? 0) : (RING[n.group] ?? 280);
 }
 
+// What shows where. The hardcoded reference species (quadruped.composed.12dof etc.) are NO LONGER drawn --
+// they were placeholders with made-up DOF; their notes survive only as each class's build/train tips. The
+// tree is root -> class -> your real builds; the full graph is the wider task/skill web (minus per-build
+// instances).
+function visible(n) {
+  if (!n || n.group === "species") return false;
+  if (state.treeMode) return n.group === "root" || n.group === "class" || n.group === "build";
+  return n.group !== "build";
+}
+function cleanName(id) {
+  const s = String(id || "");
+  return s.replace(/^build[_ ](an?|the)[_ ]/i, "").replace(/_/g, " ").trim() || s;
+}
+// The class's build/train tips live in its (now-hidden) reference-species note; drop the made-up
+// "N actuated joints" description line and keep just the Build/Train guidance.
+function tipsBody(note) {
+  const i = String(note || "").search(/\*\*Build/i);
+  return i >= 0 ? note.slice(i) : (note || "");
+}
+
 function select(id) {
   state.selected = id;
   memBus.dispatchEvent(new CustomEvent("select", { detail: id }));
@@ -103,8 +123,8 @@ function buildRow(b) {
   return el("button", { class: "mem-built-row", type: "button",
                         onClick: () => select("build:" + (b.id || b.name || b.robot_class)) }, [
     el("span", { class: "mem-built-dot", style: `background:${ok ? "#b8ff3a" : "#e8b765"}` }),
-    el("span", { class: "mem-built-name", text: b.id || b.name || "(unnamed)" }),
-    el("span", { class: "mem-built-cls", text: String(b.robot_class || "") }),
+    el("span", { class: "mem-built-name", text: cleanName(b.id || b.name || "(unnamed)") }),
+    el("span", { class: "mem-built-cls", text: String(b.species || b.robot_class || "") }),
   ]);
 }
 
@@ -141,7 +161,7 @@ function syncBuildNodes() {
     if (!c) return;
     const id = "build:" + (b.id || b.name || b.robot_class);
     state.nodes.push({
-      id, label: b.id || b.name || "build", group: "build", build: b,
+      id, label: cleanName(b.id || b.name || "build"), group: "build", build: b,
       x: c.x + (Math.random() - 0.5) * 60, y: c.y + (Math.random() - 0.5) * 60, vx: 0, vy: 0,
     });
     dynLinks.push([cls, id]);
@@ -168,17 +188,19 @@ function renderBuildNote(host, node) {
     el("h2", { text: node.label }),
   ]));
   const ok = b.valid === true || b.valid === "valid";
-  const tags = [b.robot_class, ok ? "valid" : "not valid", `${b.scene_count || 0} scene(s)`].filter(Boolean);
+  const tags = [b.species || b.robot_class, b.dof != null ? `${b.dof} DOF` : null,
+                ok ? "valid" : "not valid", `${b.scene_count || 0} scene(s)`].filter(Boolean);
   host.appendChild(el("div", { class: "mem-tags" }, tags.map((t) => el("span", { class: "mem-tag", text: t }))));
+  const real = (b.species || b.robot_class || "robot") + (b.dof != null ? `, ${b.dof} actuated joints` : "");
   host.appendChild(el("div", { class: "markdown mem-note-body",
-    html: noteMarkdown("Built in this studio from your prompt. Build + training guidance for its class:") }));
+    html: noteMarkdown(`This SPECIFIC build, from its real model: **${real}**.`) }));
   const cls = classNodeForBuild(b);
   const sp = cls ? canonicalSpeciesNote(cls) : null;
   if (sp && sp.note) {
-    host.appendChild(el("div", { class: "panel-section-title", text: `Tips — ${sp.label}` }));
-    host.appendChild(el("div", { class: "markdown mem-note-body", html: noteMarkdown(sp.note) }));
+    host.appendChild(el("div", { class: "panel-section-title", text: "Build + train tips (its type)" }));
+    host.appendChild(el("div", { class: "markdown mem-note-body", html: noteMarkdown(tipsBody(sp.note)) }));
   } else {
-    host.appendChild(el("div", { class: "empty", text: "No class tips available yet." }));
+    host.appendChild(el("div", { class: "empty", text: "No type tips available yet." }));
   }
 }
 
@@ -220,7 +242,7 @@ function makeGraphPanel(icon) {
   }
 
   function step() {
-    const nodes = state.treeMode ? state.nodes.filter((n) => TREE_GROUPS.has(n.group)) : state.nodes;
+    const nodes = state.nodes.filter(visible);
     const rep = state.treeMode ? 4200 : 2000;  // tree has few nodes -> spread harder so every label fits
     for (let i = 0; i < nodes.length; i++) {
       for (let j = i + 1; j < nodes.length; j++) {
@@ -237,7 +259,7 @@ function makeGraphPanel(icon) {
     allLinks().forEach(([ai, bi]) => {
       const a = nodeById.get(ai), b = nodeById.get(bi);
       if (!a || !b) return;
-      if (state.treeMode && !(TREE_GROUPS.has(a.group) && TREE_GROUPS.has(b.group))) return;
+      if (!visible(a) || !visible(b)) return;
       const dx = b.x - a.x, dy = b.y - a.y;
       const d = Math.sqrt(dx * dx + dy * dy) || 0.01;
       const f = (d - 120) * 0.015;
@@ -271,7 +293,7 @@ function makeGraphPanel(icon) {
     allLinks().forEach(([ai, bi]) => {
       const a = nodeById.get(ai), b = nodeById.get(bi);
       if (!a || !b) return;
-      if (state.treeMode && !(TREE_GROUPS.has(a.group) && TREE_GROUPS.has(b.group))) return;
+      if (!visible(a) || !visible(b)) return;
       const pa = toScreen(a, w, h), pb = toScreen(b, w, h);
       const active = state.selected && (ai === state.selected || bi === state.selected);
       ctx2d.strokeStyle = active ? "rgba(184,255,58,0.5)" : "rgba(120,140,150,0.16)";
@@ -282,7 +304,7 @@ function makeGraphPanel(icon) {
     // Pass 1: draw node dots; collect label candidates for de-collision.
     const labelCands = [];
     state.nodes.forEach((n) => {
-      if (state.treeMode && !TREE_GROUPS.has(n.group)) return;
+      if (!visible(n)) return;
       const p = toScreen(n, w, h);
       const g = GROUPS[n.group] || { color: "#8aa0ad" };
       const isSel = n.id === state.selected;
@@ -335,7 +357,7 @@ function makeGraphPanel(icon) {
     const w = canvas.clientWidth, h = canvas.clientHeight;
     let best = null, bestD = 18;
     state.nodes.forEach((n) => {
-      if (state.treeMode && !TREE_GROUPS.has(n.group)) return;
+      if (!visible(n)) return;
       const p = toScreen(n, w, h);
       const d = Math.hypot(p.x - mx, p.y - my);
       if (d < bestD) { bestD = d; best = n; }
@@ -461,6 +483,13 @@ function makeNotePanel(icon) {
       host.appendChild(el("div", { class: "mem-tags" }, node.tags.map((t) => el("span", { class: "mem-tag", text: `#${t}` }))));
     }
     host.appendChild(el("div", { class: "markdown mem-note-body", html: noteMarkdown(node.note || "") }));
+    if (node.group === "class") {
+      const sp = canonicalSpeciesNote(node.id);
+      if (sp && sp.note) {
+        host.appendChild(el("div", { class: "panel-section-title", text: "Build + train tips" }));
+        host.appendChild(el("div", { class: "markdown mem-note-body", html: noteMarkdown(tipsBody(sp.note)) }));
+      }
+    }
     appendBuiltSection(host, node);
     const links = Array.from(adjacency.get(node.id) || []);
     if (links.length) {
@@ -491,6 +520,7 @@ function makeListPanel(icon) {
       (groups[n.group] = groups[n.group] || []).push(n);
     });
     Object.keys(GROUPS).forEach((gk) => {
+      if (gk === "species") return;       // reference species are hidden -- folded into each class's tips
       const items = groups[gk];
       if (!items || !items.length) return;
       host.appendChild(el("div", { class: "panel-section-title", text: GROUPS[gk].label }));

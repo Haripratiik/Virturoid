@@ -625,14 +625,29 @@ class _Handler(BaseHTTPRequestHandler):
                         scene_count = 0
                 valid: bool | None = None
                 robot_class: str | None = None
+                species: str | None = None
                 contract_path = child / "reports" / "robot_package_contract.json"
                 if contract_path.exists():
                     try:
                         contract = json.loads(contract_path.read_text(encoding="utf-8"))
                         valid = bool(contract.get("ok"))
                         robot_class = contract.get("robot_class")
+                        species = contract.get("species")
                     except (json.JSONDecodeError, OSError):
                         valid = None
+                # Real morphology facts from the actual model -- the accurate species + actuated DOF, so the
+                # memory shows what was really built (not a hardcoded placeholder species/DOF).
+                dof: int | None = None
+                genome_path = child / "robot" / "robot_genome.json"
+                if genome_path.exists():
+                    try:
+                        genome = json.loads(genome_path.read_text(encoding="utf-8"))
+                        species = species or genome.get("species")
+                        joints = genome.get("joints") or []
+                        dof = sum(1 for j in joints if isinstance(j, dict)
+                                  and str(j.get("joint_type", "")).lower() not in ("fixed", "weld", ""))
+                    except (json.JSONDecodeError, OSError):
+                        pass
                 packages.append(
                     {
                         "id": child.name,
@@ -640,6 +655,8 @@ class _Handler(BaseHTTPRequestHandler):
                         "has_meshes": (child / "cad" / "mesh" / "visual").exists(),
                         "valid": valid,
                         "robot_class": robot_class,
+                        "species": species,
+                        "dof": dof,
                     }
                 )
         return {"build_root": str(root), "packages": packages}
