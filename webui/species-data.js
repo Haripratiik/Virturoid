@@ -11,6 +11,7 @@ export const GROUPS = {
   root: { label: "Root", color: "#e8c06b" },
   class: { label: "Robot class", color: "#b8ff3a" },
   species: { label: "Species", color: "#e3ebf0" },
+  build: { label: "Built robot", color: "#7fdfff" },
   task: { label: "Task", color: "#7fb6c2" },
   skill: { label: "Skill", color: "#7fb6c2" },
   training: { label: "Training", color: "#94a2ae" },

@@ -34,11 +34,15 @@ LINKS.forEach(([a, b]) => {
   }
 });
 
+// Dynamic class -> built-instance links, rebuilt from /api/packages so each real build is its own tree node.
+let dynLinks = [];
+function allLinks() { return dynLinks.length ? LINKS.concat(dynLinks) : LINKS; }
+
 // ---- The default view is the ROBOT SPECIES TREE: root -> classes -> species, force-directed into a radial
 // tree (organic, like the full graph but species-only). The wider task/skill/training web is the "Full graph"
 // toggle. Ring radii differ per mode so tree mode reads as a clean root-out hierarchy. ----
-const TREE_GROUPS = new Set(["root", "class", "species"]);
-const TREE_RING = { root: 0, class: 185, species: 390 };
+const TREE_GROUPS = new Set(["root", "class", "species", "build"]);
+const TREE_RING = { root: 0, class: 185, species: 390, build: 470 };
 function ringFor(n) {
   return state.treeMode ? (TREE_RING[n.group] ?? 0) : (RING[n.group] ?? 280);
 }
@@ -58,6 +62,7 @@ async function loadBuilds() {
   } catch (e) {
     state.builds = [];
   }
+  syncBuildNodes();
   memBus.dispatchEvent(new CustomEvent("builds"));
 }
 
@@ -95,7 +100,8 @@ function buildsForNode(node) {
 
 function buildRow(b) {
   const ok = b.valid === true || b.valid === "valid";
-  return el("div", { class: "mem-built-row" }, [
+  return el("button", { class: "mem-built-row", type: "button",
+                        onClick: () => select("build:" + (b.id || b.name || b.robot_class)) }, [
     el("span", { class: "mem-built-dot", style: `background:${ok ? "#b8ff3a" : "#e8b765"}` }),
     el("span", { class: "mem-built-name", text: b.id || b.name || "(unnamed)" }),
     el("span", { class: "mem-built-cls", text: String(b.robot_class || "") }),
@@ -114,6 +120,66 @@ function appendBuiltSummary(host) {
   if (!bs.length) return;
   host.appendChild(el("div", { class: "panel-section-title", text: `Built in this studio (${bs.length})` }));
   host.appendChild(el("div", { class: "mem-built" }, bs.map(buildRow)));
+}
+
+function rebuildAdjacency() {
+  adjacency.clear();
+  state.nodes.forEach((n) => adjacency.set(n.id, new Set()));
+  allLinks().forEach(([a, b]) => {
+    if (adjacency.has(a) && adjacency.has(b)) { adjacency.get(a).add(b); adjacency.get(b).add(a); }
+  });
+}
+
+// Turn each real build into its OWN tree node hanging off its class -- a class "splits up" into the robots
+// actually built (instead of a count badge), and each instance node is clickable for its tips.
+function syncBuildNodes() {
+  state.nodes = state.nodes.filter((n) => n.group !== "build");
+  dynLinks = [];
+  (state.builds || []).forEach((b) => {
+    const cls = classNodeForBuild(b);
+    const c = cls && nodeById.get(cls);
+    if (!c) return;
+    const id = "build:" + (b.id || b.name || b.robot_class);
+    state.nodes.push({
+      id, label: b.id || b.name || "build", group: "build", build: b,
+      x: c.x + (Math.random() - 0.5) * 60, y: c.y + (Math.random() - 0.5) * 60, vx: 0, vy: 0,
+    });
+    dynLinks.push([cls, id]);
+  });
+  nodeById.clear();
+  state.nodes.forEach((n) => nodeById.set(n.id, n));
+  rebuildAdjacency();
+}
+
+function canonicalSpeciesNote(classId) {
+  for (const id of (adjacency.get(classId) || [])) {
+    const n = nodeById.get(id);
+    if (n && n.group === "species" && n.note) return n;
+  }
+  return null;
+}
+
+// A built instance inherits the build + train tips of its class's canonical species (its real specs up top).
+function renderBuildNote(host, node) {
+  const b = node.build || {};
+  const color = (GROUPS.build || {}).color || "#7fdfff";
+  host.appendChild(el("div", { class: "mem-note-head" }, [
+    el("span", { class: "mem-note-kind", style: `color:${color}`, text: "BUILT ROBOT" }),
+    el("h2", { text: node.label }),
+  ]));
+  const ok = b.valid === true || b.valid === "valid";
+  const tags = [b.robot_class, ok ? "valid" : "not valid", `${b.scene_count || 0} scene(s)`].filter(Boolean);
+  host.appendChild(el("div", { class: "mem-tags" }, tags.map((t) => el("span", { class: "mem-tag", text: t }))));
+  host.appendChild(el("div", { class: "markdown mem-note-body",
+    html: noteMarkdown("Built in this studio from your prompt. Build + training guidance for its class:") }));
+  const cls = classNodeForBuild(b);
+  const sp = cls ? canonicalSpeciesNote(cls) : null;
+  if (sp && sp.note) {
+    host.appendChild(el("div", { class: "panel-section-title", text: `Tips — ${sp.label}` }));
+    host.appendChild(el("div", { class: "markdown mem-note-body", html: noteMarkdown(sp.note) }));
+  } else {
+    host.appendChild(el("div", { class: "empty", text: "No class tips available yet." }));
+  }
 }
 
 function noteMarkdown(text) {
@@ -168,7 +234,7 @@ function makeGraphPanel(icon) {
         b.vx -= ux * f; b.vy -= uy * f;
       }
     }
-    LINKS.forEach(([ai, bi]) => {
+    allLinks().forEach(([ai, bi]) => {
       const a = nodeById.get(ai), b = nodeById.get(bi);
       if (!a || !b) return;
       if (state.treeMode && !(TREE_GROUPS.has(a.group) && TREE_GROUPS.has(b.group))) return;
@@ -202,7 +268,7 @@ function makeGraphPanel(icon) {
     ctx2d.clearRect(0, 0, w, h);
     const neighbors = state.selected ? adjacency.get(state.selected) : null;
 
-    LINKS.forEach(([ai, bi]) => {
+    allLinks().forEach(([ai, bi]) => {
       const a = nodeById.get(ai), b = nodeById.get(bi);
       if (!a || !b) return;
       if (state.treeMode && !(TREE_GROUPS.has(a.group) && TREE_GROUPS.has(b.group))) return;
@@ -230,19 +296,6 @@ function makeGraphPanel(icon) {
       ctx2d.beginPath(); ctx2d.arc(p.x, p.y, r, 0, Math.PI * 2);
       ctx2d.fillStyle = g.color; ctx2d.fill();
       ctx2d.globalAlpha = 1;
-      // live build-count badge -- how many robots of this class the studio has actually built
-      if (n.group === "class") {
-        const nb = buildsForNode(n).length;
-        if (nb > 0) {
-          const bx = p.x + r + 3, by = p.y - r - 3;
-          ctx2d.beginPath(); ctx2d.arc(bx, by, 8, 0, Math.PI * 2);
-          ctx2d.fillStyle = "#b8ff3a"; ctx2d.fill();
-          ctx2d.fillStyle = "#0b0f12"; ctx2d.font = "700 11px 'IBM Plex Mono', monospace";
-          ctx2d.textAlign = "center"; ctx2d.textBaseline = "middle";
-          ctx2d.fillText(String(nb), bx, by + 0.5);
-          ctx2d.textBaseline = "alphabetic";
-        }
-      }
       const pr = isSel ? 0 : n.id === hoverId ? 1 : n.group === "root" ? 2 : n.group === "class" ? 3 : n.group === "species" ? 4 : 5;
       labelCands.push({ n, p, r, isSel, dim, pr });
     });
@@ -398,6 +451,7 @@ function makeNotePanel(icon) {
       appendBuiltSummary(host);
       return;
     }
+    if (node.group === "build") { renderBuildNote(host, node); return; }
     const g = GROUPS[node.group] || {};
     host.appendChild(el("div", { class: "mem-note-head" }, [
       el("span", { class: "mem-note-kind", style: `color:${g.color}`, text: (g.label || node.group).toUpperCase() }),
