@@ -81,20 +81,18 @@ def _score_template(requirements: RequirementsRecord, task: TaskGraph, template:
 def _explicit_class(prompt: str) -> str | None:
     """The robot class explicitly named in the prompt, if any (most-specific first).
 
-    Specific classes (humanoid/quadruped/mobile) are checked before the generic "arm",
-    so a phrase like "humanoid robot arm" resolves to humanoid, not manipulator.
+    Reuses the build planner's broad, word-boundary keyword vocabulary
+    (``intent_planner._CLASS_WORDS`` / ``_kw``) instead of a narrow hand-list. The old hand-list was
+    missing bare "dog" and the animal nouns, so "a dog like robot made to traverse a maze" matched no
+    class and the navigation task pulled it to a wheeled ``mobile_base`` -- it built a rover, not a dog.
+    The shared list maps "dog"/"cat"/"spider"/"traverse"/"walk" etc. to a quadruped/legged body, and the
+    priority order checks quadruped BEFORE mobile_base so "dog ... maze" is a dog, not a rover. Imported
+    lazily (same pattern as ``resolve_buildable`` above) to avoid any import cycle.
     """
-    if any(w in prompt for w in ("humanoid", "bimanual", "biped", "android")):
-        return "humanoid"
-    if any(w in prompt for w in ("quadruped", "four-legged", "four legged", "legged", "dog-like",
-                                 "dog robot", "walking robot", "hexapod", "octopod", "spider",
-                                 "six-legged", "six legged", "eight-legged", "eight legged",
-                                 "multi-legged", "multi legged", "walks through a maze", "walk through a maze")):
-        return "quadruped"
-    if any(w in prompt for w in ("drive", "mobile", "navigate", "navigation", "wheeled", "rover")):
-        return "mobile_base"
-    if "arm" in prompt or "manipulat" in prompt:
-        return "manipulator"
+    from virturoid.services.intent_planner import _CLASS_WORDS, _kw
+    for cls in ("humanoid", "quadruped", "mobile_base", "manipulator"):
+        if any(_kw(w, prompt) for w in _CLASS_WORDS[cls]):
+            return cls
     return None
 
 
