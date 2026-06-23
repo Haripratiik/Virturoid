@@ -219,8 +219,14 @@ function resetView() {
 
 function fitCamera(object) {
   currentObject = object;
-  const box = new THREE.Box3().setFromObject(object);
-  if (box.isEmpty()) return;
+  object.updateMatrixWorld(true);
+  // Frame the robot + task objects, NOT the ground plane/grid -- fitting the whole scene (incl. the floor)
+  // dwarfs the robot and pulls the camera way back, which is why Scene mode looked tiny.
+  const box = new THREE.Box3();
+  object.traverse((child) => {
+    if (child.isMesh && !child.userData.isFloor) box.expandByObject(child);
+  });
+  if (box.isEmpty()) box.setFromObject(object);
   const size = box.getSize(new THREE.Vector3());
   const center = box.getCenter(new THREE.Vector3());
   const maxDim = Math.max(size.x, size.y, size.z, 0.3);

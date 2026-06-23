@@ -79,6 +79,7 @@ function addGeomMesh(group, geomEl, materials) {
     const [sx, sy] = parseNumbers(geomEl.getAttribute("size"), 3);
     mesh = new THREE.Mesh(new THREE.PlaneGeometry((sx || 2) * 2, (sy || 2) * 2), material);
     mesh.rotation.x = -Math.PI / 2;
+    mesh.userData.isFloor = true;   // ground plane -> excluded from camera framing
   } else {
     return;
   }
@@ -139,6 +140,7 @@ export function buildSceneFromMuJoCoXml(xmlText) {
   grid.material.opacity = 0.4;
   grid.material.transparent = true;
   grid.rotation.x = Math.PI / 2;
+  grid.userData.isFloor = true;
   root.add(grid);
 
   return root;
