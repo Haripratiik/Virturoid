@@ -249,8 +249,14 @@ def build_gene_package(gene: RobotGene, prompt: str, output_dir: Path, scene_cou
     # the composer/LLM produces is evaluated on the task it actually implies (see task_matched_eval).
     from virturoid.services.task_matched_eval import robot_kind
 
-    if robot_kind(gene) == "legged":
+    kind = robot_kind(gene)
+    if kind == "legged":
         return _build_legged_package(gene, prompt, output_dir, controller_params)
+    if kind == "mobile":
+        # A wheeled mobile base navigates — it has no gripper, so it must NOT fall through to the pick-place
+        # path. It builds its real floor course (navigation route or maze, chosen from the prompt by the
+        # general scene generator) and is scored on navigation.
+        return _build_navigation_package(gene, prompt, output_dir, controller_params, scene_count)
 
     # Robot-matched scenes: objects in this robot's reachable workspace (Phase B), optionally
     # tuned by the Scene Agent's validated envelope (gated by VIRTUROID_LLM_BACKEND).
@@ -259,7 +265,18 @@ def build_gene_package(gene: RobotGene, prompt: str, output_dir: Path, scene_cou
     from virturoid.services.task_runtime import evaluate_gene_on_task, generate_task_scenes, select_task_spec
 
     spec = select_task_spec(prompt)
-    scenes = generate_task_scenes(gene, spec, count=scene_count)
+    # SORT keeps the reachability-matched generator + its tested spec; richer manipulation tasks (lift onto a
+    # shelf, stack a tower, push to a target) render their OWN scene from the general generator, with the
+    # object->target assignments DERIVED from that scene (no hard-coded layout).
+    from virturoid.services.requirements_builder import build_requirements_from_prompt
+    from virturoid.services.scene_generator import generate_scene_set
+    from virturoid.services.task_builder import build_task_graph
+    _task = build_task_graph(build_requirements_from_prompt(prompt))
+    if _task.task_type == "pick_place_sort":
+        scenes = generate_task_scenes(gene, spec, count=scene_count)
+    else:
+        scenes = generate_scene_set(_task, count=scene_count, purpose="variation").scenes
+        spec = _spec_from_scene(spec, scenes[0])
 
     # Per-scene MJCF + compiled index (the viewer reads these).
     scene_dir = output_dir / "simulation" / "mujoco" / "scenes" / "variation"
@@ -335,6 +352,127 @@ def build_gene_package(gene: RobotGene, prompt: str, output_dir: Path, scene_cou
 # against it so the as-built robot reads honestly (the trained MorphPolicy is what lifts it further).
 _LOCOMOTION_TARGET_FORWARD_M = 1.0          # normalizer for the success_rate magnitude (NOT the 'walked' bar)
 _WALK_MIN_FORWARD_M = 0.15                   # the 'actually walked' distance bar (shared with readiness_ledger)
+
+
+def _robot_footprint_radius(gene: RobotGene) -> float:
+    """Half the robot's xy footprint (a characteristic size) so floor scenes scale to THIS robot. Compiled
+    table-less so only the robot's own geoms are measured; small default if MuJoCo is unavailable."""
+    try:
+        import mujoco
+        m = mujoco.MjModel.from_xml_string(compile_gene_with_scene(gene, [], table=False))
+        d = mujoco.MjData(m)
+        mujoco.mj_forward(m, d)
+        rmax = 0.0
+        for gi in range(m.ngeom):
+            x, y = float(d.geom_xpos[gi, 0]), float(d.geom_xpos[gi, 1])
+            sz = float(max(m.geom_size[gi]))
+            rmax = max(rmax, (x * x + y * y) ** 0.5 + sz)
+        return max(0.1, min(rmax, 0.6))
+    except Exception:  # noqa: BLE001
+        return 0.2
+
+
+def _spec_from_scene(fallback_spec, scene):
+    """Derive object->target assignments from a GENERATED task scene so the as-built pick-place controller can
+    attempt any manipulation scene (lift onto a shelf, stack a tower, push to a target) — no hard-coded layout.
+    Each manipulable pairs with a same-coloured target when one exists, else the nearest; falls back to the
+    tested spec if the scene has no usable manipulable/target pair."""
+    from virturoid.services.task_runtime import PickPlaceTaskSpec
+
+    def colour(o):
+        m = (getattr(o, "material", "") or "").lower()
+        for c in ("red", "blue", "green", "orange", "yellow"):
+            if c in m:
+                return c
+        return "gray"
+
+    manip = [o for o in scene.objects if o.object_type in ("cube", "box")]
+    targets = [o for o in scene.objects if o.object_type in ("container", "zone", "platform")]
+    if not manip or not targets:
+        return fallback_spec
+    materials = {o.name: colour(o) for o in scene.objects}
+    assignments = {}
+    for o in manip:
+        same = [t for t in targets if materials.get(t.name) == materials.get(o.name)]
+        if same:
+            tgt = same[0]
+        else:
+            ox, oy = o.pose_xyz_rpy[0], o.pose_xyz_rpy[1]
+            tgt = min(targets, key=lambda t: (t.pose_xyz_rpy[0] - ox) ** 2 + (t.pose_xyz_rpy[1] - oy) ** 2)
+        assignments[o.name] = tgt.name
+    task_type = scene.requirement_trace[0] if getattr(scene, "requirement_trace", None) else fallback_spec.task_type
+    return PickPlaceTaskSpec(task_type, [o.name for o in manip], [t.name for t in targets], assignments, materials)
+
+
+def _build_navigation_package(gene: RobotGene, prompt: str, output_dir: Path, controller_params: dict | None,
+                              scene_count: int = 6) -> dict:
+    """Build + evaluate a MOBILE (wheeled) gene on NAVIGATION.
+
+    The scene the viewer renders is the task's REAL floor course — a navigation route or a MAZE, chosen from
+    the prompt by the general scene generator (no hard-coded layout) and compiled FLOOR-aware (real ground +
+    full-size walls, not a tabletop). The robot is scored on the navigation task its morphology implies
+    (``task_matched_eval`` goal-reach), never on pick-place.
+    """
+    from virturoid.services.requirements_builder import build_requirements_from_prompt
+    from virturoid.services.scene_generator import generate_scene_set
+    from virturoid.services.task_builder import build_task_graph
+    from virturoid.services.task_matched_eval import evaluate_robot
+
+    output_dir = Path(output_dir)
+    (output_dir / "robot").mkdir(parents=True, exist_ok=True)
+    (output_dir / "robot" / "robot_genome.json").write_text(json.dumps(_gene_to_genome(gene), indent=2), encoding="utf-8")
+
+    # Prompt-driven scene set (navigation course or maze) — the SAME general generator the gallery uses, so a
+    # "navigate a maze" build renders an actual maze and "navigate to the goal" renders a course.
+    task = build_task_graph(build_requirements_from_prompt(prompt))
+    robot_radius = _robot_footprint_radius(gene)   # scale the course (corridors, obstacles) to THIS robot
+    scenes = generate_scene_set(task, count=max(1, scene_count), purpose="variation", robot_radius=robot_radius).scenes
+    scene_dir = output_dir / "simulation" / "mujoco" / "scenes" / "variation"
+    scene_dir.mkdir(parents=True, exist_ok=True)
+    entries = []
+    for scene in scenes:
+        rel = f"simulation/mujoco/scenes/variation/{scene.id}.xml"
+        (output_dir / rel).write_text(compile_gene_with_scene(gene, scene.objects), encoding="utf-8")
+        entries.append({"scene_set_id": f"sceneset_{gene.id}", "scene_id": scene.id, "purpose": "variation",
+                        "mujoco_xml": rel, "object_count": len(scene.objects)})
+    (output_dir / "simulation" / "mujoco" / "compiled_scene_index.json").write_text(json.dumps(
+        {"id": f"compiled_{gene.id}", "robot_genome_id": gene.id, "backend": "mujoco",
+         "scene_count": len(entries), "scenes": entries}, indent=2), encoding="utf-8")
+    (output_dir / "simulation").mkdir(parents=True, exist_ok=True)
+    (output_dir / "simulation" / "scene_set.json").write_text(json.dumps({
+        "id": f"sceneset_{gene.id}", "version": "0.1.0", "task_graph_id": f"task_{gene.id}",
+        "purpose": "variation", "task_type": task.task_type,
+        "scenes": [_scene_to_dict(s) for s in scenes],
+    }, indent=2), encoding="utf-8")
+
+    # Score on the morphology-matched NAVIGATION task (goal-reach rate), not pick-place.
+    try:
+        res = evaluate_robot(gene, prompt=prompt, controller_params=controller_params)
+        detail = res.get("detail", {})
+        success_rate = float(res.get("value", 0.0))
+        status = "reached_goals" if success_rate > 0 else "no_goal_reached"
+    except Exception as exc:  # noqa: BLE001 - eval is best-effort; the compiled scene is the rendered artifact
+        detail = {"error": str(exc)}
+        success_rate = 0.0
+        status = "eval_unavailable"
+    is_maze = any(w in (prompt or "").lower() for w in ("maze", "labyrinth"))
+    summary = {
+        "task_type": "navigation",
+        "scene_kind": "maze" if is_maze else "navigation_course",
+        "species": gene.species,
+        "robot_class": gene.robot_class,
+        "success_rate": round(success_rate, 3),
+        "status": status,
+        "detail": detail,
+    }
+    cad = _export_real_cad(gene, output_dir)   # REAL B-rep STEP/STL for the mobile base too
+    summary["cad_real"] = bool(cad)
+    summary["cad_part_count"] = (cad or {}).get("part_count", 0)
+    (output_dir / "reports").mkdir(parents=True, exist_ok=True)
+    (output_dir / "reports" / "gene_evaluation_report.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    summary["bom"] = _emit_bom(gene, output_dir, task=prompt)  # real per-joint actuators + sensors + materials
+    summary["readiness"] = _emit_readiness(gene, output_dir)
+    return summary
 
 
 def _build_legged_package(gene: RobotGene, prompt: str, output_dir: Path, controller_params: dict | None) -> dict:

@@ -182,40 +182,107 @@ def _joint_motor_xml(joint: RobotJoint) -> str:
     return f'    <motor name="{escape(joint.name)}_motor" joint="{escape(joint.name)}" gear="1"{force_attr} />'
 
 
+_RGBA = {"red": "0.8 0.15 0.15 1", "blue": "0.15 0.25 0.8 1", "green": "0.2 0.7 0.3 1",
+         "orange": "0.9 0.55 0.15 1", "yellow": "0.85 0.75 0.2 1", "gray": "0.5 0.5 0.55 1"}
+
+
+def _rgba_for(item: SceneObject, default: str = "gray") -> str:
+    m = (item.material or "").lower()
+    for key in ("red", "blue", "green", "orange", "yellow"):
+        if key in m:
+            return _RGBA[key]
+    return _RGBA[default]
+
+
 def _scene_objects_xml(objects: list[SceneObject]) -> list[str]:
-    return [_scene_object_xml(item) for item in objects]
+    # A scene that brings its own ground plane or walls is a FLOOR scene (navigation / maze): targets and
+    # obstacles sit on the floor at full size, not pinned to the tabletop. Tabletop scenes are unaffected.
+    floor = any(getattr(o, "object_type", None) in ("floor", "wall") for o in objects)
+    return [_scene_object_xml(item, floor=floor) for item in objects]
 
 
-def _scene_object_xml(item: SceneObject) -> str:
+def _scene_object_xml(item: SceneObject, floor: bool = False) -> str:
     x, y, _, _, _, yaw = item.pose_xyz_rpy
-    material = "mat_gray"
-    if item.material and "red" in item.material:
-        material = "mat_red"
-    if item.material and "blue" in item.material:
-        material = "mat_blue"
+    name = escape(item.name)
+    s = item.scale or 1.0
 
+    # ---- floor-scene structure: ground arena + maze/boundary walls ----
+    if item.object_type == "floor":
+        hx = round(max(0.2, s), 3)                        # scale = ground X half-extent in metres
+        hy = round(hx * (item.friction or 0.8), 3)        # friction carries the Y/X aspect so the floor matches the course shape
+        return (f'    <geom name="{name}" type="box" size="{hx} {hy} 0.02" pos="{x} {y} -0.02" '
+                f'rgba="0.82 0.82 0.85 1"/>')
+    if item.object_type == "wall":
+        half_len = round(0.5 * s, 4)
+        return (f'    <geom name="{name}" type="box" size="{half_len} 0.03 0.16" pos="{x} {y} 0.16" '
+                f'euler="0 0 {round(yaw, 4)}" rgba="{_rgba_for(item, "gray")}"/>')
+
+    # ---- tabletop open-top bin (sorting / box handling) ----
     if item.object_type == "container":
+        material = "mat_red" if (item.material and "red" in item.material) else (
+            "mat_blue" if (item.material and "blue" in item.material) else "mat_gray")
         return _open_bin_xml(item.name, x, y, material)
 
+    # ---- elevated shelf / platform to lift a box onto (a low steel pedestal on the tabletop) ----
+    if item.object_type == "platform":
+        hx, hy = round(0.13 * s, 4), round(0.11 * s, 4)
+        h = round(0.05 * s, 4)
+        return (f'    <geom name="{name}" type="box" size="{hx} {hy} {h}" '
+                f'pos="{x} {y} {round(TABLE_TOP_Z + h, 4)}" rgba="0.30 0.42 0.55 1"/>')
+
+    # ---- target pad: a flat coloured marker (go here / place here / stack here) ----
+    if item.object_type == "zone":
+        half = round((0.16 if floor else 0.06) * s, 4)
+        base_z = 0.0 if floor else TABLE_TOP_Z
+        return (f'    <geom name="{name}" type="box" size="{half} {half} 0.006" '
+                f'pos="{x} {y} {round(base_z + 0.006, 4)}" rgba="{_rgba_for(item, "green")}"/>')
+
+    # ---- floor obstacle / pillar to steer around (navigation / maze) ----
+    if floor and item.object_type == "obstacle":
+        h = round(0.12 * s, 4)
+        return (f'    <geom name="{name}" type="box" size="{h} {h} {h}" pos="{x} {y} {round(h, 4)}" '
+                f'euler="0 0 {round(yaw, 4)}" rgba="0.5 0.5 0.55 1"/>')
+
+    # ---- tabletop static furniture (conveyor / surface) ----
     if item.object_type in _STATIC_TYPES:
+        material = "mat_gray"
+        if item.material and "red" in item.material:
+            material = "mat_red"
+        if item.material and "blue" in item.material:
+            material = "mat_blue"
         hx, hy, hz = _CONTAINER_HALF
         z = TABLE_TOP_Z + hz
         return (
-            f'    <geom name="{escape(item.name)}" type="box" size="{hx} {hy} {hz}" '
+            f'    <geom name="{name}" type="box" size="{hx} {hy} {hz}" '
             f'pos="{x} {y} {round(z, 4)}" material="{material}" />'
         )
 
-    # Manipulable object: a dynamic free body resting on the table, with
-    # domain-randomized size, friction, and yaw applied to the geom.
-    half = round(_CUBE_HALF * (item.scale or 1.0), 4)
+    # ---- manipulable object: a dynamic free body resting on the table ----
+    # red/blue/gray keep their shared materials (so sorting scenes are byte-identical); cardboard boxes render
+    # tan and green/orange objects show their real colour via rgba.
+    mm = (item.material or "").lower()
+    if "cardboard" in mm or "wood" in mm:
+        color_attr = ' rgba="0.72 0.55 0.35 1"'
+    elif "green" in mm:
+        color_attr = f' rgba="{_RGBA["green"]}"'
+    elif "orange" in mm or "yellow" in mm:
+        color_attr = f' rgba="{_RGBA["orange"]}"'
+    else:
+        material = "mat_gray"
+        if "red" in mm:
+            material = "mat_red"
+        if "blue" in mm:
+            material = "mat_blue"
+        color_attr = f' material="{material}"'
+    half = round(_CUBE_HALF * s, 4)
     z = round(TABLE_TOP_Z + half + 0.001, 4)
     mass = item.mass_kg if item.mass_kg else 0.05
     friction_attr = f' friction="{item.friction} 0.1 0.01"' if item.friction else ""
     return (
-        f'    <body name="obj_{escape(item.name)}" pos="{x} {y} {z}" euler="0 0 {round(yaw, 4)}">\n'
-        f'      <freejoint name="free_{escape(item.name)}" />\n'
-        f'      <geom name="{escape(item.name)}" type="box" size="{half} {half} {half}" '
-        f'mass="{round(mass, 4)}"{friction_attr} material="{material}" />\n'
+        f'    <body name="obj_{name}" pos="{x} {y} {z}" euler="0 0 {round(yaw, 4)}">\n'
+        f'      <freejoint name="free_{name}" />\n'
+        f'      <geom name="{name}" type="box" size="{half} {half} {half}" '
+        f'mass="{round(mass, 4)}"{friction_attr}{color_attr} />\n'
         "    </body>"
     )
 

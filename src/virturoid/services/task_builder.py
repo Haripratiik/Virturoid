@@ -33,7 +33,7 @@ def build_task_graph(requirements: RequirementsRecord) -> TaskGraph:
             metrics=["success_rate", "collision_count", "timeout_rate", "drop_rate"],
         )
 
-    if "box" in prompt or "conveyor" in prompt:
+    if "box" in prompt or "conveyor" in prompt or any(t in prompt for t in ("lift", "shelf", "pallet", "hoist")):
         return TaskGraph(
             id=f"task_{requirements.id}",
             name="Move boxes to target bin",
@@ -54,7 +54,7 @@ def build_task_graph(requirements: RequirementsRecord) -> TaskGraph:
             metrics=["success_rate", "collision_count", "drop_rate", "timeout_rate"],
         )
 
-    if any(token in prompt for token in ["mobile", "drive", "navigate", "navigation", "deliver", "delivery", "inspect"]):
+    if any(token in prompt for token in ["mobile", "drive", "navigate", "navigation", "deliver", "delivery", "inspect", "maze", "labyrinth"]):
         return TaskGraph(
             id=f"task_{requirements.id}",
             name="Navigate indoor route",

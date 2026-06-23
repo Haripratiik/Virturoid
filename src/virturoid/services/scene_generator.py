@@ -23,11 +23,14 @@ _DIFFICULTY = {"baseline": 1, "variation": 2, "regression": 3, "holdout": 3, "ed
                "stress": 5}
 
 
-def generate_scene_set(task: TaskGraph, count: int = 5, purpose: str = "baseline") -> SceneSet:
+def generate_scene_set(task: TaskGraph, count: int = 5, purpose: str = "baseline",
+                       *, robot_radius: float | None = None) -> SceneSet:
     if count <= 0:
         raise ValueError("Scene count must be positive.")
 
-    scenes = [_generate_scene(task, index, purpose) for index in range(count)]
+    # robot_radius (when the caller knows the robot) lets floor scenes — maze corridor width, obstacle size —
+    # scale to THIS robot's footprint instead of a fixed size, so the course is navigable for it.
+    scenes = [_generate_scene(task, index, purpose, robot_radius) for index in range(count)]
     return SceneSet(
         id=f"scenes_{task.id}_{purpose}",
         task_graph_id=task.id,
@@ -159,10 +162,17 @@ def _scene_seed(task: TaskGraph, purpose: str, index: int) -> int:
     return int(digest[:8], 16) % (2**31)
 
 
-def _generate_scene(task: TaskGraph, index: int, purpose: str) -> SceneGraph:
+def _generate_scene(task: TaskGraph, index: int, purpose: str, robot_radius: float | None = None) -> SceneGraph:
+    # Maze and lift are prompt-driven VARIANTS of navigation / box-handling: same task_type (so the morphology,
+    # perception and training builders are unaffected), but a distinct scene layout.
+    prompt = (task.prompt or "").lower()
     if task.task_type == "navigation":
-        return _generate_navigation_scene(task, index, purpose)
+        if "maze" in prompt or "labyrinth" in prompt:
+            return _generate_maze_scene(task, index, purpose, robot_radius)
+        return _generate_navigation_scene(task, index, purpose, robot_radius)
     if task.task_type == "pick_place_box":
+        if any(k in prompt for k in ("lift", "shelf", "pallet", "hoist")):
+            return _generate_lift_scene(task, index, purpose)
         return _generate_box_scene(task, index, purpose)
     if task.task_type == "stack":
         return _generate_stack_scene(task, index, purpose)
@@ -380,62 +390,133 @@ def _generate_push_scene(task: TaskGraph, index: int, purpose: str) -> SceneGrap
                       requirement_trace=[task.task_type, purpose, "tabletop", f"difficulty_{difficulty}"])
 
 
-def _generate_navigation_scene(task: TaskGraph, index: int, purpose: str) -> SceneGraph:
+def _generate_navigation_scene(task: TaskGraph, index: int, purpose: str, robot_radius: float | None = None) -> SceneGraph:
     rng = random.Random(_scene_seed(task, purpose, index))
     difficulty = _DIFFICULTY.get(purpose, 2)
     dr = _domain_randomization(rng, difficulty)
-    route_length = round(rng.uniform(1.0, 1.6) + 0.15 * difficulty, 3)
-    lane_offset = round(rng.uniform(-0.2, 0.2), 3)
+    rs = max(0.08, robot_radius or 0.2)            # obstacles are sized to the robot's footprint
+    route_length = round(rng.uniform(1.2, 1.6) + 0.1 * difficulty, 3)
+    lane_offset = round(rng.uniform(-0.25, 0.25), 3)
     obstacle_count = max(1, difficulty)
+    cx = round(route_length / 2.0, 4)
     objects = [
-        SceneObject(
-            name="start_zone",
-            object_type="zone",
-            pose_xyz_rpy=(0.0, 0.0, 0.002, 0.0, 0.0, 0.0),
-            material="matte_blue",
-            scale=1.0,
-        ),
-        SceneObject(
-            name="goal_zone",
-            object_type="zone",
-            pose_xyz_rpy=(route_length, lane_offset, 0.002, 0.0, 0.0, 0.0),
-            material="matte_green",
-            scale=1.2,
-        ),
+        # the floor arena the mobile base drives on — marks this a FLOOR scene (the tabletop is dropped) and
+        # gives the goal/obstacles a ground to sit on instead of floating at table height.
+        SceneObject(name="arena_floor", object_type="floor",
+                    pose_xyz_rpy=(cx, 0.0, 0.0, 0.0, 0.0, 0.0), material="matte_gray",
+                    scale=round(route_length / 2.0 + 0.4, 3),
+                    friction=round(0.8 / (route_length / 2.0 + 0.4), 3)),
+        SceneObject(name="start_zone", object_type="zone",
+                    pose_xyz_rpy=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0), material="matte_blue", scale=0.7),
+        SceneObject(name="goal_zone", object_type="zone",
+                    pose_xyz_rpy=(route_length, lane_offset, 0.0, 0.0, 0.0, 0.0), material="matte_green", scale=1.3),
     ]
     for obstacle_index in range(obstacle_count):
         progress = (obstacle_index + 1) / (obstacle_count + 1)
         x = round(route_length * progress + rng.uniform(-0.08, 0.08), 4)
-        y = round(lane_offset * progress + rng.choice([-1, 1]) * rng.uniform(0.12, 0.32), 4)
+        y = round(lane_offset * progress + rng.choice([-1, 1]) * rng.uniform(0.18, 0.40), 4)
         yaw = round(rng.uniform(-math.pi, math.pi), 4)
         objects.append(
-            SceneObject(
-                name=f"obstacle_{index}_{obstacle_index}",
-                object_type="obstacle",
-                pose_xyz_rpy=(x, y, 0.05, 0.0, 0.0, yaw),
-                mass_kg=None,
-                material="matte_gray",
-                friction=round(rng.uniform(0.8, 1.2), 3),
-                scale=round(rng.uniform(0.8, 1.35), 3),
-            )
-        )
+            SceneObject(name=f"obstacle_{index}_{obstacle_index}", object_type="obstacle",
+                        pose_xyz_rpy=(x, y, 0.0, 0.0, 0.0, yaw), mass_kg=None, material="matte_gray",
+                        friction=round(rng.uniform(0.8, 1.2), 3), scale=round(rng.uniform(0.9, 1.3) * rs / 0.12, 3)))
 
     variation_parameters = {
-        "index": index,
-        "purpose": purpose,
-        "seed": _scene_seed(task, purpose, index),
-        "route_length_m": route_length,
-        "lane_offset_m": lane_offset,
-        "obstacle_count": obstacle_count,
+        "index": index, "purpose": purpose, "seed": _scene_seed(task, purpose, index),
+        "route_length_m": route_length, "lane_offset_m": lane_offset, "obstacle_count": obstacle_count,
         "clutter": obstacle_count > 1,
     }
     variation_parameters.update(dr)
     return SceneGraph(
-        id=f"scene_{task.id}_{purpose}_{index:03d}",
-        name=f"{task.name} {purpose} scene {index + 1}",
-        backend_targets=["mujoco"],
-        robot_spawn_xyz_rpy=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
-        objects=objects,
-        variation_parameters=variation_parameters,
+        id=f"scene_{task.id}_{purpose}_{index:03d}", name=f"{task.name} {purpose} scene {index + 1}",
+        backend_targets=["mujoco"], robot_spawn_xyz_rpy=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+        objects=objects, variation_parameters=variation_parameters,
         requirement_trace=[task.task_type, purpose, "indoor_navigation", f"difficulty_{difficulty}"],
     )
+
+
+def _generate_maze_scene(task: TaskGraph, index: int, purpose: str, robot_radius: float | None = None) -> SceneGraph:
+    """MAZE navigation, SIZED TO THE ROBOT. A compact 2-D serpentine: stacked lanes the robot weaves through
+    (right, then left, then right ...) via gaps in the dividing walls to reach the goal. Corridor width, lane
+    length and arena all derive from the robot's footprint (``robot_radius``) so it is a navigable maze for
+    THIS robot; the goal sits in the open end of the final lane, clear of every wall."""
+    rng = random.Random(_scene_seed(task, purpose, index))
+    difficulty = _DIFFICULTY.get(purpose, 2)
+    rs = max(0.08, robot_radius or 0.2)
+    gap = round(2.6 * rs, 4)                              # corridor: lane height AND the opening the robot passes through
+    wt = 0.03                                             # wall half-thickness (matches the wall renderer)
+    lane_pitch = round(gap + 2 * wt, 4)
+    n_rows = 3 if difficulty < 4 else 4
+    lane_len = round((2.2 + 0.3 * difficulty) * gap, 4)   # lanes a few robot-lengths long; longer when harder
+    HALF = math.pi / 2.0
+    left, right = round(-0.7 * gap, 4), round(lane_len + 0.7 * gap, 4)
+    y_top = round((n_rows - 1) * lane_pitch, 4)           # bottom lane center is the robot spawn row (y=0)
+    bottom, top = round(-gap / 2 - wt, 4), round(y_top + gap / 2 + wt, 4)
+    cx, cy = round((left + right) / 2.0, 4), round((bottom + top) / 2.0, 4)
+    fx = round((right - left) / 2.0 + 0.1, 3)
+
+    def hwall(name, x0, x1, y):                           # horizontal wall x0..x1 at height y
+        return SceneObject(name, "wall", (round((x0 + x1) / 2, 4), round(y, 4), 0.0, 0.0, 0.0, 0.0),
+                           material="matte_gray", scale=round(abs(x1 - x0), 4))
+
+    def vwall(name, x, ya, yb):                           # vertical wall ya..yb at x
+        return SceneObject(name, "wall", (round(x, 4), round((ya + yb) / 2, 4), 0.0, 0.0, 0.0, HALF),
+                           material="matte_gray", scale=round(abs(yb - ya), 4))
+
+    objects = [
+        SceneObject("arena_floor", "floor", (cx, cy, 0.0, 0.0, 0.0, 0.0), material="matte_gray",
+                    scale=fx, friction=round(((top - bottom) / 2.0 + 0.1) / fx, 3)),
+        hwall("wall_bottom", left, right, bottom),
+        hwall("wall_top", left, right, top),
+        vwall("wall_left", left, bottom, top),
+        vwall("wall_right", right, bottom, top),
+    ]
+    # dividing walls between lanes, with the opening alternating end (right, left, ...) -> a serpentine path
+    for j in range(n_rows - 1):
+        yd = round((j + 0.5) * lane_pitch, 4)
+        if j % 2 == 0:
+            objects.append(hwall(f"divider_{j}", left, right - gap, yd))   # opening at the RIGHT
+        else:
+            objects.append(hwall(f"divider_{j}", left + gap, right, yd))   # opening at the LEFT
+    # start in the bottom lane at the robot's spawn; goal in the open end of the final lane (clear of walls)
+    objects.append(SceneObject("start_zone", "zone", (0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+                               material="matte_blue", scale=round(1.3 * gap, 3)))
+    goal_x = round(right - 0.7 * gap, 4) if ((n_rows - 1) % 2 == 0) else round(left + 0.7 * gap, 4)
+    objects.append(SceneObject("goal_zone", "zone", (goal_x, y_top, 0.0, 0.0, 0.0, 0.0),
+                               material="matte_green", scale=round(1.55 * gap, 3)))
+    vp = {"index": index, "purpose": purpose, "seed": _scene_seed(task, purpose, index),
+          "n_rows": n_rows, "corridor_m": gap, "robot_radius_m": round(rs, 4), "clutter": n_rows > 3}
+    vp.update(_domain_randomization(rng, difficulty))
+    return SceneGraph(id=f"scene_{task.id}_{purpose}_{index:03d}", name=f"{task.name} {purpose} maze {index + 1}",
+                      backend_targets=["mujoco"], robot_spawn_xyz_rpy=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+                      objects=objects, variation_parameters=vp,
+                      requirement_trace=[task.task_type, purpose, "maze_navigation", f"difficulty_{difficulty}"])
+
+
+def _generate_lift_scene(task: TaskGraph, index: int, purpose: str) -> SceneGraph:
+    """LIFT task: large, heavy boxes to pick up and place onto an elevated shelf/platform (NOT small sorting
+    blocks). Box count and mass grow with difficulty."""
+    rng = random.Random(_scene_seed(task, purpose, index))
+    difficulty = _DIFFICULTY.get(purpose, 2)
+    dr = _domain_randomization(rng, difficulty)
+    spread = dr["position_jitter_m"]
+    n = 2 + (1 if purpose in {"stress", "edge_case"} else 0)
+    mats = ["cardboard", "matte_red", "matte_blue"]
+    bases = [(0.33, -0.10), (0.33, 0.10), (0.40, 0.0)]
+    heavy = 1.5 if purpose == "stress" else 1.0
+    objects = []
+    for i in range(n):
+        b = _jittered_block(rng, f"box_{i}", bases[i % len(bases)], mats[i % len(mats)], spread)
+        b.object_type = "box"
+        b.mass_kg = round(rng.uniform(0.3, 0.55) * heavy, 4)
+        b.scale = round(rng.uniform(1.4, 1.8), 3)
+        objects.append(b)
+    objects.append(SceneObject(name="shelf", object_type="platform",
+                   pose_xyz_rpy=(0.52, 0.16, 0.0, 0.0, 0.0, 0.0), material="matte_gray", scale=1.1))
+    vp = {"index": index, "purpose": purpose, "seed": _scene_seed(task, purpose, index),
+          "n_boxes": n, "environment": "warehouse"}
+    vp.update(dr)
+    return SceneGraph(id=f"scene_{task.id}_{purpose}_{index:03d}", name=f"{task.name} {purpose} lift {index + 1}",
+                      backend_targets=["mujoco"], robot_spawn_xyz_rpy=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+                      objects=objects, variation_parameters=vp,
+                      requirement_trace=[task.task_type, purpose, "box_handling", f"difficulty_{difficulty}"])

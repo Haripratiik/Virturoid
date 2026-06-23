@@ -261,9 +261,13 @@ def compile_gene_with_scene(gene: RobotGene, scene_objects, *, table: bool = Tru
         raise ValueError(f"cannot compile invalid gene {gene.id}: {'; '.join(issues)}")
     root = gene.root()
     base_z = _MOUNT_Z.get(gene.base_mount, TABLE_TOP_Z)
+    scene_objects = list(scene_objects)
+    # A scene that brings its own ground/walls (navigation, maze) is a FLOOR scene: drop the tabletop so the
+    # robot drives on the scene's own floor instead of a 0.7x0.45 m table.
+    floor_scene = any(getattr(o, "object_type", None) in ("floor", "wall") for o in scene_objects)
     table_xml = (
         f'    <geom name="table" type="box" size="0.7 0.45 {TABLE_TOP_Z}" pos="0.4 0 0" rgba="0.7 0.7 0.65 1"/>\n'
-        if table else ""
+        if (table and not floor_scene) else ""
     )
     lines = [
         f'<mujoco model="{escape(gene.id)}">',

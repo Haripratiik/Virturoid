@@ -35,6 +35,7 @@ function addGeomMesh(group, geomEl, materials) {
   const type = geomEl.getAttribute("type") || "box";
   const material = makeMaterial(materials, geomEl);
   let mesh = null;
+  let selfPositioned = false; // fromto geoms set their own position + rotation from the endpoints
 
   if (type === "box") {
     const [sx, sy, sz] = parseNumbers(geomEl.getAttribute("size"), 3);
@@ -42,17 +43,37 @@ function addGeomMesh(group, geomEl, materials) {
   } else if (type === "sphere") {
     const [radius] = parseNumbers(geomEl.getAttribute("size"), 1);
     mesh = new THREE.Mesh(new THREE.SphereGeometry(radius || 0.02, 24, 16), material);
-  } else if (type === "cylinder") {
-    const [radius] = parseNumbers(geomEl.getAttribute("size"), 1);
-    const fromto = parseNumbers(geomEl.getAttribute("fromto"), 6);
-    const start = new THREE.Vector3(fromto[0], fromto[1], fromto[2]);
-    const end = new THREE.Vector3(fromto[3], fromto[4], fromto[5]);
-    const length = start.distanceTo(end) || 0.05;
-    mesh = new THREE.Mesh(new THREE.CylinderGeometry(radius || 0.02, radius || 0.02, length, 24), material);
-    const midpoint = start.clone().add(end).multiplyScalar(0.5);
-    mesh.position.copy(midpoint);
-    if (length > 0) {
-      mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), end.clone().sub(start).normalize());
+  } else if (type === "ellipsoid") {
+    const sz = parseNumbers(geomEl.getAttribute("size"), 3);
+    mesh = new THREE.Mesh(new THREE.SphereGeometry(1, 24, 16), material);
+    mesh.scale.set(sz[0] || 0.02, sz[1] || 0.02, sz[2] || 0.02);
+  } else if (type === "cylinder" || type === "capsule") {
+    // MuJoCo: either fromto (two endpoints) OR size=(radius, half-length) centred at pos, axis = local +Z.
+    // capsule was previously UNHANDLED (fell through to return), so every capsule LINK of an arm vanished.
+    const sizes = parseNumbers(geomEl.getAttribute("size"), 2);
+    const radius = sizes[0] || 0.02;
+    const fromtoAttr = geomEl.getAttribute("fromto");
+    if (fromtoAttr) {
+      const ft = parseNumbers(fromtoAttr, 6);
+      const start = new THREE.Vector3(ft[0], ft[1], ft[2]);
+      const end = new THREE.Vector3(ft[3], ft[4], ft[5]);
+      const length = start.distanceTo(end) || 0.05;
+      const geo = type === "capsule"
+        ? new THREE.CapsuleGeometry(radius, length, 8, 16)
+        : new THREE.CylinderGeometry(radius, radius, length, 24);
+      mesh = new THREE.Mesh(geo, material);
+      mesh.position.copy(start.clone().add(end).multiplyScalar(0.5));
+      if (length > 0) {
+        mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), end.clone().sub(start).normalize());
+      }
+      selfPositioned = true;
+    } else {
+      const halfLen = sizes[1] || 0.05;
+      const geo = type === "capsule"
+        ? new THREE.CapsuleGeometry(radius, halfLen * 2, 8, 16)
+        : new THREE.CylinderGeometry(radius, radius, halfLen * 2, 24);
+      geo.rotateX(Math.PI / 2); // three axis +Y -> MuJoCo capsule/cylinder axis +Z
+      mesh = new THREE.Mesh(geo, material);
     }
   } else if (type === "plane") {
     const [sx, sy] = parseNumbers(geomEl.getAttribute("size"), 3);
@@ -62,13 +83,13 @@ function addGeomMesh(group, geomEl, materials) {
     return;
   }
 
-  const pos = parseNumbers(geomEl.getAttribute("pos"), 3);
-  if (type !== "cylinder") {
+  if (!selfPositioned) {
+    const pos = parseNumbers(geomEl.getAttribute("pos"), 3);
     mesh.position.set(pos[0], pos[1], pos[2]);
-  }
-  const euler = parseNumbers(geomEl.getAttribute("euler"), 3);
-  if (type !== "cylinder" && euler.some((value) => value !== 0)) {
-    mesh.rotation.set(euler[0], euler[1], euler[2], "ZYX");
+    const euler = parseNumbers(geomEl.getAttribute("euler"), 3);
+    if (euler.some((value) => value !== 0)) {
+      mesh.rotation.set(euler[0], euler[1], euler[2], "ZYX");
+    }
   }
   mesh.castShadow = true;
   mesh.receiveShadow = true;
