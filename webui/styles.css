@@ -878,3 +878,5 @@ td code, .mono { color: var(--muted); }
 .mem-title-sub { font-family: var(--font-mono); font-size: 10px; color: var(--faint); }
 .mem-legend { top: auto; bottom: 12px; left: 14px; background: rgba(13, 18, 23, 0.55); }
 .mem-graph-hint { color: var(--faint); }
+.mem-mode-toggle { position: absolute; top: 12px; right: 12px; font-family: var(--font-mono); font-size: 11px; color: var(--ink); background: rgba(13, 18, 23, 0.82); border: 1px solid var(--line); border-radius: 8px; padding: 6px 11px; cursor: pointer; backdrop-filter: blur(6px); }
+.mem-mode-toggle:hover { border-color: #b8ff3a; color: #b8ff3a; }

@@ -24,7 +24,7 @@ function seedNodes() {
   return NODES.map((n) => ({ ...n, ...placed.get(n.id), vx: 0, vy: 0 }));
 }
 
-const state = { selected: null, nodes: seedNodes() };
+const state = { selected: null, nodes: seedNodes(), treeMode: true };
 const nodeById = new Map(state.nodes.map((n) => [n.id, n]));
 const adjacency = new Map(state.nodes.map((n) => [n.id, new Set()]));
 LINKS.forEach(([a, b]) => {
@@ -33,6 +33,32 @@ LINKS.forEach(([a, b]) => {
     adjacency.get(b).add(a);
   }
 });
+
+// ---- Species-tree layout: robot classes (top row) -> their species (below). Only these two groups show in
+// the default tree view; the wider task/skill/training web appears under the "Full graph" toggle. ----
+const TREE_GROUPS = new Set(["class", "species"]);
+function computeTreePositions() {
+  const speciesOf = new Map();
+  state.nodes.forEach((n) => { if (n.group === "class") speciesOf.set(n.id, []); });
+  LINKS.forEach(([a, b]) => {
+    const na = nodeById.get(a), nb = nodeById.get(b);
+    if (na && nb && na.group === "class" && nb.group === "species") speciesOf.get(a).push(b);
+  });
+  // Left-to-right: each robot class on the left, its species to the right, one row per pair. Long species
+  // ids fit as right-side labels instead of colliding in a wide top-down layout.
+  const CLASSX = -180, SPECIESX = 40, ROWY = 86;
+  const classes = state.nodes.filter((n) => n.group === "class");
+  const m = classes.length;
+  classes.forEach((c, i) => {
+    const y = (i - (m - 1) / 2) * ROWY;
+    c.treeX = CLASSX; c.treeY = y;
+    (speciesOf.get(c.id) || []).forEach((sid, k) => {
+      const s = nodeById.get(sid);
+      if (s) { s.treeX = SPECIESX; s.treeY = y + k * 42; }
+    });
+  });
+}
+computeTreePositions();
 
 function select(id) {
   state.selected = id;
@@ -61,7 +87,7 @@ function noteMarkdown(text) {
 // ---------------- Graph panel ----------------
 function makeGraphPanel(icon) {
   let canvas, ctx2d, host, raf;
-  const cam = { x: 0, y: 0, scale: 1 };
+  const cam = { x: 0, y: 0, scale: 0.7 };
   const camTarget = { x: 0, y: 0, active: false };
   let dragNode = null, dragging = false, panning = false, last = null, moved = 0;
 
@@ -77,6 +103,14 @@ function makeGraphPanel(icon) {
   }
 
   function step() {
+    if (state.treeMode) {
+      state.nodes.forEach((n) => {
+        if (!TREE_GROUPS.has(n.group) || n === dragNode) return;
+        n.x += ((n.treeX ?? 0) - n.x) * 0.16;
+        n.y += ((n.treeY ?? 0) - n.y) * 0.16;
+      });
+      return;
+    }
     const nodes = state.nodes;
     for (let i = 0; i < nodes.length; i++) {
       for (let j = i + 1; j < nodes.length; j++) {
@@ -126,6 +160,7 @@ function makeGraphPanel(icon) {
     LINKS.forEach(([ai, bi]) => {
       const a = nodeById.get(ai), b = nodeById.get(bi);
       if (!a || !b) return;
+      if (state.treeMode && !(TREE_GROUPS.has(a.group) && TREE_GROUPS.has(b.group))) return;
       const pa = toScreen(a, w, h), pb = toScreen(b, w, h);
       const active = state.selected && (ai === state.selected || bi === state.selected);
       ctx2d.strokeStyle = active ? "rgba(184,255,58,0.5)" : "rgba(120,140,150,0.16)";
@@ -134,6 +169,7 @@ function makeGraphPanel(icon) {
     });
 
     state.nodes.forEach((n) => {
+      if (state.treeMode && !TREE_GROUPS.has(n.group)) return;
       const p = toScreen(n, w, h);
       const g = GROUPS[n.group] || { color: "#8aa0ad" };
       const isSel = n.id === state.selected;
@@ -148,8 +184,13 @@ function makeGraphPanel(icon) {
       ctx2d.fillStyle = g.color; ctx2d.fill();
       ctx2d.fillStyle = isSel ? "#ffffff" : dim ? "rgba(220,228,233,0.55)" : "#eaf0f4";
       ctx2d.font = `${isSel || n.group === "class" ? 600 : 400} 12px 'IBM Plex Mono', monospace`;
-      ctx2d.textAlign = "center";
-      ctx2d.fillText(n.label, p.x, p.y + r + 14);
+      if (state.treeMode) {
+        if (n.group === "class") { ctx2d.textAlign = "right"; ctx2d.fillText(n.label, p.x - r - 8, p.y + 4); }
+        else { ctx2d.textAlign = "left"; ctx2d.fillText(n.label, p.x + r + 8, p.y + 4); }
+      } else {
+        ctx2d.textAlign = "center";
+        ctx2d.fillText(n.label, p.x, p.y + r + 14);
+      }
       ctx2d.globalAlpha = 1;
     });
   }
@@ -169,6 +210,7 @@ function makeGraphPanel(icon) {
     const w = canvas.clientWidth, h = canvas.clientHeight;
     let best = null, bestD = 18;
     state.nodes.forEach((n) => {
+      if (state.treeMode && !TREE_GROUPS.has(n.group)) return;
       const p = toScreen(n, w, h);
       const d = Math.hypot(p.x - mx, p.y - my);
       if (d < bestD) { bestD = d; best = n; }
@@ -183,10 +225,22 @@ function makeGraphPanel(icon) {
       host = el("div", { class: "mem-graph" });
       canvas = el("canvas", {});
       host.appendChild(canvas);
+      const titleSub = el("span", { class: "mem-title-sub",
+        text: "robot classes \u2192 species \u00b7 click a species for its build + train tips" });
       host.appendChild(el("div", { class: "mem-title" }, [
         el("span", { class: "mem-title-main", text: "Robot Species Tree" }),
-        el("span", { class: "mem-title-sub", text: "click a node to read its notes" }),
+        titleSub,
       ]));
+      const modeToggle = el("button", { class: "mem-mode-toggle", type: "button", text: "Full graph \u203a" });
+      modeToggle.addEventListener("click", () => {
+        state.treeMode = !state.treeMode;
+        modeToggle.textContent = state.treeMode ? "Full graph \u203a" : "\u2039 Species tree";
+        titleSub.textContent = state.treeMode
+          ? "robot classes \u2192 species \u00b7 click a species for its build + train tips"
+          : "the full task / skill / training web \u00b7 click any node";
+        cam.x = 0; cam.y = 0; cam.scale = state.treeMode ? 0.7 : 1;
+      });
+      host.appendChild(modeToggle);
       host.appendChild(el("div", { class: "mem-graph-hint", text: "drag to pan \u00b7 scroll to zoom" }));
       const legendItems = [
         ["#b8ff3a", "Class"],
@@ -260,7 +314,7 @@ function makeNotePanel(icon) {
     clear(host);
     const node = state.selected ? nodeById.get(state.selected) : null;
     if (!node) {
-      host.appendChild(el("div", { class: "empty", text: "Select a node in the graph to read its notes." }));
+      host.appendChild(el("div", { class: "empty", text: "Select a species in the tree to read its build + training tips." }));
       return;
     }
     const g = GROUPS[node.group] || {};
