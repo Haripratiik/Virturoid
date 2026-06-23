@@ -427,12 +427,15 @@ async function reload(refs, ctx) {
   if (refs.empty) refs.empty.style.display = "none";
   refs.status.style.display = "";
   if (refs.playbar) refs.playbar.style.display = "none";
-  if (refs.modeSelect.value === "episode") {
+  if (refs.modeSelect.value === "episode" || refs.modeSelect.value === "robot") {
+    clear(refs.sceneSelect);                                    // don't leave a stale scene name in the disabled picker
+    refs.sceneSelect.appendChild(el("option", { value: "", text: "— n/a in this mode —" }));
     refs.sceneSelect.disabled = true;
-    await loadEpisode(refs, ctx);
-  } else if (refs.modeSelect.value === "robot") {
-    refs.sceneSelect.disabled = true;
-    await loadRobot(refs, ctx);
+    if (refs.modeSelect.value === "episode") {
+      await loadEpisode(refs, ctx);
+    } else {
+      await loadRobot(refs, ctx);
+    }
   } else {
     await populateScenes(refs, ctx);
     await loadScene(refs, ctx);
