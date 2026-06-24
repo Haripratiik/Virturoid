@@ -240,7 +240,11 @@ def _scene_object_xml(item: SceneObject, floor: bool = False) -> str:
     # ---- floor obstacle / pillar to steer around (navigation / maze) ----
     if floor and item.object_type == "obstacle":
         h = round(0.12 * s, 4)
-        return (f'    <geom name="{name}" type="box" size="{h} {h} {h}" pos="{x} {y} {round(h, 4)}" '
+        # footprint stays sized to the robot (course stays navigable), but keep the obstacle SHORTER than the
+        # mobile base's ~0.18 m roofline. A full cube here towered ~0.7 m and hid the low rover behind it; a
+        # low crate steers the same and leaves the robot the tallest, clearly-visible thing in the scene.
+        hz = round(min(h, 0.07), 4)
+        return (f'    <geom name="{name}" type="box" size="{h} {h} {hz}" pos="{x} {y} {round(hz, 4)}" '
                 f'euler="0 0 {round(yaw, 4)}" rgba="0.5 0.5 0.55 1"/>')
 
     # ---- tabletop static furniture (conveyor / surface) ----

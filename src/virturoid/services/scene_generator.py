@@ -411,6 +411,22 @@ def _generate_navigation_scene(task: TaskGraph, index: int, purpose: str, robot_
         SceneObject(name="goal_zone", object_type="zone",
                     pose_xyz_rpy=(route_length, lane_offset, 0.0, 0.0, 0.0, 0.0), material="matte_green", scale=1.3),
     ]
+    # A perimeter ROOM ("...indoors"): four walls flush with the arena edges so the rover stays IN the scene
+    # instead of driving off a wall-less floor when it overshoots the goal -- the same containment maze_nav
+    # relies on, and what makes "indoors" actually read as a room.
+    hx = round(route_length / 2.0 + 0.4, 3)        # floor X half-extent (matches arena_floor scale)
+    hy = 0.8                                        # floor Y half-extent (arena_floor friction pins Y/X -> hy=0.8)
+    _HALF = round(math.pi / 2.0, 4)
+    objects += [
+        SceneObject(name="wall_bottom", object_type="wall", pose_xyz_rpy=(cx, -hy, 0.0, 0.0, 0.0, 0.0),
+                    material="matte_gray", scale=round(2 * hx, 3)),
+        SceneObject(name="wall_top", object_type="wall", pose_xyz_rpy=(cx, hy, 0.0, 0.0, 0.0, 0.0),
+                    material="matte_gray", scale=round(2 * hx, 3)),
+        SceneObject(name="wall_left", object_type="wall", pose_xyz_rpy=(cx - hx, 0.0, 0.0, 0.0, 0.0, _HALF),
+                    material="matte_gray", scale=round(2 * hy, 3)),
+        SceneObject(name="wall_right", object_type="wall", pose_xyz_rpy=(cx + hx, 0.0, 0.0, 0.0, 0.0, _HALF),
+                    material="matte_gray", scale=round(2 * hy, 3)),
+    ]
     for obstacle_index in range(obstacle_count):
         progress = (obstacle_index + 1) / (obstacle_count + 1)
         x = round(route_length * progress + rng.uniform(-0.08, 0.08), 4)

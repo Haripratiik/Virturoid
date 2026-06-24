@@ -14,7 +14,10 @@ from pathlib import Path
 
 from virturoid.services.mujoco_runner import mujoco_available
 
-GOAL_RADIUS_M = 0.22
+# Goal radius is forgiving on purpose: a fast skid-steer rover that has to register "reached" within a tiny
+# radius overshoots it and then drives off a wall-less arena until timeout. ~the goal-zone footprint lets it
+# stop AT the goal (a delivered package), which is both the right behaviour and what reads well on replay.
+GOAL_RADIUS_M = 0.35
 OBSTACLE_CLEARANCE_M = 0.17
 
 
