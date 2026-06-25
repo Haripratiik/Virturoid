@@ -313,7 +313,7 @@ def build_gene_package(gene: RobotGene, prompt: str, output_dir: Path, scene_cou
 
     # A genome-from-gene so reports/viewer have the structure (links/joints/ee from the gene).
     (output_dir / "robot").mkdir(parents=True, exist_ok=True)
-    (output_dir / "robot" / "robot_genome.json").write_text(json.dumps(_gene_to_genome(gene), indent=2), encoding="utf-8")
+    _write_genome_and_urdf(gene, output_dir)
 
     cad = _export_real_cad(gene, output_dir)   # REAL B-rep STEP/STL (the gene path shipped no CAD before)
     summary = evaluate_gene_on_task(gene, spec, scenes, params=controller_params)
@@ -526,7 +526,7 @@ def _build_navigation_package(gene: RobotGene, prompt: str, output_dir: Path, co
 
     output_dir = Path(output_dir)
     (output_dir / "robot").mkdir(parents=True, exist_ok=True)
-    (output_dir / "robot" / "robot_genome.json").write_text(json.dumps(_gene_to_genome(gene), indent=2), encoding="utf-8")
+    _write_genome_and_urdf(gene, output_dir)
 
     # Prompt-driven scene set (navigation course or maze) — the SAME general generator the gallery uses, so a
     # "navigate a maze" build renders an actual maze and "navigate to the goal" renders a course.
@@ -595,7 +595,7 @@ def _build_legged_package(gene: RobotGene, prompt: str, output_dir: Path, contro
 
     output_dir = Path(output_dir)
     (output_dir / "robot").mkdir(parents=True, exist_ok=True)
-    (output_dir / "robot" / "robot_genome.json").write_text(json.dumps(_gene_to_genome(gene), indent=2), encoding="utf-8")
+    _write_genome_and_urdf(gene, output_dir)
 
     # Write the LOCOMOTION scene (robot on flat ground) as a real compiled MJCF + index. A walker's
     # "simulation" is the locomotion rollout, not object scenes — but it IS a compiled, loadable scene, so
@@ -702,6 +702,21 @@ def _emit_readiness(gene: RobotGene, output_dir: Path) -> dict:
         return {"safe_to_export": ledger.safe_to_export, "highest_attained": ledger.highest_attained}
     except Exception:  # noqa: BLE001 - readiness emission must never break a build
         return {}
+
+
+def _write_genome_and_urdf(gene: RobotGene, output_dir: Path) -> None:
+    """Write robot/robot_genome.json AND robot/robot.urdf for a gene-built package. The gene path shipped the genome
+    + MJCF but no URDF, so gene-built robots (any creature) had no standard robot description for ROS/Gazebo and
+    wouldn't render in the viewer's Robot mode. Best-effort URDF -- the MJCF replay never needs it."""
+    (output_dir / "robot").mkdir(parents=True, exist_ok=True)
+    genome = _gene_to_genome(gene)
+    (output_dir / "robot" / "robot_genome.json").write_text(json.dumps(genome, indent=2), encoding="utf-8")
+    try:
+        from virturoid.schemas.robot import RobotGenome
+        from virturoid.services.urdf_exporter import write_robot_urdf
+        write_robot_urdf(RobotGenome.from_dict(genome), output_dir)
+    except Exception:  # noqa: BLE001 - URDF is a nicety; the MJCF replay works without it
+        pass
 
 
 def _gene_to_genome(gene: RobotGene) -> dict:

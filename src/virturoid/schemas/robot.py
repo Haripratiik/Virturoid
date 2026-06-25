@@ -70,3 +70,25 @@ class RobotGenome(VersionedEntity):
             if sensor.parent_link not in link_set:
                 result.add("missing_sensor_link", "Sensor parent link not found.", f"sensors[{index}].parent_link")
         return result
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "RobotGenome":
+        """Reconstruct a RobotGenome from its serialized dict (the inverse of to_dict / the gene path's
+        _gene_to_genome): joints/sensors become objects again, tuples are restored, and unknown keys (e.g. a gene
+        path's 'robot_class'/'source') are dropped. Lets the URDF + package exporters round-trip a genome that was
+        written as JSON -- previously this method was MISSING, so write-from-genome (gene-path URDF, the legacy
+        _try_write_robot_urdf) silently failed."""
+        d = dict(data or {})
+
+        def _joint(j: dict) -> RobotJoint:
+            kw = {k: v for k, v in j.items() if k in RobotJoint.__dataclass_fields__}
+            if isinstance(kw.get("limit"), dict):
+                kw["limit"] = JointLimit(**{k: v for k, v in kw["limit"].items() if k in JointLimit.__dataclass_fields__})
+            if isinstance(kw.get("axis_xyz"), list):
+                kw["axis_xyz"] = tuple(kw["axis_xyz"])
+            return RobotJoint(**kw)
+
+        d["joints"] = [_joint(j) for j in d.get("joints", []) if isinstance(j, dict)]
+        d["sensors"] = [RobotSensor(**{k: v for k, v in s.items() if k in RobotSensor.__dataclass_fields__})
+                        for s in d.get("sensors", []) if isinstance(s, dict)]
+        return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
