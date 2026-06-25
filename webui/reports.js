@@ -98,9 +98,10 @@ export const reportsSection = {
     }
     root.appendChild(emptyState("Loading reports..."));
 
-    const [summary, markdown] = await Promise.all([
+    const [summary, markdown, ledger] = await Promise.all([
       ctx.fetchJson("reports/autonomous_build_summary.json"),
       ctx.fetchText("reports/mvp_summary.md"),
+      ctx.fetchJson("reports/product_readiness_ledger.json"),
     ]);
     clear(root);
 
@@ -110,13 +111,20 @@ export const reportsSection = {
       el("a", { class: "button", href: ctx.packageUrl("reports/autonomous_build_summary.json"), target: "_blank", rel: "noreferrer" }, "Build summary JSON"),
     ]));
 
-    if (summary) {
-      root.appendChild(el("div", { class: "metrics" }, [
-        el("div", { class: "metric" }, [el("span", { text: "Robot class" }), el("strong", { text: summary.selected_robot_class || "-" })]),
-        el("div", { class: "metric" }, [el("span", { text: "Task type" }), el("strong", { text: summary.task_type || "-" })]),
-        el("div", { class: "metric" }, [el("span", { text: "Package valid" }), el("strong", { text: summary.package_valid ? "Yes" : "No" })]),
-        el("div", { class: "metric" }, [el("span", { text: "Readiness" }), el("strong", { text: summary.readiness ? `${summary.readiness.score}%` : "-" })]),
-      ]));
+    if (summary || ledger) {
+      const metrics = [];
+      if (summary) {
+        metrics.push(el("div", { class: "metric" }, [el("span", { text: "Robot class" }), el("strong", { text: summary.selected_robot_class || "-" })]));
+        metrics.push(el("div", { class: "metric" }, [el("span", { text: "Task type" }), el("strong", { text: summary.task_type || "-" })]));
+        metrics.push(el("div", { class: "metric" }, [el("span", { text: "Package valid" }), el("strong", { text: summary.package_valid ? "Yes" : "No" })]));
+      }
+      // The Product Readiness Ledger is the export truth source (not the legacy MVP completeness %).
+      if (ledger) {
+        metrics.push(el("div", { class: "metric" }, [el("span", { text: "Safe to export" }), el("strong", { text: ledger.safe_to_export ? "Yes" : "No" })]));
+      } else if (summary && summary.readiness) {
+        metrics.push(el("div", { class: "metric" }, [el("span", { text: "Completeness" }), el("strong", { text: `${summary.readiness.score}%` })]));
+      }
+      root.appendChild(el("div", { class: "metrics" }, metrics));
     }
 
     if (markdown) {
