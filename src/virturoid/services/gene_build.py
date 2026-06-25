@@ -717,6 +717,14 @@ def _write_genome_and_urdf(gene: RobotGene, output_dir: Path) -> None:
         write_robot_urdf(RobotGenome.from_dict(genome), output_dir)
     except Exception:  # noqa: BLE001 - URDF is a nicety; the MJCF replay works without it
         pass
+    try:
+        # Installable ROS2 (ament_python) harness from the genome + URDF, so gene-built robots are ROS2-deployable
+        # like the legacy path's. No learned controller bundle yet on this path, so the node publishes a neutral
+        # pose -- still a real, buildable package (colcon build + ros2 launch). Best-effort.
+        from virturoid.services.ros2_exporter import maybe_export_ros2_package
+        maybe_export_ros2_package(output_dir)
+    except Exception:  # noqa: BLE001 - the ROS2 package is best-effort; the core package works without it
+        pass
 
 
 def _gene_to_genome(gene: RobotGene) -> dict:
