@@ -600,6 +600,18 @@ def _maybe_analyze_failures(failure_clusters, emit) -> dict | None:
 # Classes that build from a gene (real, distinct robots) rather than the tuned legacy
 # arm/mobile pipelines. manipulator/mobile_base stay on their higher-success legacy path.
 _GENE_ONLY_CLASSES = {"humanoid", "quadruped"}
+# Manipulation tasks the tuned legacy arm path can't score (it runs the colour-sort eval only) -> general gene path.
+_NONSORT_MANIP_TASKS = {"pick_place_box", "stack", "push", "generic_manipulation"}
+
+
+def _prompt_task_type(prompt: str) -> str | None:
+    """Cheap task-type probe from the prompt (no gene/MuJoCo build) for routing decisions."""
+    try:
+        from virturoid.services.requirements_builder import build_requirements_from_prompt
+        from virturoid.services.task_builder import build_task_graph
+        return build_task_graph(build_requirements_from_prompt(prompt)).task_type
+    except Exception:  # noqa: BLE001 - routing probe is best-effort; fall back to the legacy path
+        return None
 
 
 def _maybe_gene_build(prompt, output_dir, target, memory_dir, emit, *, train: bool = False) -> AutonomyReport | None:
@@ -611,7 +623,10 @@ def _maybe_gene_build(prompt, output_dir, target, memory_dir, emit, *, train: bo
     from virturoid.services.morphology_selector import _explicit_class
 
     requested_class = _explicit_class((prompt or "").lower())
-    if requested_class not in _GENE_ONLY_CLASSES:
+    # The tuned legacy arm pipeline only SCORES the colour-sort task -- stack / place-on-shelf / push read 0% there.
+    # Route those (with the gene-only walking classes) through the general gene path so they actually run + evaluate.
+    nonsort_manip = _prompt_task_type(prompt) in _NONSORT_MANIP_TASKS
+    if requested_class not in _GENE_ONLY_CLASSES and not nonsort_manip:
         return None
     # Design the body INTELLIGENTLY: compose_robot routes a creature prompt through the LLM ANATOMY compiler
     # (the LLM describes the animal's anatomy; a general compiler builds it) — so "a dog" becomes a dog, not a
@@ -628,6 +643,12 @@ def _maybe_gene_build(prompt, output_dir, target, memory_dir, emit, *, train: bo
         gene = gene_for_class(requested_class, prompt=prompt)
     if gene is None:
         return None  # declared class with no gene yet -> fall through to legacy/foundation path
+    # A non-sort task that didn't actually compose a manipulator (e.g. an ambiguous 'push' on a mobile base)
+    # belongs on its own class's path, not the arm gene path.
+    if requested_class not in _GENE_ONLY_CLASSES:
+        if getattr(gene, "robot_class", None) != "manipulator":
+            return None
+        requested_class = "manipulator"   # flywheel reuse lookup + honest reporting of this arm gene build
 
     # Flywheel reuse: if a prior customer's gene for this class is stored in the species tree,
     # start from it (amend) instead of the seed — faster/better as the tree fills in.

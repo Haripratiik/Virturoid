@@ -74,6 +74,32 @@ class AutonomousBuildTests(unittest.TestCase):
             self.assertTrue((out / "reports" / "memory_effectiveness_report.json").exists())
             self.assertIn("memory_effectiveness_report", report.exported_artifacts)
 
+    def test_nonsort_manipulation_tasks_route_to_gene_path_not_sort_only_legacy(self):
+        """Stack / place-on-shelf / push tasks must run the general gene path (their REAL task eval), not the
+        tuned legacy arm path -- which only scores the colour sort, so every other manipulation task read a
+        structural 0% there. Regression for the 'sort-only' manipulation pipeline."""
+        from virturoid.services.autonomous_build import (
+            _NONSORT_MANIP_TASKS,
+            _prompt_task_type,
+            autonomous_build,
+        )
+
+        # Routing decision: a non-sort manipulation task is flagged for the gene path; the colour sort is NOT,
+        # so it keeps the higher-success legacy pipeline.
+        self.assertIn(_prompt_task_type("a tabletop arm that stacks blocks into a tower"), _NONSORT_MANIP_TASKS)
+        self.assertIn(_prompt_task_type("a tabletop arm that places parts on a shelf"), _NONSORT_MANIP_TASKS)
+        self.assertNotIn(_prompt_task_type("a tabletop arm that sorts red and blue blocks"), _NONSORT_MANIP_TASKS)
+
+        # End to end: a stack arm now produces a real task evaluation via the gene path (gene-built note present),
+        # instead of falling into the sort-only legacy eval that scored it a structural 0%.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mem = Path(tmpdir) / "memory"
+            mem.mkdir(parents=True, exist_ok=True)
+            report = autonomous_build("a tabletop arm that stacks blocks into a tower", Path(tmpdir) / "out", memory_dir=mem)
+            self.assertEqual("manipulator", report.robot_class)
+            self.assertEqual("stack", report.task_type)
+            self.assertTrue(any("gene" in n.lower() for n in report.notes), report.notes)
+
     def test_memory_warm_start_skips_codesign_when_prior_design_already_solves_it(self):
         """The moat (§13/§26): a second build of a known task reuses the prior converged body and
         SKIPS the expensive co-design search — measurably cheaper, not just 'memory_reused=True'."""
