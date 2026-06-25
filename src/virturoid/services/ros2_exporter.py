@@ -29,6 +29,13 @@ def export_ros2_package(package_dir: Path, package_name: str = "virturoid_robot"
     # Embed the exported controller (if the package has one) so the node runs the real policy.
     bundle_dir = package_dir / "software" / "controller"
     has_controller = (bundle_dir / "policy_params.json").exists() and (bundle_dir / "controller.py").exists()
+    policy_type = "reach"
+    if has_controller:
+        try:
+            policy_type = json.loads((bundle_dir / "policy_params.json").read_text(encoding="utf-8")).get(
+                "policy_type", "reach")
+        except Exception:  # noqa: BLE001 - default to the reach harness if the bundle params are unreadable
+            policy_type = "reach"
     targets = _harness_targets(package_dir)
     if has_controller:
         (root / package_name / "controller.py").write_text(
@@ -45,14 +52,15 @@ def export_ros2_package(package_dir: Path, package_name: str = "virturoid_robot"
     (root / "launch" / "evaluate.launch.py").write_text(_LAUNCH_PY.format(name=package_name), encoding="utf-8")
     (root / "config" / "robot.yaml").write_text(
         json.dumps({"robot_genome_id": genome.get("id"), "joints": joints, "control_frequency_hz": 20.0,
-                    "has_controller": has_controller, "target_positions": targets}, indent=2),
+                    "has_controller": has_controller, "policy_type": policy_type, "target_positions": targets},
+                   indent=2),
         encoding="utf-8",
     )
     (root / "test" / "test_task_regression.py").write_text(_TEST_PY, encoding="utf-8")
     (root / "README.md").write_text(
         f"# {package_name}\n\nGenerated ROS2 package for `{genome.get('id')}`"
-        + (" — runs the exported ReachController.\n\n" if has_controller else " (no controller bundle; "
-           "node publishes a neutral pose).\n\n")
+        + ((f" — runs the exported {'GaitController (trot gait)' if policy_type == 'trot_cpg_gait' else 'ReachController'}.\n\n")
+           if has_controller else " (no controller bundle; node publishes a neutral pose).\n\n")
         + "```\ncolcon build --packages-select " + package_name + "\nros2 launch " + package_name
         + " evaluate.launch.py\n```\n", encoding="utf-8",
     )
@@ -164,24 +172,31 @@ class EvaluationNode(Node):
         config = json.loads((_PKG.parents[1] / "config" / "robot.yaml").read_text())
         self.joints = config["joints"]
         self.targets = config.get("target_positions") or [[0.4, 0.0]]
+        self.policy_type = config.get("policy_type", "reach")
         self.i = 0
+        self.t = 0.0
+        self.dt = 1.0 / config.get("control_frequency_hz", 20.0)
         self.controller = None
         if config.get("has_controller") and (_PKG / "controller.py").exists():
             import importlib.util
             spec = importlib.util.spec_from_file_location("vq_controller", _PKG / "controller.py")
             mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
-            self.controller = mod.ReachController.from_file(str(_PKG / "policy_params.json"))
+            cls = mod.GaitController if self.policy_type == "trot_cpg_gait" else mod.ReachController
+            self.controller = cls.from_file(str(_PKG / "policy_params.json"))
             self.joints = self.controller.joint_names
         self.pub = self.create_publisher(JointTrajectory, "/joint_trajectory_controller/joint_trajectory", 10)
-        self.create_timer(1.0 / config.get("control_frequency_hz", 20.0), self.tick)
+        self.create_timer(self.dt, self.tick)
 
     def tick(self):
         msg = JointTrajectory()
         msg.joint_names = self.joints
         point = JointTrajectoryPoint()
         if self.controller is not None:
-            target = self.targets[self.i % len(self.targets)]; self.i += 1
-            targets = self.controller.infer(target)
+            if self.policy_type == "trot_cpg_gait":
+                targets = self.controller.infer(self.t); self.t += self.dt
+            else:
+                target = self.targets[self.i % len(self.targets)]; self.i += 1
+                targets = self.controller.infer(target)
             point.positions = [float(targets[j]) for j in self.joints]
         else:
             point.positions = [0.0 for _ in self.joints]
@@ -240,10 +255,18 @@ def test_controller_runs_if_present():
         return  # no controller bundle exported with this package
     spec = importlib.util.spec_from_file_location("vq_controller", pkg / "controller.py")
     mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
-    controller = mod.ReachController.from_file(str(pkg / "policy_params.json"))
-    for target in config.get("target_positions", [[0.4, 0.0]]):
-        out = controller.infer(target)
-        assert set(out) == set(controller.joint_names), "controller must output every joint"
-        for j, (low, high) in zip(controller.joint_names, controller.position_limits):
-            assert low - 1e-6 <= out[j] <= high + 1e-6, f"{j} target out of limits"
+    if config.get("policy_type") == "trot_cpg_gait":
+        controller = mod.GaitController.from_file(str(pkg / "policy_params.json"))
+        for t in (0.0, 0.1, 0.25, 0.5):
+            out = controller.infer(t)
+            assert set(out) == set(controller.joint_names), "controller must output every joint"
+            for j, limit in zip(controller.joint_names, controller.limits):
+                assert limit[0] - 1e-6 <= out[j] <= limit[1] + 1e-6, f"{j} target out of limits"
+    else:
+        controller = mod.ReachController.from_file(str(pkg / "policy_params.json"))
+        for target in config.get("target_positions", [[0.4, 0.0]]):
+            out = controller.infer(target)
+            assert set(out) == set(controller.joint_names), "controller must output every joint"
+            for j, (low, high) in zip(controller.joint_names, controller.position_limits):
+                assert low - 1e-6 <= out[j] <= high + 1e-6, f"{j} target out of limits"
 '''

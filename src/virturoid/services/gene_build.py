@@ -746,7 +746,11 @@ class GaitController:
 
 
 if __name__ == "__main__":
-    controller = GaitController.from_file(str(Path(__file__).with_name("control_program.json")))
+    _here = Path(__file__).parent
+    _params = _here / "policy_params.json"
+    if not _params.exists():
+        _params = _here / "control_program.json"
+    controller = GaitController.from_file(str(_params))
     for _i in range(6):
         _t = _i * 0.1
         print(json.dumps({"t": round(_t, 2), "targets": controller.infer(_t)}))
@@ -778,6 +782,12 @@ def _write_gait_control_program(gene: RobotGene, genome: dict, output_dir: Path)
     sw.mkdir(parents=True, exist_ok=True)
     (sw / "control_program.json").write_text(json.dumps(program, indent=2), encoding="utf-8")
     (sw / "gait_controller.py").write_text(_GAIT_CONTROLLER_SOURCE, encoding="utf-8")
+    # Also drop the controller into software/controller/ so the ROS2 exporter embeds it and its node RUNS the
+    # gait (policy_type "trot_cpg_gait") instead of publishing a neutral pose.
+    bundle = sw / "controller"
+    bundle.mkdir(parents=True, exist_ok=True)
+    (bundle / "policy_params.json").write_text(json.dumps(program, indent=2), encoding="utf-8")
+    (bundle / "controller.py").write_text(_GAIT_CONTROLLER_SOURCE, encoding="utf-8")
 
 
 def _write_genome_and_urdf(gene: RobotGene, output_dir: Path) -> None:
@@ -794,17 +804,17 @@ def _write_genome_and_urdf(gene: RobotGene, output_dir: Path) -> None:
     except Exception:  # noqa: BLE001 - URDF is a nicety; the MJCF replay works without it
         pass
     try:
-        # Installable ROS2 (ament_python) harness from the genome + URDF, so gene-built robots are ROS2-deployable
-        # like the legacy path's. No learned controller bundle yet on this path, so the node publishes a neutral
-        # pose -- still a real, buildable package (colcon build + ros2 launch). Best-effort.
+        # Legged robots get a standalone, runnable trot control program (the gene-path control_program.json) AND a
+        # software/controller/ bundle. Written BEFORE the ROS2 export so the ROS2 node embeds it and runs the gait.
+        _write_gait_control_program(gene, genome, output_dir)
+    except Exception:  # noqa: BLE001 - the gait control program is best-effort; non-legged bodies are skipped
+        pass
+    try:
+        # Installable ROS2 (ament_python) harness from the genome + URDF + (for legged robots) the gait-controller
+        # bundle, so gene-built robots are ROS2-deployable like the legacy path's. Best-effort.
         from virturoid.services.ros2_exporter import maybe_export_ros2_package
         maybe_export_ros2_package(output_dir)
     except Exception:  # noqa: BLE001 - the ROS2 package is best-effort; the core package works without it
-        pass
-    try:
-        # Legged robots also get a standalone, runnable trot control program (the gene-path control_program.json).
-        _write_gait_control_program(gene, genome, output_dir)
-    except Exception:  # noqa: BLE001 - the gait control program is best-effort; non-legged bodies are skipped
         pass
 
 
