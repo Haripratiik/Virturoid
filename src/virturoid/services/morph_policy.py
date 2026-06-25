@@ -466,6 +466,49 @@ def _trot_cpg_tokens(model, graph, params: dict):
     return amp, phase, False                                  # not a recognizable legged body -> scalar recipe
 
 
+def extract_gait_params(gene) -> dict | None:
+    """Extract the deterministic trot-CPG gait as exportable joint-target params, or None if ``gene`` isn't a
+    recognized legged body (manipulator / unknown morphology). This is the SAME feed-forward gait
+    ``recipe_rollout_morph`` drives -- ``target[j] = default_pose[j] + amplitude[j]*sin(2*pi*freq*t + phase[j])`` --
+    MINUS the learned residual, so a deployed PD / ros2_control loop tracking these joint-position targets
+    reproduces the exported walk. Pure data (no policy weights), so it round-trips to a standalone controller."""
+    import mujoco
+    import numpy as np
+
+    from virturoid.services.morph_graph import encode_robot
+
+    model = compiled_model(robot_mjcf(gene)); model.opt.iterations = 20
+    data = mujoco.MjData(model); mujoco.mj_resetData(model, data); mujoco.mj_forward(model, data)
+    graph = encode_robot(model)
+    if graph.base_jid < 0 or graph.n_tokens == 0:               # fixed-base / no actuators: nothing to walk
+        return None
+    amp, phase, gate = _trot_cpg_tokens(model, graph, CPG_DEFAULT)
+    if not gate:                                                # not a recognizable legged body -> no gait program
+        return None
+    qadr = np.asarray(graph.qadr, dtype=int)
+    act_u = np.asarray(graph.act_u, dtype=int)
+    default_pose = [float(data.qpos[a]) for a in qadr]          # the DEFAULT standing pose (the gait baseline)
+    joint_names: list[str] = []
+    limits: list[list[float]] = []
+    for u in act_u:                                             # one actuated joint per token, token order preserved
+        jid = int(model.actuator_trnid[int(u), 0])
+        nm = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, jid)
+        joint_names.append(nm or f"joint_{jid}")
+        if bool(model.jnt_limited[jid]):
+            limits.append([float(model.jnt_range[jid][0]), float(model.jnt_range[jid][1])])
+        else:
+            limits.append([-3.14159265, 3.14159265])
+    return {
+        "policy_type": "trot_cpg_gait",
+        "joint_names": joint_names,
+        "default_pose": default_pose,
+        "amplitude": [float(a) for a in np.asarray(amp).ravel()],
+        "phase_offset": [float(p) for p in np.asarray(phase).ravel()],
+        "frequency_hz": float(CPG_DEFAULT["freq"]),
+        "position_limits": limits,
+    }
+
+
 def recipe_rollout_morph(gene, policy: MorphPolicy | None = None, *, steps: int = 900, kp: float = 32.0,
                          kd: float = 1.5, ascale: float = 0.4, vtgt: float = 0.3, normalizer=None,
                          adaptive: bool = False, cpg: dict | None = None, model_perturb=None,

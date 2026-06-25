@@ -704,6 +704,82 @@ def _emit_readiness(gene: RobotGene, output_dir: Path) -> dict:
         return {}
 
 
+_GAIT_CONTROLLER_SOURCE = '''"""Standalone trot-gait controller exported by Virturoid.
+
+Computes feed-forward joint POSITION TARGETS for a CPG trot gait. For joint j at time t (seconds):
+    target[j] = default_pose[j] + amplitude[j] * sin(2*pi*frequency_hz*t + phase_offset[j])
+clamped to the joint position limits. A downstream PD / ros2_control loop tracks these targets at the
+low-level control frequency. Pure standard library; no MuJoCo or Virturoid imports, so it runs inside a
+ROS2 node or a bare Python process.
+"""
+
+from __future__ import annotations
+
+import json
+import math
+from pathlib import Path
+
+
+class GaitController:
+    def __init__(self, params: dict):
+        self.joint_names = params["joint_names"]
+        self.default_pose = params["default_pose"]
+        self.amplitude = params["amplitude"]
+        self.phase_offset = params["phase_offset"]
+        self.frequency_hz = float(params["frequency_hz"])
+        self.limits = params["position_limits"]
+
+    @classmethod
+    def from_file(cls, path: str) -> "GaitController":
+        return cls(json.loads(Path(path).read_text(encoding="utf-8")))
+
+    def infer(self, t_seconds: float) -> dict:
+        """Return clamped joint position targets for the gait phase at time ``t_seconds``."""
+        omega = 2.0 * math.pi * self.frequency_hz
+        out = {}
+        for name, q0, amp, ph, limit in zip(
+            self.joint_names, self.default_pose, self.amplitude, self.phase_offset, self.limits
+        ):
+            value = q0 + amp * math.sin(omega * t_seconds + ph)
+            out[name] = max(limit[0], min(limit[1], value))
+        return out
+
+
+if __name__ == "__main__":
+    controller = GaitController.from_file(str(Path(__file__).with_name("control_program.json")))
+    for _i in range(6):
+        _t = _i * 0.1
+        print(json.dumps({"t": round(_t, 2), "targets": controller.infer(_t)}))
+'''
+
+
+def _write_gait_control_program(gene: RobotGene, genome: dict, output_dir: Path) -> None:
+    """For LEGGED gene robots, export the deterministic trot gait as a standalone, runnable control program
+    (software/control_program.json + software/gait_controller.py) -- the gene-path analogue of the legacy
+    control_program.json, so a gene-built walker ships an actual deployable controller (a downstream PD loop tracks
+    the joint targets), not just a robot description. No-op for non-legged bodies (extract_gait_params -> None)."""
+    from virturoid.services.morph_policy import extract_gait_params
+
+    gait = extract_gait_params(gene)
+    if not gait:
+        return
+    program = {
+        "id": f"gait_control_program_{genome.get('id', 'robot')}",
+        "robot_genome_id": genome.get("id"),
+        "entrypoint": "software/gait_controller.py",
+        "control_law": "target[j] = default_pose[j] + amplitude[j]*sin(2*pi*frequency_hz*t + phase_offset[j]); "
+                       "a downstream PD / ros2_control loop tracks these joint-position targets",
+        "control_frequency_hz": 20.0,
+        **gait,
+        "notes": ["Deterministic feed-forward trot gait extracted from the Virturoid recipe CPG prior; "
+                  "a learned residual policy (morph_policy npz) refines it, but the bare gait already walks."],
+    }
+    sw = output_dir / "software"
+    sw.mkdir(parents=True, exist_ok=True)
+    (sw / "control_program.json").write_text(json.dumps(program, indent=2), encoding="utf-8")
+    (sw / "gait_controller.py").write_text(_GAIT_CONTROLLER_SOURCE, encoding="utf-8")
+
+
 def _write_genome_and_urdf(gene: RobotGene, output_dir: Path) -> None:
     """Write robot/robot_genome.json AND robot/robot.urdf for a gene-built package. The gene path shipped the genome
     + MJCF but no URDF, so gene-built robots (any creature) had no standard robot description for ROS/Gazebo and
@@ -724,6 +800,11 @@ def _write_genome_and_urdf(gene: RobotGene, output_dir: Path) -> None:
         from virturoid.services.ros2_exporter import maybe_export_ros2_package
         maybe_export_ros2_package(output_dir)
     except Exception:  # noqa: BLE001 - the ROS2 package is best-effort; the core package works without it
+        pass
+    try:
+        # Legged robots also get a standalone, runnable trot control program (the gene-path control_program.json).
+        _write_gait_control_program(gene, genome, output_dir)
+    except Exception:  # noqa: BLE001 - the gait control program is best-effort; non-legged bodies are skipped
         pass
 
 
