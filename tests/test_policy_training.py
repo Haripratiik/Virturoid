@@ -12,7 +12,8 @@ _MUJOCO = importlib.util.find_spec("mujoco") is not None
 @unittest.skipUnless(_MUJOCO, "MuJoCo not installed.")
 class PolicyTrainingTests(unittest.TestCase):
     def test_training_improves_reward_and_exports_runnable_controller(self):
-        from virturoid.services.controller_exporter import export_controller_bundle
+        from virturoid.services.controller_exporter import export_controller_bundle, write_training_acceptance_report
+        from virturoid.services.manipulation_skill_trainer import train_contact_grasp_skill_from_export
         from virturoid.services.policy_trainer import train_arm_controller_from_export
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -45,9 +46,43 @@ class PolicyTrainingTests(unittest.TestCase):
 
             # Controller export is inference-ready and standalone (no virturoid/mujoco import).
             bundle_path = export_controller_bundle(output_dir, policy)
+            acceptance_path = write_training_acceptance_report(output_dir, policy, bundle_path, min_success_rate=0.0)
             bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
             self.assertEqual({"base_yaw": 0, "shoulder_pitch": 1, "elbow_pitch": 2}, bundle["joint_mapping"])
             self.assertEqual(3, len(bundle["action_outputs"]))
+            acceptance = json.loads(acceptance_path.read_text(encoding="utf-8"))
+            self.assertTrue(acceptance["accepted"])
+            self.assertTrue(acceptance["files"]["controller_bundle"])
+            self.assertTrue(acceptance["files"]["controller_entrypoint"])
+            self.assertEqual(policy.evaluation.success_rate, acceptance["evaluation"]["success_rate"])
+
+            manipulation = train_contact_grasp_skill_from_export(
+                output_dir,
+                train_scene_uris=["simulation/baseline_scene_set.json"],
+                eval_scene_uris=["simulation/baseline_scene_set.json"],
+                max_attempts=2,
+                memory_dir=Path(tmpdir) / "memory",
+                species="fixed_arm.three_dof.tabletop",
+            )
+            self.assertTrue(manipulation["accepted"])
+            self.assertFalse(manipulation["memory_reused"])
+            self.assertTrue(manipulation["banked_skill_id"])
+            self.assertTrue(manipulation["improved_over_baseline"])
+            self.assertGreaterEqual(manipulation["evaluation"]["success_rate"], 0.5)
+            self.assertTrue((output_dir / "software" / "skills" / "contact_grasp_skill.json").exists())
+            skill = json.loads((output_dir / "software" / "skills" / "contact_grasp_skill.json").read_text(encoding="utf-8"))
+            self.assertEqual("contact_grasp_lift", skill["skill_type"])
+            recalled = train_contact_grasp_skill_from_export(
+                output_dir,
+                train_scene_uris=["simulation/baseline_scene_set.json"],
+                eval_scene_uris=["simulation/baseline_scene_set.json"],
+                max_attempts=2,
+                memory_dir=Path(tmpdir) / "memory",
+                species="fixed_arm.three_dof.tabletop",
+            )
+            self.assertTrue(recalled["accepted"])
+            self.assertTrue(recalled["memory_reused"])
+            self.assertEqual(manipulation["banked_skill_id"], recalled["memory_skill_id"])
 
             params = json.loads((output_dir / "software" / "controller" / "policy_params.json").read_text(encoding="utf-8"))
             spec = importlib.util.spec_from_file_location(

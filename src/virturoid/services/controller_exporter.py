@@ -117,3 +117,76 @@ def export_controller_bundle(
     bundle_path = bundle_dir / "controller_bundle.json"
     bundle_path.write_text(json.dumps(bundle, indent=2), encoding="utf-8")
     return bundle_path
+
+
+def write_training_acceptance_report(
+    package_dir: Path,
+    policy: TrainedPolicy,
+    bundle_path: Path,
+    *,
+    min_success_rate: float = 0.5,
+    min_stable_rate: float = 0.9,
+) -> Path:
+    """Write the honest training acceptance verdict for an exported controller."""
+    package_dir = Path(package_dir)
+    bundle_path = Path(bundle_path)
+    controller_dir = package_dir / "software" / "controller"
+    policy_path = controller_dir / "trained_policy.json"
+    params_path = controller_dir / "policy_params.json"
+    entrypoint_path = controller_dir / "controller.py"
+    metrics_path = package_dir / "training" / "policy_training_metrics.json"
+    validation = policy.validate()
+    files = {
+        "trained_policy": policy_path.exists(),
+        "controller_bundle": bundle_path.exists(),
+        "policy_params": params_path.exists(),
+        "controller_entrypoint": entrypoint_path.exists(),
+        "training_metrics": metrics_path.exists(),
+    }
+    eval_success = float(policy.evaluation.success_rate)
+    stable = float(policy.evaluation.stable_rate)
+    improved = policy.training.best_reward >= policy.training.initial_reward
+    accepted = (
+        validation.ok
+        and all(files.values())
+        and policy.evaluation.eval_scene_count > 0
+        and improved
+        and eval_success >= min_success_rate
+        and stable >= min_stable_rate
+    )
+    report = {
+        "accepted": bool(accepted),
+        "policy_id": policy.id,
+        "method": policy.training.method,
+        "thresholds": {
+            "min_success_rate": min_success_rate,
+            "min_stable_rate": min_stable_rate,
+        },
+        "training": {
+            "iterations": policy.training.iterations,
+            "candidates_per_iteration": policy.training.candidates_per_iteration,
+            "training_scene_count": policy.training.training_scene_count,
+            "initial_reward": policy.training.initial_reward,
+            "best_reward": policy.training.best_reward,
+            "improved_reward": bool(improved),
+        },
+        "evaluation": {
+            "eval_scene_count": policy.evaluation.eval_scene_count,
+            "success_rate": eval_success,
+            "stable_rate": stable,
+            "mean_reach_distance_m": policy.evaluation.mean_reach_distance_m,
+            "best_reach_distance_m": policy.evaluation.best_reach_distance_m,
+            "success_threshold_m": policy.evaluation.success_threshold_m,
+        },
+        "files": files,
+        "validation_ok": validation.ok,
+        "validation_issues": [issue.code for issue in validation.issues],
+        "notes": [
+            "Acceptance is based on held-out reach evaluation, controller bundle completeness, and policy schema validation.",
+            "This reach controller is a first training proof, not a full pick/place/grasp policy.",
+        ],
+    }
+    out = package_dir / "reports" / "training_acceptance_report.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    return out

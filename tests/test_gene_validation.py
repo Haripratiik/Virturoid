@@ -48,6 +48,13 @@ class GeneValidationTests(unittest.TestCase):
         self.assertTrue(r["checks"]["stability"])
 
     @unittest.skipUnless(_MUJOCO, "mujoco not installed")
+    def test_mobile_base_uses_wheel_footprint_for_stability(self):
+        r = validate_gene_design(compose_robot("a mobile base robot that navigates around obstacles"))
+        self.assertIn("stability", r["checks"])          # 4 wheels -> support polygon -> CoM inside -> stable
+        self.assertTrue(r["checks"]["stability"])
+        self.assertFalse(any(f["check"] == "stability" and f["severity"] == "high" for f in r["risk_flags"]))
+
+    @unittest.skipUnless(_MUJOCO, "mujoco not installed")
     def test_top_heavy_pole_is_flagged_unstable(self):
         # A tall thin free-base pole has a point/line support -> statically unstable rest pose.
         base = GeneSegment(name="b", parent=None, shape="capsule", length_m=0.04, radius_m=0.02, mass_kg=0.2)

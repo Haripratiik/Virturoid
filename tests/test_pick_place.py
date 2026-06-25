@@ -35,6 +35,24 @@ class PickPlaceEvaluationTests(unittest.TestCase):
             self.assertTrue(report_path.exists())
             saved = json.loads(report_path.read_text(encoding="utf-8"))
             self.assertEqual(report.total_episodes, saved["total_episodes"])
+            self.assertEqual("idealized_pin", saved["grasp_model"])
+            gap_path = output_dir / "reports" / "manipulation_fidelity_gap_report.json"
+            self.assertTrue(gap_path.exists())
+            gap = json.loads(gap_path.read_text(encoding="utf-8"))
+            self.assertTrue(gap["contact_grasp_certified"])
+            self.assertIsNone(gap["export_blocker"])
+            self.assertGreaterEqual(gap["contact_grasp_success_rate"], 0.5)
+            self.assertEqual("idealized_pin", gap["grasp_model"])
+            grasp_path = output_dir / "reports" / "grasp_evaluation_report.json"
+            self.assertTrue(grasp_path.exists())
+            grasp = json.loads(grasp_path.read_text(encoding="utf-8"))
+            self.assertEqual("contact", grasp["grasp_model"])
+            self.assertGreaterEqual(grasp["success_rate"], 0.5)
+            self.assertGreater(grasp["mean_lift_m"], 0.03)
+            from virturoid.services.readiness_ledger import build_product_readiness_ledger
+            ledger = build_product_readiness_ledger(output_dir, robot_class="manipulator")
+            self.assertTrue(ledger.safe_to_export)
+            self.assertEqual("attained", ledger.by_stage["physics_evaluated"].status)
             trace = (output_dir / "runs" / "mvp_pick_place_eval" / "logs" / "episode_trace.jsonl").read_text(encoding="utf-8")
             rows = [json.loads(line) for line in trace.splitlines() if line.strip()]
             self.assertEqual(report.total_episodes, len(rows))

@@ -71,6 +71,8 @@ class AutonomousBuildTests(unittest.TestCase):
             self.assertEqual("pick_place_sort", program["task"])
             self.assertIn("phases", program)
             self.assertEqual(report.converged_design, program["converged_design"])
+            self.assertTrue((out / "reports" / "memory_effectiveness_report.json").exists())
+            self.assertIn("memory_effectiveness_report", report.exported_artifacts)
 
     def test_memory_warm_start_skips_codesign_when_prior_design_already_solves_it(self):
         """The moat (§13/§26): a second build of a known task reuses the prior converged body and
@@ -95,6 +97,13 @@ class AutonomousBuildTests(unittest.TestCase):
             self.assertNotIn("co_design_hardware", stages)          # so the expensive search is skipped
             self.assertTrue(report.succeeded)
             self.assertGreaterEqual(report.final_success_rate, 0.8)
+            mem_report = json.loads((out / "reports" / "memory_effectiveness_report.json").read_text(encoding="utf-8"))
+            self.assertTrue(mem_report["memory_reused"])
+            self.assertTrue(mem_report["warm_start_attempted"])
+            self.assertTrue(mem_report["co_design_skipped_after_memory"])
+            self.assertFalse(mem_report["co_design_search_ran"])
+            self.assertGreaterEqual(mem_report["warm_start_success_rate"], 0.8)
+            self.assertGreaterEqual(mem_report["evidence"]["training_rows_at_target"], 1)
 
 
 if __name__ == "__main__":

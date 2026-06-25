@@ -6,12 +6,16 @@ from virturoid.schemas.cad import CadAssembly, CadModel
 
 
 def write_placeholder_cad_files(cad_models: list[CadModel], assembly: CadAssembly, output_dir: Path) -> None:
-    """Materialize minimal CAD placeholders for the MVP export.
+    """Materialize CAD files for the MVP export.
 
-    These are not manufacturable CAD yet. They are intentionally explicit text
-    placeholders at the exact artifact paths so downstream code has real files
-    to consume while the CAD kernel integration is built.
+    When build123d/OpenCascade is available this writes real B-rep STEP and STL
+    geometry from the structured CadModel records. If the CAD kernel is absent
+    or fails, it falls back to explicit text placeholders so downstream package
+    structure remains stable and the readiness ledger can honestly reject them.
     """
+    if _try_write_real_cad_files(cad_models, assembly, output_dir):
+        return
+
     for model in cad_models:
         if model.artifact is None:
             continue
@@ -26,6 +30,81 @@ def write_placeholder_cad_files(cad_models: list[CadModel], assembly: CadAssembl
     parametric_path = output_dir / "cad" / "parametric" / "robot_arm.py"
     parametric_path.parent.mkdir(parents=True, exist_ok=True)
     parametric_path.write_text(_parametric_source_for_assembly(assembly, cad_models), encoding="utf-8")
+
+
+def _try_write_real_cad_files(cad_models: list[CadModel], assembly: CadAssembly, output_dir: Path) -> bool:
+    try:
+        import build123d as bd
+    except Exception:  # noqa: BLE001
+        return False
+    try:
+        solids = []
+        offset_x = 0.0
+        for model in cad_models:
+            if model.artifact is None:
+                continue
+            solid = _solid_for_model(bd, model)
+            step_path = output_dir / model.artifact.uri
+            step_path.parent.mkdir(parents=True, exist_ok=True)
+            bd.export_step(solid, str(step_path))
+            mesh_path = output_dir / "cad" / "mesh" / "visual" / f"{model.id}.stl"
+            mesh_path.parent.mkdir(parents=True, exist_ok=True)
+            bd.export_stl(solid, str(mesh_path))
+            width = (model.bounding_box_mm or (50.0, 30.0, 20.0))[0]
+            solids.append(solid.moved(bd.Location((offset_x, 0, 0))))
+            offset_x += max(25.0, float(width)) + 30.0
+
+        if not solids:
+            return False
+        assembly_solid = solids[0]
+        for solid in solids[1:]:
+            assembly_solid = assembly_solid + solid
+        assembly_path = output_dir / "cad" / "exact" / "robot_assembly.step"
+        assembly_path.parent.mkdir(parents=True, exist_ok=True)
+        bd.export_step(assembly_solid, str(assembly_path))
+        parametric_path = output_dir / "cad" / "parametric" / "robot_arm.py"
+        parametric_path.parent.mkdir(parents=True, exist_ok=True)
+        parametric_path.write_text(_parametric_source_for_assembly(assembly, cad_models), encoding="utf-8")
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _solid_for_model(bd, model: CadModel):
+    width, depth, height = model.bounding_box_mm or (50.0, 30.0, 20.0)
+    w, d, h = max(4.0, float(width)), max(4.0, float(depth)), max(4.0, float(height))
+    model_id = model.id.lower()
+    with bd.BuildPart() as p:
+        if "base" in model_id:
+            bd.Box(w, d, h)
+            with bd.Locations((0, 0, h * 0.65)):
+                bd.Cylinder(min(w, d) * 0.23, h * 0.9)
+            with bd.Locations((0, 0, h * 1.15)):
+                bd.Cylinder(min(w, d) * 0.16, h * 0.5)
+        elif "link" in model_id:
+            bd.Box(w, d * 0.72, h * 0.72)
+            for x in (-w * 0.5, w * 0.5):
+                with bd.Locations(bd.Location((x, 0, 0), (0, 90, 0))):
+                    bd.Cylinder(max(d, h) * 0.32, max(8.0, min(d, h) * 0.5))
+            if "upper" in model_id:
+                with bd.Locations(bd.Location((-w * 0.45, 0, 0), (0, 90, 0))):
+                    bd.Cylinder(max(d, h) * 0.48, max(12.0, min(d, h)))
+        elif "camera" in model_id:
+            bd.Box(w, d, h)
+            with bd.Locations((w * 0.18, 0, h * 0.55)):
+                bd.Box(w * 0.45, d * 0.75, h * 0.45)
+        elif "gripper" in model_id:
+            bd.Box(w, d, h)
+            for y in (-d * 0.32, d * 0.32):
+                with bd.Locations((w * 0.22, y, h * 0.4)):
+                    bd.Box(w * 0.42, d * 0.12, h * 0.75)
+        else:
+            bd.Box(w, d, h)
+    part = p.part
+    try:
+        return bd.fillet(part.edges(), min(w, d, h) * 0.08)
+    except Exception:  # noqa: BLE001
+        return part
 
 
 def _step_placeholder_for_model(model: CadModel) -> str:

@@ -65,8 +65,9 @@ class RobotModelFidelityTests(unittest.TestCase):
         self.assertIn("gripper_link", bodies)
         # Manipulable blocks are dynamic free bodies (7 qpos each) on top of 3 hinges.
         self.assertIn("obj_red_block", bodies)
-        self.assertEqual(3, model.nu)
-        self.assertEqual(1, model.nsite)
+        # 3 arm hinges + 2 parallel-jaw finger actuators: the gripper is actuated for real contact grasp/lift.
+        self.assertEqual(5, model.nu)
+        self.assertEqual(2, model.nsite)  # ee_site + grasp_site (the gripper's grasp reference frame)
         self.assertEqual("ee_site", mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_SITE, 0))
 
         # Joint ranges come from the genome limits, not a hardcoded default.

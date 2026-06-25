@@ -20,6 +20,8 @@ from virturoid.services.requirements_builder import build_requirements_from_prom
 from virturoid.services.task_builder import build_task_graph
 from virturoid.services.workbench_ui import WORKBENCH_UI_URI, write_workbench_ui
 
+PRODUCT_READINESS_LEDGER_URI = "reports/product_readiness_ledger.json"
+
 
 @dataclass
 class AutonomousBuildResult:
@@ -107,6 +109,7 @@ def build_robot_package_from_prompt(
     )
     artifacts = {
         **package.artifacts,
+        "product_readiness_ledger": PRODUCT_READINESS_LEDGER_URI,
         "robot_package_contract": PACKAGE_CONTRACT_URI,
         "mvp_readiness_report": READINESS_REPORT_URI,
         "workbench": WORKBENCH_UI_URI,
@@ -116,6 +119,8 @@ def build_robot_package_from_prompt(
     evaluation = _maybe_evaluate(package.written_dir, perceive=perceive) if evaluate else None
     if evaluation and evaluation.get("ran"):
         artifacts["physics_evaluation_report"] = "reports/physics_evaluation_report.json"
+        artifacts["grasp_evaluation_report"] = "reports/grasp_evaluation_report.json"
+        artifacts["manipulation_fidelity_gap_report"] = "reports/manipulation_fidelity_gap_report.json"
 
     if co_optimize:
         codesign = _maybe_co_optimize(package.written_dir, requirements.prompt, build_template.robot_class)
@@ -170,6 +175,8 @@ def build_robot_package_from_prompt(
             gate.key for gate in readiness.gates if gate.required and gate.status != "pass"
         ],
     }
+    result.readiness = _ledger_backed_readiness(
+        package.written_dir, build_template.robot_class, legacy_readiness=readiness)
     write_workbench_ui(package.written_dir, summary=result.to_dict(), artifacts=artifacts, training=package.training)
     _write_summary(package.written_dir, result)
     return result
@@ -206,7 +213,7 @@ def _build_via_general_engine(requirements, task, selection, output_dir: Path, t
         "robot_genome": "robot/robot_genome.json",
         "scene_set": "simulation/scene_set.json",
         "compiled_scene_index": "simulation/mujoco/compiled_scene_index.json",
-        "product_readiness_ledger": "reports/product_readiness_ledger.json",
+        "product_readiness_ledger": PRODUCT_READINESS_LEDGER_URI,
         "robot_package_contract": PACKAGE_CONTRACT_URI,
         "mvp_readiness_report": READINESS_REPORT_URI,
         "workbench": WORKBENCH_UI_URI,
@@ -259,6 +266,8 @@ def _build_via_general_engine(requirements, task, selection, output_dir: Path, t
             "uri": READINESS_REPORT_URI, "ready": readiness.ready, "score": readiness.score,
             "failed_required_gates": [g.key for g in readiness.gates if g.required and g.status != "pass"],
         }
+        result.readiness = _ledger_backed_readiness(
+            written_dir, robot_class, gene=gene, legacy_readiness=readiness)
     except Exception:  # noqa: BLE001
         pass
     try:
@@ -285,6 +294,39 @@ def _try_write_robot_urdf(written_dir: Path) -> None:
         write_robot_urdf(genome, written_dir)
     except Exception:  # noqa: BLE001 - URDF is a nicety; episode replay works without it
         pass
+
+
+def _ledger_backed_readiness(package_dir: Path, robot_class: str, *, legacy_readiness=None, gene=None) -> dict:
+    """Expose the Product Readiness Ledger as the public readiness verdict.
+
+    The MVP scorecard is still useful for package-shape diagnostics, but it can pass over placeholder CAD or
+    unrun physics. The ledger is the export truth: `ready` means `safe_to_export`.
+    """
+    legacy = None
+    if legacy_readiness is not None:
+        legacy = {
+            "uri": READINESS_REPORT_URI,
+            "ready": bool(legacy_readiness.ready),
+            "score": legacy_readiness.score,
+            "failed_required_gates": [
+                gate.key for gate in legacy_readiness.gates if gate.required and gate.status != "pass"
+            ],
+        }
+    try:
+        from virturoid.services.readiness_ledger import write_product_readiness_ledger
+        ledger = write_product_readiness_ledger(package_dir, robot_class=robot_class, gene=gene, enforce=False)
+        out = {
+            "uri": PRODUCT_READINESS_LEDGER_URI,
+            "ready": ledger.safe_to_export,
+            "safe_to_export": ledger.safe_to_export,
+            "highest_attained": ledger.highest_attained,
+            "failed_required_gates": ledger.validate(),
+            "legacy_mvp_readiness": legacy,
+        }
+        return out
+    except Exception as exc:  # noqa: BLE001 - do not break builds if the additive ledger probe crashes
+        fallback = legacy or {"uri": READINESS_REPORT_URI, "ready": False, "score": 0, "failed_required_gates": []}
+        return {**fallback, "safe_to_export": False, "ledger_error": str(exc)}
 
 
 def _maybe_evaluate(written_dir: Path, perceive: bool = False) -> dict:

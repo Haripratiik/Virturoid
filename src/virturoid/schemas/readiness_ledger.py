@@ -69,7 +69,7 @@ class ProductReadinessLedger:
         bs = self.by_stage
         for stage in LEDGER_STAGES:
             rec = bs.get(stage)
-            if rec is not None and rec.real:
+            if rec is not None and rec.status == ATTAINED:
                 reached = stage
             elif rec is not None and stage in self.required and not rec.real:
                 break          # a required stage failed -> can't have honestly climbed past it

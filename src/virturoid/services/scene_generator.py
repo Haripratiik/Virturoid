@@ -199,6 +199,8 @@ def _domain_randomization(rng: random.Random, difficulty: int) -> dict:
 # per the scene-feasibility rule: do not spawn objects the arm provably cannot reach).
 _REACH_MIN_M = 0.30
 _REACH_MAX_M = 0.42
+_CONTACT_GRASP_X_RANGE = (0.36, 0.42)
+_CONTACT_GRASP_Y_LIMIT = 0.085
 
 
 def _clamp_to_workspace(x: float, y: float) -> tuple[float, float]:
@@ -207,7 +209,10 @@ def _clamp_to_workspace(x: float, y: float) -> tuple[float, float]:
         return x, y
     clamped = min(max(r, _REACH_MIN_M), _REACH_MAX_M)
     scale = clamped / r
-    return round(x * scale, 4), round(y * scale, 4)
+    x, y = x * scale, y * scale
+    x = min(max(x, _CONTACT_GRASP_X_RANGE[0]), _CONTACT_GRASP_X_RANGE[1])
+    y = min(max(y, -_CONTACT_GRASP_Y_LIMIT), _CONTACT_GRASP_Y_LIMIT)
+    return round(x, 4), round(y, 4)
 
 
 def _jittered_block(rng: random.Random, name: str, base_xy, material: str, spread: float) -> SceneObject:
@@ -260,8 +265,8 @@ def _generate_sorting_scene(task: TaskGraph, index: int, purpose: str) -> SceneG
                           requirement_trace=[task.task_type, purpose, "tabletop", "negative_hard_case"])
 
     objects = [
-        _jittered_block(rng, "red_block", (0.34, -0.10), "matte_red", spread),
-        _jittered_block(rng, "blue_block", (0.34, 0.10), "matte_blue", spread),
+        _jittered_block(rng, "red_block", (0.38, -0.07), "matte_red", spread),
+        _jittered_block(rng, "blue_block", (0.38, 0.07), "matte_blue", spread),
         SceneObject(
             name="red_bin",
             object_type="container",
@@ -395,9 +400,9 @@ def _generate_navigation_scene(task: TaskGraph, index: int, purpose: str, robot_
     difficulty = _DIFFICULTY.get(purpose, 2)
     dr = _domain_randomization(rng, difficulty)
     rs = max(0.08, robot_radius or 0.2)            # obstacles are sized to the robot's footprint
-    route_length = round(rng.uniform(1.2, 1.6) + 0.1 * difficulty, 3)
+    route_length = round(rng.uniform(1.8, 2.2) + 0.1 * difficulty, 3)
     lane_offset = round(rng.uniform(-0.25, 0.25), 3)
-    obstacle_count = max(1, difficulty)
+    obstacle_count = max(1, min(2, difficulty))    # at most 2 obstacles, so there's always a navigable lane
     cx = round(route_length / 2.0, 4)
     objects = [
         # the floor arena the mobile base drives on — marks this a FLOOR scene (the tabletop is dropped) and
@@ -415,7 +420,7 @@ def _generate_navigation_scene(task: TaskGraph, index: int, purpose: str, robot_
     # instead of driving off a wall-less floor when it overshoots the goal -- the same containment maze_nav
     # relies on, and what makes "indoors" actually read as a room.
     hx = round(route_length / 2.0 + 0.4, 3)        # floor X half-extent (matches arena_floor scale)
-    hy = 0.8                                        # floor Y half-extent (arena_floor friction pins Y/X -> hy=0.8)
+    hy = round(route_length / 2.0 + 0.35, 3)       # near-square room: walls sit just inside the arena floor (was a too-narrow 0.8)
     _HALF = round(math.pi / 2.0, 4)
     objects += [
         SceneObject(name="wall_bottom", object_type="wall", pose_xyz_rpy=(cx, -hy, 0.0, 0.0, 0.0, 0.0),
@@ -435,7 +440,7 @@ def _generate_navigation_scene(task: TaskGraph, index: int, purpose: str, robot_
         objects.append(
             SceneObject(name=f"obstacle_{index}_{obstacle_index}", object_type="obstacle",
                         pose_xyz_rpy=(x, y, 0.0, 0.0, 0.0, yaw), mass_kg=None, material="matte_gray",
-                        friction=round(rng.uniform(0.8, 1.2), 3), scale=round(rng.uniform(0.9, 1.3) * rs / 0.12, 3)))
+                        friction=round(rng.uniform(0.8, 1.2), 3), scale=round(rng.uniform(0.45, 0.7) * rs / 0.12, 3)))
 
     variation_parameters = {
         "index": index, "purpose": purpose, "seed": _scene_seed(task, purpose, index),

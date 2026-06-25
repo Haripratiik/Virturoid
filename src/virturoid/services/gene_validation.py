@@ -150,15 +150,18 @@ def _mujoco_checks(gene, cls, checks, flag) -> None:
     mujoco.mj_forward(m, d)
     GT = mujoco.mjtGeom
     body_geoms = [g for g in range(m.ngeom) if int(m.geom_type[g]) != int(GT.mjGEOM_PLANE)]
+    contact_geoms = [g for g in body_geoms if int(m.geom_contype[g]) and int(m.geom_conaffinity[g])]
 
     # Static stability (free-base bodies only): whole-body CoM xy must lie inside the support polygon = the
     # convex hull of the lowest (ground-contacting) geoms. A top-heavy / single-foot body is flagged unstable.
-    if gene.base_mount == "free" and body_geoms:
+    if gene.base_mount == "free" and contact_geoms:
         try:
             com = np.array(d.subtree_com[0][:2], float)
-            bottoms = d.geom_xpos[body_geoms, 2] - m.geom_rbound[body_geoms]
+            # MuJoCo geom_rbound is a loose bounding sphere. On flat boxes / wheels it can put the chassis
+            # "below" the wheels, so use tight transformed AABB bottoms and ignore visual-only geoms.
+            bottoms = _geom_bottoms_tight(m, d, contact_geoms, np)
             zmin = float(bottoms.min())
-            foot = [body_geoms[i] for i, b in enumerate(bottoms) if b <= zmin + 0.04]
+            foot = [contact_geoms[i] for i, b in enumerate(bottoms) if b <= zmin + 0.04]
             pts = np.array([d.geom_xpos[g, :2] for g in foot], float)
             stable = _com_in_support(com, pts)
             checks["stability"] = bool(stable)
@@ -195,6 +198,19 @@ def _com_in_support(com, pts) -> bool:
         if cross < tol:
             return False
     return True
+
+
+def _geom_bottoms_tight(mj, data, geoms, np):
+    """Return tight world-z bottoms for geoms using MuJoCo's local AABBs, not loose bounding spheres."""
+    aabb = mj.geom_aabb.reshape(mj.ngeom, 6)
+    signs = np.array([[sx, sy, sz] for sx in (-1, 1) for sy in (-1, 1) for sz in (-1, 1)], float)
+    bottoms = []
+    for g in geoms:
+        center, half = aabb[g, :3], aabb[g, 3:]
+        corners = center + signs * half
+        world = data.geom_xpos[g] + corners @ data.geom_xmat[g].reshape(3, 3).T
+        bottoms.append(float(world[:, 2].min()))
+    return np.array(bottoms, float)
 
 
 def _convex_hull(pts):

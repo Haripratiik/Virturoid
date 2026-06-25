@@ -62,6 +62,7 @@ def robot_and_single_scene_to_mjcf(
             "  </worldbody>",
             "  <actuator>",
             *[_joint_motor_xml(joint) for joint in robot.joints],
+            *(_gripper_motor_xml() if robot.end_effectors else []),
             "  </actuator>",
             *_sensor_output_xml(robot),
             "</mujoco>",
@@ -150,6 +151,10 @@ def _body_xml(layout: LinkLayout, sensors: list[RobotSensor], indent: int) -> st
         lines.append(
             f'{pad}  <site name="ee_site" pos="0 0 {round(length, 4)}" size="0.012" rgba="0.1 0.9 0.5 1" />'
         )
+        lines.append(
+            f'{pad}  <site name="grasp_site" pos="0 0 {round(length - 0.055, 4)}" size="0.01" rgba="1 0.7 0.1 1" />'
+        )
+        lines.extend(f"{pad}  {row}" for row in _parallel_jaw_gripper_xml(length))
 
     # Mount any sensors declared on this link so they move with the chain.
     for sensor in sensors:
@@ -180,6 +185,27 @@ def _joint_motor_xml(joint: RobotJoint) -> str:
     effort = joint.limit.effort if joint.limit and joint.limit.effort else None
     force_attr = f' forcerange="{-effort} {effort}"' if effort else ""
     return f'    <motor name="{escape(joint.name)}_motor" joint="{escape(joint.name)}" gear="1"{force_attr} />'
+
+
+def _gripper_motor_xml() -> list[str]:
+    return [
+        '    <motor name="left_gripper_slide_motor" joint="left_gripper_slide" gear="1" forcerange="-25 25" />',
+        '    <motor name="right_gripper_slide_motor" joint="right_gripper_slide" gear="1" forcerange="-25 25" />',
+    ]
+
+
+def _parallel_jaw_gripper_xml(parent_length: float) -> list[str]:
+    z = round(parent_length, 4)
+    return [
+        f'<body name="left_gripper_finger" pos="0 0.055 {z}">',
+        '  <joint name="left_gripper_slide" type="slide" axis="0 -1 0" limited="true" range="0 0.04" damping="2.0" />',
+        '  <geom name="left_gripper_pad" type="box" size="0.012 0.008 0.055" pos="0 0 -0.045" mass="0.025" rgba="0.12 0.12 0.14 1" friction="1.5 0.1 0.01" />',
+        '</body>',
+        f'<body name="right_gripper_finger" pos="0 -0.055 {z}">',
+        '  <joint name="right_gripper_slide" type="slide" axis="0 1 0" limited="true" range="0 0.04" damping="2.0" />',
+        '  <geom name="right_gripper_pad" type="box" size="0.012 0.008 0.055" pos="0 0 -0.045" mass="0.025" rgba="0.12 0.12 0.14 1" friction="1.5 0.1 0.01" />',
+        '</body>',
+    ]
 
 
 _RGBA = {"red": "0.8 0.15 0.15 1", "blue": "0.15 0.25 0.8 1", "green": "0.2 0.7 0.3 1",

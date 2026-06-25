@@ -132,6 +132,9 @@ def _write_manipulator_package(
                 "trained_policy": "software/controller/trained_policy.json",
                 "controller_bundle": "software/controller/controller_bundle.json",
                 "controller_entrypoint": "software/controller/controller.py",
+                "training_acceptance_report": "reports/training_acceptance_report.json",
+                "manipulation_training_acceptance_report": "reports/manipulation_training_acceptance_report.json",
+                "contact_grasp_skill": "software/skills/contact_grasp_skill.json",
                 "policy_eval_trace": "runs/mvp_policy_eval/logs/episode_trace.jsonl",
             }
         )
@@ -143,7 +146,7 @@ def _write_manipulator_package(
         training=training,
         notes=[
             "Routed to the full manipulator MVP pipeline.",
-            "Package includes CAD placeholders, Robot Genome, URDF, scene sets, MuJoCo XML, dry-run traces, and validation reports.",
+            "Package includes CAD artifacts, Robot Genome, URDF, scene sets, MuJoCo XML, dry-run traces, and validation reports.",
         ],
     )
 
@@ -201,7 +204,8 @@ def _mobile_base_package_valid(output_dir: Path) -> bool:
 
 
 def _maybe_train_manipulator(output_dir: Path) -> dict:
-    from virturoid.services.controller_exporter import export_controller_bundle
+    from virturoid.services.controller_exporter import export_controller_bundle, write_training_acceptance_report
+    from virturoid.services.manipulation_skill_trainer import train_contact_grasp_skill_from_export
     from virturoid.services.mujoco_runner import mujoco_available
     from virturoid.services.policy_trainer import train_arm_controller_from_export
 
@@ -212,6 +216,8 @@ def _maybe_train_manipulator(output_dir: Path) -> dict:
         }
     policy = train_arm_controller_from_export(output_dir)
     bundle_path = export_controller_bundle(output_dir, policy)
+    acceptance_path = write_training_acceptance_report(output_dir, policy, bundle_path)
+    manipulation_report = train_contact_grasp_skill_from_export(output_dir)
     from virturoid.services.ros2_exporter import maybe_export_ros2_package
     ros2_root = maybe_export_ros2_package(output_dir)   # runnable ROS2 harness for the exported controller (§24)
     return {
@@ -224,6 +230,10 @@ def _maybe_train_manipulator(output_dir: Path) -> dict:
         "eval_success_rate": policy.evaluation.success_rate,
         "trained_policy_json": str(output_dir / "software" / "controller" / "trained_policy.json"),
         "controller_bundle_json": str(bundle_path),
+        "training_acceptance_report_json": str(acceptance_path),
+        "manipulation_training_accepted": manipulation_report["accepted"],
+        "manipulation_training_acceptance_report_json": str(output_dir / "reports" / "manipulation_training_acceptance_report.json"),
+        "contact_grasp_skill_json": str(output_dir / "software" / "skills" / "contact_grasp_skill.json"),
         "controller_entrypoint": str(output_dir / "software" / "controller" / "controller.py"),
         "eval_episode_trace": str(output_dir / "runs" / "mvp_policy_eval" / "logs" / "episode_trace.jsonl"),
         "ros2_package": str(ros2_root) if ros2_root else None,

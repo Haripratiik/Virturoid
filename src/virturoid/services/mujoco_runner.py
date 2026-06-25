@@ -430,11 +430,19 @@ def _load_optional(package_dir: Path, artifact: dict | None) -> dict:
     return json.loads((package_dir / artifact["uri"]).read_text(encoding="utf-8"))
 
 
-def _actuated_joint_map(model) -> list[tuple[int, int, int]]:
-    """Return (qpos_addr, dof_addr, joint_id) for each actuator's target joint."""
+def _actuated_joint_map(model, *, include_slide_joints: bool = False) -> list[tuple[int, int, int]]:
+    """Return (qpos_addr, dof_addr, joint_id) for each actuator's target joint.
+
+    By default this returns only the arm joints. The MVP arm now exports slide-joint gripper fingers as real
+    contact geometry; legacy reach/training controllers should not treat those fingers as reach DOFs.
+    """
+    import mujoco
+
     mapping: list[tuple[int, int, int]] = []
     for actuator in range(model.nu):
         jnt = int(model.actuator_trnid[actuator, 0])
+        if not include_slide_joints and int(model.jnt_type[jnt]) == int(mujoco.mjtJoint.mjJNT_SLIDE):
+            continue
         mapping.append((int(model.jnt_qposadr[jnt]), int(model.jnt_dofadr[jnt]), jnt))
     return mapping
 

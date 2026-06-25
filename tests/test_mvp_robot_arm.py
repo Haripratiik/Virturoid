@@ -1,11 +1,15 @@
 import tempfile
 import unittest
 import json
+import importlib.util
 from pathlib import Path
 from xml.etree import ElementTree
 
 from virturoid.mvp import build_mvp_robot_arm_project, write_mvp_robot_arm_project
+from virturoid.services.cad_geometry import is_real_cad
 from virturoid.services.package_validator import validate_mvp_export_package
+
+_B123D = importlib.util.find_spec("build123d") is not None
 
 
 class MvpRobotArmTests(unittest.TestCase):
@@ -146,11 +150,12 @@ class MvpRobotArmTests(unittest.TestCase):
             self.assertTrue((output_dir / "reports" / "package_validation_report.json").exists())
             self.assertTrue((output_dir / "reports" / "mvp_summary.md").exists())
             self.assertTrue((output_dir / "reports" / "index.html").exists())
-            self.assertTrue((output_dir / "cad" / "exact" / "robot_assembly.step").exists())
-            self.assertIn(
-                "Virturoid MVP placeholder STEP assembly",
-                (output_dir / "cad" / "exact" / "robot_assembly.step").read_text(encoding="utf-8"),
-            )
+            assembly_step = output_dir / "cad" / "exact" / "robot_assembly.step"
+            self.assertTrue(assembly_step.exists())
+            if _B123D:
+                self.assertTrue(is_real_cad(assembly_step))
+            else:
+                self.assertIn("Virturoid MVP placeholder STEP assembly", assembly_step.read_text(encoding="utf-8"))
             robot_urdf = (output_dir / "robot" / "robot.urdf").read_text(encoding="utf-8")
             self.assertIn('<robot name="Autonomous reference tabletop arm">', robot_urdf)
             self.assertIn('<joint name="base_yaw" type="revolute">', robot_urdf)
@@ -179,7 +184,11 @@ class MvpRobotArmTests(unittest.TestCase):
             self.assertIn("red_block", preview_svg)
             stl_files = list((output_dir / "cad" / "mesh" / "visual").glob("*.stl"))
             self.assertGreaterEqual(len(stl_files), 5)
-            self.assertIn("solid cad_arm_base", (output_dir / "cad" / "mesh" / "visual" / "cad_arm_base.stl").read_text(encoding="utf-8"))
+            arm_stl = output_dir / "cad" / "mesh" / "visual" / "cad_arm_base.stl"
+            if _B123D:
+                self.assertGreater(arm_stl.stat().st_size, 100)
+            else:
+                self.assertIn("solid cad_arm_base", arm_stl.read_text(encoding="utf-8"))
             parametric_source = (output_dir / "cad" / "parametric" / "robot_arm.py").read_text(encoding="utf-8")
             self.assertIn("MODEL_PARAMETERS", parametric_source)
             self.assertIn("cad_upper_link", parametric_source)
