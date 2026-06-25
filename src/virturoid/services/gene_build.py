@@ -300,6 +300,12 @@ def build_gene_package(gene: RobotGene, prompt: str, output_dir: Path, scene_cou
         "scenes": [_scene_to_dict(s) for s in scenes],
     }, indent=2), encoding="utf-8")
 
+    # REAL contact-grasp sort replay for the viewer (no _pin_block): record the gripper closing on each block by
+    # CONTACT FRICTION, lifting, carrying it to its bin, releasing -- so the 3D demo shows actual physics, not the
+    # idealized pin the live sort loop uses. The viewer (simulate_episode_for_viewer) prefers this file and falls
+    # back to the pin only when it's absent (older packages) or the gripper is degenerate. Best-effort.
+    _record_contact_replay(gene, scenes, spec, output_dir)
+
     # A genome-from-gene so reports/viewer have the structure (links/joints/ee from the gene).
     (output_dir / "robot").mkdir(parents=True, exist_ok=True)
     (output_dir / "robot" / "robot_genome.json").write_text(json.dumps(_gene_to_genome(gene), indent=2), encoding="utf-8")
@@ -347,6 +353,55 @@ def build_gene_package(gene: RobotGene, prompt: str, output_dir: Path, scene_cou
     _emit_mvp_artifacts(gene, output_dir, task_type=_task.task_type, package_type="gene_package")
     summary["readiness"] = _emit_readiness(gene, output_dir)   # honest truth-gate (this path had NONE before)
     return summary
+
+
+def _record_contact_replay(gene: RobotGene, scenes, spec, output_dir: Path) -> bool:
+    """Record a no-pin contact-grasp SORT episode on scene 0 to simulation/contact_episode.json so the viewer
+    replays a REAL friction grasp (the gripper closes on each block and holds it by CONTACT), not the idealized-pin
+    sort loop. Returns True iff a successful replay was written. Best-effort: only for a gripper/hand that actually
+    places at least one block -- a missed/dropped grasp leaves no file so the viewer keeps the honest pin fallback."""
+    if str(getattr(gene, "end_effector_type", "") or "").lower() not in ("gripper", "hand"):
+        return False
+    try:
+        import mujoco
+
+        from virturoid.services.pick_place_controller import run_contact_pick_place_episode
+        from virturoid.services.viewer_sim import _geom_metadata
+
+        # Find the first scene whose contact SORT cleanly places EVERY block: a reachability-matched layout can
+        # still drop one, and a half-failed replay is worse demo than a clean pin. Bounded so the build stays fast.
+        chosen = None
+        for sc in scenes[: min(4, len(scenes))]:
+            frames: list = []
+            ep = run_contact_pick_place_episode(gene, sc.objects, spec.assignments, record_frames=frames, frame_every=12)
+            if frames and ep.get("placed_count", 0) >= max(1, ep.get("block_count", 1)):
+                chosen = (sc, frames, ep)
+                break
+        if chosen is None:
+            return False
+        sc, frames, ep = chosen
+        # geoms from the SAME deterministic compile the episode ran on, so geom order matches the recorded frames.
+        cmj = mujoco.MjModel.from_xml_string(compile_gene_with_scene(gene, sc.objects))
+        (output_dir / "simulation").mkdir(parents=True, exist_ok=True)
+        (output_dir / "simulation" / "contact_episode.json").write_text(json.dumps({
+            "scene_id": sc.id, "grasp_model": "contact",
+            "geoms": _geom_metadata(cmj), "frames": frames,
+            "outcome": {"status": ep.get("status"), "failure_label": ep.get("failure_label"),
+                        "placed_count": ep.get("placed_count"), "block_count": ep.get("block_count"),
+                        "grasp_model": "contact", "metrics": ep.get("metrics")},
+        }, indent=2), encoding="utf-8")
+        # Make the contact-reliable scene the viewer's default (index 0) so SCENE mode and the EPISODE replay show the
+        # same layout -- the per-scene MJCF + compiled index are keyed by scene_id, so only the display order changes.
+        ss_path = output_dir / "simulation" / "scene_set.json"
+        try:
+            ss = json.loads(ss_path.read_text(encoding="utf-8"))
+            ss["scenes"].sort(key=lambda s: 0 if s.get("id") == sc.id else 1)
+            ss_path.write_text(json.dumps(ss, indent=2), encoding="utf-8")
+        except Exception:  # noqa: BLE001 - reorder is cosmetic; the replay is keyed by scene_id regardless
+            pass
+        return True
+    except Exception:  # noqa: BLE001 - replay is best-effort; the viewer falls back to the pin episode
+        return False
 
 
 # A from-scratch scripted gait that clears this distance is a "walking" baseline; the score normalizes

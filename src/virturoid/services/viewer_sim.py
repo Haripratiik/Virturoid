@@ -49,16 +49,34 @@ def simulate_episode_for_viewer(package_dir: Path, scene_set_uri: str = "simulat
         outcome = {"status": nav["status"], "failure_label": None if nav["status"] == "reached" else nav["status"],
                    "placed_count": 1 if nav["status"] == "reached" else 0, "block_count": 1}
     else:
-        from virturoid.services.pick_place_controller import run_pick_place_episode
+        # Prefer a REAL contact-grasp sort replay the build recorded (gripper holds each block by CONTACT FRICTION,
+        # NO _pin_block) -- so the demo shows actual physics, matching the "nothing is teleported" claim. Fall back
+        # to the idealized-pin episode for older packages with no replay, or when a different scene is requested.
+        rec = None
+        contact_ep = package_dir / "simulation" / "contact_episode.json"
+        if contact_ep.exists():
+            try:
+                cand = json.loads(contact_ep.read_text(encoding="utf-8"))
+                if cand.get("scene_id") == scene["id"] and cand.get("frames"):
+                    rec = cand
+            except Exception:  # noqa: BLE001 - a malformed replay just falls back to the pin episode
+                rec = None
+        if rec is not None:
+            geoms = rec.get("geoms", geoms)
+            frames = rec["frames"]
+            outcome = rec.get("outcome", {"status": "success", "failure_label": None,
+                                          "placed_count": 0, "block_count": 0})
+        else:
+            from virturoid.services.pick_place_controller import run_pick_place_episode
 
-        objects = {o["name"]: tuple(o["pose_xyz_rpy"][:3]) for o in scene["objects"]}
-        # Replay the SAME task that was built/evaluated (object->target assignments), if present.
-        ep_scene = {"objects": objects}
-        if scene_set.get("assignments"):
-            ep_scene["assignments"] = scene_set["assignments"]
-        out = run_pick_place_episode(model, ep_scene, record_frames=frames, frame_every=10)
-        outcome = {"status": out["status"], "failure_label": out["failure_label"],
-                   "placed_count": out["placed_count"], "block_count": out["block_count"]}
+            objects = {o["name"]: tuple(o["pose_xyz_rpy"][:3]) for o in scene["objects"]}
+            # Replay the SAME task that was built/evaluated (object->target assignments), if present.
+            ep_scene = {"objects": objects}
+            if scene_set.get("assignments"):
+                ep_scene["assignments"] = scene_set["assignments"]
+            out = run_pick_place_episode(model, ep_scene, record_frames=frames, frame_every=10)
+            outcome = {"status": out["status"], "failure_label": out["failure_label"],
+                       "placed_count": out["placed_count"], "block_count": out["block_count"]}
 
     return {
         "scene_id": scene["id"],
