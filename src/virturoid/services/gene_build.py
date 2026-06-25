@@ -629,27 +629,26 @@ def _build_legged_package(gene: RobotGene, prompt: str, output_dir: Path, contro
     # BACKWARD "walked" while the viewport showed a FORWARD fall. Fall back to the scripted eval only when no
     # policy is banked yet (then both the report and the viewer use the scripted gait).
     from virturoid.services.learn_locomotion import banked_policy_for
+    from virturoid.services.morph_policy import recipe_rollout_morph
     pol = banked_policy_for(gene, models_dir="models")
-    cadence = upright_frac = None; n_feet = 0
-    if pol is not None and getattr(pol, "obs_mean", None) is not None:
-        from virturoid.services.morph_policy import recipe_rollout_morph
-        rr = recipe_rollout_morph(gene, pol, steps=900)              # matches viewer_sim._locomotion_episode
-        forward_m = float(rr.get("forward", 0.0))
-        cadence = float(rr.get("cadence", 0.0)); upright_frac = float(rr.get("upright_frac", 0.0))
-        n_feet = int(rr.get("n_feet", 0))
-        # HONEST 'walked' gate (anti-Goodhart): genuine forward distance AND sustained-tall posture AND a real
-        # stepping cadence — so an upright SLIDE (cadence 0) or a forward TOPPLE no longer certifies as a walk.
-        upright = upright_frac >= 0.6
-        stepping = cadence >= 1.0 or n_feet < 2                      # a legged body must lift feet; non-legged skip
-        walked = forward_m > _WALK_MIN_FORWARD_M and upright and stepping
-        status = "walked" if walked else ("upright" if upright_frac >= 0.5 else "fell")
-        distance_m = abs(forward_m)
-    else:
-        res = evaluate_robot(gene, prompt=prompt, controller_params=controller_params)
-        d = res.get("detail", {})
-        forward_m = float(d.get("forward_m", 0.0)); upright = bool(d.get("upright", False))
-        status = d.get("status", "unknown"); distance_m = float(d.get("distance_m", 0.0))
-        walked = status == "walked"
+    # Score with the CPG-driven recipe rollout, EXACTLY like the viewer: the banked recipe policy if one exists,
+    # else the BARE trot-CPG (pol=None). The old code fell back to a no-CPG scripted eval when no policy was banked,
+    # so every un-banked composed walker (six-legged, a fresh quad) read 'fell'/0.0 here while the viewport walked it
+    # on the bare CPG -- the headline contradicted the 3D replay. A genuinely unstable anatomy body still reads 'fell'.
+    use_pol = pol if (pol is not None and getattr(pol, "obs_mean", None) is not None) else None
+    rr = recipe_rollout_morph(gene, use_pol, steps=900)
+    forward_m = float(rr.get("forward", 0.0))
+    cadence = float(rr.get("cadence", 0.0)); upright_frac = float(rr.get("upright_frac", 0.0))
+    n_feet = int(rr.get("n_feet", 0))
+    # HONEST 'walked' gate (anti-Goodhart): genuine forward distance AND sustained-tall posture AND a real stepping
+    # cadence -- so an upright SLIDE (cadence 0) or a forward TOPPLE does not certify as a walk. The upright
+    # threshold is 0.5 (not 0.6): a wide/low stance (six-legged, sprawled) walks fine at ~0.55 upright-fraction and
+    # the cadence + forward requirements already reject a slide (cadence 0) and a topple (no sustained cadence).
+    upright = upright_frac >= 0.5
+    stepping = cadence >= 1.0 or n_feet < 2                          # a legged body must lift feet; non-legged skip
+    walked = forward_m > _WALK_MIN_FORWARD_M and upright and stepping
+    status = "walked" if walked else ("upright" if upright_frac >= 0.5 else "fell")
+    distance_m = abs(forward_m)
     # success_rate is GATED on genuinely walking — a slide/topple earns 0, not partial credit for raw displacement.
     success_rate = round(min(1.0, max(0.0, forward_m) / _LOCOMOTION_TARGET_FORWARD_M), 3) if walked else 0.0
     summary = {
