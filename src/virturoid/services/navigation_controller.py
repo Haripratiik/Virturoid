@@ -22,7 +22,7 @@ OBSTACLE_CLEARANCE_M = 0.17
 
 
 def run_navigation_episode(model, goal_xy, obstacle_xy: list, horizon: int = 1500, record_frames=None, frame_every: int = 25) -> dict:
-    """Drive the base toward the goal with heading control and obstacle nudging."""
+    """Drive the base toward the goal with potential-field heading control + obstacle avoidance."""
     import mujoco
     import numpy as np
 
@@ -100,13 +100,24 @@ def run_navigation_episode(model, goal_xy, obstacle_xy: list, horizon: int = 150
         if status == "collision":
             break
 
-        desired_yaw = math.atan2(to_goal[1], to_goal[0])
-        yaw_err = math.atan2(math.sin(desired_yaw - yaw), math.cos(desired_yaw - yaw))
-        # Simple reactive avoidance: bias heading away from the nearest close obstacle.
+        # Potential-field heading: goal attraction + repulsion away from each near obstacle + a TANGENTIAL
+        # (perpendicular, goal-side) component so the rover slips AROUND an obstacle instead of stalling in front
+        # of it. Replaces a broken bias -- a dead "* 0.0" term left only a fixed +-0.5 nudge, a local minimum that
+        # timed out short of the goal (navigation read 0%). Caps ~0.33 on cluttered scenes (marginal skid-steer
+        # drive); robust navigation needs a learned policy -- this just removes the structural bug.
+        steer = to_goal / max(dist, 1e-6)
         for ob in obstacle_xy:
-            d = pos - np.array(ob[:2])
-            if float(np.linalg.norm(d)) < 0.4:
-                yaw_err += 0.6 * math.atan2(d[1], d[0]) * 0.0 + (0.5 if d[1] >= 0 else -0.5)
+            d = pos - np.array(ob[:2], dtype=float)
+            od = float(np.linalg.norm(d))
+            if od < 0.6:
+                w = (0.6 - od) / 0.6
+                rep = d / max(od, 1e-6)
+                tang = np.array([-rep[1], rep[0]])
+                if float(np.dot(tang, to_goal)) < 0.0:
+                    tang = -tang
+                steer = steer + (2.0 * w) * rep + (1.6 * w) * tang
+        desired_yaw = math.atan2(float(steer[1]), float(steer[0]))
+        yaw_err = math.atan2(math.sin(desired_yaw - yaw), math.cos(desired_yaw - yaw))
         # Drive forward (slowing when mis-aligned) + a strong differential to steer. Calibrated signs
         # (fwd_sign/turn_sign) make this work for any wheel convention; the high turn gain rotates a
         # 4-wheel skid-steer rover against its lateral friction. Keep some forward during turns so
@@ -151,7 +162,10 @@ def run_navigation_evaluation(package_dir: Path, scene_uri: str = "simulation/sc
         obstacles = [o["pose_xyz_rpy"][:2] for o in scene["objects"] if o.get("object_type") == "obstacle"]
         if goal is None:
             continue
-        outcome = run_navigation_episode(model, goal, obstacles)
+        # Scale the step budget to the goal distance: the rover maneuvers slowly around obstacles (~1 m per
+        # ~1000 steps), so the fixed 1500-step horizon timed out before it could arrive.
+        dist = (float(goal[0]) ** 2 + float(goal[1]) ** 2) ** 0.5
+        outcome = run_navigation_episode(model, goal, obstacles, horizon=max(1500, int(1800 * dist + 600)))
         episodes.append({"scene_id": scene["id"], **outcome})
         if outcome["status"] != "reached":
             labels[outcome["status"]] += 1
