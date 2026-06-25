@@ -161,6 +161,8 @@ def autonomous_build(
         (output_dir / "reports" / "compute_provenance.json").write_text(json.dumps(report.compute, indent=2), encoding="utf-8")
         save_build_record(build.selected_robot_class, build.task_type, {}, final, prompt, memory_dir)
         _record_to_memory_db(memory_dir, prompt, build, None, final, target_success_rate, report)
+        report.exported_artifacts["memory_effectiveness_report"] = _write_memory_effectiveness_report(
+            output_dir, memory_dir, report)
         _write_report(output_dir, report)
         return report
 
@@ -346,7 +348,8 @@ def autonomous_build(
             )
 
     if train:
-        from virturoid.services.controller_exporter import export_controller_bundle
+        from virturoid.services.controller_exporter import export_controller_bundle, write_training_acceptance_report
+        from virturoid.services.manipulation_skill_trainer import train_contact_grasp_skill_from_export
         from virturoid.services.policy_trainer import train_arm_controller_from_export
 
         # Skill-flywheel READ (advisory): is there a banked skill for this (class, task) to inform
@@ -357,9 +360,19 @@ def autonomous_build(
                                         build.selected_species)
 
         policy = train_arm_controller_from_export(output_dir)
-        export_controller_bundle(output_dir, policy)
+        bundle_path = export_controller_bundle(output_dir, policy)
+        acceptance_path = write_training_acceptance_report(output_dir, policy, bundle_path)
+        manipulation_report = train_contact_grasp_skill_from_export(
+            output_dir,
+            memory_dir=memory_dir,
+            robot_class=build.selected_robot_class,
+            species=build.selected_species,
+        )
         report.exported_artifacts["trained_policy"] = "software/controller/trained_policy.json"
         report.exported_artifacts["controller_bundle"] = "software/controller/controller_bundle.json"
+        report.exported_artifacts["training_acceptance_report"] = "reports/training_acceptance_report.json"
+        report.exported_artifacts["manipulation_training_acceptance_report"] = "reports/manipulation_training_acceptance_report.json"
+        report.exported_artifacts["contact_grasp_skill"] = "software/skills/contact_grasp_skill.json"
         from virturoid.services.ros2_exporter import maybe_export_ros2_package
         ros2_root = maybe_export_ros2_package(output_dir)   # runnable ROS2 harness for the exported controller (§24)
         if ros2_root is not None:
@@ -379,6 +392,8 @@ def autonomous_build(
                 stage="train_controller",
                 action="trained and exported an inference-ready controller for the converged robot",
                 detail=f"eval reach success={policy.evaluation.success_rate}"
+                       + f"; acceptance report {acceptance_path.name}"
+                       + f"; contact grasp accepted={manipulation_report['accepted']}"
                        + (f"; banked skill '{skill_id}'" if skill_id else "") + prior,
                 success_before=final,
                 success_after=final,
@@ -419,6 +434,8 @@ def autonomous_build(
         memory_dir, prompt, build, converged, final, target_success_rate, report,
         failure_clusters=initial_report.failure_clusters, transfer_decision=transfer_decision,
     )
+    report.exported_artifacts["memory_effectiveness_report"] = _write_memory_effectiveness_report(
+        output_dir, memory_dir, report)
     _write_report(output_dir, report)
     return report
 
@@ -462,6 +479,80 @@ def _export_control_program(output_dir: Path, converged: dict, trained: bool, co
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(control, indent=2), encoding="utf-8")
     return "software/control_program.json"
+
+
+def _write_memory_effectiveness_report(output_dir: Path, memory_dir: Path, report: AutonomyReport) -> str:
+    """Write an auditable proof of what memory did for this build."""
+    output_dir = Path(output_dir)
+    memory_dir = Path(memory_dir)
+    stages = [d.stage for d in report.decisions]
+    warm = [d for d in report.decisions if d.stage == "memory_warm_start"]
+    co_design_ran = "co_design_hardware" in stages
+    payload = {
+        "memory_reused": bool(report.memory_reused),
+        "robot_class": report.robot_class,
+        "task_type": report.task_type,
+        "target_success_rate": report.target_success_rate,
+        "initial_success_rate": report.initial_success_rate,
+        "final_success_rate": report.final_success_rate,
+        "success_delta": round(report.final_success_rate - report.initial_success_rate, 6),
+        "warm_start_attempted": bool(warm),
+        "warm_start_success_rate": warm[-1].success_after if warm else None,
+        "co_design_search_ran": co_design_ran,
+        "co_design_skipped_after_memory": bool(
+            warm and not co_design_ran and report.final_success_rate >= report.target_success_rate),
+        "decision_stages": stages,
+        "json_memory_record": str(memory_dir / f"{report.robot_class}__{report.task_type}.json"),
+        "sqlite_memory_db": str(memory_dir / "virturoid_memory.db"),
+        "skill_memory_reused": None,
+        "banked_contact_grasp_skill_id": None,
+        "evidence": {},
+    }
+    try:
+        manipulation_report = output_dir / "reports" / "manipulation_training_acceptance_report.json"
+        if manipulation_report.exists():
+            mt = json.loads(manipulation_report.read_text(encoding="utf-8"))
+            payload["skill_memory_reused"] = bool(mt.get("memory_reused"))
+            payload["banked_contact_grasp_skill_id"] = mt.get("banked_skill_id") or mt.get("memory_skill_id")
+            payload["evidence"]["contact_grasp_training"] = {
+                "accepted": mt.get("accepted"),
+                "memory_reused": mt.get("memory_reused"),
+                "memory_warm_start": mt.get("memory_warm_start"),
+                "success_rate": (mt.get("evaluation") or {}).get("success_rate"),
+                "mean_lift_m": (mt.get("evaluation") or {}).get("mean_lift_m"),
+            }
+    except Exception as exc:  # noqa: BLE001
+        payload["evidence"]["skill_report_error"] = str(exc)
+    try:
+        from virturoid.services.memory_db import MemoryDB
+        with MemoryDB(memory_dir / "virturoid_memory.db") as db:
+            payload["evidence"]["db_stats"] = db.stats()
+            best = db.best_design(report.robot_class, report.task_type)
+            payload["evidence"]["best_design_success_rate"] = None if best is None else best.get("success_rate")
+            payload["evidence"]["training_rows_at_target"] = len(
+                db.training_dataset(min_success=report.target_success_rate))
+            skill = db.recall_skill(report.robot_class, "contact_grasp_lift")
+            payload["evidence"]["best_contact_grasp_skill"] = None if skill is None else {
+                "skill_id": skill.get("skill_id"),
+                "success_rate": skill.get("success_rate"),
+                "species": skill.get("species"),
+                "has_controller_params": bool((skill.get("base_config") or {}).get("controller_params")),
+            }
+    except Exception as exc:  # noqa: BLE001 - observability should not fail the build
+        payload["evidence"]["db_error"] = str(exc)
+    try:
+        record_path = memory_dir / f"{report.robot_class}__{report.task_type}.json"
+        payload["evidence"]["json_record_exists"] = record_path.exists()
+        if record_path.exists():
+            payload["evidence"]["json_record_success_rate"] = json.loads(
+                record_path.read_text(encoding="utf-8")).get("success_rate")
+    except Exception as exc:  # noqa: BLE001
+        payload["evidence"]["json_record_error"] = str(exc)
+
+    path = output_dir / "reports" / "memory_effectiveness_report.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return "reports/memory_effectiveness_report.json"
 
 
 def _maybe_ai_design(prompt: str, emit) -> dict | None:
@@ -641,6 +732,7 @@ def _maybe_gene_build(prompt, output_dir, target, memory_dir, emit, *, train: bo
         f"Raw task success {final:.0%}; scene-matching + co-design improve a from-scratch gene over time."
     )
     if reused_from:
+        report.memory_reused = True   # surface gene-path flywheel reuse on the report (the flywheel KPI reads this)
         report.notes.append(f"Flywheel reuse: amended a prior stored {requested_class} gene ('{reused_from}') from the species tree.")
     # Reasoned-redesign outcome (honest: a body fix, a verified-but-no-help diagnosis, or "it's control").
     if redesign_trace is not None:

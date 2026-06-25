@@ -67,7 +67,7 @@ def _poll_and_fetch(remote_npz: str, out_path: str, *, progress, timeout: float,
     while time.time() < deadline:
         time.sleep(8)
         try:
-            out = _ssh(f"pgrep -f {proc_name} >/dev/null && echo RUN || echo DONE; "
+            out = _ssh(f"pgrep -f '[{proc_name[0]}]{proc_name[1:]}' >/dev/null && echo RUN || echo DONE; "
                        "grep -E 'iter|fwd_vel|reward|success|lift|saved|Error|Traceback' ~/app_train.log "
                        "2>/dev/null | tail -1", timeout=40).stdout.decode("utf-8", "ignore")
         except Exception:  # noqa: BLE001 - transient Tailscale hiccup; keep polling
@@ -94,6 +94,23 @@ def _poll_and_fetch(remote_npz: str, out_path: str, *, progress, timeout: float,
     import numpy as np
     np.load(out_path)                                    # validate it loads
     return out_path
+
+
+def _launch_ok(launch_cmd: str, proc_name: str) -> bool:
+    """Start a detached (setsid) trainer and confirm it is running. tailscale ssh frequently does NOT return
+    promptly after backgrounding a job (the channel lingers until the call times out), so a slow / timed-out
+    launch call is NOT a failure -- the setsid'd process detaches and trains regardless. Treat 'LAUNCHED echoed'
+    OR 'pgrep finds the trainer' as a successful launch (this fixes silent None returns on a healthy box)."""
+    try:
+        if b"LAUNCHED" in _ssh(launch_cmd, timeout=20).stdout:
+            return True
+    except Exception:  # noqa: BLE001 - channel hung after backgrounding; the job still detached, confirm below
+        pass
+    time.sleep(5)
+    try:
+        return b"RUN" in _ssh(f"pgrep -f '[{proc_name[0]}]{proc_name[1:]}' >/dev/null && echo RUN || echo NO", timeout=25).stdout
+    except Exception:  # noqa: BLE001
+        return False
 
 
 # reward-shaping flags the MJX trainer accepts (gait_critic's bounded design space -> trainer CLI flags).
@@ -125,10 +142,10 @@ def train_gene_on_gpu(gene, *, out_path: str, iters: int = 80, envs: int = 1024,
             if k in _REWARD_FLAGS:
                 extra += f" --{k.replace('_', '-')} {float(v)}"
         say(f"launching MJX PPO on the GPU ({iters} iters{', critic-tuned reward' if reward_weights else ''})…")
-        launch = (f"cd ~/virturoid && PYTHONPATH=src XLA_FLAGS='--xla_gpu_autotune_level=0' setsid {_PY} "
+        launch = (f"cd ~/virturoid && rm -f runs/app_gene.npz; PYTHONPATH=src XLA_FLAGS='--xla_gpu_autotune_level=0' setsid {_PY} "
                   f"scripts/mjx_morph_attention.py --gene-json ~/app_gene.json --iters {iters} --envs {envs} "
                   f"--save runs/app_gene.npz{extra} </dev/null >~/app_train.log 2>&1 & echo LAUNCHED")
-        if b"LAUNCHED" not in _ssh(launch, timeout=60).stdout:
+        if not _launch_ok(launch, "mjx_morph_attention"):
             return None
         return _poll_and_fetch("runs/app_gene.npz", out_path, progress=progress, timeout=timeout, say=say)
     except Exception:  # noqa: BLE001 - any failure -> caller uses the CPU trainer
@@ -166,7 +183,7 @@ def train_manipulation_on_gpu(*, task: str = "grasp", out_path: str, iters: int 
         launch = (f"cd ~/virturoid && PYTHONPATH=src XLA_FLAGS='--xla_gpu_autotune_level=0' setsid {_PY} "
                   f"scripts/{script} --iters {iters} --envs {envs} --ep-len {ep_len} --save runs/app_manip.npz "
                   f"</dev/null >~/app_train.log 2>&1 & echo LAUNCHED")
-        if b"LAUNCHED" not in _ssh(launch, timeout=60).stdout:
+        if not _launch_ok(launch, proc):
             return None
         return _poll_and_fetch("runs/app_manip.npz", out_path, progress=progress, timeout=timeout, say=say,
                                proc_name=proc)
@@ -195,7 +212,7 @@ def train_mjcf_on_gpu(mjcf: str, *, out_path: str, iters: int = 80, envs: int = 
         launch = (f"cd ~/virturoid && PYTHONPATH=src XLA_FLAGS='--xla_gpu_autotune_level=0' setsid {_PY} "
                   f"scripts/mjx_morph_attention.py --mjcf-file ~/app_model.xml --iters {iters} --envs {envs} "
                   f"--save runs/app_model.npz{extra} </dev/null >~/app_train.log 2>&1 & echo LAUNCHED")
-        if b"LAUNCHED" not in _ssh(launch, timeout=60).stdout:
+        if not _launch_ok(launch, "mjx_morph_attention"):
             return None
         return _poll_and_fetch("runs/app_model.npz", out_path, progress=progress, timeout=timeout, say=say)
     except Exception:  # noqa: BLE001 - any failure -> caller uses the CPU trainer

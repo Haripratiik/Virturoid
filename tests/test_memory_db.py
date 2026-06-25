@@ -125,6 +125,22 @@ class MemoryDBTests(unittest.TestCase):
                 self.assertEqual(2, len(db.species_tree_nodes()))
                 self.assertTrue(db.species_node("humanoid.arm.single")["buildable"])
 
+    def test_find_gene_for_class_needs_buildable_and_genes(self):
+        """Flywheel reuse regression: a stored gene is reusable ONLY when its species node is BOTH buildable
+        AND carries a full gene (segments). The bug was that a DISCOVERED species banked the gene but stayed
+        buildable=0, so find_gene_for_class never returned it (memory_reused was always False)."""
+        gene = {"species": "quadruped.composed", "segments": [{"name": "torso"}]}
+        with tempfile.TemporaryDirectory() as tmp:
+            with self._db(tmp) as db:
+                # gene present but NOT buildable -> not reusable (the old broken state)
+                db.upsert_species_node("quadruped.composed", robot_class="quadruped", genes=gene, buildable=False)
+                self.assertIsNone(db.find_gene_for_class("quadruped"))
+                # buildable AND gene -> reusable (the fix: a discovered species is buildable from its own gene)
+                db.upsert_species_node("quadruped.composed", robot_class="quadruped", genes=gene, buildable=True)
+                found = db.find_gene_for_class("quadruped")
+                self.assertIsNotNone(found)
+                self.assertTrue(found.get("segments"))
+
     def test_persists_across_connections(self):
         with tempfile.TemporaryDirectory() as tmp:
             p = Path(tmp) / "mem.db"

@@ -124,6 +124,8 @@ def auto_place_species(gene: RobotGene, db, *, source: str = "discovered",
                        if n.get("robot_class") == gene.robot_class and n.get("parent_species") is None), None)
     db.upsert_species_node(
         pattern, parent_species=parent, robot_class=gene.robot_class,
-        morphology_tags=morphology_tags(gene), genes=gene.to_dict(), source=source)
+        # A discovered species carries a full compiled gene, so it IS re-buildable from that gene -- mark it
+        # buildable so flywheel reuse (find_gene_for_class needs buildable=1 AND genes) can amend it next time.
+        morphology_tags=morphology_tags(gene), genes=gene.to_dict(), buildable=True, source=source)
     return {"action": "created", "species_pattern": pattern, "parent": parent,
             "distance": (nearest["distance"] if nearest else None), "neighbors": neighbors}
