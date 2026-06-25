@@ -275,8 +275,13 @@ def build_gene_package(gene: RobotGene, prompt: str, output_dir: Path, scene_cou
     if _task.task_type == "pick_place_sort":
         scenes = generate_task_scenes(gene, spec, count=scene_count)
     else:
-        scenes = generate_scene_set(_task, count=scene_count, purpose="variation").scenes
-        spec = _spec_from_scene(spec, scenes[0])
+        # Take the task STRUCTURE (objects/targets/assignments) from the general generator, then place it in the
+        # robot's REACHABLE workspace (the dexterous zone the sort path uses) so the controller can actually reach
+        # and place every object -- the arbitrary layout left non-sort targets out of reach (shelf dropped, stack
+        # missed-grasp). Falls back to the arbitrary layout only if the reachable matcher can't fit the objects.
+        spec = _spec_from_scene(spec, generate_scene_set(_task, count=1, purpose="variation").scenes[0])
+        reachable = generate_task_scenes(gene, spec, count=scene_count)
+        scenes = reachable or generate_scene_set(_task, count=scene_count, purpose="variation").scenes
 
     # Per-scene MJCF + compiled index (the viewer reads these).
     scene_dir = output_dir / "simulation" / "mujoco" / "scenes" / "variation"

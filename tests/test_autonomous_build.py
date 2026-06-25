@@ -99,6 +99,9 @@ class AutonomousBuildTests(unittest.TestCase):
             self.assertEqual("manipulator", report.robot_class)
             self.assertEqual("stack", report.task_type)
             self.assertTrue(any("gene" in n.lower() for n in report.notes), report.notes)
+            # Capability: with objects/targets placed in the robot's REACHABLE workspace, the stack task now
+            # reliably SUCCEEDS (was a structural 0.167 on the arbitrary layout) -- not merely "runs".
+            self.assertGreaterEqual(report.final_success_rate, 0.5)
 
     def test_memory_warm_start_skips_codesign_when_prior_design_already_solves_it(self):
         """The moat (§13/§26): a second build of a known task reuses the prior converged body and
