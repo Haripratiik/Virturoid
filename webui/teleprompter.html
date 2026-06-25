@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Virturoid Demo Teleprompter + Remote</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #07090c; --panel: #0e1218; --ink: #f2f5f8; --muted: #7d8a99;
+    --accent: #58a6ff; --do: #6fd3ff; --warn: #f0a35e; --over: #f06d6d; --line: #1b212b;
+    --scale: 1;
+    --mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink); font-family: var(--sans); overflow: hidden; }
+  body { display: flex; flex-direction: column; }
+
+  .bar { display: flex; align-items: center; gap: 18px; padding: 14px clamp(18px,4vw,54px); border-bottom: 1px solid var(--line); font-variant-numeric: tabular-nums; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 14px var(--accent); flex: none; }
+  .count { font-family: var(--mono); font-size: 15px; color: var(--muted); letter-spacing: .04em; }
+  .count b { color: var(--ink); }
+  .title { font-weight: 700; font-size: clamp(15px,2vw,20px); letter-spacing: -.01em; }
+  .spacer { flex: 1; }
+  .clock { font-family: var(--mono); font-size: 15px; color: var(--muted); white-space: nowrap; }
+  .clock .big { color: var(--ink); font-size: 19px; }
+  .clock .over { color: var(--over); } .clock .warn { color: var(--warn); }
+
+  main { flex: 1; min-height: 0; display: flex; flex-direction: column; justify-content: center; gap: clamp(14px,2.4vh,30px); padding: clamp(16px,3vh,40px) clamp(20px,6vw,90px); overflow-y: auto; -webkit-user-select: none; user-select: none; }
+  .cue { color: var(--do); font-size: clamp(13px,1.5vw,18px); line-height: 1.5; letter-spacing: .02em; max-width: 100%; }
+  .cue .kicker { font-family: var(--mono); font-size: .78em; letter-spacing: .18em; color: var(--accent); opacity: .85; margin-right: .6em; }
+  .say { font-size: 30px; line-height: 1.32; font-weight: 600; letter-spacing: -.012em; max-width: 100%; }
+  .say.silent { color: var(--muted); font-weight: 500; font-style: italic; }
+  .note { color: var(--warn); font-size: clamp(12px,1.35vw,15px); line-height: 1.5; max-width: 100%; opacity: .9; }
+  .note .kicker { font-family: var(--mono); font-size: .82em; letter-spacing: .16em; margin-right: .5em; text-transform: uppercase; }
+
+  footer { padding: 0 clamp(18px,4vw,54px) 16px; }
+  .track { height: 8px; border-radius: 99px; background: #131922; overflow: hidden; margin-bottom: 12px; }
+  .fill { height: 100%; width: 0%; background: var(--accent); border-radius: 99px; transition: width .12s linear, background .25s ease; }
+  .controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .controls button { font-family: var(--sans); font-size: 14px; font-weight: 600; color: var(--ink); background: var(--panel); border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 9px; padding: 10px 16px; cursor: pointer; }
+  .controls button:hover { border-color: #2b3543; }
+  .controls button:active { transform: translateY(1px); }
+  .controls button.primary { background: #13314e; border-color: #1f4e7a; color: #cfe6ff; min-width: 104px; }
+  .controls button.primary.on { background: #3a2a13; border-color: #7a5a1f; color: #ffe6c0; }
+  .controls .conn { font-family: var(--mono); font-size: 12px; color: var(--muted); margin-left: 6px; }
+  .controls .conn.ok { color: var(--accent); }
+  .controls .hint { font-family: var(--mono); font-size: 11.5px; color: var(--muted); margin-left: auto; }
+  main::-webkit-scrollbar { width: 8px; } main::-webkit-scrollbar-thumb { background: #1b212b; border-radius: 8px; }
+</style>
+</head>
+<body>
+  <div class="bar">
+    <span class="dot"></span>
+    <span class="count"><b id="cur">00</b> / <span id="tot">10</span></span>
+    <span class="title" id="title">—</span>
+    <span class="spacer"></span>
+    <span class="clock"><span id="beatTime" class="big">0:00</span> / <span id="beatTarget">0:00</span><span id="beatOver"></span></span>
+    <span class="clock" style="margin-left:18px">total <span id="totalTime">0:00</span></span>
+  </div>
+
+  <main>
+    <div class="cue" id="cue"></div>
+    <div class="say" id="say"></div>
+    <div class="note" id="note"></div>
+  </main>
+
+  <footer>
+    <div class="track"><div class="fill" id="fill"></div></div>
+    <div class="controls">
+      <button id="btnRestart" type="button" title="Back to the title card (Home)">&#8635; Restart</button>
+      <button id="btnPrev" type="button" title="Previous beat (Left arrow)">&#9664; Prev</button>
+      <button id="btnPlay" class="primary" type="button" title="Play / pause auto-advance (Space)">&#9654; Play</button>
+      <button id="btnNext" type="button" title="Next beat (Right arrow)">Next &#9654;</button>
+      <span class="conn" id="conn">demo: standalone</span>
+      <span class="hint">Space play/pause &middot; &larr; &rarr; step &middot; F full &middot; [ ] size</span>
+    </div>
+  </footer>
+
+<script>
+  // Narration matches docs/demo_guide.md. Cards 1..9 drive studio beats 0..8 over a
+  // same-origin BroadcastChannel; cards 0 (title) and 10 (closing slides) are manual.
+  const BEATS = [
+    { n:"00", title:"Title slide", dur:7, silent:true,
+      cue:"Show slides.html (title card) on the recorded screen. This panel is your off-camera remote -- press Play when you're rolling.",
+      say:"(No narration. Hold on the title card, then press Play.)", note:"" },
+    { n:"01", title:"Open", dur:15,
+      cue:"Studio on the Build tab, empty.",
+      say:"I'm going to type one sentence, and a robot that never existed gets designed, built, and dropped into real physics, learning to walk. That's the easy part. What actually matters is everything that happens to that robot after. Let me show you.", note:"" },
+    { n:"02", title:"Build it, watch it walk", dur:32,
+      cue:"The studio types the prompt and builds the quad live (~10s to appear). Read the setup at a measured pace; the reveal lands as you reach 'and there it is'.",
+      say:"Here's the prompt: a quadruped that walks. Watch what the system does with it. It designs an original four-legged body, no template and no copied model, and drops it into real physics... and there it is, moving under its own learned control. To be precise, the gait hasn't converged: it's a robot learning to walk, a learned policy, not a scripted animation. On a single laptop the gait emerges but doesn't fully train out, and the remaining gap is compute, not method. I'll return to that.",
+      note:"An emerging gait that hasn't converged: learning to walk, not finished. No success percentages (quad reads 0% in Analysis, card 08); the compute reason is card 09." },
+    { n:"03", title:"A robot, and the world it works in", dur:21,
+      cue:"Arm appears in its generated tabletop scene: blocks + matching bins.",
+      say:"Here is another one I built earlier: a tabletop arm that sorts blocks. And here is the part that matters. It didn't just build the arm. It built the world the arm works in: the blocks, and the matching bins. The scene is generated to fit the task, every time.", note:"" },
+    { n:"04", title:"And it does the task", dur:18,
+      cue:"The arm runs its episode -- grasps and sorts by color.",
+      say:"Then it runs it. The arm reaches in, grasps a block with a real contact grasp, and sorts it by color. Nothing is teleported into the gripper. It's physics. And this is the one I've actually trained: it clears the task about seventy-six percent of the time.",
+      note:"The arm's ~76% is the one real trained task-success number -- say it here, since we no longer show the Analysis tab." },
+    { n:"05", title:"A spec you could build", dur:21,
+      cue:"Reports tab, then Artifacts tab -- BOM, sized actuators/sensors, CAD files.",
+      say:"And it isn't just a render. That arm ships a real bill of materials, an actuator and a sensor sized for each joint, plus CAD files, STEP and STL, that open in any tool. It's a spec you could take toward hardware.", note:"" },
+    { n:"06", title:"Any body: a humanoid", dur:16,
+      cue:"Switch to the humanoid, standing (Episode frozen at frame 0). Hold on the full articulated body.",
+      say:"And it does this for any body, including the one that matters most: a humanoid. Ask for one, and it generates the whole articulated body, a torso, two arms, two legs, dozens of joints, all original geometry.",
+      note:"Humanoid is built but does NOT walk -- show it standing, keep walking out of this beat." },
+    { n:"07", title:"Any body: a wheeled base", dur:14,
+      cue:"Switch to the mobile base in Scene mode: the room it generated, the rover, the obstacles, the goal.",
+      say:"The same system builds a wheeled base. It generates the room it works in, then navigates it, around the obstacles, to its goal.", note:"" },
+    { n:"08", title:"Any body: a six-legged walker", dur:20,
+      cue:"Switch to the six-legged walker, walking (Episode). The fidelity line lands here.",
+      say:"Or a six-legged walker. Any body, any task, each from a single sentence. And across all of them, the visual fidelity isn't production-grade yet, that's the same compute limit, but the building blocks are all here: the morphology, the geometry, the way the parts compose. That's what generalizes.", note:"" },
+    { n:"09", title:"It remembers, and it compounds", dur:34,
+      cue:"Memory tab: the species tree, with a build node selected (its model + tips).",
+      say:"This is the part I cared about most. A system that forgets every build starts from scratch every time. So everything is remembered here, a living species tree grouped by type. Click any robot and you see its real model, plus the tips learned for that kind of body. And it isn't only for building robots, it's for training them: every build and every training run leaves behind what worked, so the next robot builds faster and its policy starts from a better place. That compounding, across building and training, is the moat.", note:"" },
+    { n:"10", title:"The honest limits", dur:23,
+      cue:"Back on the studio, the humanoid standing (built, doesn't walk).",
+      say:"Now the limit, and it's specific. The pipeline, the physics, the grasp, the memory, and the evaluator are all real and working. The one thing missing is the compute to train the gaits to convergence, a GPU-scale job, not an open question. The method is done; it needs scale. The humanoid says it best: fully built, it stands, but it doesn't walk yet.",
+      note:"Say it plainly and with confidence -- it reads as strength, not apology." },
+    { n:"11", title:"Where this goes", dur:28,
+      cue:"Alt-tab to slides.html: right arrow for the roadmap slide, right again for the close.",
+      say:"Here's where it goes next. Training at real GPU scale, so the loop converges instead of just demonstrating. Onboard perception, so robots act in unknown scenes. And onto real hardware, which is why domain randomization is already in the trainers. But everything you've seen rests on one thing: physics simulation. It's where every robot here is designed, trained, and stress-tested before it ever touches the real world. Making that simulation fast, accurate, and trainable is the hard problem, and it's exactly what I want to help build at 1X.", note:"" },
+  ];
+
+  const $ = (id) => document.getElementById(id);
+  const fmt = (s) => { s = Math.max(0, Math.floor(s)); return Math.floor(s/60) + ":" + String(s%60).padStart(2,"0"); };
+  const clamp = (n,a,b) => Math.max(a, Math.min(b, n));
+  const esc = (s) => String(s).replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+
+  const chan = ("BroadcastChannel" in window) ? new BroadcastChannel("virturoid-demo") : null;
+  let idx = 0, playing = false, userScale = 1, cardStart = performance.now(), total = 0, lastNow = performance.now();
+
+  // teleprompter card -> studio beat: cards 1..9 drive beats 0..8; card 0 resets the studio.
+  function driveDemo(n) {
+    if (!chan) return;
+    if (n >= 1 && n <= 10) chan.postMessage({ cmd: "goto", index: n - 1 });
+    else if (n === 0) chan.postMessage({ cmd: "reset" });
+  }
+
+  function render() {
+    const b = BEATS[idx];
+    $("cur").textContent = b.n;
+    $("tot").textContent = BEATS.length - 1;
+    $("title").textContent = b.title;
+    $("cue").innerHTML = '<span class="kicker">SCREEN</span>' + esc(b.cue);
+    $("say").textContent = b.say;
+    $("say").classList.toggle("silent", !!b.silent);
+    if (b.note) { $("note").style.display = ""; $("note").innerHTML = '<span class="kicker">honest</span>' + esc(b.note); }
+    else { $("note").style.display = "none"; }
+    $("beatTarget").textContent = fmt(b.dur);
+    fitText();
+    document.querySelector("main").scrollTop = 0;
+  }
+  function show(n) { idx = clamp(n, 0, BEATS.length - 1); render(); cardStart = performance.now(); driveDemo(idx); }
+  function setPlaying(p) {
+    playing = p;
+    const btn = $("btnPlay");
+    btn.innerHTML = p ? "&#10073;&#10073; Pause" : "&#9654; Play";
+    btn.classList.toggle("on", p);
+    if (p) cardStart = performance.now();
+  }
+
+  function tick() {
+    const now = performance.now();
+    const dt = (now - lastNow) / 1000; lastNow = now;
+    if (playing) total += dt;
+    const b = BEATS[idx];
+    const el = (now - cardStart) / 1000;
+    const over = el - b.dur;
+    $("beatTime").textContent = fmt(el);
+    $("beatTime").className = "big" + (over > 0 ? " over" : (el > b.dur * 0.8 ? " warn" : ""));
+    $("beatOver").textContent = over > 1 ? "  +" + fmt(over) : "";
+    $("beatOver").className = over > 1 ? "over" : "";
+    const ratio = Math.min(1, el / b.dur);
+    const fill = $("fill");
+    fill.style.width = (playing || el > 0 ? ratio * 100 : 0).toFixed(1) + "%";
+    fill.style.background = over > 0 ? "var(--over)" : (el > b.dur * 0.8 ? "var(--warn)" : "var(--accent)");
+    $("totalTime").textContent = fmt(total);
+    if (playing && el >= b.dur) { if (idx < BEATS.length - 1) show(idx + 1); else setPlaying(false); }
+    requestAnimationFrame(tick);
+  }
+
+  // remote handshake with the studio demo
+  if (chan) {
+    chan.onmessage = (e) => {
+      const m = e.data || {};
+      if (m.cmd === "demo-ready") { $("conn").textContent = "demo: connected"; $("conn").classList.add("ok"); }
+    };
+    chan.postMessage({ cmd: "hello" });
+  } else {
+    $("conn").textContent = "demo: (no channel)";
+  }
+
+  $("btnRestart").onclick = () => { setPlaying(false); show(0); };
+  $("btnPrev").onclick = () => show(idx - 1);
+  $("btnPlay").onclick = () => setPlaying(!playing);
+  $("btnNext").onclick = () => show(idx + 1);
+
+  // Auto-fit: pick the largest font (up to a cap, nudged by [ ]) that fits the whole card on one screen.
+  function fitText() {
+    const main = document.querySelector("main"), say = document.getElementById("say");
+    let fs = Math.round(46 * userScale);
+    say.style.fontSize = fs + "px";
+    let g = 0;
+    while (fs > 13 && main.scrollHeight > main.clientHeight + 1 && g < 80) { fs -= 1; say.style.fontSize = fs + "px"; g++; }
+  }
+  document.addEventListener("keydown", (e) => {
+    const k = e.key;
+    if (k === " ") { setPlaying(!playing); e.preventDefault(); }
+    else if (k === "ArrowRight" || k === "PageDown") { show(idx + 1); e.preventDefault(); }
+    else if (k === "ArrowLeft" || k === "PageUp") { show(idx - 1); e.preventDefault(); }
+    else if (k === "Home") { setPlaying(false); show(0); }
+    else if (k === "End") { show(BEATS.length - 1); }
+    else if (k === "f" || k === "F") { if (document.fullscreenElement) document.exitFullscreen(); else document.documentElement.requestFullscreen(); }
+    else if (k === "[") { userScale = Math.max(0.6, userScale - 0.1); fitText(); }
+    else if (k === "]") { userScale = Math.min(1.8, userScale + 0.1); fitText(); }
+  });
+  // tap to step (but not when tapping the control bar)
+  document.addEventListener("click", (e) => {
+    if (e.target.closest(".controls")) return;
+    show(e.clientX < window.innerWidth * 0.32 ? idx - 1 : idx + 1);
+  });
+
+  window.addEventListener("resize", fitText);
+  render();
+  show(0);
+  requestAnimationFrame(tick);
+</script>
+</body>
+</html>

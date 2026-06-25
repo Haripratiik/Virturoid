@@ -144,7 +144,10 @@ function stepEpisode(now) {
   if (ep.onFrame) ep.onFrame(ep.idx);
 }
 
+let loadSeq = 0; // bumped on every (re)load; a stale async load aborts instead of double-rendering on top.
+
 async function loadEpisode(refs, ctx) {
+  const myLoad = (loadSeq += 1);
   clearContent();
   refs.jointPanel.style.display = "none";
   if (!ctx.package) {
@@ -160,6 +163,7 @@ async function loadEpisode(refs, ctx) {
     setStatus(refs, `Episode request failed: ${error.message || error}`, true);
     return;
   }
+  if (myLoad !== loadSeq) return; // a newer load started while we were fetching -- don't add a stale copy
   if (view.error) {
     setStatus(refs, view.error, true);
     return;
@@ -309,11 +313,13 @@ function addFallbackVisuals(robot) {
 }
 
 async function loadRobot(refs, ctx) {
+  const myLoad = (loadSeq += 1);
   clearContent();
   setStatus(refs, "Loading URDF...");
 
   const urdfUrl = ctx.packageUrl("robot/robot.urdf");
   const text = await ctx.fetchText("robot/robot.urdf");
+  if (myLoad !== loadSeq) return; // superseded by a newer load
   if (!text) {
     // Legged / engine-built packages have no URDF but do have a replayable episode -- show the motion.
     if (refs.modeSelect) refs.modeSelect.value = "episode";
@@ -375,6 +381,7 @@ async function loadRobot(refs, ctx) {
     fitCamera(robot);
   }, 250);
 
+  if (myLoad !== loadSeq) return; // superseded while parsing
   v.content.add(robot);
   v.robot = robot;
   buildJointSliders(refs, robot);
@@ -400,6 +407,7 @@ async function populateScenes(refs, ctx) {
 }
 
 async function loadScene(refs, ctx, xmlPath) {
+  const myLoad = (loadSeq += 1);
   clearContent();
   refs.jointPanel.style.display = "none";
   const target = xmlPath || refs.sceneSelect.value;
@@ -409,6 +417,7 @@ async function loadScene(refs, ctx, xmlPath) {
   }
   setStatus(refs, `Loading scene: ${target.split("/").pop()}...`);
   const xmlText = await ctx.fetchText(target);
+  if (myLoad !== loadSeq) return; // superseded by a newer load
   if (!xmlText) {
     setStatus(refs, "Could not load scene XML.", true);
     return;

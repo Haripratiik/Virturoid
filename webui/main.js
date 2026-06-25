@@ -11,8 +11,9 @@ import { propertiesPanel } from "./properties.js";
 import { assistantPanel } from "./assistant.js";
 import { outlinerPanel } from "./outliner.js";
 import { consolePanel } from "./console.js";
-import { createMemoryPanels } from "./memory.js";
+import { createMemoryPanels, selectMemoryNode, loadMemoryBuilds } from "./memory.js";
 import { createAnalysisPanels } from "./analysis.js";
+import { runAutoDemo } from "./autodemo.js";
 
 const ICON = {
   viewport: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 3 7v10l9 5 9-5V7z"/><path d="m3 7 9 5 9-5"/><path d="M12 22V12"/></svg>',
@@ -88,10 +89,13 @@ const ctx = {
 
 const memoryPanels = createMemoryPanels(ICON);
 const analysisPanels = createAnalysisPanels(ICON);
+// The dock mounts these panel objects by reference, so capture the assistant entry the
+// dock actually mounts -- mount() sets _els on THIS object, not the imported singleton.
+const assistantEntry = { ...assistantPanel, icon: ICON.assistant };
 
 const panelList = [
   { id: "viewport", title: "Viewport", icon: ICON.viewport, ...adapt("viewport", "Viewport", ICON.viewport, viewerSection) },
-  { ...assistantPanel, icon: ICON.assistant },
+  assistantEntry,
   { ...outlinerPanel, icon: ICON.outliner },
   { ...propertiesPanel, icon: ICON.properties },
   { ...consolePanel, icon: ICON.console },
@@ -246,4 +250,13 @@ async function init() {
   setInterval(refreshAssistantStatus, 15000);
 }
 
-init();
+init().then(() => {
+  if (new URLSearchParams(location.search).has("demo")) {
+    runAutoDemo({
+      setWorkspace, setPackage,
+      goTo: (id) => ctx.goTo(id),
+      viewerSection, assistantPanel: assistantEntry,
+      selectMemoryNode, loadMemoryBuilds,
+    });
+  }
+});

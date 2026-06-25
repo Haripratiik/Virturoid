@@ -86,6 +86,9 @@ async function loadBuilds() {
   memBus.dispatchEvent(new CustomEvent("builds"));
 }
 
+// Exposed so the self-running demo (autodemo.js) can refresh the tree and highlight a build node.
+export { select as selectMemoryNode, loadBuilds as loadMemoryBuilds };
+
 function classNodeForBuild(b) {
   const cls = String((b && b.robot_class) || "").toLowerCase();
   const name = String((b && (b.id || b.name)) || "").toLowerCase();
