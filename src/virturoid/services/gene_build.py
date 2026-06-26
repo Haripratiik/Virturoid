@@ -572,6 +572,21 @@ def _build_navigation_package(gene: RobotGene, prompt: str, output_dir: Path, co
         "status": status,
         "detail": detail,
     }
+    # PERCEPTION: when the prompt asks for SENSED navigation of an UNKNOWN environment, also evaluate the
+    # range-sensing reactive navigator -- the robot reaches goals using ONLY its rangefinder ring, no map.
+    if any(w in (prompt or "").lower()
+           for w in ("perception", "sensor", "unknown", "explore", "rangefinder", "sense", "lidar")):
+        try:
+            from virturoid.services.perception_nav import evaluate_perception_nav
+            psum = evaluate_perception_nav(gene, n_scenes=4, seed=0)
+            summary["perception"] = {"success_rate": psum["success_rate"], "reached": psum["reached"],
+                                     "n_scenes": psum["n_scenes"], "sensed_only": True}
+            summary["success_rate"] = round(max(summary["success_rate"], psum["success_rate"]), 3)
+            (output_dir / "reports").mkdir(parents=True, exist_ok=True)
+            (output_dir / "reports" / "perception_navigation_report.json").write_text(
+                json.dumps(psum, indent=2), encoding="utf-8")
+        except Exception:  # noqa: BLE001 - perception eval is best-effort; never breaks the build
+            pass
     cad = _export_real_cad(gene, output_dir)   # REAL B-rep STEP/STL for the mobile base too
     summary["cad_real"] = bool(cad)
     summary["cad_part_count"] = (cad or {}).get("part_count", 0)

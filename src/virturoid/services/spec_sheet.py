@@ -79,6 +79,8 @@ def build_spec_sheet(output_dir) -> dict:
     if ev.get("task_type") == "locomotion":
         perf.update({"forward_m": round(float(ev.get("forward_m") or ev.get("distance_m") or 0.0), 2),
                      "cadence_hz": ev.get("cadence_hz"), "gait_stability_frac": ev.get("upright_frac")})
+    if isinstance(ev.get("perception"), dict):
+        perf["perception_nav_success"] = ev["perception"].get("success_rate")  # sensed-only reach rate
 
     spec = {
         "name": genome.get("name") or genome.get("species"),
