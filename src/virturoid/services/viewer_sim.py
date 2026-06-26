@@ -45,9 +45,13 @@ def simulate_episode_for_viewer(package_dir: Path, scene_set_uri: str = "simulat
 
         goal = next((o["pose_xyz_rpy"][:2] for o in scene["objects"] if o["name"] == "goal_zone"), [1.0, 0.0])
         obstacles = [o["pose_xyz_rpy"][:2] for o in scene["objects"] if o.get("object_type") == "obstacle"]
-        nav = run_navigation_episode(model, goal, obstacles, record_frames=frames, frame_every=20)
-        outcome = {"status": nav["status"], "failure_label": None if nav["status"] == "reached" else nav["status"],
-                   "placed_count": 1 if nav["status"] == "reached" else 0, "block_count": 1}
+        try:
+            nav = run_navigation_episode(model, goal, obstacles, record_frames=frames, frame_every=20)
+            outcome = {"status": nav["status"], "failure_label": None if nav["status"] == "reached" else nav["status"],
+                       "placed_count": 1 if nav["status"] == "reached" else 0, "block_count": 1}
+        except Exception as exc:  # noqa: BLE001 - nav episode failed -> the settle fallback below keeps motion
+            outcome = {"status": "render_fallback", "failure_label": str(exc)[:80],
+                       "placed_count": 0, "block_count": 1}
     else:
         # Prefer a REAL contact-grasp sort replay the build recorded (gripper holds each block by CONTACT FRICTION,
         # NO _pin_block) -- so the demo shows actual physics, matching the "nothing is teleported" claim. Fall back
@@ -74,9 +78,18 @@ def simulate_episode_for_viewer(package_dir: Path, scene_set_uri: str = "simulat
             ep_scene = {"objects": objects}
             if scene_set.get("assignments"):
                 ep_scene["assignments"] = scene_set["assignments"]
-            out = run_pick_place_episode(model, ep_scene, record_frames=frames, frame_every=10)
-            outcome = {"status": out["status"], "failure_label": out["failure_label"],
-                       "placed_count": out["placed_count"], "block_count": out["block_count"]}
+            try:
+                out = run_pick_place_episode(model, ep_scene, record_frames=frames, frame_every=10)
+                outcome = {"status": out["status"], "failure_label": out["failure_label"],
+                           "placed_count": out["placed_count"], "block_count": out["block_count"]}
+            except Exception as exc:  # noqa: BLE001 - pick-place failed -> the settle fallback below keeps motion
+                outcome = {"status": "render_fallback", "failure_label": str(exc)[:80],
+                           "placed_count": 0, "block_count": 0}
+
+    if not frames:  # GUARANTEE motion: the task episode produced no frames (failed/empty) -> settle under gravity
+        _settle_episode(model, record_frames=frames)
+        if isinstance(outcome, dict):
+            outcome.setdefault("note", "settling fallback — the task episode produced no frames to replay")
 
     return {
         "scene_id": scene["id"],
@@ -178,6 +191,24 @@ def _locomotion_episode(model, package_dir: Path, *, record_frames: list, steps:
     return {"status": status, "failure_label": None if status == "walked" else status,
             "placed_count": 1 if status == "walked" else 0, "block_count": 1,
             "forward_m": round(forward, 3), "upright": bool(upright), "learned": has_policy}
+
+
+def _settle_episode(model, *, record_frames: list, steps: int = 180, frame_every: int = 6) -> None:
+    """Fallback replay: let the robot settle under gravity (no control), recording geom poses per frame. This
+    GUARANTEES the viewer always has SOME motion to play even when the task-specific episode failed or produced
+    no frames -- so a build is never a frozen, motionless scene in the viewport."""
+    import mujoco
+    import numpy as np
+
+    from virturoid.services.pick_place_controller import _capture_geom_frame
+
+    data = mujoco.MjData(model); mujoco.mj_resetData(model, data); mujoco.mj_forward(model, data)
+    for t in range(steps):
+        mujoco.mj_step(model, data)
+        if t % frame_every == 0:
+            record_frames.append(_capture_geom_frame(data, model))
+        if not np.all(np.isfinite(data.qpos)):
+            break
 
 
 def render_episode_frames(package_dir: Path, scene_index: int = 0, width: int = 720, height: int = 540,
