@@ -19,6 +19,8 @@ models/*
 *.npz
 # Keep the trained quad walk policy so the headline walk replays on a fresh clone (no GPU needed)
 !models/learned_quadruped.composed.npz
+# Keep the 22KB velocity-conditioned policy so nav_learned's closed-loop maze-follow works out-of-the-box
+!models/morph_frog_vel.npz
 *.stl
 *.stl.b64
 *.step
