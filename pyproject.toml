@@ -12,9 +12,10 @@ requires-python = ">=3.10"
 dependencies = ["numpy>=1.24"]
 
 [project.optional-dependencies]
-# Physics simulation + evaluation (MuJoCo is the engine, not a custom physics core).
-sim = ["mujoco>=3.0", "Pillow>=10.0"]
-# Real CAD geometry (build123d / OpenCascade) for STEP/STL B-rep export.
+# Physics simulation + evaluation + real CAD export (the standard build path: MuJoCo is the engine, build123d
+# gives real B-rep STEP/STL so a build emits real CAD, not placeholders).
+sim = ["mujoco>=3.0", "Pillow>=10.0", "build123d>=0.5"]
+# Real CAD geometry (build123d / OpenCascade) for STEP/STL B-rep export — alias kept for explicit installs.
 cad = ["build123d>=0.5"]
 # Web app / local UI server.
 web = ["fastapi>=0.110", "uvicorn>=0.27"]

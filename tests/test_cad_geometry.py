@@ -96,6 +96,24 @@ class CadGeometryTests(unittest.TestCase):
                 self.assertGreater(part["mass_kg"], 0.0)
                 self.assertGreater(part["volume_cm3"], 0.0)
 
+    def test_gene_build_export_passes_the_is_real_cad_gate(self):
+        # End-to-end certification: the BUILD's CAD step (gene_build._export_real_cad) emits STEPs that pass
+        # the readiness ledger's is_real_cad gate (real B-rep, not a 479-byte placeholder). This is the
+        # capability the "CAD geometry" partial was about — proven for the actual build path, not just the unit.
+        from virturoid.services.cad_geometry import is_real_cad
+        from virturoid.services.gene_build import _export_real_cad
+        from virturoid.services.morphology_composer import compose_robot
+        g = compose_robot("a quadruped walking robot")
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            manifest = _export_real_cad(g, out)
+            self.assertIsNotNone(manifest, "build123d present -> the build must emit a real CAD manifest")
+            self.assertGreater(manifest.get("part_count", 0), 0)
+            steps = list((out / "cad").rglob("*.step"))
+            self.assertTrue(steps, "the build wrote STEP files")
+            self.assertTrue(any(is_real_cad(s) for s in steps),
+                            "at least one build STEP must pass the readiness is_real_cad gate (real B-rep)")
+
 
 if __name__ == "__main__":
     unittest.main()

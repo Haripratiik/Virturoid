@@ -221,7 +221,13 @@ def _export_real_cad(gene: RobotGene, output_dir: Path) -> dict | None:
                 _json.dumps(manifest, indent=2), encoding="utf-8")
             return manifest
         return None
-    except Exception:  # noqa: BLE001 - missing build123d / kernel failure -> honest 'no real CAD', never fake
+    except ImportError:  # build123d absent -> NON-SILENT: tell the user how to get real CAD (don't fake it)
+        import warnings
+        warnings.warn("build123d is not installed, so this build ships NO CAD (the readiness ledger will mark "
+                      "CAD 'scaffolded', not real). Install it for real B-rep STEP/STL: pip install -e \".[sim]\" "
+                      "(or \".[cad]\").", RuntimeWarning, stacklevel=2)
+        return None
+    except Exception:  # noqa: BLE001 - kernel failure -> honest 'no real CAD', never fake
         return None
 
 
