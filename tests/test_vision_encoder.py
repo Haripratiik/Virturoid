@@ -45,3 +45,20 @@ def test_render_camera_sees_a_colored_object_if_gl_available():
         pytest.skip(f"no GL render context: {exc}")
     assert img.shape == (128, 128, 3)
     assert int(((img[:, :, 0] > 120) & (img[:, :, 1] < 90)).sum()) > 100   # the red box is visible to the camera
+
+
+def test_jax_encoder_matches_numpy_is_trainable_and_batches():
+    pytest.importorskip("jax")
+    import jax
+    import jax.numpy as jnp
+
+    from virturoid.services.vision_encoder import jax_encode, to_jax_params
+
+    enc = TinyVisionEncoder(seed=3)
+    img = np.random.default_rng(5).random((16, 16, 3)).astype(np.float32)
+    params = to_jax_params(enc)
+    assert np.abs(enc.encode(img) - np.asarray(jax_encode(params, img))).max() < 1e-4      # JAX == NumPy
+    grad = jax.grad(lambda p, im: jnp.mean(jax_encode(p, im) ** 2))(params, img)
+    assert float(sum(jnp.sum(v ** 2) for v in grad.values())) > 0.0                         # differentiable
+    batched = jax.jit(jax.vmap(jax_encode, in_axes=(None, 0)))(params, np.repeat(img[None], 8, axis=0))
+    assert np.asarray(batched).shape == (8, 64)                                             # vmap + jit

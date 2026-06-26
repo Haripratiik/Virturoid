@@ -77,3 +77,30 @@ class TinyVisionEncoder:
     @property
     def n_params(self) -> int:
         return int(self.W1.size + self.b1.size + self.W2.size + self.b2.size + self.Wf.size + self.bf.size)
+
+
+# --- trainable JAX variant (GPU vision RL) -------------------------------------------------------------------
+# The NumPy encoder above is forward-only (CPU validation). This pure-JAX form is the SAME tiny network, but
+# differentiable + jit/vmap-able, so it trains on the GPU (the actual "train more"). No Flax/optax dependency --
+# raw jax.lax.conv, matching the existing MJX-script style. A GPU SAC/PPO loop (the Squint recipe) optimizes
+# `params`; deploy the learned params back through this same apply on the robot's Jetson.
+
+def to_jax_params(enc: "TinyVisionEncoder") -> dict:
+    """Port a (NumPy) TinyVisionEncoder's weights into a JAX param dict -- the training starting point."""
+    import jax.numpy as jnp
+
+    return {k: jnp.asarray(getattr(enc, k)) for k in ("W1", "b1", "W2", "b2", "Wf", "bf")}
+
+
+def jax_encode(params: dict, img):
+    """Differentiable JAX forward of the tiny encoder. (16,16,3) in [0,1] -> (feat,). Matches TinyVisionEncoder."""
+    import jax
+    import jax.numpy as jnp
+
+    dn = ("NCHW", "OIHW", "NCHW")
+    x = jnp.transpose(jnp.asarray(img, jnp.float32), (2, 0, 1))[None]              # (1,3,16,16)
+    x = jax.lax.conv_general_dilated(x, params["W1"], (2, 2), "VALID", dimension_numbers=dn)
+    x = jnp.maximum(x + params["b1"][None, :, None, None], 0.0)                    # (1,c1,7,7) + relu
+    x = jax.lax.conv_general_dilated(x, params["W2"], (2, 2), "VALID", dimension_numbers=dn)
+    x = jnp.maximum(x + params["b2"][None, :, None, None], 0.0)                    # (1,c2,3,3) + relu
+    return jnp.tanh(x.reshape(-1) @ params["Wf"] + params["bf"])                   # (feat,)
