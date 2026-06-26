@@ -7,6 +7,7 @@ import { contractSection } from "./contract.js";
 import { validationSection } from "./validation.js";
 import { artifactsSection } from "./artifacts.js";
 import { reportsSection } from "./reports.js";
+import { compareSection } from "./compare.js";
 import { propertiesPanel } from "./properties.js";
 import { assistantPanel } from "./assistant.js";
 import { outlinerPanel } from "./outliner.js";
@@ -105,6 +106,7 @@ const panelList = [
   adapt("validation", "Validation", ICON.validation, validationSection),
   adapt("artifacts", "Artifacts", ICON.artifacts, artifactsSection),
   adapt("reports", "Reports", ICON.reports, reportsSection),
+  adapt("compare", "Compare", ICON.reports, compareSection),
   ...memoryPanels,
   ...analysisPanels,
 ];

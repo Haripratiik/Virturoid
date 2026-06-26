@@ -648,6 +648,21 @@ class _Handler(BaseHTTPRequestHandler):
                                   and str(j.get("joint_type", "")).lower() not in ("fixed", "weld", ""))
                     except (json.JSONDecodeError, OSError):
                         pass
+                spec_summary = None
+                spec_path = child / "reports" / "spec_sheet.json"
+                if spec_path.exists():
+                    try:
+                        sp = json.loads(spec_path.read_text(encoding="utf-8"))
+                        spec_summary = {
+                            "summary": sp.get("summary"),
+                            "mass_kg": (sp.get("physical") or {}).get("mass_kg"),
+                            "cost_usd": (sp.get("power_and_cost") or {}).get("est_parts_cost_usd"),
+                            "power_w": (sp.get("power_and_cost") or {}).get("est_power_draw_w"),
+                            "success": (sp.get("performance") or {}).get("success_rate"),
+                            "task": (sp.get("performance") or {}).get("task"),
+                        }
+                    except (json.JSONDecodeError, OSError):
+                        spec_summary = None
                 packages.append(
                     {
                         "id": child.name,
@@ -657,6 +672,7 @@ class _Handler(BaseHTTPRequestHandler):
                         "robot_class": robot_class,
                         "species": species,
                         "dof": dof,
+                        "spec": spec_summary,
                     }
                 )
         return {"build_root": str(root), "packages": packages}
