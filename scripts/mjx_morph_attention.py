@@ -375,7 +375,9 @@ def main(argv=None) -> int:
                 #   got no signal to climb back up). This is the core of the iter-35 collapse fix.
                 fell = (z < 0.5 * z_stand).astype(jp.float32)           # FALLEN -> terminate
                 alive2 = alive * (1.0 - fell)                           # 0 once fallen, stays 0 thereafter
-                progress = jp.clip(fwd, 0.0, VTGT)                     # forward speed up to vtgt; ZERO at standstill
+                progress = jp.clip(fwd, -VTGT, VTGT)                  # forward speed up to vtgt; BACKWARD now PENALIZED
+                #   (was clip(fwd, 0, vtgt) -> backward earned 0, not negative, so a policy could collect the
+                #   gait-quality rewards while REVERSING a forward CPG prior; this is the humanoid backward-walk bug)
                 sm = jp.mean((off - a_prev) ** 2, axis=-1)              # smoothness of the APPLIED control offset
                 fz = data2.geom_xpos[:, foot_idx, 2]                    # (N, n_feet) foot heights
                 clearance = jp.mean(jp.clip(fz - foot_z0, 0.0, 0.08), axis=-1)   # MEAN foot lift (anti-shuffle)
