@@ -49,7 +49,9 @@ def gen_bearing_dataset(n: int = 400, *, seed: int = 0, render_px: int = 32):
             mujoco.mj_forward(model, data)
             renderer.update_scene(data, camera="cam")
             xs.append(to_encoder_input(renderer.render()))
-            ys.append(theta / _FOV_HALF)
+            # nav image-x convention: the camera's right axis is world -Y, so world +Y (theta>0) lands image-LEFT
+            # (negative bearing). Labelling this way lets the learned predictor drive vision_nav directly.
+            ys.append(-theta / _FOV_HALF)
     finally:
         renderer.close()
     return np.asarray(xs, np.float32), np.asarray(ys, np.float32)
@@ -104,8 +106,41 @@ def train_bearing_predictor(x, y, *, epochs: int = 80, lr: float = 3e-3, seed: i
 
 def learn_to_see_goal(*, n: int = 400, epochs: int = 80, seed: int = 0) -> dict:
     """End-to-end: render data, train, report. test_mae (normalized bearing units, -1..1) << baseline = learned."""
+    params, report = train_goal_seer(n=n, epochs=epochs, seed=seed)
+    return report
+
+
+def train_goal_seer(*, n: int = 400, epochs: int = 80, seed: int = 0):
+    """Train and RETURN (params, report) so the learned perception can drive vision_nav (not just self-report)."""
     x, y = gen_bearing_dataset(n, seed=seed)
-    _params, test_mae, baseline_mae = train_bearing_predictor(x, y, epochs=epochs, seed=seed)
-    return {"n": n, "epochs": epochs, "test_mae": round(test_mae, 4), "baseline_mae": round(baseline_mae, 4),
-            "improvement_x": round(baseline_mae / test_mae, 2) if test_mae > 0 else None,
-            "test_mae_deg": round(test_mae * _FOV_HALF * 180 / math.pi, 2), "learned": test_mae < 0.5 * baseline_mae}
+    params, test_mae, baseline_mae = train_bearing_predictor(x, y, epochs=epochs, seed=seed)
+    report = {"n": n, "epochs": epochs, "test_mae": round(test_mae, 4), "baseline_mae": round(baseline_mae, 4),
+              "improvement_x": round(baseline_mae / test_mae, 2) if test_mae > 0 else None,
+              "test_mae_deg": round(test_mae * _FOV_HALF * 180 / math.pi, 2),
+              "learned": test_mae < 0.5 * baseline_mae}
+    return params, report
+
+
+def make_learned_bearing_fn(params: dict, goal_rgb=(0.1, 0.85, 0.15)):
+    """Wrap trained params as a ``bearing_fn(frame) -> (bearing|None, frac)`` for vision_nav.run_vision_nav_episode.
+
+    The BEARING (the precise 'where') is the learned encoder's prediction; visibility (is any goal colour present
+    at all?) is a trivial colour-fraction gate, since the regressor only ever saw in-view goals. This is what
+    lets the robot navigate end-to-end on LEARNED perception."""
+    import jax
+    import numpy as np
+
+    from virturoid.services.vision_encoder import jax_encode, to_encoder_input
+
+    enc = {k: params[k] for k in ("W1", "b1", "W2", "b2", "Wf", "bf")}
+    w_head, b_head = params["w_head"], params["b_head"]
+    predict = jax.jit(lambda enc_in: jax_encode(enc, enc_in) @ w_head + b_head)
+    target = np.asarray(goal_rgb, np.float32)
+
+    def bearing_fn(frame):
+        frac = float((np.abs(np.asarray(frame, np.float32) / 255.0 - target).max(axis=2) < 0.28).mean())
+        if frac < 0.0025:
+            return None, frac                                    # no goal colour in view -> search
+        return float(np.clip(float(predict(to_encoder_input(frame))), -1.0, 1.0)), frac
+
+    return bearing_fn

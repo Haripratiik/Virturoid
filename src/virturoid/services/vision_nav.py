@@ -64,8 +64,12 @@ def build_vision_scene(goal_xy, goal_rgb=(0.1, 0.85, 0.15), obstacles=(), *, ren
 def run_vision_nav_episode(goal_xy=(3.0, 0.0), goal_rgb=(0.1, 0.85, 0.15), *, start=(0.0, 0.0),
                            start_yaw=0.0, obstacles=(), horizon: int = 500, v_max: float = 0.035,
                            turn_gain: float = 1.4, search_rate: float = 0.07, reach_m: float = 0.7,
-                           render_px: int = 64):
-    """Drive a differential-drive robot to a goal it can SEE. Returns reached / final_distance_m / steps."""
+                           render_px: int = 64, bearing_fn=None):
+    """Drive a differential-drive robot to a goal it can SEE. Returns reached / final_distance_m / steps.
+
+    bearing_fn(frame) -> (bearing|None, frac) overrides the hand-written color detector -- pass a LEARNED
+    perception (a trained TinyVisionEncoder predictor) to drive the robot end-to-end on what it learned to see."""
+    _detect = bearing_fn if bearing_fn is not None else (lambda f: detect_goal_bearing(f, goal_rgb))
     import mujoco
     import numpy as np
 
@@ -84,7 +88,7 @@ def run_vision_nav_episode(goal_xy=(3.0, 0.0), goal_rgb=(0.1, 0.85, 0.15), *, st
             data.mocap_quat[0] = _yaw_quat(yaw)
             mujoco.mj_forward(model, data)
             renderer.update_scene(data, camera="robot_cam")
-            bearing, _frac = detect_goal_bearing(renderer.render(), goal_rgb)
+            bearing, _frac = _detect(renderer.render())
             if bearing is not None:
                 seen_ever, last_bearing, lost = True, bearing, 0
             else:

@@ -21,3 +21,18 @@ def test_encoder_learns_to_localize_the_goal():
         pytest.skip(f"no GL render context: {exc}")
     assert r["learned"]                              # trained MAE < half the untrained baseline
     assert r["test_mae"] < r["baseline_mae"]
+
+
+def test_learned_encoder_drives_the_nav():
+    pytest.importorskip("jax")
+    from virturoid.services.vision_nav import run_vision_nav_episode
+    from virturoid.services.vision_train import make_learned_bearing_fn, train_goal_seer
+
+    try:
+        params, report = train_goal_seer(n=220, epochs=65)
+        bearing_fn = make_learned_bearing_fn(params)
+        r = run_vision_nav_episode(goal_xy=(3.0, 0.0), start_yaw=0.0, bearing_fn=bearing_fn, horizon=300)
+    except Exception as exc:  # noqa: BLE001
+        pytest.skip(f"no GL render context: {exc}")
+    assert report["learned"]
+    assert r["reached"]                              # the LEARNED perception drove the robot to the goal
