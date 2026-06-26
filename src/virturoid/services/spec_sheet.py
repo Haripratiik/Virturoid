@@ -119,8 +119,9 @@ def _summary(spec: dict) -> str:
     perf = spec.get("performance") or {}
     sr = perf.get("success_rate")
     if perf.get("task") == "locomotion" and perf.get("cadence_hz"):
-        bits.append(f"walks (cadence {perf['cadence_hz']} Hz, {sr:.0%} task success)" if sr is not None
-                    else f"walks (cadence {perf['cadence_hz']} Hz)")
+        # 'walks' is gated upstream on forward + upright + cadence; the raw cadence_hz (total foot-lifts/sec) is
+        # left to the detailed table rather than this one-liner, where it reads misleadingly high.
+        bits.append(f"walks ({sr:.0%} task success)" if sr is not None else "walks")
     elif sr is not None:
         bits.append(f"{sr:.0%} task success at {perf.get('task')}")
     return ", ".join(bits) + "."
