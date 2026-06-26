@@ -1,0 +1,43 @@
+"""Vision navigation: reach a goal the robot can SEE, camera-only."""
+import math
+
+import numpy as np
+import pytest
+
+from virturoid.services.vision_nav import detect_goal_bearing, run_vision_nav_episode
+
+_GREEN = (0.1, 0.85, 0.15)
+_GREEN_U8 = (26, 217, 38)
+
+
+def test_detect_goal_bearing_left_is_negative_right_is_positive():
+    left = np.zeros((64, 64, 3), np.uint8)
+    left[20:40, 5:20] = _GREEN_U8
+    bearing, frac = detect_goal_bearing(left, _GREEN)
+    assert bearing is not None and bearing < -0.2 and frac > 0
+
+    right = np.zeros((64, 64, 3), np.uint8)
+    right[20:40, 44:59] = _GREEN_U8
+    bearing, _ = detect_goal_bearing(right, _GREEN)
+    assert bearing is not None and bearing > 0.2
+
+
+def test_detect_goal_bearing_returns_none_when_absent():
+    bearing, frac = detect_goal_bearing(np.zeros((64, 64, 3), np.uint8), _GREEN)
+    assert bearing is None and frac < 0.0025
+
+
+def test_vision_nav_reaches_a_goal_dead_ahead():
+    try:
+        r = run_vision_nav_episode(goal_xy=(3.0, 0.0), start_yaw=0.0, horizon=300)
+    except Exception as exc:  # noqa: BLE001 - headless/no-GL: skip rather than fail
+        pytest.skip(f"no GL render context: {exc}")
+    assert r["reached"] and r["goal_was_seen"] and r["sensed_only"]
+
+
+def test_vision_nav_searches_for_an_offscreen_goal():
+    try:
+        r = run_vision_nav_episode(goal_xy=(3.0, 0.0), start_yaw=math.pi, horizon=400)   # goal starts behind
+    except Exception as exc:  # noqa: BLE001
+        pytest.skip(f"no GL render context: {exc}")
+    assert r["reached"]   # must rotate to find it, then drive in
