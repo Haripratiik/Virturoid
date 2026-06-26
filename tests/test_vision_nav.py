@@ -41,3 +41,21 @@ def test_vision_nav_searches_for_an_offscreen_goal():
     except Exception as exc:  # noqa: BLE001
         pytest.skip(f"no GL render context: {exc}")
     assert r["reached"]   # must rotate to find it, then drive in
+
+
+def test_record_frames_and_save_montage():
+    pytest.importorskip("PIL")
+    import os
+    import tempfile
+
+    from virturoid.services.vision_nav import save_vision_montage
+
+    try:
+        r = run_vision_nav_episode(goal_xy=(2.5, 0.0), start_yaw=0.0, horizon=90,
+                                   record_frames=True, frame_every=10)
+    except Exception as exc:  # noqa: BLE001
+        pytest.skip(f"no GL render context: {exc}")
+    assert len(r["frames"]) > 0 and r["frames"][0].shape == (64, 64, 3)
+    with tempfile.TemporaryDirectory() as td:
+        path = save_vision_montage(r["frames"], os.path.join(td, "montage.png"))
+        assert os.path.exists(path)

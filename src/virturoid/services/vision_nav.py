@@ -64,12 +64,15 @@ def build_vision_scene(goal_xy, goal_rgb=(0.1, 0.85, 0.15), obstacles=(), *, ren
 def run_vision_nav_episode(goal_xy=(3.0, 0.0), goal_rgb=(0.1, 0.85, 0.15), *, start=(0.0, 0.0),
                            start_yaw=0.0, obstacles=(), horizon: int = 500, v_max: float = 0.035,
                            turn_gain: float = 1.4, search_rate: float = 0.07, reach_m: float = 0.7,
-                           render_px: int = 64, bearing_fn=None):
+                           render_px: int = 64, bearing_fn=None, record_frames: bool = False,
+                           frame_every: int = 12):
     """Drive a differential-drive robot to a goal it can SEE. Returns reached / final_distance_m / steps.
 
     bearing_fn(frame) -> (bearing|None, frac) overrides the hand-written color detector -- pass a LEARNED
-    perception (a trained TinyVisionEncoder predictor) to drive the robot end-to-end on what it learned to see."""
+    perception (a trained TinyVisionEncoder predictor) to drive the robot end-to-end on what it learned to see.
+    record_frames keeps every frame_every-th camera frame (the robot's-eye view) in the returned ``frames``."""
     _detect = bearing_fn if bearing_fn is not None else (lambda f: detect_goal_bearing(f, goal_rgb))
+    frames: list = []
     import mujoco
     import numpy as np
 
@@ -88,7 +91,10 @@ def run_vision_nav_episode(goal_xy=(3.0, 0.0), goal_rgb=(0.1, 0.85, 0.15), *, st
             data.mocap_quat[0] = _yaw_quat(yaw)
             mujoco.mj_forward(model, data)
             renderer.update_scene(data, camera="robot_cam")
-            bearing, _frac = _detect(renderer.render())
+            frame = renderer.render()
+            if record_frames and step % frame_every == 0:
+                frames.append(frame.copy())
+            bearing, _frac = _detect(frame)
             if bearing is not None:
                 seen_ever, last_bearing, lost = True, bearing, 0
             else:
@@ -112,7 +118,26 @@ def run_vision_nav_episode(goal_xy=(3.0, 0.0), goal_rgb=(0.1, 0.85, 0.15), *, st
     finally:
         renderer.close()
     return {"reached": reached, "final_distance_m": round(dist, 3), "steps": step + 1,
-            "goal_was_seen": seen_ever, "sensed_only": True}
+            "goal_was_seen": seen_ever, "sensed_only": True, "frames": frames}
+
+
+def save_vision_montage(frames, out_path, *, upscale: int = 4, max_cols: int = 8) -> str:
+    """Save a horizontal strip of the robot's-eye camera frames (a vision-in-action montage) as a PNG."""
+    from PIL import Image  # noqa: PLC0415 - optional, demo-only
+
+    if not frames:
+        raise ValueError("no frames to montage (run with record_frames=True)")
+    picks = frames[:: max(1, len(frames) // max_cols)][:max_cols]
+    tiles = [Image.fromarray(f).resize((f.shape[1] * upscale, f.shape[0] * upscale), Image.NEAREST) for f in picks]
+    w, h, pad = tiles[0].width, tiles[0].height, 4
+    strip = Image.new("RGB", (len(tiles) * w + (len(tiles) - 1) * pad, h), (16, 16, 20))
+    for i, t in enumerate(tiles):
+        strip.paste(t, (i * (w + pad), 0))
+    from pathlib import Path
+
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    strip.save(out_path)
+    return str(out_path)
 
 
 def evaluate_vision_nav(*, goal_x: float = 3.0, render_px: int = 64) -> dict:
