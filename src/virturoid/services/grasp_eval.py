@@ -34,8 +34,11 @@ def _set_grasp_contacts(mj, finger_bodies, box_body):
 def grasp_lift_attempt(gene, gx: float, gy: float, *, ep_len: int = 260, kpj: float = 150.0,
                        kdj: float = 18.0, kpf: float = 300.0, kdf: float = 10.0, dq: float = 0.06,
                        phases=(0.18, 0.5, 0.62), fclose: float = 0.05, success_lift: float = 0.05,
-                       hover_z: float = 0.16, lift_z: float = 0.22) -> dict:
-    """One scripted top-down grasp-and-lift attempt at object position ``(gx, gy)``. Returns
+                       hover_z: float = 0.16, lift_z: float = 0.22, aim_xy=None,
+                       record_frames: bool = False, frame_every: int = 18, cam_px: int = 240) -> dict:
+    """One scripted top-down grasp-and-lift attempt. The box sits at ``(gx, gy)``; the arm AIMS at ``aim_xy``
+    (defaults to the box). Pass a separate ``aim_xy`` to grasp a perceived/predicted position while the box is
+    really elsewhere — so a wrong perception genuinely misses. Returns
     ``{success, lifted, lifted_max, both_contact, tilt_deg, d_tcp, reason}`` — real friction grasp."""
     import mujoco
     import numpy as np
@@ -85,13 +88,14 @@ def grasp_lift_attempt(gene, gx: float, gy: float, *, ep_len: int = 260, kpj: fl
     # vertical-approach IK reference poses. The hover pose is solved seed-robustly (several seeds, best
     # kept) so it works regardless of joint layout; the descend/lift poses CONTINUE from it (each seeded
     # from the previous) so the arm stays in one configuration branch.
+    ax, ay = aim_xy if aim_xy is not None else (gx, gy)          # arm aims here; the box is at (gx, gy)
     work = mujoco.MjData(mj); mujoco.mj_resetData(mj, work)
     above_map, tilt, _res = best_top_down_pose(mj, work, site_id=tcp, palm_body_id=palm,
-                                               target=(gx, gy, hover_z), arm_joints=arm_joints, iters=250)
+                                               target=(ax, ay, hover_z), arm_joints=arm_joints, iters=250)
 
     def ik(z, seed_map):
         return solve_top_down_grasp_pose(mj, work, site_id=tcp, palm_body_id=palm,
-                                         target=(gx, gy, z), arm_joints=arm_joints,
+                                         target=(ax, ay, z), arm_joints=arm_joints,
                                          seed=[seed_map[qa] for qa, _ in arm_joints], iters=250)
 
     at_map = ik(box_z, above_map)
@@ -105,6 +109,14 @@ def grasp_lift_attempt(gene, gx: float, gy: float, *, ep_len: int = 260, kpj: fl
     mujoco.mj_forward(mj, d)
     box_z0 = float(d.qpos[bq + 2]); q_ref = q_above.copy()
     p_settle, p_grip, p_lift = phases
+
+    frames: list = []
+    renderer = cam = None
+    if record_frames:                                            # side camera for a grasp-sequence montage
+        mj.geom_rgba[box_geom] = [0.95, 0.1, 0.1, 1]; mj.geom_matid[box_geom] = -1
+        cam = mujoco.MjvCamera(); cam.lookat[:] = [gx - 0.03, gy, 0.12]
+        cam.distance, cam.azimuth, cam.elevation = 0.9, -120, -18
+        renderer = mujoco.Renderer(mj, height=cam_px, width=cam_px)
 
     def finger_contacts():
         touched = set()
@@ -131,6 +143,8 @@ def grasp_lift_attempt(gene, gx: float, gy: float, *, ep_len: int = 260, kpj: fl
         ctrl = d.qfrc_bias[act_dof] + KP * (q_star - q) - KD * qd
         d.ctrl[:] = np.clip(ctrl, -fr_lim, fr_lim)
         mujoco.mj_step(mj, d)
+        if renderer is not None and t % frame_every == 0:
+            renderer.update_scene(d, camera=cam); frames.append(renderer.render().copy())
         if frac >= p_grip:
             max_both = max(max_both, finger_contacts())
         lifted_max = max(lifted_max, float(d.qpos[bq + 2]) - box_z0)
@@ -149,9 +163,11 @@ def grasp_lift_attempt(gene, gx: float, gy: float, *, ep_len: int = 260, kpj: fl
         reason = "lifted_then_dropped"
     else:
         reason = "low_lift"
+    if renderer is not None:
+        renderer.close()
     return {"success": success, "lifted": round(lifted, 4), "lifted_max": round(lifted_max, 4),
             "both_contact": int(max_both >= 2), "tilt_deg": round(float(tilt), 2),
-            "d_tcp": round(d_tcp, 4), "reason": reason}
+            "d_tcp": round(d_tcp, 4), "reason": reason, "frames": frames}
 
 
 def evaluate_grasp_lift(gene, *, positions=None, seed: int = 0, **kw) -> dict:
