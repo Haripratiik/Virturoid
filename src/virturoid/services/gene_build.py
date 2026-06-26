@@ -342,6 +342,7 @@ def build_gene_package(gene: RobotGene, prompt: str, output_dir: Path, scene_cou
         except Exception:  # noqa: BLE001 - certification is best-effort; the sort report still gates honestly
             pass
     summary["bom"] = _emit_bom(gene, output_dir, task=prompt)  # real per-joint actuators + sensors + materials
+    _maybe_write_summaries(output_dir)                         # spec sheet + deployment guide (reports/)
     # OPT-IN §15.3 export gate: run the tiered baseline+randomized robustness loop on the REAL gene and persist
     # reports/evaluation_run.json BEFORE the ledger, so _emit_readiness ENFORCES it (manipulator-only — the gate is
     # pick-place tiered; best-effort so it never breaks a build).
@@ -577,6 +578,7 @@ def _build_navigation_package(gene: RobotGene, prompt: str, output_dir: Path, co
     (output_dir / "reports").mkdir(parents=True, exist_ok=True)
     (output_dir / "reports" / "gene_evaluation_report.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     summary["bom"] = _emit_bom(gene, output_dir, task=prompt)  # real per-joint actuators + sensors + materials
+    _maybe_write_summaries(output_dir)                         # spec sheet + deployment guide (reports/)
     _emit_mvp_artifacts(gene, output_dir, task_type=task.task_type, package_type="gene_navigation_package")
     summary["readiness"] = _emit_readiness(gene, output_dir)
     return summary
@@ -669,9 +671,26 @@ def _build_legged_package(gene: RobotGene, prompt: str, output_dir: Path, contro
     (output_dir / "reports").mkdir(parents=True, exist_ok=True)
     (output_dir / "reports" / "gene_evaluation_report.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     summary["bom"] = _emit_bom(gene, output_dir, task=prompt)  # real per-joint actuators + sensors + materials
+    _maybe_write_summaries(output_dir)                         # spec sheet + deployment guide (reports/)
     _emit_mvp_artifacts(gene, output_dir, task_type="locomotion", package_type="gene_locomotion_package")
     summary["readiness"] = _emit_readiness(gene, output_dir)
     return summary
+
+
+def _maybe_write_summaries(output_dir: Path) -> None:
+    """Best-effort post-build summaries: the capability + cost SPEC SHEET (reports/spec_sheet.*) and the
+    'build it for real' DEPLOYMENT GUIDE (reports/deployment_guide.md), both aggregated from the genome + BOM +
+    evaluation + the URDF/ROS2/control artifacts. Pure summaries -- never break the build."""
+    try:
+        from virturoid.services.spec_sheet import write_spec_sheet
+        write_spec_sheet(output_dir)
+    except Exception:  # noqa: BLE001 - the spec sheet is a summary nicety
+        pass
+    try:
+        from virturoid.services.deployment_guide import write_deployment_guide
+        write_deployment_guide(output_dir)  # reads the spec sheet, so it runs AFTER it
+    except Exception:  # noqa: BLE001 - the deployment guide is a summary nicety
+        pass
 
 
 def _emit_bom(gene: RobotGene, output_dir: Path, task: str = "") -> dict:

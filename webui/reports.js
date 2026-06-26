@@ -98,10 +98,11 @@ export const reportsSection = {
     }
     root.appendChild(emptyState("Loading reports..."));
 
-    const [summary, markdown, ledger] = await Promise.all([
+    const [summary, markdown, ledger, spec] = await Promise.all([
       ctx.fetchJson("reports/autonomous_build_summary.json"),
       ctx.fetchText("reports/mvp_summary.md"),
       ctx.fetchJson("reports/product_readiness_ledger.json"),
+      ctx.fetchJson("reports/spec_sheet.json"),
     ]);
     clear(root);
 
@@ -110,6 +111,30 @@ export const reportsSection = {
       el("a", { class: "button", href: ctx.packageUrl("reports/index.html"), target: "_blank", rel: "noreferrer" }, "Open HTML report"),
       el("a", { class: "button", href: ctx.packageUrl("reports/autonomous_build_summary.json"), target: "_blank", rel: "noreferrer" }, "Build summary JSON"),
     ]));
+
+    if (spec) {
+      const phys = spec.physical || {}, cost = spec.power_and_cost || {}, act = spec.actuation || {}, perf = spec.performance || {};
+      const sz = phys.size_m;
+      const fmt = (v, suffix = "") => (v === null || v === undefined || v === "" ? "-" : `${v}${suffix}`);
+      const rows = [
+        ["Degrees of freedom", fmt(spec.dof)],
+        ["Mass", fmt(phys.mass_kg, " kg")],
+        ["Size (LxWxH)", sz ? `${sz.length_m}x${sz.width_m}x${sz.height_m} m` : "-"],
+        ["Peak joint torque", fmt(act.peak_joint_torque_nm, " Nm")],
+        ["Est. power draw", fmt(cost.est_power_draw_w, " W")],
+        ["Est. parts cost", cost.est_parts_cost_usd != null ? `$${Number(cost.est_parts_cost_usd).toLocaleString()}` : "-"],
+        ["Sensors", (spec.sensing || []).join(", ") || "-"],
+        ["Task success", perf.success_rate != null ? `${Math.round(perf.success_rate * 100)}%` : "-"],
+      ];
+      root.appendChild(el("h2", { text: "Spec Sheet", style: "margin:8px 0 4px;" }));
+      root.appendChild(el("p", { text: spec.summary || "", style: "font-size:15px;opacity:0.85;margin:0 0 12px;" }));
+      root.appendChild(el("div", { class: "metrics" }, rows.map(([k, v]) =>
+        el("div", { class: "metric" }, [el("span", { text: k }), el("strong", { text: String(v) })]))));
+      root.appendChild(el("div", { class: "actions", style: "margin:12px 0 20px;" }, [
+        el("a", { class: "button", href: ctx.packageUrl("reports/spec_sheet.md"), target: "_blank", rel: "noreferrer" }, "Open spec sheet (Markdown)"),
+        el("a", { class: "button", href: ctx.packageUrl("reports/deployment_guide.md"), target: "_blank", rel: "noreferrer" }, "Build it for real (deployment guide)"),
+      ]));
+    }
 
     if (summary || ledger) {
       const metrics = [];
