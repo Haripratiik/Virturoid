@@ -548,8 +548,10 @@ def main(argv=None) -> int:
         if it % 10 == 0 or it == args.iters - 1:
             print(f"  iter {it:>4}  ep_reward={float(ep_rew):8.2f}  fwd_vel={float(ep_fwd):+.3f}  "
                   f"({(time.time()-t0):.0f}s)", flush=True)
-        # CHECKPOINT periodically — the WSL2 GPU watchdog (TDR) can kill a long run; don't lose the policy.
-        if args.save and it > 0 and it % 30 == 0:
+        # CHECKPOINT often — the WSL2 GPU watchdog (TDR) kills long kernels mid-run (observed: a hang ~iter 20),
+        # and every-30 lost everything before the first checkpoint. Every 10 keeps a fetchable policy (CPG-primed,
+        # so it still walks) even when the box is killed early -- the difference between a usable run and a None.
+        if args.save and it > 0 and it % 10 == 0:
             _save(params, ep_fwd); print(f"  [checkpoint @ iter {it}]", flush=True)
     print(f"done: attention {args.robot}, fwd_vel {float(ep_fwd):+.3f}, {time.time()-t0:.0f}s", flush=True)
     if args.save:
