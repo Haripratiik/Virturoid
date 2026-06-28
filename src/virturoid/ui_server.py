@@ -41,6 +41,27 @@ _ASSISTANT_SYSTEM_PROMPT = (
 )
 
 
+def package_honesty_summary(child) -> dict | None:
+    """Compact honesty signals for the package list, read from a build's honest reports (§4.1/§4.8A/§4.8E):
+    the BOM<->sim mass-fidelity ratio + flag count, and spec-compliance (did the build honor a detailed prompt?).
+    Returns None when neither report exists. Best-effort -- never raises."""
+    def _rd(p):
+        try:
+            return json.loads(Path(p).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+    out: dict = {}
+    fid = _rd(Path(child) / "reports" / "bom_sim_fidelity.json")
+    if fid:
+        out["mass_fidelity_ratio"] = fid.get("mass_fidelity_ratio")
+        out["fidelity_flags"] = len(fid.get("flags") or [])
+    comp = _rd(Path(child) / "reports" / "spec_compliance.json")
+    if comp:
+        out["spec_all_honored"] = comp.get("all_honored")
+        out["spec_constraints"] = len(comp.get("constraints") or [])
+    return out or None
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run the local Virturoid build console.")
     parser.add_argument("--host", default="127.0.0.1", help="Host for the local server.")
@@ -663,6 +684,7 @@ class _Handler(BaseHTTPRequestHandler):
                         }
                     except (json.JSONDecodeError, OSError):
                         spec_summary = None
+                honesty = package_honesty_summary(child)        # §4.1/§4.8A/§4.8E honest signals
                 packages.append(
                     {
                         "id": child.name,
@@ -673,6 +695,7 @@ class _Handler(BaseHTTPRequestHandler):
                         "species": species,
                         "dof": dof,
                         "spec": spec_summary,
+                        "honesty": honesty,
                     }
                 )
         return {"build_root": str(root), "packages": packages}
