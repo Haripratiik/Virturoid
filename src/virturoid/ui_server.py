@@ -41,6 +41,25 @@ _ASSISTANT_SYSTEM_PROMPT = (
 )
 
 
+def _resolve_build_root(build_root: Path) -> Path:
+    """If the chosen build root has no built packages but the curated demo set (build/ui_verify) does, use the
+    demo set -- so `python -m virturoid.ui_server` shows the demo instead of an empty studio (the demo foot-gun:
+    the auto-demo references package IDs that only exist under build/ui_verify). Once the user builds into their
+    own root, that root has packages and is used as-is."""
+    def _has_packages(d: Path) -> bool:
+        return d.exists() and any((c / "robot").exists() or (c / "simulation").exists()
+                                  for c in d.iterdir() if c.is_dir())
+    if not _has_packages(build_root):
+        demo = Path("build") / "ui_verify"
+        try:
+            if demo.resolve() != build_root.resolve() and _has_packages(demo):
+                print(f"[ui] build root {build_root} has no packages; serving the demo set at {demo}")
+                return demo
+        except OSError:
+            pass
+    return build_root
+
+
 def package_honesty_summary(child) -> dict | None:
     """Compact honesty signals for the package list, read from a build's honest reports (§4.1/§4.8A/§4.8E):
     the BOM<->sim mass-fidelity ratio + flag count, and spec-compliance (did the build honor a detailed prompt?).
@@ -77,7 +96,7 @@ def main() -> None:
         help="Serve in the browser instead of opening the native desktop window.",
     )
     args = parser.parse_args()
-    build_root = Path(args.build_root)
+    build_root = _resolve_build_root(Path(args.build_root))
 
     if args.web:
         _run_web(args.host, args.port, build_root)

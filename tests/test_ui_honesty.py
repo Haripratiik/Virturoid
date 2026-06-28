@@ -28,6 +28,13 @@ class UIHonestyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             self.assertIsNone(package_honesty_summary(Path(tmp)))
 
+    def test_resolve_build_root_keeps_a_root_that_has_packages(self):
+        from virturoid.ui_server import _resolve_build_root
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "myroot"
+            (root / "pkg1" / "robot").mkdir(parents=True)              # a built package -> no demo fallback
+            self.assertEqual(_resolve_build_root(root), root)
+
 
 if __name__ == "__main__":
     unittest.main()
