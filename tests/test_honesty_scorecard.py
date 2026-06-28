@@ -46,5 +46,31 @@ class HonestyScorecardTests(unittest.TestCase):
         self.assertIn("| Claim |", md)
 
 
+class ScorecardFromPackageTests(unittest.TestCase):
+    def test_reads_all_honest_reports_from_disk(self):
+        import json
+        import tempfile
+        from pathlib import Path
+
+        from virturoid.services.honesty_scorecard import scorecard_from_package
+        with tempfile.TemporaryDirectory() as tmp:
+            r = Path(tmp) / "reports"
+            r.mkdir()
+            (r / "product_readiness_ledger.json").write_text(json.dumps(
+                {"stages": [{"stage": "real_cad_exported", "status": ATTAINED},
+                            {"stage": "rendered_cv_data", "status": BELOW_GATE}]}), encoding="utf-8")
+            (r / "spec_compliance.json").write_text(json.dumps(
+                {"constraints": [{"constraint": "height_m", "honored": True}]}), encoding="utf-8")
+            (r / "bom_sim_fidelity.json").write_text(json.dumps(
+                {"mass_fidelity_ratio": 2.2, "flags": ["optimistic"], "faithful": False}), encoding="utf-8")
+            (r / "sim2sim_report.json").write_text(json.dumps(
+                {"verdict": "transfer STRONG", "pearson_r": 0.9, "mmrv": 0.0}), encoding="utf-8")
+            sc = scorecard_from_package(Path(tmp))
+            claims = {x["claim"] for x in sc["rows"]}
+            self.assertEqual(claims, {"real_cad_exported", "rendered_cv_data", "spec:height_m",
+                                      "bom_sim_fidelity", "sim2sim transfer"})
+            self.assertEqual(sc["n_flagged"], 2)          # CV below-gate + optimistic fidelity, shown openly
+
+
 if __name__ == "__main__":
     unittest.main()
