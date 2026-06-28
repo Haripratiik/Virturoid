@@ -66,6 +66,27 @@ def _maybe_write_sim2sim(out: Path, prompt: str) -> None:
         print(f"  (sim2sim) {exc}")
 
 
+def _maybe_write_grasp_dataset(out: Path, prompt: str) -> None:
+    """For MANIPULATORS, write reports/grasp_dataset_summary.json -- the MimicGen data engine (1 scripted grasp
+    -> N verified demos via randomization + rejection sampling), so the demo's data-bottleneck-escape claim is a
+    concrete artifact. Best-effort."""
+    if not any(w in prompt.lower() for w in ("arm", "grasp", "sort", "pick", "manipulat", "gripper", "block")):
+        return
+    try:
+        from virturoid.services.data_factory import generate_grasp_demos
+        from virturoid.services.morphology_composer import compose_robot
+        gene = compose_robot("grasp and lift a box on a table", llm=None)
+        ds = generate_grasp_demos(gene, n=32)
+        summary = {k: v for k, v in ds.items() if k != "demos"}
+        summary["headline"] = (f"{ds['augmentation_x']} verified demos from 1 scripted grasp "
+                               f"({int(ds['yield'] * 100)}% yield) - the in-sim data engine")
+        (out / "reports").mkdir(parents=True, exist_ok=True)
+        (out / "reports" / "grasp_dataset_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+        print(f"  data-factory: {summary['headline']}")
+    except Exception as exc:  # noqa: BLE001
+        print(f"  (data-factory) {exc}")
+
+
 def _ensure_honest_reports(out: Path, prompt: str) -> None:
     """Make every package -- whether built on the gene path or the legacy TEMPLATE path (arms) -- carry the spec
     sheet, the BOM<->sim fidelity report, and the unified honesty scorecard. The template path doesn't write
@@ -87,6 +108,7 @@ def _ensure_honest_reports(out: Path, prompt: str) -> None:
         except Exception as exc:  # noqa: BLE001
             print(f"  (fidelity) {exc}")
     _maybe_write_sim2sim(out, prompt)                        # sim2sim BEFORE the scorecard so the row is included
+    _maybe_write_grasp_dataset(out, prompt)                  # data-engine artifact for manipulators
     try:
         from virturoid.services.honesty_scorecard import scorecard_from_package
         (out / "reports").mkdir(parents=True, exist_ok=True)
