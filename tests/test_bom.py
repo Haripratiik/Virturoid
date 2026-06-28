@@ -144,6 +144,33 @@ class BomTests(unittest.TestCase):
         self.assertEqual(_pick_lidar(40.0), "Ouster OS1-32")           # large -> long-range 3D
         self.assertNotEqual(_pick_lidar(80.0), _pick_lidar(3.0))       # huge != tiny
 
+    def test_power_defaults_to_socketed_and_switches_to_battery_on_prompt(self):
+        # Product rule: socketed (wall) power by DEFAULT; a battery ONLY when the prompt asks for untethered use.
+        g = build_from_anatomy(QUAD)
+        default = [ln for ln in build_bom(g, task="step in place on a lab bench")["lines"]
+                   if ln["category"] == "power"]
+        self.assertTrue(default, "a power source is always specified")
+        self.assertTrue(all("Mean Well" in ln["part"] for ln in default),
+                        f"default power must be a socketed wall PSU, got {[ln['part'] for ln in default]}")
+        battery = [ln for ln in build_bom(g, task="a battery-powered robot that roams untethered")["lines"]
+                   if ln["category"] == "power"]
+        self.assertTrue(any("LiPo" in ln["part"] or "Li-ion" in ln["part"] for ln in battery),
+                        f"a battery/untethered prompt must select a battery pack, got {[ln['part'] for ln in battery]}")
+
+    def test_compute_scales_with_load_not_just_class(self):
+        # The brain is sized by COMPUTE LOAD (DOF + vision/SLAM + whole-body), not the robot class alone.
+        from virturoid.services.morphology_composer import compose_robot
+        from virturoid.services.humanoid_anatomy import build_anthropometric_humanoid
+        tier = {"Raspberry Pi 5 (8GB)": 0, "NVIDIA Jetson Orin Nano 8GB": 1, "NVIDIA Jetson AGX Orin 64GB": 2}
+        arm = compose_robot("a tabletop robot arm", llm=None)
+        plain = [ln for ln in build_bom(arm, task="hold a fixed pose")["lines"] if ln["category"] == "compute"][0]
+        visiony = [ln for ln in build_bom(arm, task="use a camera to detect and sort blocks")["lines"]
+                   if ln["category"] == "compute"][0]
+        self.assertLessEqual(tier[plain["part"]], tier[visiony["part"]])      # vision needs >= the no-vision board
+        hum = [ln for ln in build_bom(build_anthropometric_humanoid(), task="walk and balance")["lines"]
+               if ln["category"] == "compute"][0]
+        self.assertEqual(hum["part"], "NVIDIA Jetson AGX Orin 64GB")          # whole-body -> top board
+
     def test_totals_and_markdown(self):
         bom = build_bom(build_from_anatomy(QUAD))
         t = bom["totals"]

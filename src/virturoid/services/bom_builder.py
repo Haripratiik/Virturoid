@@ -303,22 +303,70 @@ def _sensor_suite(robot_class: str, capabilities, task_text: str = "", scale_kg:
     return _dedupe_components(suite)
 
 
-def _compute_and_power(robot_class: str, n_actuators: int) -> list[tuple[str, int, str]]:
-    cls = (robot_class or "").lower()
-    items: list[tuple[str, int, str]] = []
-    if cls in ("humanoid", "biped"):
-        items.append(("NVIDIA Jetson AGX Orin 64GB", 1, "whole-body control + perception"))
-        items.append(("Li-ion 48V 12Ah pack", 1, "high-torque joint bus"))
-    elif cls in ("quadruped", "legged"):
-        items.append(("NVIDIA Jetson Orin Nano 8GB", 1, "locomotion + perception"))
-        items.append(("Li-ion 48V 12Ah pack" if n_actuators >= 10 else "LiPo 6S 8000mAh (22.2V)", 1, "joint bus"))
-    elif cls in ("mobile_base", "mobile", "rover"):
-        items.append(("NVIDIA Jetson Orin Nano 8GB", 1, "SLAM + navigation"))
-        items.append(("LiPo 4S 5200mAh (14.8V)", 1, "drive + logic"))
-    else:                                          # manipulator / default
-        items.append(("NVIDIA Jetson Orin Nano 8GB", 1, "planning + vision"))
-        items.append(("LiPo 4S 5200mAh (14.8V)", 1, "logic + servo bus"))
-    return items
+# Prompt hints that flip power from the socketed DEFAULT to a battery (the product rule: socketed wall power
+# unless the prompt asks for untethered/portable operation). _SOCKET_HINTS pins it back to wall power.
+_BATTERY_HINTS = re.compile(
+    r"\b(batter|portable|untether|cordless|wireless|roam|off[- ]?grid|on[- ]the[- ]go|handheld|backpack|"
+    r"drone|free[- ]?roam|wander|mobile robot|in the field|field robot)\w*", re.I)
+_SOCKET_HINTS = re.compile(
+    r"\b(benchtop|bench[- ]top|tethered|wall[- ]?power|mains[- ]?power|stationary|fixed[- ]base|corded|"
+    r"plugged[- ]?in|desktop|tabletop)\w*", re.I)
+# Real parts for sizing: wall PSUs (name -> supply watts) and battery packs (name -> Wh).
+_WALL_PSUS: tuple[tuple[str, float], ...] = (
+    ("Mean Well RSP-150-24", 150.0), ("Mean Well RSP-320-48", 320.0),
+    ("Mean Well RSP-750-48", 750.0), ("Mean Well RSP-1500-48", 1500.0))
+_BATTERY_PACKS: tuple[tuple[str, float], ...] = (
+    ("LiPo 4S 5200mAh (14.8V)", 77.0), ("LiPo 6S 8000mAh (22.2V)", 178.0), ("Li-ion 48V 12Ah pack", 576.0))
+_VISION_RE = re.compile(r"vision|camera|visual|perceiv|detect|recogn|inspect|\bsee\b|slam|navigat|\bmap\b", re.I)
+_LIDAR_RE = re.compile(r"lidar|point[- ]?cloud|3d map|slam|navigat", re.I)
+
+
+def _select_compute(robot_class: str, n_actuators: int, task: str, capabilities) -> tuple[str, str]:
+    """Size the 'brain' from the robot's actual COMPUTE LOAD — DOF count + vision/LiDAR/SLAM + whole-body
+    class — not the class alone. A simple low-DOF arm gets a Pi; a vision-guided or whole-body robot gets an
+    AGX Orin. (Real boards from the catalog's compute tier.)"""
+    blob = f"{task or ''} {' '.join(capabilities or [])}"
+    has_vision = bool(_VISION_RE.search(blob))
+    has_lidar = bool(_LIDAR_RE.search(blob))
+    whole_body = (robot_class or "").lower() in ("humanoid", "biped")
+    load = n_actuators + (8 if has_vision else 0) + (6 if has_lidar else 0) + (10 if whole_body else 0)
+    # whole-body bipeds need the top board (real humanoids run 25-75 DOF + perception; our gene under-counts it);
+    # everything else scales by DOF + sensing load.
+    board = ("NVIDIA Jetson AGX Orin 64GB" if whole_body or load >= 24
+             else "NVIDIA Jetson Orin Nano 8GB" if load >= 9
+             else "Raspberry Pi 5 (8GB)")
+    drivers = [d for d, on in (("whole-body", whole_body), ("vision", has_vision), ("LiDAR/SLAM", has_lidar)) if on]
+    why = f"compute load {load} ({n_actuators} DOF{', ' + ', '.join(drivers) if drivers else ''})"
+    return board, why
+
+
+def _select_power(robot_class: str, task: str, draw_w: float) -> tuple[str, int, str]:
+    """Choose the power source. DEFAULT is socketed wall power (a PSU rated above the draw); switch to a
+    battery only when the prompt asks for untethered/portable operation, then size the pack for ~1 h at the
+    estimated draw. (The product rule: socketed unless the user specifies battery.)"""
+    blob = task or ""
+    wants_battery = bool(_BATTERY_HINTS.search(blob)) and not _SOCKET_HINTS.search(blob)
+    if wants_battery:
+        need_wh = max(40.0, draw_w * 1.25)                  # ~1 h runtime + 25% margin
+        for name, wh in _BATTERY_PACKS:
+            if wh >= need_wh:
+                return name, 1, f"battery: {wh:g} Wh >= {need_wh:.0f} Wh (~{draw_w:.0f} W, ~1 h untethered)"
+        name, wh = _BATTERY_PACKS[-1]
+        return name, 1, f"battery: {wh:g} Wh largest pack (~{draw_w:.0f} W draw)"
+    need_w = max(60.0, draw_w * 1.4)                         # PSU headroom over peak draw
+    for name, w in _WALL_PSUS:
+        if w >= need_w:
+            return name, 1, f"socketed PSU: {w:g} W >= {need_w:.0f} W draw (default; say 'battery' for untethered)"
+    name, w = _WALL_PSUS[-1]
+    return name, 1, f"socketed PSU: {w:g} W largest (~{draw_w:.0f} W draw)"
+
+
+def _compute_and_power(robot_class: str, n_actuators: int, *, task: str = "",
+                       capabilities=None, bus_w: float = 0.0) -> list[tuple[str, int, str]]:
+    board, why = _select_compute(robot_class, n_actuators, task, capabilities)
+    board_w = component(board).power_w if component(board) else 15.0
+    draw_w = bus_w + board_w + 12.0                          # actuator bus (dominant) + compute + sensor/IO allowance
+    return [(board, 1, why), _select_power(robot_class, task, draw_w)]
 
 
 def _mobile_drive(gene: RobotGene) -> list[tuple[str, int, str]]:
@@ -348,6 +396,8 @@ def build_bom(gene: RobotGene, *, capabilities=None, task: str = "") -> dict:
     for a, qty in Counter(chosen).items():
         lines.append(BomLine(a.name, "actuator", qty, a.mass_kg, a.price_usd,
                              f"{a.kind}, peak {a.peak_torque_nm:g} Nm @ {a.voltage_v:g} V, gear {a.gear_ratio:g}:1"))
+    # actuator-bus continuous power (the dominant electrical draw) — sizes the power source below
+    bus_w = sum(a.rated_torque_nm * a.max_speed_radps * 0.3 for a in chosen)
 
     # 2) STRUCTURE — resolve each part's material for the TASK, then one line PER material actually used
     # (a coloured shell, an aluminium/steel/carbon skeleton, metal hands/feet) with its links + mass + cost.
@@ -369,7 +419,8 @@ def build_bom(gene: RobotGene, *, capabilities=None, task: str = "") -> dict:
     # 3) SENSORS / 4) COMPUTE+POWER / 5) MOBILE DRIVE / 6) END EFFECTOR
     scale_kg = sum(s.mass_kg for s in gene.segments)        # the robot's size drives sensor selection
     spec_items = (_sensor_suite(gene.robot_class, capabilities, task, scale_kg)
-                  + _compute_and_power(gene.robot_class, len(joints))
+                  + _compute_and_power(gene.robot_class, len(joints), task=task,
+                                       capabilities=capabilities, bus_w=bus_w)
                   + _mobile_drive(gene))
     if (gene.end_effector_type or "none") in ("gripper", "suction") and \
             (gene.robot_class or "").lower() in ("manipulator", "arm", "humanoid"):
@@ -387,8 +438,7 @@ def build_bom(gene: RobotGene, *, capabilities=None, task: str = "") -> dict:
     # electronics draw is exact (datasheet); the actuator bus is a duty-weighted continuous estimate
     # (rated torque x rated speed x ~30% duty / drivetrain efficiency) — a battery-sizing figure, not a stall peak.
     elec_w = sum(ln.qty * (component(ln.part).power_w if component(ln.part) else 0.0) for ln in lines)
-    bus_w = sum(a.rated_torque_nm * a.max_speed_radps * 0.3 for a in chosen)
-    est_power = round(elec_w + bus_w, 1)
+    est_power = round(elec_w + bus_w, 1)            # bus_w computed above, right after actuator selection
     return {
         "robot_class": gene.robot_class,
         "dof": len(joints),

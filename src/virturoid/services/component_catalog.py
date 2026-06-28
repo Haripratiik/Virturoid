@@ -118,6 +118,11 @@ COMPONENTS: tuple[Component, ...] = (
     Component("LiPo 4S 5200mAh (14.8V)", "power", 0.440, 0.0, 45.0, "Turnigy", "77Wh, ~12V rail"),
     Component("LiPo 6S 8000mAh (22.2V)", "power", 1.05, 0.0, 110.0, "Turnigy", "178Wh, 24V rail"),
     Component("Li-ion 48V 12Ah pack", "power", 2.6, 0.0, 320.0, "custom", "576Wh, 48V rail (legged/humanoid)"),
+    # power — socketed (wall) PSUs: the DEFAULT supply for tethered/benchtop robots, sized above the draw
+    Component("Mean Well RSP-150-24", "power", 0.65, 0.0, 55.0, "Mean Well", "150W 24V enclosed PSU (socketed/wall)"),
+    Component("Mean Well RSP-320-48", "power", 1.30, 0.0, 78.0, "Mean Well", "320W 48V enclosed PSU (socketed/wall)"),
+    Component("Mean Well RSP-750-48", "power", 2.40, 0.0, 140.0, "Mean Well", "750W 48V enclosed PSU (socketed/wall)"),
+    Component("Mean Well RSP-1500-48", "power", 4.20, 0.0, 320.0, "Mean Well", "1500W 48V enclosed PSU (socketed/wall)"),
     # mobile drive
     Component("Pololu 37Dx70L 12V gearmotor + encoder", "drive_motor", 0.215, 11.0, 40.0, "Pololu", "12V, 0.8Nm, 64CPR"),
     Component("100mm rubber drive wheel + hub", "wheel", 0.150, 0.0, 15.0, "Pololu", "100mm dia, 6mm hex"),
