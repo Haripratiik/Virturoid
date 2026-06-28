@@ -35,6 +35,37 @@ WANT = ["reports/spec_sheet.json", "reports/bom_sim_fidelity.json", "reports/hon
         "reports/product_readiness_ledger.json", "robot/bill_of_materials.json"]
 
 
+def _maybe_write_sim2sim(out: Path, prompt: str) -> None:
+    """For WALKERS, write reports/sim2sim_report.json -- how robustly the banked gait survives DOMAIN
+    RANDOMIZATION (randomized actuator gain / mass / damping / friction). DR-robustness is the recognized
+    sim2real-trust signal for locomotion, so this is the honest BEAT-4 number; it also feeds the scorecard's
+    sim2sim row. Best-effort (skips silently if there's no exactly-matching banked policy)."""
+    if not any(w in prompt.lower() for w in ("walk", "quadruped", "dog", "legged", "hexapod", "six-leg")):
+        return
+    try:
+        from virturoid.services.morph_graph import encode_robot
+        from virturoid.services.morph_policy import compiled_model, recipe_robustness, robot_mjcf
+        from virturoid.services.morphology_composer import compose_robot
+        from virturoid.services.viewer_sim import _load_locomotion_policy
+        gene = compose_robot(prompt, llm=None)
+        fd = encode_robot(compiled_model(robot_mjcf(gene))).feature_dim
+        pol = _load_locomotion_policy(out, fd, "models")
+        if pol is None:
+            return                                            # no matching banked gait -> nothing honest to report
+        rob = recipe_robustness(gene, pol, n=8)
+        surv = float(rob.get("survival_rate", 0.0))
+        grade = "STRONG" if surv >= 0.7 else "MODERATE" if surv >= 0.4 else "WEAK"
+        rep = {"verdict": f"transfer {grade}: banked gait survives {int(surv * 100)}% of randomized-dynamics worlds",
+               "survival_rate": surv, "mean_forward_m": rob.get("mean_forward"),
+               "min_forward_m": rob.get("min_forward"), "n_trials": rob.get("n"),
+               "method": "recipe_robustness: the banked policy under randomized actuator gain / mass / damping / friction"}
+        (out / "reports").mkdir(parents=True, exist_ok=True)
+        (out / "reports" / "sim2sim_report.json").write_text(json.dumps(rep, indent=2), encoding="utf-8")
+        print(f"  sim2sim: {rep['verdict']}")
+    except Exception as exc:  # noqa: BLE001
+        print(f"  (sim2sim) {exc}")
+
+
 def _ensure_honest_reports(out: Path, prompt: str) -> None:
     """Make every package -- whether built on the gene path or the legacy TEMPLATE path (arms) -- carry the spec
     sheet, the BOM<->sim fidelity report, and the unified honesty scorecard. The template path doesn't write
@@ -55,6 +86,7 @@ def _ensure_honest_reports(out: Path, prompt: str) -> None:
                 json.dumps(bom_sim_fidelity(gene), indent=2, default=str), encoding="utf-8")
         except Exception as exc:  # noqa: BLE001
             print(f"  (fidelity) {exc}")
+    _maybe_write_sim2sim(out, prompt)                        # sim2sim BEFORE the scorecard so the row is included
     try:
         from virturoid.services.honesty_scorecard import scorecard_from_package
         (out / "reports").mkdir(parents=True, exist_ok=True)
