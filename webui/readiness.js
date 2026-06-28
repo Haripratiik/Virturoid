@@ -50,10 +50,12 @@ export const readinessSection = {
       const safe = ledger.safe_to_export === true;
       root.appendChild(
         el("div", { class: "card score" }, [
-          el("div", { class: "num", text: safe ? "SAFE" : "BLOCKED" }),
+          el("div", { class: "num", text: safe ? "EXPORT-READY" : "BLOCKED" }),
           el("div", { class: "meta" }, [
-            el("div", {}, pill(safe ? "safe to export" : "not safe to export", safe ? "ok" : "bad")),
+            el("div", {}, pill(safe ? "package complete + verified" : "not safe to export", safe ? "ok" : "bad")),
             el("p", { style: "margin:6px 0 0;", text: `Highest attained stage: ${ledger.highest_attained || "-"}` }),
+            el("p", { style: "margin:6px 0 0;opacity:0.75;font-size:13px;",
+              text: "Export-readiness = package completeness + honest verification, NOT trained task capability. See the Honesty Scorecard (Reports) for what this robot can actually do." }),
           ]),
         ]),
       );
