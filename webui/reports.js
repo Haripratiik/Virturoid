@@ -98,13 +98,14 @@ export const reportsSection = {
     }
     root.appendChild(emptyState("Loading reports..."));
 
-    const [summary, markdown, ledger, spec, scorecard, compliance] = await Promise.all([
+    const [summary, markdown, ledger, spec, scorecard, compliance, dataset] = await Promise.all([
       ctx.fetchJson("reports/autonomous_build_summary.json"),
       ctx.fetchText("reports/mvp_summary.md"),
       ctx.fetchJson("reports/product_readiness_ledger.json"),
       ctx.fetchJson("reports/spec_sheet.json"),
       ctx.fetchJson("reports/honesty_scorecard.json"),
       ctx.fetchJson("reports/spec_compliance.json"),
+      ctx.fetchJson("reports/grasp_dataset_summary.json"),
     ]);
     clear(root);
 
@@ -185,6 +186,14 @@ export const reportsSection = {
           el("strong", { text: `${got}${mark}` }),
         ]);
       })));
+    }
+
+    // The in-sim data engine: 1 scripted grasp -> N verified demos (the data-bottleneck escape).
+    if (dataset && dataset.headline) {
+      root.appendChild(el("div", { style: "margin:8px 0 16px;padding:12px 14px;background:rgba(60,120,200,0.10);border-radius:8px;" }, [
+        el("div", { text: "Data engine (MimicGen)", style: "font-size:11.5px;opacity:0.65;text-transform:uppercase;letter-spacing:0.6px;" }),
+        el("div", { text: dataset.headline, style: "font-size:16px;font-weight:600;margin-top:3px;" }),
+      ]));
     }
 
     if (markdown) {
