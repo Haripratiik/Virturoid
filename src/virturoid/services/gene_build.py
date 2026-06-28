@@ -349,6 +349,7 @@ def build_gene_package(gene: RobotGene, prompt: str, output_dir: Path, scene_cou
             pass
     summary["bom"] = _emit_bom(gene, output_dir, task=prompt)  # real per-joint actuators + sensors + materials
     _maybe_write_summaries(output_dir)                         # spec sheet + deployment guide (reports/)
+    _maybe_write_spec_compliance(output_dir, gene, prompt)     # requested-vs-achieved spec report (§4.8E)
     # OPT-IN §15.3 export gate: run the tiered baseline+randomized robustness loop on the REAL gene and persist
     # reports/evaluation_run.json BEFORE the ledger, so _emit_readiness ENFORCES it (manipulator-only — the gate is
     # pick-place tiered; best-effort so it never breaks a build).
@@ -600,6 +601,7 @@ def _build_navigation_package(gene: RobotGene, prompt: str, output_dir: Path, co
     (output_dir / "reports" / "gene_evaluation_report.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     summary["bom"] = _emit_bom(gene, output_dir, task=prompt)  # real per-joint actuators + sensors + materials
     _maybe_write_summaries(output_dir)                         # spec sheet + deployment guide (reports/)
+    _maybe_write_spec_compliance(output_dir, gene, prompt)     # requested-vs-achieved spec report (§4.8E)
     _emit_mvp_artifacts(gene, output_dir, task_type=task.task_type, package_type="gene_navigation_package")
     summary["readiness"] = _emit_readiness(gene, output_dir)
     return summary
@@ -693,9 +695,33 @@ def _build_legged_package(gene: RobotGene, prompt: str, output_dir: Path, contro
     (output_dir / "reports" / "gene_evaluation_report.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     summary["bom"] = _emit_bom(gene, output_dir, task=prompt)  # real per-joint actuators + sensors + materials
     _maybe_write_summaries(output_dir)                         # spec sheet + deployment guide (reports/)
+    _maybe_write_spec_compliance(output_dir, gene, prompt)     # requested-vs-achieved spec report (§4.8E)
     _emit_mvp_artifacts(gene, output_dir, task_type="locomotion", package_type="gene_locomotion_package")
     summary["readiness"] = _emit_readiness(gene, output_dir)
     return summary
+
+
+def _maybe_write_spec_compliance(output_dir: Path, gene, prompt: str) -> None:
+    """If the prompt carried QUANTITATIVE constraints (height / weight budget / payload / pinned parts), write
+    an honest requested-vs-achieved report (reports/spec_compliance.json) so the build SHOWS whether it honored
+    the spec (§4.8E). No-op when the prompt has no such constraints; never breaks a build."""
+    try:
+        from virturoid.services.spec_parser import parse_prompt_spec, spec_compliance_report
+        spec = parse_prompt_spec(prompt or "")
+        if not spec.any():
+            return
+        bom = None
+        try:
+            from virturoid.services.bom_builder import build_bom
+            bom = build_bom(gene, task=prompt or "")
+        except Exception:  # noqa: BLE001 - the report still covers height/weight without a BOM
+            pass
+        report = spec_compliance_report(gene, spec, bom=bom)
+        (output_dir / "reports").mkdir(parents=True, exist_ok=True)
+        (output_dir / "reports" / "spec_compliance.json").write_text(
+            json.dumps(report, indent=2, default=str), encoding="utf-8")
+    except Exception:  # noqa: BLE001 - the compliance report is value-add; never block a build
+        pass
 
 
 def _maybe_write_summaries(output_dir: Path) -> None:
