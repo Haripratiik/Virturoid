@@ -702,9 +702,16 @@ def _build_legged_package(gene: RobotGene, prompt: str, output_dir: Path, contro
 
 
 def _maybe_write_spec_compliance(output_dir: Path, gene, prompt: str) -> None:
-    """If the prompt carried QUANTITATIVE constraints (height / weight budget / payload / pinned parts), write
-    an honest requested-vs-achieved report (reports/spec_compliance.json) so the build SHOWS whether it honored
-    the spec (§4.8E). No-op when the prompt has no such constraints; never breaks a build."""
+    """Write the build's HONEST reports: the BOM<->sim FIDELITY report (every build, §4.8A — surfaces the
+    optimistic-sim mass gap) and, when the prompt carried quantitative constraints (height/weight/payload/
+    pinned), the requested-vs-achieved SPEC-COMPLIANCE report (§4.8E). Best-effort; never breaks a build."""
+    try:                                                       # §4.8A: BOM<->sim fidelity, written for every build
+        from virturoid.services.fidelity_report import bom_sim_fidelity
+        (output_dir / "reports").mkdir(parents=True, exist_ok=True)
+        (output_dir / "reports" / "bom_sim_fidelity.json").write_text(
+            json.dumps(bom_sim_fidelity(gene), indent=2, default=str), encoding="utf-8")
+    except Exception:  # noqa: BLE001 - the fidelity report is value-add; never block a build
+        pass
     try:
         from virturoid.services.spec_parser import parse_prompt_spec, spec_compliance_report
         spec = parse_prompt_spec(prompt or "")
