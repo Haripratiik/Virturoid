@@ -98,17 +98,20 @@ export const reportsSection = {
     }
     root.appendChild(emptyState("Loading reports..."));
 
-    const [summary, markdown, ledger, spec] = await Promise.all([
+    const [summary, markdown, ledger, spec, scorecard, compliance] = await Promise.all([
       ctx.fetchJson("reports/autonomous_build_summary.json"),
       ctx.fetchText("reports/mvp_summary.md"),
       ctx.fetchJson("reports/product_readiness_ledger.json"),
       ctx.fetchJson("reports/spec_sheet.json"),
+      ctx.fetchJson("reports/honesty_scorecard.json"),
+      ctx.fetchJson("reports/spec_compliance.json"),
     ]);
     clear(root);
 
     root.appendChild(el("div", { class: "actions", style: "margin-bottom:16px;" }, [
       el("a", { class: "button", href: ctx.packageUrl("reports/workbench.html"), target: "_blank", rel: "noreferrer" }, "Open package workbench"),
       el("a", { class: "button", href: ctx.packageUrl("reports/index.html"), target: "_blank", rel: "noreferrer" }, "Open HTML report"),
+      el("a", { class: "button", href: ctx.packageUrl("reports/deployment_guide.md"), target: "_blank", rel: "noreferrer" }, "Build it for real"),
       el("a", { class: "button", href: ctx.packageUrl("reports/autonomous_build_summary.json"), target: "_blank", rel: "noreferrer" }, "Build summary JSON"),
     ]));
 
@@ -150,6 +153,38 @@ export const reportsSection = {
         metrics.push(el("div", { class: "metric" }, [el("span", { text: "Completeness" }), el("strong", { text: `${summary.readiness.score}%` })]));
       }
       root.appendChild(el("div", { class: "metrics" }, metrics));
+    }
+
+    // The Honesty Scorecard -- the wedge: every claim shown next to the gate's verdict; weak results never hidden.
+    if (scorecard && Array.isArray(scorecard.rows) && scorecard.rows.length) {
+      root.appendChild(el("h2", { text: "Honesty Scorecard", style: "margin:18px 0 2px;" }));
+      root.appendChild(el("p", { text: scorecard.headline || "", style: "font-size:15px;opacity:0.9;margin:0 0 10px;" }));
+      const tbl = el("table", { style: "width:100%;border-collapse:collapse;font-size:14px;" }, [
+        el("tr", {}, ["Claim", "Verdict", "Honest?"].map((h) =>
+          el("th", { text: h, style: "text-align:left;padding:6px 8px;border-bottom:1px solid #2a3138;opacity:0.7;" }))),
+        ...scorecard.rows.map((r) => el("tr", { style: r.honest ? "" : "background:rgba(225,170,60,0.10);" }, [
+          el("td", { text: String(r.claim || ""), style: "padding:6px 8px;border-bottom:1px solid #1c2228;" }),
+          el("td", { text: String(r.verdict || ""), style: "padding:6px 8px;border-bottom:1px solid #1c2228;opacity:0.9;" }),
+          el("td", { text: r.honest ? "✓ pass" : "⚠ flagged",
+            style: `padding:6px 8px;border-bottom:1px solid #1c2228;white-space:nowrap;color:${r.honest ? "#5fc27e" : "#e1aa3c"};` }),
+        ])),
+      ]);
+      root.appendChild(tbl);
+      root.appendChild(el("p", { text: "Flagged rows are the product catching its own limits — shown openly, with a verdict, not hidden.", style: "font-size:12.5px;opacity:0.6;margin:6px 0 16px;" }));
+    }
+
+    // Requested-vs-achieved for a detailed-spec prompt (height / weight / payload / pinned parts).
+    if (compliance && Array.isArray(compliance.constraints) && compliance.constraints.length) {
+      root.appendChild(el("h2", { text: "Requested vs achieved", style: "margin:8px 0 6px;" }));
+      root.appendChild(el("div", { class: "metrics" }, compliance.constraints.map((c) => {
+        const want = c.requested != null ? c.requested : (c.requested_max != null ? "≤ " + c.requested_max : "");
+        const got = c.achieved != null ? c.achieved : (c.present_in_bom ? "in BOM" : "-");
+        const mark = c.honored === false ? "  ⚠" : (c.honored ? "  ✓" : "");
+        return el("div", { class: "metric" }, [
+          el("span", { text: `${c.constraint}  (asked ${want})` }),
+          el("strong", { text: `${got}${mark}` }),
+        ]);
+      })));
     }
 
     if (markdown) {

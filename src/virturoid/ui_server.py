@@ -547,6 +547,9 @@ class _Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/packages":
             self._send_json(self._list_packages())
             return
+        if parsed.path == "/api/scorecard":
+            self._send_json(self._scorecard(parsed))
+            return
         if parsed.path == "/api/episode":
             self._send_episode(parsed)
             return
@@ -577,6 +580,23 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json({"error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
             return
         self._send_json(result)
+
+    def _scorecard(self, parsed) -> dict:
+        """The unified Honesty Scorecard for a package (§4.1) — computed on demand so it works even for packages
+        built before the scorecard was persisted. Reads the build's honest reports (readiness + spec-compliance +
+        fidelity + sim2sim)."""
+        from urllib.parse import parse_qs
+        name = (parse_qs(parsed.query).get("package") or [""])[0]
+        if not name:
+            return {"rows": [], "n_claims": 0, "headline": "no package selected"}
+        pkg = self.root / _safe_output_name(name)
+        if not pkg.exists():
+            return {"rows": [], "n_claims": 0, "headline": "package not found"}
+        try:
+            from virturoid.services.honesty_scorecard import scorecard_from_package
+            return scorecard_from_package(pkg)
+        except Exception as exc:  # noqa: BLE001
+            return {"error": str(exc), "rows": [], "n_claims": 0, "headline": "scorecard unavailable"}
 
     def _send_package_file(self, path: str) -> None:
         parts = [part for part in path.split("/") if part]

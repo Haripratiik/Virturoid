@@ -772,6 +772,14 @@ def _emit_readiness(gene: RobotGene, output_dir: Path) -> dict:
         from virturoid.services.readiness_ledger import write_product_readiness_ledger
         ledger = write_product_readiness_ledger(output_dir, robot_class=gene.robot_class, gene=gene,
                                                 enforce=False)
+        # Unified Honesty Scorecard (§4.1) — readiness + spec-compliance + fidelity (+ sim2sim if present) in one
+        # claim-vs-verdict view; the demo's honesty centerpiece (surfaces weak results next to their verdict).
+        try:
+            from virturoid.services.honesty_scorecard import scorecard_from_package
+            (output_dir / "reports" / "honesty_scorecard.json").write_text(
+                json.dumps(scorecard_from_package(output_dir), indent=2, default=str), encoding="utf-8")
+        except Exception:  # noqa: BLE001 - scorecard is value-add; never break a build
+            pass
         return {"safe_to_export": ledger.safe_to_export, "highest_attained": ledger.highest_attained}
     except Exception:  # noqa: BLE001 - readiness emission must never break a build
         return {}
