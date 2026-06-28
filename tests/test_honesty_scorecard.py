@@ -27,6 +27,12 @@ class HonestyScorecardTests(unittest.TestCase):
         self.assertFalse(claims["spec:self_weight_kg"]["honest"])
         self.assertIn("flagged", sc["headline"])
 
+    def test_fidelity_row_flags_optimistic_sim(self):
+        sc = honesty_scorecard(fidelity={"mass_fidelity_ratio": 2.26, "flags": ["optimistic"], "faithful": False})
+        row = next(r for r in sc["rows"] if r["claim"] == "bom_sim_fidelity")
+        self.assertFalse(row["honest"])                  # the optimistic-sim gap is surfaced as flagged
+        self.assertIn("lighter", row["verdict"])
+
     def test_empty_scorecard(self):
         sc = honesty_scorecard()
         self.assertEqual(sc["n_claims"], 0)

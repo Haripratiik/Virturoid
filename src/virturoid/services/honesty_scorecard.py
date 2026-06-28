@@ -18,12 +18,18 @@ _REAL_STATUSES = {ATTAINED, NOT_REQUIRED}
 
 
 def honesty_scorecard(*, readiness: dict | None = None, spec_compliance: dict | None = None,
-                      sim2sim: dict | None = None) -> dict:
+                      sim2sim: dict | None = None, fidelity: dict | None = None) -> dict:
     """Combine the honest signals into one scorecard. Each input is the corresponding report dict (or None)."""
     rows: list[dict] = []
     for st in (readiness or {}).get("stages", []):
         rows.append({"claim": st.get("stage", ""), "verdict": st.get("status", ""),
                      "honest": st.get("status") in _REAL_STATUSES, "evidence": st.get("detail", "")})
+    if fidelity:
+        ratio = fidelity.get("mass_fidelity_ratio")
+        faithful = bool(fidelity.get("faithful", not fidelity.get("flags")))
+        rows.append({"claim": "bom_sim_fidelity", "honest": faithful,
+                     "verdict": ("faithful" if faithful else f"sim ~{ratio}x lighter than real parts (disclosed)"),
+                     "evidence": {"mass_fidelity_ratio": ratio, "flags": fidelity.get("flags", [])}})
     for c in (spec_compliance or {}).get("constraints", []):
         honored = c.get("honored")
         rows.append({"claim": "spec:" + str(c.get("constraint", "")),
@@ -68,4 +74,5 @@ def scorecard_from_package(package_dir) -> dict:
 
     return honesty_scorecard(readiness=_read("product_readiness_ledger.json"),
                              spec_compliance=_read("spec_compliance.json"),
-                             sim2sim=_read("sim2sim_report.json"))
+                             sim2sim=_read("sim2sim_report.json"),
+                             fidelity=_read("bom_sim_fidelity.json"))
