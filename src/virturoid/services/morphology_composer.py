@@ -552,6 +552,8 @@ def _compose_robot_impl(prompt: str, *, llm="auto", reach_m: float | None = None
         # axolotl is an animal; the keyword list only knows the species someone typed in. (llm=None offline.)
         plan = plan_build(prompt, llm=llm)
     req = build_requirements_from_prompt(prompt, payload_kg=payload_kg, reach_m=reach_m)
+    from virturoid.services.spec_parser import parse_target_height_m
+    target_height_m = parse_target_height_m(prompt)        # honor "a 1.2 m tall humanoid" even offline (§4.8E)
 
     # DESIGN-INTENT COMPILER (general + reliable): with an LLM, it DESIGNS the BODY PLAN — class, scale, how
     # many of which appendages, an end effector — and our deterministic parametric builders synthesize the
@@ -623,17 +625,24 @@ def _compose_robot_impl(prompt: str, *, llm="auto", reach_m: float | None = None
     spec = morphology_from_requirements(req.reach_m, req.payload_kg, prompt=prompt,
                                         environment=req.environment, robot_class=plan.robot_class)
     spec["design_source"] = "heuristic"
-    return _fallback_gene(prompt, spec)
+    return _fallback_gene(prompt, spec, target_height_m=target_height_m)
 
 
-def _fallback_gene(prompt: str, heuristic_spec: dict) -> RobotGene:
+def _fallback_gene(prompt: str, heuristic_spec: dict, *, target_height_m: float | None = None) -> RobotGene:
     """The deterministic ORIGINAL-geometry FALLBACK when the LLM is unavailable or its design fails to
     verify. Never copies a real model: a humanoid/biped -> the anthropometric loft humanoid; a clearly-named
-    exotic (spider/snake/frog) -> its archetype; anything else -> the heuristic block recipe."""
+    exotic (spider/snake/frog) -> its archetype; anything else -> the heuristic block recipe.
+
+    ``target_height_m`` (a height parsed from the prompt, §4.8E) scales the humanoid to the requested stature
+    via the builder's head-height knob (total stature ~7.7 H), so "a 1.2 m tall humanoid" stands ~1.2 m even
+    offline; absent, the head-canon default is used so default builds stay byte-identical."""
     p = (prompt or "").lower()
     if any(w in p for w in _HUMANOID_WORDS):
         from virturoid.services.humanoid_anatomy import build_anthropometric_humanoid
-        g = build_anthropometric_humanoid()
+        # 8.55 = empirical measured-stature / head-height for this builder (the compiled AABB exceeds the 7.7
+        # head-canon because geom bounds extend past the crown); divide by it so MEASURED height ~= requested.
+        H = max(0.12, min(0.32, target_height_m / 8.55)) if target_height_m else 0.205
+        g = build_anthropometric_humanoid(H)
         g.design_source = "anthropometric"
         return g
     # Distinctive exotic SHAPES the general compiler can't yet express (legless serpent / radial spider /
