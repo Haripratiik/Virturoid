@@ -18,6 +18,9 @@ def _fake_package(root: Path):
     genome = {"id": "test_arm", "joints": [{"name": "base_yaw"}, {"name": "shoulder_pitch"},
                                            {"name": "elbow_pitch"}]}
     (root / "robot" / "robot_genome.json").write_text(json.dumps(genome), encoding="utf-8")
+    (root / "robot" / "bill_of_materials.json").write_text(json.dumps(
+        {"actuator_map": {"base_yaw": "Dynamixel XM430-W350-T", "shoulder_pitch": "T-Motor AK80-9",
+                          "elbow_pitch": "Dynamixel XM430-W350-T"}}), encoding="utf-8")
     (root / "simulation" / "scene_set.json").write_text(json.dumps(
         {"scenes": [{"objects": [{"pose_xyz_rpy": [0.42, -0.05, 0.05, 0, 0, 0]}]}]}), encoding="utf-8")
 
@@ -67,6 +70,25 @@ class Ros2ExportTests(unittest.TestCase):
             self.assertTrue((pkg / "virturoid_robot" / "policy_params.json").exists())
             # the bundled regression test runs the REAL controller and checks clamped joint targets
             _run_bundled_test(pkg, "test_controller_runs_if_present")
+
+    def test_emits_ros2_control_hardware_interface_and_safety(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); _fake_package(root)
+            pkg = export_ros2_package(root)
+            rc = (pkg / "config" / "ros2_control.yaml").read_text()
+            self.assertIn("joint_trajectory_controller", rc)
+            for j in ("base_yaw", "shoulder_pitch", "elbow_pitch"):
+                self.assertIn(j, rc)
+            hw = (pkg / "config" / "hardware_interface.yaml").read_text()
+            self.assertIn("Dynamixel XM430-W350-T", hw)              # joint -> the REAL BOM actuator
+            self.assertIn("T-Motor AK80-9", hw)
+            sf_path = pkg / "virturoid_robot" / "safety_filter.py"   # bundled CBF-lite gate
+            self.assertTrue(sf_path.exists())
+            spec = importlib.util.spec_from_file_location("vq_safety", sf_path)
+            mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+            out, viol = mod.SafetyFilter(lower=[-1.0], upper=[1.0], vel_limit=100.0).clamp([5.0], q=[0.0], dt=0.01)
+            self.assertEqual(viol, 1)
+            self.assertLessEqual(out[0], 1.0)
 
     def test_maybe_export_is_safe_without_genome(self):
         with tempfile.TemporaryDirectory() as tmp:

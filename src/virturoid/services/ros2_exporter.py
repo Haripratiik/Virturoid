@@ -56,13 +56,27 @@ def export_ros2_package(package_dir: Path, package_name: str = "virturoid_robot"
                    indent=2),
         encoding="utf-8",
     )
+    # ros2_control DEPLOY substrate (§4.7): a controller-manager config + a BOM-keyed hardware-interface map (the
+    # bridge to the REAL motors you bought) + the safety filter the node applies before commanding a motor.
+    actuator_map = _read_actuator_map(package_dir)
+    (root / "config" / "ros2_control.yaml").write_text(_ros2_control_yaml(joints), encoding="utf-8")
+    (root / "config" / "hardware_interface.yaml").write_text(
+        _hardware_interface_yaml(joints, actuator_map), encoding="utf-8")
+    (root / package_name / "safety_filter.py").write_text(_SAFETY_FILTER_PY, encoding="utf-8")
     (root / "test" / "test_task_regression.py").write_text(_TEST_PY, encoding="utf-8")
     (root / "README.md").write_text(
         f"# {package_name}\n\nGenerated ROS2 package for `{genome.get('id')}`"
         + ((f" — runs the exported {'GaitController (trot gait)' if policy_type == 'trot_cpg_gait' else 'ReachController'}.\n\n")
            if has_controller else " (no controller bundle; node publishes a neutral pose).\n\n")
         + "```\ncolcon build --packages-select " + package_name + "\nros2 launch " + package_name
-        + " evaluate.launch.py\n```\n", encoding="utf-8",
+        + " evaluate.launch.py\n```\n\n"
+        + "## Deploy to hardware (§4.7)\n"
+        + "`config/ros2_control.yaml` (controller manager) + `config/hardware_interface.yaml` (each joint -> its\n"
+        + "real BOM actuator) wire the controller to ros2_control; set `hardware_plugin` to your motor-bus driver\n"
+        + "(Dynamixel / ODrive / CAN / EtherCAT). `" + package_name + "/safety_filter.py` clamps every command to\n"
+        + "joint + rate limits before a motor sees it. Validate the closed loop in sim first via\n"
+        + "`services/sim_ros_bridge` (MuJoCo as virtual hardware behind the same command/state interface).\n",
+        encoding="utf-8",
     )
     return root
 
@@ -81,6 +95,74 @@ def maybe_export_ros2_package(package_dir, package_name: str = "virturoid_robot"
         return export_ros2_package(package_dir, package_name)
     except Exception:  # noqa: BLE001 - ROS2 export must never break the core build
         return None
+
+
+def _read_actuator_map(package_dir: Path) -> dict:
+    """The joint -> real-motor map from the bill of materials, so the hardware interface names the ACTUAL part
+    per joint. Empty (generic) when no BOM was written with the package."""
+    for rel in ("robot/bill_of_materials.json", "reports/bill_of_materials.json"):
+        p = package_dir / rel
+        if p.exists():
+            try:
+                return json.loads(p.read_text(encoding="utf-8")).get("actuator_map", {}) or {}
+            except (json.JSONDecodeError, OSError):
+                pass
+    return {}
+
+
+def _ros2_control_yaml(joints: list) -> str:
+    jl = "\n".join(f"      - {j}" for j in joints) or "      []"
+    return (
+        "controller_manager:\n"
+        "  ros__parameters:\n"
+        "    update_rate: 100  # Hz\n"
+        "    joint_state_broadcaster:\n"
+        "      type: joint_state_broadcaster/JointStateBroadcaster\n"
+        "    joint_trajectory_controller:\n"
+        "      type: joint_trajectory_controller/JointTrajectoryController\n\n"
+        "joint_trajectory_controller:\n"
+        "  ros__parameters:\n"
+        "    joints:\n" + jl + "\n"
+        "    command_interfaces: [position]\n"
+        "    state_interfaces: [position, velocity]\n")
+
+
+def _hardware_interface_yaml(joints: list, actuator_map: dict) -> str:
+    rows = []
+    for j in joints:
+        motor = actuator_map.get(j) or "GENERIC position actuator (set from the BOM)"
+        rows.append(f'  {j}:\n    actuator: "{motor}"\n    command_interface: position\n'
+                    f"    state_interfaces: [position, velocity]")
+    body = "\n".join(rows) or "  {}"
+    return (
+        "# Maps each robot joint to the REAL actuator from the bill of materials and the ros2_control interface it\n"
+        "# exposes. Set hardware_plugin to your bus driver (Dynamixel / ODrive / CAN / EtherCAT) before deploying.\n"
+        'hardware:\n  hardware_plugin: "REPLACE_WITH_YOUR_DRIVER  # e.g. dynamixel_hardware/DynamixelHardware"\n'
+        "joints:\n" + body + "\n")
+
+
+_SAFETY_FILTER_PY = '''"""Pure-stdlib safety gate (no ROS/numpy): clamp commanded joint-position targets to joint
+limits + a per-step rate (velocity) limit. The LAST thing before a real motor -- it prevents a policy from
+driving a joint past its mechanical stop or slewing faster than the safety budget. The node calls clamp() on
+every command before publishing to ros2_control. Mirrors services/sim_ros_bridge.SafetyFilter."""
+
+
+class SafetyFilter:
+    def __init__(self, lower, upper, vel_limit=8.0):
+        self.lower, self.upper, self.vel_limit = list(lower), list(upper), float(vel_limit)
+
+    def clamp(self, target, q, dt):
+        """Return (clamped_targets, n_violations); a violation = the raw command had to be altered."""
+        out, violations = [], 0
+        step = max(1e-6, self.vel_limit * float(dt))
+        for i, t in enumerate(target):
+            c = min(self.upper[i], max(self.lower[i], float(t)))
+            c = min(q[i] + step, max(q[i] - step, c))
+            if abs(c - float(t)) > 1e-6:
+                violations += 1
+            out.append(c)
+        return out, violations
+'''
 
 
 def _harness_targets(package_dir: Path) -> list[list[float]]:
