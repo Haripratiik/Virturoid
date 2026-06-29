@@ -569,6 +569,9 @@ class _Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/scorecard":
             self._send_json(self._scorecard(parsed))
             return
+        if parsed.path == "/api/flywheel":
+            self._send_json(self._flywheel())
+            return
         if parsed.path == "/api/episode":
             self._send_episode(parsed)
             return
@@ -616,6 +619,18 @@ class _Handler(BaseHTTPRequestHandler):
             return scorecard_from_package(pkg)
         except Exception as exc:  # noqa: BLE001
             return {"error": str(exc), "rows": [], "n_claims": 0, "headline": "scorecard unavailable"}
+
+    def _flywheel(self) -> dict:
+        """The flywheel COMPOUNDING CURVE (the moat KPI) for the build set — the per-cycle series written by
+        scripts/run_flywheel_for_demo.py at the build root. Empty (with a hint) until that script runs."""
+        p = self.root / "flywheel_compounding.json"
+        if not p.exists():
+            return {"series": [], "n_cycles": 0, "compounding": False,
+                    "headline": "run scripts/run_flywheel_for_demo.py to populate the compounding curve"}
+        try:
+            return json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            return {"series": [], "n_cycles": 0, "compounding": False, "headline": f"unreadable: {exc}"}
 
     def _send_package_file(self, path: str) -> None:
         parts = [part for part in path.split("/") if part]

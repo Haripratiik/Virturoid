@@ -89,6 +89,32 @@ async function loadBuilds() {
 // Exposed so the self-running demo (autodemo.js) can refresh the tree and highlight a build node.
 export { select as selectMemoryNode, loadBuilds as loadMemoryBuilds };
 
+// ---- Flywheel COMPOUNDING CURVE (the moat KPI): banked assets per build cycle, from /api/flywheel
+// (populated by scripts/run_flywheel_for_demo.py). Rendered in the Notes panel's default view. ----
+let _flywheel = null;
+async function loadFlywheel() {
+  try { _flywheel = await fetch("/api/flywheel").then((r) => r.json()); } catch (e) { _flywheel = null; }
+  memBus.dispatchEvent(new CustomEvent("flywheel"));
+}
+function appendFlywheelChart(host) {
+  const fw = _flywheel;
+  if (!fw || !Array.isArray(fw.series) || !fw.series.length) return;
+  host.appendChild(el("div", { class: "panel-section-title", text: "Flywheel — banked assets per cycle (the moat)" }));
+  const max = Math.max(...fw.series.map((s) => s.banked)) || 1;
+  const chart = el("div", { style: "display:flex;flex-direction:column;gap:6px;margin:8px 0;" });
+  fw.series.forEach((s) => {
+    const w = Math.round((100 * s.banked) / max);
+    chart.appendChild(el("div", { style: "display:flex;align-items:center;gap:8px;font-size:12px;" }, [
+      el("span", { text: `cycle ${s.cycle}${s.warm_start ? " ⟲ warm" : ""}`, style: "width:96px;opacity:0.75;" }),
+      el("div", { style: `height:14px;width:${w}%;min-width:4px;background:#5fc27e;border-radius:3px;` }),
+      el("span", { text: String(s.banked), style: "opacity:0.85;" }),
+    ]));
+  });
+  host.appendChild(chart);
+  host.appendChild(el("p", { text: fw.headline || "",
+    style: `font-size:13px;margin-top:4px;color:${fw.compounding ? "#5fc27e" : "#e1aa3c"};` }));
+}
+
 function classNodeForBuild(b) {
   const cls = String((b && b.robot_class) || "").toLowerCase();
   const name = String((b && (b.id || b.name)) || "").toLowerCase();
@@ -473,6 +499,7 @@ function makeNotePanel(icon) {
     const node = state.selected ? nodeById.get(state.selected) : null;
     if (!node) {
       host.appendChild(el("div", { class: "empty", text: "Select a species in the tree to read its build + training tips." }));
+      appendFlywheelChart(host);
       appendBuiltSummary(host);
       return;
     }
@@ -505,8 +532,8 @@ function makeNotePanel(icon) {
   }
   return {
     id: "memoryNote", title: "Notes", icon, dependsOnPackage: false,
-    mount(elx) { clear(elx); host = el("div", { class: "mem-note" }); elx.appendChild(host); render(); memBus.addEventListener("select", render); memBus.addEventListener("builds", render); },
-    onShow() { render(); },
+    mount(elx) { clear(elx); host = el("div", { class: "mem-note" }); elx.appendChild(host); render(); memBus.addEventListener("select", render); memBus.addEventListener("builds", render); memBus.addEventListener("flywheel", render); loadFlywheel(); },
+    onShow() { render(); loadFlywheel(); },
   };
 }
 
