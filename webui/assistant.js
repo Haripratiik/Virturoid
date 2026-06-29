@@ -129,6 +129,26 @@ export const assistantPanel = {
     this._els.log.scrollTop = this._els.log.scrollHeight;
   },
 
+  _startBuildStages(prompt, typing) {
+    // demo item 4: while a ~10s build is in flight, tick a label through the REAL pipeline stages so the window
+    // never reads as "frozen" (the failure mode that kills live robotics demos). Build-like prompts only.
+    if (!/\b(build|make|create|design|generate|a robot|an?\s+(arm|quadruped|humanoid|dog|hexapod|rover|gripper|six)|walks?|sorts?|grasp|stack)/i.test(prompt)) return null;
+    const stages = ["designing the body", "sizing real actuators (BOM)", "compiling MuJoCo physics",
+                    "running the honesty gate", "recording the episode"];
+    const bubble = typing.querySelector(".asst-bubble");
+    if (!bubble) return null;
+    let i = 0;
+    const tick = () => {
+      if (!bubble.isConnected) return;
+      const label = stages[Math.min(i, stages.length - 1)];
+      bubble.innerHTML = `<span class="asst-stage" style="opacity:0.85;margin-right:6px;">${label}</span>`
+        + `<span class="dots"><i></i><i></i><i></i></span>`;
+      i += 1;
+    };
+    tick();
+    return setInterval(tick, 1700);   // advance ~every 1.7s; holds on the last stage until the reply arrives
+  },
+
   async _send(text) {
     const value = (text || "").trim();
     if (!value || this._busy) return;
@@ -146,6 +166,7 @@ export const assistantPanel = {
     ]);
     this._els.log.appendChild(typing);
     this._els.log.scrollTop = this._els.log.scrollHeight;
+    const stageTimer = this._startBuildStages(value, typing);   // demo item 4: staged progress, no frozen 3-dot
 
     try {
       const messages = this._history
@@ -175,6 +196,7 @@ export const assistantPanel = {
       typing.remove();
       this._append("assistant", `Something went wrong: ${error.message || error}`);
     } finally {
+      if (stageTimer) clearInterval(stageTimer);
       this._busy = false;
       this._els.send.disabled = false;
       this._els.input.focus();
