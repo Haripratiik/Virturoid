@@ -58,6 +58,11 @@ def main(argv=None) -> int:
     ap.add_argument("--prog-w", type=float, default=4.0, help="forward-PROGRESS reward (linear, 0 at standstill, "
                     "capped at vtgt) — the 'actually go forward' incentive that a Gaussian speed-tracker lacked "
                     "(a small vtgt makes standing score ~82 pct of a Gaussian, so it converges to standing)")
+    ap.add_argument("--back-w", type=float, default=10.0, help="BACKWARD-base-x penalty weight (G4 parity fix): "
+                    "the gait-quality rewards (air-time/alternation/clearance) pay for STEPPING regardless of "
+                    "direction, so a body earns them while REVERSING a forward CPG prior — the MJX-vs-CPU backward "
+                    "convergence. This penalty is applied OUTSIDE the max(0) gate, so a backward gait is driven "
+                    "toward 0 reward (never a basin) while a forward gait is untouched.")
     # CANONICAL legged_gym (Rudin et al.) reward terms — the published dictionary that converts an upright slide
     # into a deliberate WALK (see docs/virturoid_research_dossier.md). feet_air_time is the single most important
     # anti-slide / anti-stand-still term: it pays the policy for the TIME each foot spends in the air per step
@@ -208,6 +213,7 @@ def main(argv=None) -> int:
     q_default = jp.asarray([float(_d0.qpos[int(a)]) for a in graph.qadr])
     KP, KD, ASCALE, VTGT, CLEAR_W = args.kp, args.kd, args.ascale, args.vtgt, args.clear_w
     SWING_W, SLIP_W, ALT_W, SMOOTH_W, PROG_W = args.swing_w, args.slip_w, args.alt_w, args.smooth_w, args.prog_w
+    BACK_W = args.back_w                                       # G4: explicit backward-base-x penalty
     AIR_W, AIR_TGT, VZ_W, WXY_W = args.air_w, args.air_target, args.vz_w, args.wxy_w   # legged_gym reward terms
     TORQUE_W = args.torque_w                              # actuator-effort penalty (anti-crank stabilizer)
     # TROT-CPG PRIOR (opt-in --cpg): per-token feed-forward amplitude/phase from the SAME logic as the CPU recipe
@@ -437,7 +443,11 @@ def main(argv=None) -> int:
                                     + CLEAR_W * clearance * up + SWING_W * swing * up + ALT_W * swing_phase * up
                                     + AIR_W * air_reward * up
                                     - SLIP_W * slip - SMOOTH_W * sm - stab - TORQUE_W * effort)
-                rew = alive2 * step_r                                   # non-negative; zero after a fall
+                # G4 PARITY FIX: an explicit cost for BACKWARD base-x, applied OUTSIDE the max(0) so the stepping
+                # rewards can't fund a reversed gait. Scales with how backward it goes -> backward is driven to 0
+                # reward (never a basin) while a forward gait pays nothing. Kills the MJX backward-convergence.
+                back_pen = BACK_W * jp.maximum(0.0, -fwd) * up
+                rew = alive2 * jp.maximum(0.0, step_r - back_pen)       # non-negative; zero after a fall or if reversing
             # carry the action basis used for smoothness next step (applied offset for recipe; clipped for legacy)
             a_next = a_clip if LEGACY else off
             return (data2, alive2, a_next, air_time2, last_contact2), (obs, act, logp, rew, val, fwd, alive2)

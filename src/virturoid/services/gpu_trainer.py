@@ -114,7 +114,8 @@ def _launch_ok(launch_cmd: str, proc_name: str) -> bool:
 
 
 # reward-shaping flags the MJX trainer accepts (gait_critic's bounded design space -> trainer CLI flags).
-_REWARD_FLAGS = ("prog_w", "clear_w", "swing_w", "slip_w", "alt_w", "smooth_w", "air_w", "vz_w", "wxy_w", "torque_w")
+_REWARD_FLAGS = ("prog_w", "clear_w", "swing_w", "slip_w", "alt_w", "smooth_w", "air_w", "vz_w", "wxy_w",
+                 "torque_w", "back_w")   # back_w = the G4 backward-base-x penalty
 
 
 def train_gene_on_gpu(gene, *, out_path: str, iters: int = 80, envs: int = 1024, progress=None,
