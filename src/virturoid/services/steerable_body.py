@@ -23,16 +23,29 @@ def _leg_links(dofs_per_leg: int):
     return {2: [hip, knee], 3: [yaw, hip, knee], 4: [yaw, hip, knee, ankle]}[dofs_per_leg]
 
 
-def steerable_quadruped(species: str = "frog", *, n_legs: int = 4, dofs_per_leg: int = 3):
+def steerable_quadruped(species: str = "frog", *, n_legs: int = 4, dofs_per_leg: int = 3,
+                        bilateral: bool = False):
     """A frog-like legged body. ``dofs_per_leg`` selects the leg chain (3 = hip-yaw+hip-pitch+knee, the
-    hip-yaw being what lets a learned policy turn). ``n_legs`` places legs at corners (4) or radially."""
+    hip-yaw being what lets a learned policy turn). ``n_legs`` places legs at corners (4) or radially — set
+    ``bilateral=True`` to instead run n/2 legs down EACH side of an elongated body (insect/centipede), the
+    forward-walkable layout: every leg's fore-aft swing thrusts the same way, so the body has a coherent
+    heading (a radial layout is symmetric -> no net forward thrust)."""
     from virturoid.services.morphology_builder import MorphologyBuilder
 
     b = MorphologyBuilder("legged", base_mount="free", species=species)
-    b.base("torso", shape="box", length=0.10, radius=0.16, mass=2.5)
-    if n_legs == 4:
+    if bilateral and n_legs != 4:
+        per_side = n_legs // 2
+        b.base("torso", shape="box", length=0.10, radius=0.20, mass=2.5)   # elongated for side-mounted legs
+        xs = [round(0.20 - 0.40 * i / max(1, per_side - 1), 3) for i in range(per_side)]   # front..back
+        mounts = []
+        for x in xs:
+            mounts += [(x, 0.13), (x, -0.13)]                # a pair (left, right) at each body station
+        mounts = mounts[:n_legs]
+    elif n_legs == 4:
+        b.base("torso", shape="box", length=0.10, radius=0.16, mass=2.5)
         mounts = [(0.14, 0.12), (0.14, -0.12), (-0.14, 0.12), (-0.14, -0.12)]
     else:  # radial arrangement for other leg counts
+        b.base("torso", shape="box", length=0.10, radius=0.16, mass=2.5)
         mounts = [(0.15 * math.cos(2 * math.pi * i / n_legs), 0.15 * math.sin(2 * math.pi * i / n_legs))
                   for i in range(n_legs)]
     links = _leg_links(dofs_per_leg)

@@ -113,6 +113,9 @@ def main(argv=None) -> int:
                     "conditioning (adds Wfilm; the CPU MorphPolicy mirrors it)")
     ap.add_argument("--topo-bias", action="store_true", help="Phase-5 tokenizer upgrade: topology-aware "
                     "attention bias on kinematic hop distance (adds Wtopo)")
+    ap.add_argument("--calf-phase", type=float, default=None, help="override the trot-CPG calf phase (rad); "
+                    "per-body gait direction (quad walks fwd at 1.5708, a bilateral hexapod at 0.0)")
+    ap.add_argument("--cpg-freq", type=float, default=None, help="override the trot-CPG frequency (Hz)")
     args = ap.parse_args(argv)
     if args.smoke:
         args.envs, args.iters, args.ep_len, args.minibatches = 2, 2, 20, 1
@@ -212,15 +215,22 @@ def main(argv=None) -> int:
     # The phase is driven by the live sim clock data.time (no carry surgery; continuous across chunks, resets per ep).
     CPG_ON = False; CPG_FREQ = 0.0; RES_SCALE = 1.0; TWO_PI = 2.0 * float(np.pi)
     cpg_amp_j = jp.zeros(graph.n_tokens); cpg_phase_j = jp.zeros(graph.n_tokens)
+    CPG_PARAMS = None
     if args.cpg:
         from virturoid.services.morph_policy import CPG_DEFAULT, _trot_cpg_tokens
-        _amp, _phase, _gate = _trot_cpg_tokens(mj, graph, CPG_DEFAULT)
+        cpgd = dict(CPG_DEFAULT)                              # per-body gait overrides (direction/rhythm)
+        if args.calf_phase is not None:
+            cpgd["calf_phase"] = float(args.calf_phase)
+        if args.cpg_freq is not None:
+            cpgd["freq"] = float(args.cpg_freq)
+        _amp, _phase, _gate = _trot_cpg_tokens(mj, graph, cpgd)
         if _gate:
-            CPG_ON = True; CPG_FREQ = float(CPG_DEFAULT["freq"]); RES_SCALE = float(CPG_DEFAULT["residual_scale"])
-            cpg_amp_j = jp.asarray(_amp); cpg_phase_j = jp.asarray(_phase)
-            print(f"trot-CPG prior ON: freq={CPG_FREQ} res_scale={RES_SCALE} active={int((_amp != 0).sum())} tokens", flush=True)
+            CPG_ON = True; CPG_FREQ = float(cpgd["freq"]); RES_SCALE = float(cpgd["residual_scale"])
+            cpg_amp_j = jp.asarray(_amp); cpg_phase_j = jp.asarray(_phase); CPG_PARAMS = cpgd
+            print(f"trot-CPG prior ON: freq={CPG_FREQ} calf_phase={cpgd['calf_phase']} res_scale={RES_SCALE} "
+                  f"active={int((_amp != 0).sum())} tokens", flush=True)
         else:
-            print("--cpg requested but body is not a recognized 4-leg quad; using scalar recipe", flush=True)
+            print("--cpg requested but body is not a recognized legged body; using scalar recipe", flush=True)
     # SIM2REAL DR knobs (static -> every DR op below is guarded by DR_ON, so --dr off is byte-identical).
     DR_ON = bool(args.dr); DR_GAIN = float(args.dr_gain); DR_PD = float(args.dr_pd)
     DR_OBS = float(args.dr_obs); DR_PUSH = float(args.dr_push); DR_PUSH_MAG = float(args.dr_push_mag)
@@ -512,6 +522,10 @@ def main(argv=None) -> int:
             extra["Wfilm"] = np.asarray(a["Wfilm"])
         if TOPO_BIAS:
             extra["Wtopo"] = np.asarray(a["Wtopo"])
+        if CPG_PARAMS is not None:                            # bank the EXACT CPG so CPU deploy matches training
+            extra["cpg_arr"] = np.asarray([CPG_PARAMS["freq"], CPG_PARAMS["thigh_amp"], CPG_PARAMS["calf_amp"],
+                                           CPG_PARAMS["calf_phase"], CPG_PARAMS["residual_scale"],
+                                           1.0 if CPG_PARAMS.get("leg_flip") else 0.0])
         np.savez(args.save, We=np.asarray(a["We"]), be=np.asarray(a["be"]), Wq=np.asarray(a["Wq"]),
                  Wk=np.asarray(a["Wk"]), Wv=np.asarray(a["Wv"]), Wo=np.asarray(a["Wo"]),
                  Wh=np.asarray(a["Wh"]), bh=np.asarray(a["bh"]), **extra,

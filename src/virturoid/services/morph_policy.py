@@ -165,6 +165,10 @@ class MorphPolicy:
         # TROT-CPG flag rides in meta[5]: a CPG-trained residual MUST deploy under the same CPG prior (else the
         # learned residual drives a body with no stepping rhythm). Older 5-element meta -> None -> scalar recipe.
         p.cpg = CPG_DEFAULT if (len(meta) > 5 and float(meta[5]) > 0.5) else None
+        if "cpg_arr" in d.files:                             # EXACT banked CPG (per-body calf_phase/freq) -> deploy==train
+            c = np.asarray(d["cpg_arr"], dtype=float)
+            p.cpg = {"freq": float(c[0]), "thigh_amp": float(c[1]), "calf_amp": float(c[2]),
+                     "calf_phase": float(c[3]), "residual_scale": float(c[4]), "leg_flip": bool(c[5] > 0.5)}
         return p
 
     def to_npz(self, path, score: float = 0.0, *, normalizer=None):
