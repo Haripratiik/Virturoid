@@ -14,11 +14,12 @@ from __future__ import annotations
 _CPG_KEYS = ("calf_phase", "freq", "thigh_amp", "calf_amp", "residual_scale")
 
 
-def make_cpg_evaluate(gene, *, steps: int = 600, seed: int = 0, base_cpg: dict | None = None):
-    """Return an ``evaluate(spec) -> result`` that applies a spec's CPG edit to ``gene`` and runs a pure-CPG
-    (zero-residual) recipe rollout. The zero policy + compiled graph are built ONCE and reused across the search,
-    so each eval is just a rollout (~1-2 s CPU). ``spec`` = ``{edit_kind:'cpg', params:{calf_phase,freq,...}}``.
-    """
+def make_locomotion_evaluate(gene, *, steps: int = 600, seed: int = 0, base_cpg: dict | None = None):
+    """Return an ``evaluate(spec) -> result`` that applies a spec's locomotion edit to ``gene`` and runs a
+    pure-CPG (zero-residual) recipe rollout. Handles two edit kinds over the SAME rollout: ``cpg`` (gait prior:
+    calf_phase/freq/thigh_amp/calf_amp) and ``gains`` (PD: kp/kd, or adaptive inertia-scaled gains). The zero
+    policy + compiled graph are built ONCE and reused, so each eval is just a rollout (~1-2 s CPU) — the cheapest
+    fidelity rung. ``spec`` = ``{edit_kind:'cpg'|'gains', params:{...}}``."""
     import numpy as np
 
     from virturoid.services.morph_graph import encode_robot
@@ -30,15 +31,24 @@ def make_cpg_evaluate(gene, *, steps: int = 600, seed: int = 0, base_cpg: dict |
     base = dict(base_cpg or CPG_DEFAULT)
 
     def evaluate(spec):
+        p = spec.get("params") or {}
         cpg = dict(base)
         for k in _CPG_KEYS:
-            if k in (spec.get("params") or {}):
-                cpg[k] = float(spec["params"][k])
-        r = recipe_rollout_morph(gene, zero, steps=steps, cpg=cpg, seed=seed)
+            if k in p:
+                cpg[k] = float(p[k])
+        kp = float(p.get("kp", 32.0))                         # PD gains (gains edit); default = the scalar recipe
+        kd = float(p.get("kd", 1.5))
+        adaptive = bool(p.get("adaptive", False))             # inertia-scaled per-joint gains (the "any robot" leg)
+        r = recipe_rollout_morph(gene, zero, steps=steps, cpg=cpg, kp=kp, kd=kd, adaptive=adaptive, seed=seed)
         return {"forward": float(r.get("forward", 0.0)), "cadence": float(r.get("cadence", 0.0)),
-                "upright_frac": r.get("upright_frac"), "survived": bool(r.get("survived")), "cpg": cpg}
+                "upright_frac": r.get("upright_frac"), "survived": bool(r.get("survived")),
+                "cpg": cpg, "gains": {"kp": kp, "kd": kd, "adaptive": adaptive}}
 
     return evaluate
+
+
+# Back-compat alias: the CPG-only search is just the locomotion evaluate driven by cpg edits.
+make_cpg_evaluate = make_locomotion_evaluate
 
 
 def cpg_grid_proposer(grid: list[dict] | None = None):

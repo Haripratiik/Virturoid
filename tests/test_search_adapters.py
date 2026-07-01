@@ -4,7 +4,7 @@ LLM-free grid proposer (night-shift N1 core). Uses MuJoCo (like the other locomo
 import unittest
 
 from virturoid.services.design_search import run_design_search
-from virturoid.services.search_adapters import cpg_grid_proposer, make_cpg_evaluate
+from virturoid.services.search_adapters import cpg_grid_proposer, make_cpg_evaluate, make_locomotion_evaluate
 from virturoid.services.steerable_body import steerable_quadruped
 
 
@@ -24,6 +24,15 @@ class SearchAdapterTests(unittest.TestCase):
         # each node has a real diagnosis artifact with a locomotion failure mode
         self.assertIn(rep.best.artifact["failure_mode"],
                       ("walking", "weak_forward", "walks_backward", "shuffle", "leaning", "fell"))
+
+    def test_locomotion_evaluate_applies_gains_edits(self):
+        gene = steerable_quadruped(n_legs=4, dofs_per_leg=3)
+        evaluate = make_locomotion_evaluate(gene, steps=100)
+        r = evaluate({"edit_kind": "gains", "params": {"kp": 55.0, "kd": 2.5, "adaptive": False}})
+        self.assertEqual(r["gains"]["kp"], 55.0)               # the gains edit reached the rollout
+        self.assertEqual(r["gains"]["kd"], 2.5)
+        import math
+        self.assertTrue(math.isfinite(r["forward"]))
 
 
 if __name__ == "__main__":
