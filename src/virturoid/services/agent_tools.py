@@ -46,6 +46,15 @@ def _design_brain(args: dict) -> dict:
     return design_brain_summary(args.get("memory_dir") or "build/memory")
 
 
+def _describe_robot(args: dict) -> dict:
+    """Make a robot legible to an LLM: compose a body from the prompt, serialize it to tokens + a grounded
+    natural-language summary (the robotics-native read side — an agent reasons about *this* body, not blind)."""
+    prompt = args["prompt"]                                   # required (accessed first -> clean missing-arg error)
+    from virturoid.services.morphology_composer import compose_robot
+    from virturoid.services.robot_serializer import describe_robot
+    return describe_robot(compose_robot(prompt))
+
+
 def _build_robot(args: dict) -> dict:
     """Compose + physics-build a robot from a prompt (REAL MuJoCo; slow). Returns an honest summary."""
     from virturoid.services.autonomous_build import autonomous_build
@@ -110,6 +119,14 @@ TOOLS: dict[str, dict] = {
         "parameters": {"type": "object", "properties": {
             "memory_dir": {"type": "string", "description": "shared memory dir (default build/memory)"}}},
         "handler": _design_brain, "heavy": False,
+    },
+    "describe_robot": {
+        "description": "Serialize a robot (composed from a prompt) into LLM-readable tokens + a grounded "
+                       "natural-language summary — the robotics-native read side so an agent reasons about "
+                       "the specific body, not blind. No physics; composes a body only.",
+        "parameters": {"type": "object", "required": ["prompt"], "properties": {
+            "prompt": {"type": "string", "description": "what robot to describe (e.g. 'a dog that walks')"}}},
+        "handler": _describe_robot, "heavy": False,
     },
     "evaluate_robot": {
         "description": "Compose a robot for a prompt and score it on its morphology-implied task (real MuJoCo).",
