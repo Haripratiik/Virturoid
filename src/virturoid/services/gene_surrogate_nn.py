@@ -92,7 +92,7 @@ class GeneGNN:
         self.enc = nn.Linear(_NODE_DIM, h)
         self.msg1 = nn.Linear(h, h)
         self.msg2 = nn.Linear(h, h)
-        self.head = nn.Sequential(nn.Linear(h, h), nn.ReLU(), nn.Linear(h, 1))
+        self.head = nn.Sequential(nn.Linear(2 * h, h), nn.ReLU(), nn.Linear(h, 1))  # 2h: mean|max pool
         # graph-autoencoder decoder: reconstruct node features from per-node latents -> the objective that
         # shapes the pooled latent into a reusable DESIGN manifold (GLSO), not just a success scalar.
         self.dec = nn.Sequential(nn.Linear(h, h), nn.ReLU(), nn.Linear(h, _NODE_DIM))
@@ -118,8 +118,15 @@ class GeneGNN:
         return h
 
     def _encode_one(self, x, edge_index):
-        """Message-pass + graph-mean pool -> the pooled graph latent (``z_body``), pre-head."""
-        return self._message_pass(x, edge_index).mean(dim=0)
+        """Message-pass + mean|max graph pooling -> the pooled graph latent (``z_body``), pre-head.
+
+        Concatenating mean AND max over the node hidden states keeps COARSE structure that mean-pooling
+        alone washes out: e.g. max over the TopoPE child-count signal separates a BRANCHED quad (torso has
+        4 children) from a SERIAL arm (max 1 child) — the ``arm-near-quad`` failure of pure mean-pooling."""
+        import torch
+
+        h = self._message_pass(x, edge_index)
+        return torch.cat([h.mean(dim=0), h.max(dim=0).values])
 
     def _forward_one(self, x, edge_index):
         import torch

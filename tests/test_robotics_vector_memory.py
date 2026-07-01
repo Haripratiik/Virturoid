@@ -202,10 +202,10 @@ class LearnedLatentSeamTests(unittest.TestCase):
         from virturoid.services.gene_surrogate_nn import GeneGNN
         gnn = GeneGNN(hidden=16, device="cpu")
         latent = gnn.embed(tabletop_arm_gene())
-        self.assertEqual(len(latent), 16)
+        self.assertEqual(len(latent), 32)                                 # mean|max pooling -> 2*hidden
         self.assertEqual(latent, gnn.embed(tabletop_arm_gene()))          # deterministic for fixed weights
         # and it plugs straight into the body embedder
-        self.assertEqual(len(embed_body(tabletop_arm_gene(), latent=latent)), 16)
+        self.assertEqual(len(embed_body(tabletop_arm_gene(), latent=latent)), 32)
 
 
 if __name__ == "__main__":
