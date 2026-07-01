@@ -575,6 +575,10 @@ class _Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/design_brain":
             self._send_json(self._design_brain())
             return
+        if parsed.path == "/api/tools":                        # agentic tool surface: DISCOVER the tools
+            from virturoid.services.agent_tools import tool_specs
+            self._send_json({"tools": tool_specs()})
+            return
         if parsed.path == "/api/episode":
             self._send_episode(parsed)
             return
@@ -594,7 +598,16 @@ class _Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/assistant/chat":
             self._handle_json_post(lambda payload: run_assistant_turn(payload, self.root))
             return
+        if parsed.path == "/api/tool":                         # agentic tool surface: INVOKE a tool by name
+            self._handle_json_post(self._agent_tool_call)
+            return
         self._send_json({"error": "Not found"}, status=HTTPStatus.NOT_FOUND)
+
+    def _agent_tool_call(self, payload) -> dict:
+        """Dispatch an agentic tool: ``{tool, args}`` -> ``{ok, tool, result|error}`` (localhost tool surface
+        so an external agent / MCP bridge can drive the platform over HTTP; see services/agent_tools)."""
+        from virturoid.services.agent_tools import call_tool
+        return call_tool(payload.get("tool", ""), payload.get("args") or {})
 
     def _handle_json_post(self, handler) -> None:
         try:
