@@ -58,6 +58,18 @@ class MorphPolicyPhase5Tests(unittest.TestCase):
         on._arrs["Wtopo"][...] = np.array([0.0, 1.5, -1.0, 0.7, 0.0, 0.0, 0.0, 0.0, 0.0])
         self.assertFalse(np.allclose(on.act(obs, hop=hop), off.act(obs)))
 
+    def test_topo_bias_policy_deploys_through_recipe_rollout(self):
+        """A topo-bias policy must run the recipe deploy path with its hop matrix wired (train==deploy)."""
+        from virturoid.fixtures.gene_library import quadruped_gene
+        from virturoid.services.morph_graph import encode_robot
+        from virturoid.services.morph_policy import compiled_model, recipe_rollout_morph, robot_mjcf
+        gene = quadruped_gene()
+        g = encode_robot(compiled_model(robot_mjcf(gene)))
+        pol = MorphPolicy(g.feature_dim, topo_bias=True)        # zero Wtopo -> runs; hop must be computed + passed
+        r = recipe_rollout_morph(gene, pol, steps=60)
+        self.assertTrue(r["finite"])
+        self.assertIn("forward", r)
+
     def test_npz_round_trip_preserves_opt_in_weights(self):
         import tempfile
         from pathlib import Path

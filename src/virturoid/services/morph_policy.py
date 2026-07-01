@@ -572,6 +572,13 @@ def recipe_rollout_morph(gene, policy: MorphPolicy | None = None, *, steps: int 
         policy = MorphPolicy(graph.feature_dim, seed=seed)
     if policy.feature_dim != graph.feature_dim:
         raise ValueError(f"policy feature_dim {policy.feature_dim} != graph {graph.feature_dim}")
+    # Phase-5 topo-bias: a policy trained WITH the topology attention bias must DEPLOY with it too, or the
+    # learned control mismatches. Compute the body's hop-distance matrix once (None for non-topo policies ->
+    # act() ignores it -> byte-identical). Morphology-agnostic: recomputed per body, so it transfers.
+    hop = None
+    if getattr(policy, "topo_bias", False):
+        from virturoid.services.topo_pe import hop_distance_matrix
+        hop = np.asarray(hop_distance_matrix(graph.parent), dtype=int)
     if graph.base_jid < 0 or graph.n_tokens == 0:            # fixed-base / no actuators: nothing to walk
         return {"finite": True, "gait": 0.0, "forward": 0.0, "height_ratio": 1.0, "alive": steps,
                 "survived": True, "speed": 0.0, "frames": [], "n_tokens": graph.n_tokens,
@@ -630,7 +637,7 @@ def recipe_rollout_morph(gene, policy: MorphPolicy | None = None, *, steps: int 
         obs = graph.observe(model, data)
         if mean is not None:
             obs = (obs - mean) / std
-        a = policy.act(obs)
+        a = policy.act(obs, hop=hop)
         cphase = _two_pi * cpg_freq * t * dt if cpg_on else 0.0
         for k in range(graph.n_tokens):
             cpg_off = float(cpg_amp[k] * np.sin(cphase + cpg_phase[k])) if cpg_on else 0.0
