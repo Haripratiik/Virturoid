@@ -314,3 +314,43 @@ class RoboticsVectorMemory:
                         {"robot_class": r["robot_class"], "buildable": bool(r["buildable"])})
             written += 1
         return written
+
+    def _species_genes(self) -> dict:
+        """species_pattern -> RobotGene for nodes carrying a full gene (for skill body embeddings)."""
+        out: dict = {}
+        for r in self.conn.execute(
+                "SELECT species_pattern, genes FROM species_tree WHERE genes IS NOT NULL").fetchall():
+            try:
+                g = json.loads(r["genes"])
+                if isinstance(g, dict) and g.get("segments") and isinstance(g["segments"][0], dict):
+                    out[r["species_pattern"]] = RobotGene.from_dict(g)
+            except (json.JSONDecodeError, TypeError, KeyError, ValueError):
+                continue
+        return out
+
+    def index_skills(self) -> int:
+        """Embed every banked skill into the ``skill`` sub-space (z_skill = body ⊕ task ⊕ success),
+        keyed by skill_id, so a warm-start search is a cosine kNN that also retrieves a NEAR-morphology
+        skill the exact class+task string match misses (a push skill on a similar arm seeds a new
+        transport arm — the skill-transfer moat, made semantic). Bodies are recovered from each skill's
+        species gene when available (zeros otherwise). Returns the number of skill vectors written.
+        """
+        genes = self._species_genes()
+        rows = self.conn.execute(
+            "SELECT skill_id, robot_class, species, task_type, success_rate FROM skills").fetchall()
+        written = 0
+        for r in rows:
+            gene = genes.get(r["species"])
+            task_text = " ".join(p for p in (r["task_type"], r["robot_class"], r["species"]) if p)
+            vec = embed_skill(task_text, gene, success_rate=r["success_rate"])
+            self.upsert(SKILL, r["skill_id"], vec,
+                        {"robot_class": r["robot_class"], "task_type": r["task_type"], "species": r["species"]})
+            written += 1
+        return written
+
+    def nearest_skills(self, gene: RobotGene | None, task_type: str, *, robot_class: str | None = None,
+                       k: int = 5, min_sim: float | None = None) -> list[dict]:
+        """Nearest banked skills to a (body, task) in the ``skill`` sub-space — cross-body warm-start
+        candidates ranked by morphology+task similarity (call ``index_skills`` first to populate)."""
+        q = embed_skill(" ".join(p for p in (task_type, robot_class) if p), gene, success_rate=1.0)
+        return self.nearest(SKILL, q, k=k, min_sim=min_sim)

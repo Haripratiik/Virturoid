@@ -124,6 +124,20 @@ class VectorStoreTests(unittest.TestCase):
             hits = vm.nearest(BODY, embed_body(add_parallel_gripper(tabletop_arm_gene())), k=2)
             self.assertEqual(hits[0]["meta"]["robot_class"], "manipulator")
 
+    def test_index_skills_enables_cross_body_retrieval(self):
+        from virturoid.services.species_discovery import auto_place_species
+        with tempfile.TemporaryDirectory() as tmp, self._mem(tmp) as db:
+            arm_sp = auto_place_species(tabletop_arm_gene(), db)["species_pattern"]
+            quad_sp = auto_place_species(humanoid_upper_body_gene(), db)["species_pattern"]
+            db.record_skill("grasp.arm", "manipulator", "grasp", success_rate=0.9, species=arm_sp)
+            db.record_skill("reach.other", "humanoid", "reach", success_rate=0.8, species=quad_sp)
+            vm = RoboticsVectorMemory(db)
+            self.assertEqual(vm.index_skills(), 2)
+            # a new gripper-arm doing grasp retrieves the arm's grasp skill ahead of the other body's
+            hits = vm.nearest_skills(add_parallel_gripper(tabletop_arm_gene()), "grasp", k=2)
+            self.assertEqual(hits[0]["obj_id"], "grasp.arm")
+            self.assertEqual(hits[0]["meta"]["task_type"], "grasp")
+
 
 class SimilarRunsUpgradeTests(unittest.TestCase):
     def _mem(self, tmp):
