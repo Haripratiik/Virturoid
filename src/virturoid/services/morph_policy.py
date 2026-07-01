@@ -471,9 +471,15 @@ def _trot_cpg_tokens(model, graph, params: dict):
         if m:
             tok_leg[k] = int(m.group(1)); tok_role[k] = int(m.group(2)); legs.add(int(m.group(1)))
     legs = sorted(legs)
-    if len(legs) == 4:
-        base = [np.pi, 0.0, 0.0, np.pi] if params.get("leg_flip") else [0.0, np.pi, np.pi, 0.0]
-        leg_phase = {legs[i]: base[i] for i in range(4)}      # diagonal pairs anti-phase
+    if legs:
+        if len(legs) == 4:
+            base = [np.pi, 0.0, 0.0, np.pi] if params.get("leg_flip") else [0.0, np.pi, np.pi, 0.0]
+            leg_phase = {legs[i]: base[i] for i in range(4)}  # diagonal pairs anti-phase (proven quad trot)
+        else:
+            # GENERAL N-leg body (hexapod/octopod/…): adjacent legs anti-phase -> an alternating-tripod gait
+            # (for a radial hexapod, legs {0,2,4} vs {1,3,5}). Gives ANY procedural legged body a stepping rhythm
+            # instead of the scalar-recipe shuffle — the locomotion-generality fix. Quad path above is untouched.
+            leg_phase = {lg: (np.pi * (i % 2)) for i, lg in enumerate(legs)}
         for k in range(n):
             if tok_leg[k] is None:
                 continue

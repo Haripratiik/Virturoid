@@ -29,6 +29,19 @@ class TrotCpgPriorTests(unittest.TestCase):
                            f"CPG must hold the body more upright (cpg {cpg['height_ratio']} vs scalar {scalar['height_ratio']})")
         self.assertTrue(cpg["survived"], "the CPG prior must keep an untrained quad upright for the whole horizon")
 
+    def test_cpg_generalizes_to_a_six_leg_body(self):
+        # the N-leg generalization: a hexapod (leg{i}_{j} naming, 6 legs) must ALSO get a stepping rhythm
+        # (alternating-tripod), not fall back to the scalar-recipe shuffle — the locomotion-generality fix.
+        from virturoid.services.morph_graph import encode_robot
+        from virturoid.services.morph_policy import (CPG_DEFAULT, _trot_cpg_tokens, compiled_model,
+                                                     robot_mjcf)
+        from virturoid.services.steerable_body import steerable_quadruped
+        gr = encode_robot(compiled_model(robot_mjcf(steerable_quadruped(n_legs=6, dofs_per_leg=3))))
+        amp, phase, gate = _trot_cpg_tokens(compiled_model(robot_mjcf(
+            steerable_quadruped(n_legs=6, dofs_per_leg=3))), gr, CPG_DEFAULT)
+        self.assertTrue(gate, "a 6-leg body must be a recognized legged body (N-leg CPG generalization)")
+        self.assertGreaterEqual(sum(1 for a in amp if a != 0), 6, "each leg's hip+knee should oscillate")
+
     def test_dr_robustness_eval_and_perturb_hook_off_is_identical(self):
         # SIM2REAL: recipe_rollout_morph's model_perturb hook is opt-in — None leaves the rollout byte-identical
         # (no regression). recipe_robustness runs N rollouts under randomized dynamics and reports a valid
