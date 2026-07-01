@@ -14,7 +14,7 @@ from virturoid.fixtures.gene_library import tabletop_arm_gene, humanoid_upper_bo
 from virturoid.services.design_critic import add_parallel_gripper
 from virturoid.services.memory_db import MemoryDB
 from virturoid.services.robotics_vector_memory import (
-    BODY, SKILL, TASK, RUN, RoboticsVectorMemory, BODY_DIM,
+    BODY, EPISODE, SKILL, TASK, RUN, RoboticsVectorMemory, BODY_DIM,
     cosine, embed_body, embed_episode, embed_skill, embed_task, embed_text,
 )
 
@@ -137,6 +137,19 @@ class VectorStoreTests(unittest.TestCase):
             hits = vm.nearest_skills(add_parallel_gripper(tabletop_arm_gene()), "grasp", k=2)
             self.assertEqual(hits[0]["obj_id"], "grasp.arm")
             self.assertEqual(hits[0]["meta"]["task_type"], "grasp")
+
+    def test_index_episode_and_retrieve_by_behavior(self):
+        with tempfile.TemporaryDirectory() as tmp, self._mem(tmp) as db:
+            vm = RoboticsVectorMemory(db)
+            vm.index_episode("walk1", {"cadence_hz": 8.0, "upright_frac": 0.9, "forward_m": 0.8},
+                             {"status": "walked"})
+            vm.index_episode("fell1", {"cadence_hz": 0.0, "upright_frac": 0.1, "forward_m": -0.2},
+                             {"status": "fell"})
+            self.assertEqual(vm.count(EPISODE), 2)
+            # a walk-like query retrieves the walking episode, not the fall
+            hits = vm.nearest_episodes({"cadence_hz": 7.5, "upright_frac": 0.88, "forward_m": 0.75}, k=1)
+            self.assertEqual(hits[0]["obj_id"], "walk1")
+            self.assertEqual(hits[0]["meta"]["status"], "walked")
 
 
 class SimilarRunsUpgradeTests(unittest.TestCase):

@@ -717,6 +717,22 @@ def _maybe_gene_build(prompt, output_dir, target, memory_dir, emit, *, train: bo
     emit("evaluate_done", f"Gene-built {gene.species} ran real '{task_type}': {final:.0%} task success.",
          {"success_rate": final})
 
+    # Episode sub-space (Pillar 2): index this build's honest behavior stats (a walk's cadence/upright/
+    # forward, a grasp's success) into the vector memory so "find episodes that behaved like this" is a kNN
+    # over real rollout data (the 4th sub-space of the unified index). Best-effort; never breaks a build.
+    try:
+        from virturoid.services.memory_db import MemoryDB
+        from virturoid.services.robotics_vector_memory import RoboticsVectorMemory
+        _feats = {k: float(v) for k, v in summary.items()
+                  if isinstance(v, (int, float)) and not isinstance(v, bool)}
+        if _feats:
+            with MemoryDB(Path(memory_dir) / "virturoid_memory.db") as _edb:
+                RoboticsVectorMemory(_edb).index_episode(
+                    str(gene.id), _feats,
+                    {"robot_class": gene.robot_class, "task_type": task_type, "status": summary.get("status")})
+    except Exception:  # noqa: BLE001 - episode indexing is observability; never break a build
+        pass
+
     # Reasoned redesign (design_critic): if the body underperforms the task, diagnose the PHYSICAL
     # limit (reach / joint torque / structure) and apply a directed, VERIFIED gene amendment —
     # reusing or recording cross-customer "lessons" (the flywheel). A control-only shortfall

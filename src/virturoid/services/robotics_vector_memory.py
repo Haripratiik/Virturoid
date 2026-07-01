@@ -428,3 +428,13 @@ class RoboticsVectorMemory:
         q = embed_skill(" ".join(p for p in (task_type, robot_class) if p), gene, success_rate=1.0,
                         latent=_body_latent(gene) if gene is not None else None)
         return self.nearest(SKILL, q, k=k, min_sim=min_sim)
+
+    def index_episode(self, obj_id: str, features: dict, meta: dict | None = None) -> None:
+        """Embed one episode's behavior features (a walk's cadence/upright/forward, a grasp's success/…) into
+        the ``episode`` sub-space, so "find episodes that behaved like this" is a cosine kNN — the 4th sub-space
+        of the unified index, populated from the honest rollout stats every build already computes."""
+        self.upsert(EPISODE, str(obj_id), embed_episode(features or {}), meta or {})
+
+    def nearest_episodes(self, features: dict, *, k: int = 5, min_sim: float | None = None) -> list[dict]:
+        """Nearest prior episodes to a behavior-feature query (cosine kNN over the ``episode`` sub-space)."""
+        return self.nearest(EPISODE, embed_episode(features or {}), k=k, min_sim=min_sim)

@@ -93,6 +93,11 @@ class AutonomousBuildTests(unittest.TestCase):
             arc_path = memory_dir / "design_archive.json"       # the Curator illuminated the archive
             self.assertTrue(arc_path.exists())
             self.assertGreaterEqual(MapElitesArchive.load(arc_path).coverage(), 1)
+            # the episode sub-space was populated from the build's honest rollout stats (Move 3)
+            from virturoid.services.memory_db import MemoryDB
+            from virturoid.services.robotics_vector_memory import EPISODE, RoboticsVectorMemory
+            with MemoryDB(memory_dir / "virturoid_memory.db") as edb:
+                self.assertGreaterEqual(RoboticsVectorMemory(edb).count(EPISODE), 1)
 
     def test_nonsort_manipulation_tasks_route_to_gene_path_not_sort_only_legacy(self):
         """Stack / place-on-shelf / push tasks must run the general gene path (their REAL task eval), not the
