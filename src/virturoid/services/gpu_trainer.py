@@ -120,7 +120,8 @@ _REWARD_FLAGS = ("prog_w", "clear_w", "swing_w", "slip_w", "alt_w", "smooth_w", 
 def train_gene_on_gpu(gene, *, out_path: str, iters: int = 80, envs: int = 1024, progress=None,
                       timeout: float = 2400.0, reward_weights: dict | None = None,
                       cpg: bool = False, dr: bool = False, init_npz: str | None = None,
-                      adaptive: bool = False, ep_len: int | None = None) -> str | None:
+                      adaptive: bool = False, ep_len: int | None = None,
+                      film: bool = False, topo_bias: bool = False) -> str | None:
     """Sync repo+gene to the box, run MJX PPO, fetch the trained policy to ``out_path``. Returns the local
     npz path, or ``None`` on any failure so the caller can fall back to CPU. ``reward_weights`` (the AI gait
     critic's redesigned weights) are passed as trainer flags; ``cpg``/``dr`` enable the trot-CPG prior and
@@ -134,6 +135,8 @@ def train_gene_on_gpu(gene, *, out_path: str, iters: int = 80, envs: int = 1024,
         extra = " --cpg" if cpg else ""
         extra += " --dr" if dr else ""
         extra += " --adaptive" if adaptive else ""           # inertia-scaled per-joint PD gains — needed to train a humanoid
+        extra += " --film" if film else ""                    # Phase-5 FiLM joint-attribute conditioning
+        extra += " --topo-bias" if topo_bias else ""          # Phase-5 topology-aware attention bias
         if ep_len:
             extra += f" --ep-len {int(ep_len)}"
         if init_npz:

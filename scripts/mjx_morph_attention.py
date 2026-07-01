@@ -109,6 +109,10 @@ def main(argv=None) -> int:
                     "bursts under the TDR limit, building on prior training — the AI-assisted gait loop)")
     ap.add_argument("--gene-json", default=None, help="train a RobotGene serialized to JSON (overrides --robot)")
     ap.add_argument("--mjcf-file", default=None, help="train an IMPORTED MJCF model directly (overrides --robot/--gene-json)")
+    ap.add_argument("--film", action="store_true", help="Phase-5 tokenizer upgrade: FiLM joint-attribute "
+                    "conditioning (adds Wfilm; the CPU MorphPolicy mirrors it)")
+    ap.add_argument("--topo-bias", action="store_true", help="Phase-5 tokenizer upgrade: topology-aware "
+                    "attention bias on kinematic hop distance (adds Wtopo)")
     args = ap.parse_args(argv)
     if args.smoke:
         args.envs, args.iters, args.ep_len, args.minibatches = 2, 2, 20, 1
@@ -175,6 +179,13 @@ def main(argv=None) -> int:
     qadr = jp.asarray(graph.qadr); vadr = jp.asarray(graph.vadr)
     static = jp.asarray(graph.static)
     clamps = jp.asarray(graph.clamps)
+    # Phase-5 tokenizer upgrades (opt-in, mirror the CPU MorphPolicy so trained weights transfer back).
+    FILM, TOPO_BIAS, TOPO_BUCKETS = bool(args.film), bool(args.topo_bias), 8
+    if TOPO_BIAS:                                          # static per-morphology hop-distance matrix (NT, NT)
+        from virturoid.services.topo_pe import hop_distance_matrix
+        HOP = jp.asarray(hop_distance_matrix(graph.parent), dtype=jp.int32)
+    else:
+        HOP = None
     base_qadr = graph.base_qadr
     base_vadr = int(mj.jnt_dofadr[graph.base_jid]) if graph.base_jid >= 0 else -1
     # STANDING height (the body now spawns on its feet) — used as a CONTINUOUS height reward so the policy
@@ -254,11 +265,15 @@ def main(argv=None) -> int:
     att = {"We": W(ks[0], (F, H)), "be": jp.zeros(H),
            "Wq": W(ks[1], (H, H)), "Wk": W(ks[2], (H, H)), "Wv": W(ks[3], (H, H)), "Wo": W(ks[4], (H, H)),
            "Wh": W(ks[5], (H, 1)), "bh": jp.zeros(1)}
+    if FILM:
+        att["Wfilm"] = jp.zeros((F, 2 * H))               # -> (gamma, beta); zero-init = identity at start
+    if TOPO_BIAS:
+        att["Wtopo"] = jp.zeros(TOPO_BUCKETS + 1)         # learned bias per hop distance; zero-init = no bias
     vf = [(W(ks[6], (H, 64)) * (1 / H) ** 0.5, jp.zeros(64)), (W(ks[7], (64, 1)) * (1 / 64) ** 0.5, jp.zeros(1))]
     params = {"att": att, "vf": vf, "logstd": jp.zeros(1) - 0.5}
     if args.init_npz:                                    # WARM-START: chain short bursts (build on prior training)
         _d = np.load(args.init_npz)
-        for _k in ("We", "be", "Wq", "Wk", "Wv", "Wo", "Wh", "bh"):
+        for _k in list(att.keys()):                       # includes Wfilm/Wtopo when those upgrades are on
             if _k in _d.files and att[_k].shape == _d[_k].shape:
                 att[_k] = jp.asarray(_d[_k])
         params = {"att": att, "vf": vf, "logstd": jp.zeros(1) - 0.5}
@@ -275,16 +290,12 @@ def main(argv=None) -> int:
         g = jp.array([1.0, q[2], upright, qd[0], qd[1], qd[2], qd[3], qd[4], qd[5]])
         return jp.nan_to_num(jp.concatenate([static, dyn, jp.tile(g, (NT, 1))], axis=1))
 
+    from virturoid.services.morph_forward import attention_forward
+
     def policy_mean_pool(P, obs):
-        """obs (NT, F) -> (action_means (NT,), pooled_embed (H,)). EXACTLY mirrors MorphPolicy.act."""
-        a = P["att"]
-        e = jp.tanh(obs @ a["We"] + a["be"])
-        q, k, v = e @ a["Wq"], e @ a["Wk"], e @ a["Wv"]
-        s = (q @ k.T) / jp.sqrt(H)
-        s = s - s.max(axis=1, keepdims=True)
-        w = jp.exp(s); w = w / w.sum(axis=1, keepdims=True)
-        u = jp.tanh(e + (w @ v) @ a["Wo"])
-        return jp.tanh(u @ a["Wh"] + a["bh"])[:, 0], u.mean(0)
+        """obs (NT, F) -> (action_means (NT,), pooled_embed (H,)). Uses the SHARED forward (morph_forward)
+        so the GPU trainer is byte-identical to the CPU MorphPolicy — trained weights transfer to any body."""
+        return attention_forward(P["att"], obs, H, xp=jp, film=FILM, hop=HOP, topo_bias=TOPO_BIAS)
 
     def vmlp(ps, x):
         x = jp.tanh(x @ ps[0][0] + ps[0][1])
@@ -495,9 +506,15 @@ def main(argv=None) -> int:
         a = p["att"]
         # save in the MorphPolicy._ORDER so the CPU policy loads straight in (transfer to any body)
         Path(args.save).parent.mkdir(parents=True, exist_ok=True)
+        # Phase-5 opt-in weights ride alongside (detected by key presence in MorphPolicy.from_npz).
+        extra = {}
+        if FILM:
+            extra["Wfilm"] = np.asarray(a["Wfilm"])
+        if TOPO_BIAS:
+            extra["Wtopo"] = np.asarray(a["Wtopo"])
         np.savez(args.save, We=np.asarray(a["We"]), be=np.asarray(a["be"]), Wq=np.asarray(a["Wq"]),
                  Wk=np.asarray(a["Wk"]), Wv=np.asarray(a["Wv"]), Wo=np.asarray(a["Wo"]),
-                 Wh=np.asarray(a["Wh"]), bh=np.asarray(a["bh"]),
+                 Wh=np.asarray(a["Wh"]), bh=np.asarray(a["bh"]), **extra,
                  # meta layout MUST match MorphPolicy.from_npz: [F,H,NT,fwd, adaptive@4, cpg@5] so CPU replay reads
                  # the right flags (adaptive gains + the trot-CPG prior) and reproduces the GPU gait.
                  meta=np.asarray([F, H, NT, float(fwd),
@@ -505,8 +522,9 @@ def main(argv=None) -> int:
 
     if args.eval_npz:                                   # EVAL: deterministic single-env MJX rollout (recipe control)
         dd = np.load(args.eval_npz)
-        for kk in ("We", "be", "Wq", "Wk", "Wv", "Wo", "Wh", "bh"):
-            params["att"][kk] = jp.asarray(dd[kk])
+        for kk in list(params["att"].keys()):             # includes Wfilm/Wtopo when the upgrades are on
+            if kk in dd.files:
+                params["att"][kk] = jp.asarray(dd[kk])
 
         @jax.jit
         def estep(d):
