@@ -85,6 +85,12 @@ def run_flywheel(prompts, *, memory_dir, out_root, train: bool = False,
             "designs_added": after["designs"] - before["designs"],
             "skills_added": after["skills"] - before["skills"],
         }
+        try:   # the moat measured after this cycle (MAP-Elites coverage/QD + provenance mean-delta) — the
+               # "it gets smarter with every design" numbers the demo shows rising across cycles.
+            from virturoid.services.design_brain import design_brain_summary
+            rec["design_brain"] = design_brain_summary(memory_dir)
+        except Exception:  # noqa: BLE001 - observability; never break the runner
+            pass
         cycles.append(rec)
         emit("cycle_done", f"Cycle {i}: {'succeeded' if rec['succeeded'] else 'did not reach target'} "
              f"({rec['success_rate']:.0%}); banked now {after['designs']} designs, {after['skills']} skills.",
