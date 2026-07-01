@@ -48,13 +48,15 @@ def make_laddered_evaluate(screen_evaluate, hifi_evaluate, *, promote=None, on_r
 
 def make_gpu_locomotion_hifi(gene, *, iters: int = 60, envs: int = 2048, out_dir: str | None = None,
                              verify_steps: int = 900, base_reward_weights: dict | None = None,
-                             train_fn=None, verify_fn=None):
+                             init_npz: str | None = None, train_fn=None, verify_fn=None):
     """The REAL hi-fi rung: train a residual on the GPU for ``gene`` under a spec's edits, fetch the policy, and
     VERIFY it with an independent CPU rollout -> result dict ``{forward,cadence,upright_frac,survived,npz,trained}``.
     ``spec`` edits map to trainer flags: ``cpg`` params (calf_phase/freq) + ``reward`` params (prog_w/fwd_gate_w/…).
-    ``train_fn``/``verify_fn`` are injectable for testing; defaults use the real gpu_trainer + recipe_rollout_morph.
-    Returns ``survived=False`` (an honest floor) if the GPU is unavailable or training fails -- the caller's gate
-    then simply won't promote it, and the search continues on cheaper candidates."""
+    ``init_npz`` WARM-STARTS training from a banked policy (the transfer-seed from ``transfer_seed.best_transfer_seed``
+    -- the measured fix for the from-scratch backward basin). ``train_fn``/``verify_fn`` are injectable for testing;
+    defaults use the real gpu_trainer + recipe_rollout_morph. Returns ``survived=False`` (an honest floor) if the
+    GPU is unavailable or training fails -- the caller's gate then simply won't promote it, and the search
+    continues on cheaper candidates."""
     import os
     import tempfile
 
@@ -69,8 +71,10 @@ def make_gpu_locomotion_hifi(gene, *, iters: int = 60, envs: int = 2048, out_dir
         for k in ("prog_w", "clear_w", "swing_w", "alt_w", "air_w", "back_w", "fwd_gate_w"):
             if k in p:
                 reward_weights[k] = float(p[k])
+        seed = p.get("init_npz", init_npz)                    # a spec can override the warm-start seed per candidate
         npz = os.path.join(outd, f"hifi_{abs(hash(repr(sorted(p.items())))) % 10_000_000}.npz")
-        trained = _train(gene, out_path=npz, iters=iters, envs=envs, cpg=cpg, reward_weights=reward_weights)
+        trained = _train(gene, out_path=npz, iters=iters, envs=envs, cpg=cpg, reward_weights=reward_weights,
+                         init_npz=seed)
         if not trained:
             return {"forward": 0.0, "cadence": 0.0, "upright_frac": 0.0, "survived": False, "trained": False,
                     "npz": None, "note": "gpu_unavailable_or_train_failed"}
@@ -82,12 +86,13 @@ def make_gpu_locomotion_hifi(gene, *, iters: int = 60, envs: int = 2048, out_dir
     return hifi
 
 
-def _default_gpu_train(gene, *, out_path, iters, envs, cpg, reward_weights):
+def _default_gpu_train(gene, *, out_path, iters, envs, cpg, reward_weights, init_npz=None):
     from virturoid.services.gpu_trainer import train_gene_on_gpu
     calf = cpg.get("calf_phase")
     freq = cpg.get("freq")
     return train_gene_on_gpu(gene, out_path=out_path, iters=iters, envs=envs, cpg=bool(cpg),
-                             calf_phase=calf, cpg_freq=freq, reward_weights=reward_weights or None)
+                             calf_phase=calf, cpg_freq=freq, reward_weights=reward_weights or None,
+                             init_npz=init_npz)
 
 
 def _default_cpu_verify(gene, npz_path, *, steps):

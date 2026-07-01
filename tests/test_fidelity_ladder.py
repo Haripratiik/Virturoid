@@ -45,12 +45,13 @@ class FidelityLadderTests(unittest.TestCase):
         # a successful train returns an npz path; the ladder then VERIFIES it via verify_fn (independent re-run)
         seen = {}
 
-        def fake_train(gene, *, out_path, iters, envs, cpg, reward_weights):
+        def fake_train(gene, *, out_path, iters, envs, cpg, reward_weights, init_npz=None):
             seen["cpg"] = cpg
             seen["reward_weights"] = reward_weights
+            seen["init_npz"] = init_npz
             return out_path                                       # "trained" -> npz path
 
-        hifi = make_gpu_locomotion_hifi(gene=object(), train_fn=fake_train,
+        hifi = make_gpu_locomotion_hifi(gene=object(), init_npz="seed.npz", train_fn=fake_train,
                                         verify_fn=lambda g, npz, *, steps: {"forward": 0.7, "survived": True})
         r = hifi({"params": {"calf_phase": 0.0, "freq": 1.5, "fwd_gate_w": 0.85, "prog_w": 6.0}})
         self.assertTrue(r["trained"])
@@ -58,6 +59,7 @@ class FidelityLadderTests(unittest.TestCase):
         self.assertEqual(seen["cpg"], {"calf_phase": 0.0, "freq": 1.5})    # cpg edits routed to trainer
         self.assertEqual(seen["reward_weights"]["fwd_gate_w"], 0.85)       # reward edits routed to trainer
         self.assertEqual(seen["reward_weights"]["prog_w"], 6.0)
+        self.assertEqual(seen["init_npz"], "seed.npz")                     # warm-start seed routed to trainer
 
 
 if __name__ == "__main__":
