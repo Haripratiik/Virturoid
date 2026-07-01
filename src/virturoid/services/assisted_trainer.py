@@ -158,6 +158,27 @@ def train_assisted(gene, *, target: float = 0.35, models_dir: str = "models", me
         if best_travel >= target:
             say(f"banked policy already clears target ({best_travel:+.3f} >= {target}) — REUSING, no training")
 
+    # 2b) CROSS-EMBODIMENT warm-start (the transfer moat): if no SAME-species policy clears the target, sweep the
+    # whole banked pool for the policy that best TRANSFERS forward to THIS body and warm-start from it if it
+    # travels further. This is the measured fix for bodies that train BACKWARD from scratch (e.g. a hexapod
+    # warm-started from a forward quad -> the morphology-agnostic residual carries "how to push forward"). Only
+    # runs when a same-species reuse hasn't already won, so well-served bodies pay nothing.
+    if best_travel < target:
+        try:
+            from virturoid.services.transfer_seed import transfer_policy_for
+            tpol, tnpz, _ranked = transfer_policy_for(gene, models_dir=models_dir)
+            if tpol is not None:
+                tr = travel_of(tpol)
+                if float(tr["forward"]) > best_travel:
+                    best_policy, best_travel, best_upright = tpol, float(tr["forward"]), bool(tr["upright"])
+                    warm_started = True
+                    if baseline is None:
+                        baseline = best_travel
+                    say(f"cross-embodiment warm-start from {tnpz.split('/')[-1]} "
+                        f"(transfers {best_travel:+.3f} m forward to this body)")
+        except Exception:  # noqa: BLE001 - transfer recall is best-effort; never break training
+            pass
+
     # 3) GPU (efficient parallel sim) once when healthy + still short of target; else fall to parallel-CPU below.
     backend = "reused" if best_travel >= target else "parallel-cpu"
     if prefer_gpu and best_travel < target:
