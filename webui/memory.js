@@ -115,6 +115,30 @@ function appendFlywheelChart(host) {
     style: `font-size:13px;margin-top:4px;color:${fw.compounding ? "#5fc27e" : "#e1aa3c"};` }));
 }
 
+// ---- Design Brain (the moat MEASURED): MAP-Elites coverage/QD + provenance mean-delta, from /api/design_brain
+// (populated by the live build path's keystone). The "it gets smarter with every design" numbers. ----
+let _designBrain = null;
+async function loadDesignBrain() {
+  try { _designBrain = await fetch("/api/design_brain").then((r) => r.json()); } catch (e) { _designBrain = null; }
+  memBus.dispatchEvent(new CustomEvent("designbrain"));
+}
+function appendDesignBrain(host) {
+  const d = _designBrain;
+  if (!d || (!d.archive_coverage && !d.provenance_edges)) return;
+  host.appendChild(el("div", { class: "panel-section-title", text: "Design Brain - it gets smarter with every design" }));
+  const row = (label, val, color) => el("div", { style: "display:flex;align-items:center;gap:8px;font-size:12px;margin:3px 0;" }, [
+    el("span", { text: label, style: "width:170px;opacity:0.75;" }),
+    el("span", { text: String(val), style: `opacity:0.9;color:${color || "inherit"};font-weight:600;` }),
+  ]);
+  host.appendChild(el("div", { style: "margin:8px 0;" }, [
+    row("design niches (coverage)", d.archive_coverage),
+    row("QD-score (quality x diversity)", d.qd_score),
+    row("warm-start edges", d.provenance_edges),
+    row("mean gain per reuse", d.mean_delta == null ? "-" : `+${d.mean_delta}`, "#5fc27e"),
+  ]));
+  if (d.headline) host.appendChild(el("p", { text: d.headline, style: "font-size:13px;margin-top:4px;color:#7cc6ff;" }));
+}
+
 function classNodeForBuild(b) {
   const cls = String((b && b.robot_class) || "").toLowerCase();
   const name = String((b && (b.id || b.name)) || "").toLowerCase();
@@ -500,6 +524,7 @@ function makeNotePanel(icon) {
     if (!node) {
       host.appendChild(el("div", { class: "empty", text: "Select a species in the tree to read its build + training tips." }));
       appendFlywheelChart(host);
+      appendDesignBrain(host);
       appendBuiltSummary(host);
       return;
     }
@@ -532,8 +557,8 @@ function makeNotePanel(icon) {
   }
   return {
     id: "memoryNote", title: "Notes", icon, dependsOnPackage: false,
-    mount(elx) { clear(elx); host = el("div", { class: "mem-note" }); elx.appendChild(host); render(); memBus.addEventListener("select", render); memBus.addEventListener("builds", render); memBus.addEventListener("flywheel", render); loadFlywheel(); },
-    onShow() { render(); loadFlywheel(); },
+    mount(elx) { clear(elx); host = el("div", { class: "mem-note" }); elx.appendChild(host); render(); memBus.addEventListener("select", render); memBus.addEventListener("builds", render); memBus.addEventListener("flywheel", render); memBus.addEventListener("designbrain", render); loadFlywheel(); loadDesignBrain(); },
+    onShow() { render(); loadFlywheel(); loadDesignBrain(); },
   };
 }
 
