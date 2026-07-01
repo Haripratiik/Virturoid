@@ -4,7 +4,10 @@ while hexapod-from-scratch goes backward -- so the ranking must prefer the forwa
 
 import unittest
 
-from virturoid.services.transfer_seed import best_transfer_seed
+import tempfile
+from pathlib import Path
+
+from virturoid.services.transfer_seed import best_transfer_seed, gather_banked_policies, transfer_policy_for
 
 
 class TransferSeedTests(unittest.TestCase):
@@ -38,6 +41,20 @@ class TransferSeedTests(unittest.TestCase):
         best, ranked = best_transfer_seed(gene=None, candidates=["broken.npz", "good.npz"], evaluate=flaky)
         self.assertEqual(best, "good.npz")                 # a broken candidate just doesn't compete
         self.assertEqual([r["npz"] for r in ranked], ["good.npz"])
+
+    def test_gather_banked_policies_lists_and_dedups(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "sub").mkdir()
+            (Path(tmp) / "a.npz").write_bytes(b"x")
+            (Path(tmp) / "sub" / "b.npz").write_bytes(b"y")
+            got = gather_banked_policies(tmp, extra=["/ext/seed.npz"])
+            self.assertEqual(got[0], "/ext/seed.npz")                      # extras first
+            self.assertTrue(any(g.endswith("a.npz") for g in got) and any(g.endswith("b.npz") for g in got))
+
+    def test_transfer_policy_for_none_when_no_forward(self):
+        pol, npz, ranked = transfer_policy_for(gene=None, candidates=[])   # empty pool -> nothing to warm-start from
+        self.assertIsNone(pol)
+        self.assertIsNone(npz)
 
 
 if __name__ == "__main__":

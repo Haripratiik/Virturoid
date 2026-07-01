@@ -52,3 +52,25 @@ def best_transfer_seed(gene, candidates, *, steps: int = 600, require_survived: 
     eligible = [r for r in ranked
                 if float(r.get("forward", 0.0)) > min_forward and (r.get("survived") or not require_survived)]
     return (eligible[0]["npz"] if eligible else None), ranked
+
+
+def gather_banked_policies(models_dir: str = "models", *, extra=None, recursive: bool = True) -> list[str]:
+    """Collect candidate banked-policy npz paths from ``models_dir`` (recursively by default) plus any ``extra``
+    paths, deduped with extras first. The candidate pool for a transfer sweep."""
+    from pathlib import Path
+    p = Path(models_dir)
+    found = [str(x) for x in (p.rglob("*.npz") if recursive else p.glob("*.npz"))] if p.exists() else []
+    return list(dict.fromkeys(list(extra or []) + found))
+
+
+def transfer_policy_for(gene, *, models_dir: str = "models", candidates=None, steps: int = 600,
+                        min_forward: float = 0.02):
+    """Cross-embodiment warm-start selection (generalizes ``learn_locomotion.banked_policy_for`` beyond same
+    species): sweep the banked pool and return ``(policy, npz, ranked)`` for the best FORWARD transfer to
+    ``gene``, or ``(None, None, ranked)`` if none transfers forward (-> train from scratch)."""
+    cands = candidates if candidates is not None else gather_banked_policies(models_dir)
+    best, ranked = best_transfer_seed(gene, cands, steps=steps, min_forward=min_forward)
+    if best is None:
+        return None, None, ranked
+    from virturoid.services.morph_policy import MorphPolicy
+    return MorphPolicy.from_npz(best), best, ranked
