@@ -572,6 +572,9 @@ class _Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/flywheel":
             self._send_json(self._flywheel())
             return
+        if parsed.path == "/api/design_brain":
+            self._send_json(self._design_brain())
+            return
         if parsed.path == "/api/episode":
             self._send_episode(parsed)
             return
@@ -631,6 +634,20 @@ class _Handler(BaseHTTPRequestHandler):
             return json.loads(p.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             return {"series": [], "n_cycles": 0, "compounding": False, "headline": f"unreadable: {exc}"}
+
+    def _design_brain(self) -> dict:
+        """The Design Brain panel (the moat MEASURED): MAP-Elites coverage/QD-score + provenance compounding
+        from the build set's shared memory. Best-effort over candidate memory dirs; zeros + a hint until real
+        builds have populated the archive/provenance (autonomous_build's keystone writes them)."""
+        try:
+            from virturoid.services.design_brain import design_brain_summary
+        except Exception as exc:  # noqa: BLE001
+            return {"archive_coverage": 0, "provenance_edges": 0, "headline": f"unavailable: {exc}"}
+        for cand in (self.root / "memory", self.root, self.root.parent / "memory"):
+            s = design_brain_summary(cand)
+            if s.get("archive_coverage") or s.get("provenance_edges"):
+                return s
+        return design_brain_summary(self.root / "memory")   # zeros + headline
 
     def _send_package_file(self, path: str) -> None:
         parts = [part for part in path.split("/") if part]
