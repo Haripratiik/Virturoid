@@ -134,6 +134,29 @@ def _evaluate_robot(args: dict) -> dict:
             "task": res.get("task"), "metric": res.get("metric"), "value": res.get("value")}
 
 
+def _design_search(args: dict) -> dict:
+    """Run a bounded, verified DESIGN SEARCH: compose a body from the prompt, then let the harness sweep its
+    CPG gait parameters — each candidate physics-evaluated, selected by the honesty gate, diagnosed — and return
+    the best config + the honest tree of what was tried. This is the multi-step search bare Claude+MCP can't do
+    (no training loop, no verified selection); the CPU CPG rung is the cheapest tier (a GPU burst is the next)."""
+    prompt = args["prompt"]                                    # required (accessed first -> clean missing-arg error)
+    from virturoid.services.design_search import run_design_search
+    from virturoid.services.morphology_composer import compose_robot
+    from virturoid.services.search_adapters import cpg_grid_proposer, make_cpg_evaluate
+    gene = compose_robot(prompt)
+    evaluate = make_cpg_evaluate(gene, steps=int(args.get("steps", 600)))
+    gates = {"forward_m": float(args.get("forward_target", 0.12)), "cadence": 3.0, "upright": 0.5}
+    rep = run_design_search(propose=cpg_grid_proposer(), evaluate=evaluate, task_type="locomotion",
+                            max_evals=int(args.get("max_evals", 8)), gates=gates)
+    b = rep.best
+    return {"robot_class": gene.robot_class, "dof": len(gene.actuated_joints()), "solved": rep.solved,
+            "n_evals": rep.n_evals, "stopped_reason": rep.stopped_reason,
+            "best": ({"params": b.spec.get("params"), "forward_m": round(float(b.result.get("forward", 0)), 3),
+                      "cadence": round(float(b.result.get("cadence", 0)), 1),
+                      "failure_mode": b.artifact["failure_mode"], "fitness": b.fitness} if b else None),
+            "tree": rep.tree()}
+
+
 def _capabilities(_args: dict) -> dict:
     """The task types + skills the platform can build/evaluate (the capability registry)."""
     try:
@@ -211,6 +234,16 @@ TOOLS: dict[str, dict] = {
         "parameters": {"type": "object", "required": ["prompt"], "properties": {
             "prompt": {"type": "string"}}},
         "handler": _evaluate_robot, "heavy": True,
+    },
+    "design_search": {
+        "description": "Run a bounded VERIFIED design search over a body's gait parameters (compose -> sweep "
+                       "-> physics-evaluate each -> honesty-gate select -> diagnose), returning the best config "
+                       "+ an honest tree. The multi-step search a bare LLM+simulator cannot do. Real MuJoCo, slow.",
+        "parameters": {"type": "object", "required": ["prompt"], "properties": {
+            "prompt": {"type": "string"}, "max_evals": {"type": "integer", "default": 8},
+            "steps": {"type": "integer", "default": 600},
+            "forward_target": {"type": "number", "default": 0.12}}},
+        "handler": _design_search, "heavy": True,
     },
     "build_robot": {
         "description": "Compose + physics-build a buildable robot (body + BOM + CAD + honest eval) from a "

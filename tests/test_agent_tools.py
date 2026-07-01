@@ -89,6 +89,16 @@ class AgentToolsTests(unittest.TestCase):
             self.assertTrue(r["ok"])
             self.assertIn("note", r["result"])
 
+    def test_design_search_tool_runs_a_verified_multistep_search(self):
+        # the agentic-surface brick: an external agent can run a bounded verified search (real MuJoCo, kept tiny)
+        r = call_tool("design_search", {"prompt": "a quadruped robot that walks", "max_evals": 2, "steps": 120})
+        self.assertTrue(r["ok"], r)
+        self.assertIn("tree", r["result"])
+        self.assertEqual(len(r["result"]["tree"]), r["result"]["n_evals"])   # honest tree of what it tried
+        self.assertLessEqual(r["result"]["n_evals"], 2)
+        for row in r["result"]["tree"]:
+            self.assertIn(row["verdict"], ("pass", "fail"))
+
 
 if __name__ == "__main__":
     unittest.main()
