@@ -63,6 +63,12 @@ def main(argv=None) -> int:
                     "direction, so a body earns them while REVERSING a forward CPG prior — the MJX-vs-CPU backward "
                     "convergence. This penalty is applied OUTSIDE the max(0) gate, so a backward gait is driven "
                     "toward 0 reward (never a basin) while a forward gait is untouched.")
+    ap.add_argument("--fwd-gate-w", type=float, default=0.0, help="G4 ROOT-CAUSE fix (the parity probe FALSIFIED "
+                    "the MJX-vs-CPU sim-flip theory: pure-CPG CPU==MJX==~0). The true bug is REWARD DILUTION: the "
+                    "gait-quality bonuses are direction-agnostic, so an IN-PLACE/BACKWARD march maxes them while the "
+                    "lone forward term is swamped. In [0,1], the fraction by which those bonuses are GATED on forward "
+                    "speed (fwd/vtgt): 0.0 = old ungated reward (byte-identical, suite/other recipes unchanged), "
+                    "1.0 = quality pays only while moving forward. Use ~0.85 to fix the reversed-gait convergence.")
     # CANONICAL legged_gym (Rudin et al.) reward terms — the published dictionary that converts an upright slide
     # into a deliberate WALK (see docs/virturoid_research_dossier.md). feet_air_time is the single most important
     # anti-slide / anti-stand-still term: it pays the policy for the TIME each foot spends in the air per step
@@ -214,6 +220,7 @@ def main(argv=None) -> int:
     KP, KD, ASCALE, VTGT, CLEAR_W = args.kp, args.kd, args.ascale, args.vtgt, args.clear_w
     SWING_W, SLIP_W, ALT_W, SMOOTH_W, PROG_W = args.swing_w, args.slip_w, args.alt_w, args.smooth_w, args.prog_w
     BACK_W = args.back_w                                       # G4: explicit backward-base-x penalty
+    FGATE = args.fwd_gate_w                                    # G4 root-cause fix: gate gait-quality on forward speed
     AIR_W, AIR_TGT, VZ_W, WXY_W = args.air_w, args.air_target, args.vz_w, args.wxy_w   # legged_gym reward terms
     TORQUE_W = args.torque_w                              # actuator-effort penalty (anti-crank stabilizer)
     # TROT-CPG PRIOR (opt-in --cpg): per-token feed-forward amplitude/phase from the SAME logic as the CPU recipe
@@ -439,9 +446,18 @@ def main(argv=None) -> int:
                 # tokens, so the policy pays for cranking destabilizing targets — the reward now shapes the APPROACH
                 # to each step, not just the fall cliff. Always on (ungated) so it discourages flailing while crouched.
                 effort = jp.mean((ctrl_tok / (clamps + 1e-6)) ** 2, axis=-1)
+                # G4 ROOT-CAUSE FIX (the parity probe FALSIFIED the sim-flip hypothesis: pure-CPG CPU==MJX==~0, no
+                # flip). The real bug is REWARD DILUTION -- the gait-QUALITY bonuses (clearance/swing/alternation/
+                # air-time) are direction-agnostic, so a tidy IN-PLACE or BACKWARD march maxes them while the lone
+                # forward term is swamped -> the policy banks a clean reversed gait (cadence 13.3, upright .92, fwd
+                # -0.29). GATE those bonuses on FORWARD speed so "nice stepping" only pays while going forward.
+                # FGATE in [0,1] interpolates: 0 = old ungated reward (byte-identical -> suite/other recipes unchanged),
+                # 1 = fully gated. alive(0.2*up)+upright(0.15) stay ungated (don't just fall); progress+back_pen stay directional.
+                fgate = jp.clip(fwd / (VTGT + 1e-6), 0.0, 1.0)         # 0 standing/backward -> 1 at target forward speed
+                gate_mult = (1.0 - FGATE) + FGATE * fgate              # FGATE=0 -> 1.0 (unchanged); FGATE=1 -> fgate
                 step_r = jp.maximum(0.0, PROG_W * progress * up + 0.2 * up + 0.15 * jp.maximum(0.0, upr)
-                                    + CLEAR_W * clearance * up + SWING_W * swing * up + ALT_W * swing_phase * up
-                                    + AIR_W * air_reward * up
+                                    + (CLEAR_W * clearance + SWING_W * swing + ALT_W * swing_phase
+                                       + AIR_W * air_reward) * up * gate_mult
                                     - SLIP_W * slip - SMOOTH_W * sm - stab - TORQUE_W * effort)
                 # G4 PARITY FIX: an explicit cost for BACKWARD base-x, applied OUTSIDE the max(0) so the stepping
                 # rewards can't fund a reversed gait. Scales with how backward it goes -> backward is driven to 0
