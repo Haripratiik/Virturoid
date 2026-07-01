@@ -34,6 +34,22 @@ class NightReport:
     budget_used: int = 0
     results: list = field(default_factory=list)
     stopped_reason: str = "proposals_exhausted"
+    qd: dict = None                      # QD-archive dashboard snapshot (coverage/qd_score/annecs_v) when an archive is passed
+
+
+def default_night_descriptor(cand, search) -> tuple:
+    """A default behavior descriptor for the QD archive: ``(num_actuated_joints, best_forward)`` -- a cheap
+    (morphology-size, behavior-speed) niche key. ``search`` is the SearchReport; the gene comes from ``cand``."""
+    gene = cand.get("gene")
+    try:
+        n_dof = float(len(gene.actuated_joints()))
+    except Exception:  # noqa: BLE001 - unknown gene shape -> put it in the 0-DOF edge cell
+        n_dof = 0.0
+    fwd = 0.0
+    if search.best is not None:
+        m = search.best.artifact.get("metrics") or {}
+        fwd = float(m.get("forward_m", m.get("forward", 0.0)) or 0.0)
+    return (n_dof, fwd)
 
 
 def _load_journal(path):
@@ -60,15 +76,20 @@ def _append_journal(path, rec):
 
 def run_night_shift(proposals, evaluate_for, *, memory_dir, llm=None, budget_evals: int = 200,
                     per_candidate_evals: int = 8, gate_target: float = 0.30, journal_path=None,
-                    on_result=None) -> NightReport:
+                    on_result=None, archive=None, descriptor_for=None) -> NightReport:
     """Run the night shift over ``proposals`` (an iterable of candidate dicts, each ``{id, gene, task,
     task_type?, gates?}``). ``evaluate_for(candidate) -> evaluate`` builds the per-candidate physics evaluator
     (fidelity-ladder adapter in production, a test double in tests). Bounded by ``budget_evals`` total search
-    evaluations. ``journal_path`` (G8) makes it resumable — already-journaled candidate ids are skipped."""
+    evaluations. ``journal_path`` (G8) makes it resumable — already-journaled candidate ids are skipped.
+
+    ``archive`` (a ``qd_archive.QDArchive``) is optional: when given, each verified BANK is inserted into the
+    MAP-Elites archive keyed by ``descriptor_for(cand, search)`` (default ``default_night_descriptor``), and the
+    report carries the QD dashboard snapshot (coverage / qd_score / ANNECS-V) — the open-endedness metrics."""
     from virturoid.services.robotics_vector_memory import cosine, embed_body
     done = _load_journal(journal_path)
     rep = NightReport()
     banked_embeds: list = []                                  # ANNECS-V: distinct banked bodies (embedding-space)
+    _descriptor = descriptor_for or default_night_descriptor
 
     for cand in proposals:
         cid = cand["id"]
@@ -99,6 +120,12 @@ def run_night_shift(proposals, evaluate_for, *, memory_dir, llm=None, budget_eva
                 if all(cosine(z, e) < 0.98 for e in banked_embeds):
                     rep.novel += 1
                     banked_embeds.append(z)
+                if archive is not None:                       # QD: place the verified win in its behavior niche
+                    fit = float(search.best.fitness) if search.best else 0.0
+                    try:
+                        archive.add(cid, _descriptor(cand, search), fit)
+                    except Exception:  # noqa: BLE001 - a bad descriptor must not break the night run
+                        pass
 
         rec = {"id": cid, "solved": search.solved, "banked": bool(banked.get("banked")),
                "evals": search.n_evals, "stopped": search.stopped_reason,
@@ -108,4 +135,6 @@ def run_night_shift(proposals, evaluate_for, *, memory_dir, llm=None, budget_eva
         if on_result is not None:
             on_result(rec)
 
+    if archive is not None:
+        rep.qd = archive.snapshot()
     return rep

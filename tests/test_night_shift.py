@@ -67,6 +67,17 @@ class NightShiftTests(unittest.TestCase):
             self.assertGreaterEqual(rep.banked, 1)             # both solve; banking is verified-only
             self.assertEqual(rep.novel, 1)                     # ANNECS-V counts the (identical) body ONCE
 
+    def test_qd_archive_records_niches(self):
+        from virturoid.services.qd_archive import QDArchive
+        with tempfile.TemporaryDirectory() as tmp:
+            arch = QDArchive(dims=[("n_dof", 0, 30), ("success", 0.0, 2.0)], bins=6)
+            rep = run_night_shift(_cands(), _evaluate_for, memory_dir=tmp, llm=None, per_candidate_evals=3,
+                                  archive=arch)
+            self.assertIsNotNone(rep.qd)                        # dashboard snapshot present when an archive is passed
+            self.assertEqual(rep.qd["filled"], 2)              # arm + quad banked into distinct DOF niches
+            self.assertGreaterEqual(rep.qd["annecs_v"], 1)
+            self.assertGreater(rep.qd["qd_score"], 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()
