@@ -56,38 +56,68 @@ def run_arm_a(task_id: str, *, steps: int = 600) -> dict:
     return res
 
 
-def run_arm_b(task_id: str, *, steps: int = 600, max_evals: int = 12, on_node=None) -> dict:
-    """Harness arm: search the CPG gait direction on the CPU rung (honesty-gate selection) -> verify the SELECTED
-    best. Returns the verifier's verdict plus ``searched`` (the winning CPG) and ``n_evals`` (search cost)."""
+def run_arm_b(task_id: str, *, steps: int = 600, max_evals: int = 12, on_node=None, use_memory: bool = True,
+              models_dir: str = "build/models") -> dict:
+    """Full-harness arm: (1) MEMORY -- recall the banked policy that best TRANSFERS to this body (zero-shot, the
+    flywheel moat Arm A lacks) and (2) SEARCH the CPG gait direction on the CPU rung. Submit BOTH to the
+    independent verifier and keep the better-verified result. Returns the verdict plus ``searched`` (winning CPG),
+    ``n_evals`` (search cost), and ``recalled`` (the transfer seed used, if memory won)."""
     from virturoid.services.design_search import run_design_search
     from virturoid.services.search_adapters import cpg_grid_proposer, make_locomotion_evaluate
     task = get_task(task_id)
     gene = _task_body(task)
     if gene is None:
         return {"task": task_id, "arm": "B", "verified_pass": False, "failure_mode": "unsupported_task",
-                "metrics": {}, "method": "CPG-search harness"}
+                "metrics": {}, "method": "full harness"}
+
+    candidates = []                                            # (verified_result, method, extras)
+
+    # (1) MEMORY: the best forward transfer from the banked pool, verified zero-shot (no training, no GPU).
+    recalled = None
+    if use_memory:
+        try:
+            from virturoid.services.transfer_seed import transfer_policy_for
+            pol, npz, _ranked = transfer_policy_for(gene, models_dir=models_dir, steps=steps)
+            if pol is not None:
+                recalled = npz
+                rv = verify_submission(task_id, gene, pol, steps=steps)
+                candidates.append((rv, f"memory transfer-recall ({npz.split('/')[-1]})", {"recalled": npz}))
+        except Exception:  # noqa: BLE001 - memory is best-effort; the search path still runs
+            pass
+
+    # (2) SEARCH: the CPG gait direction on the cheap rung, honesty-gate selection.
     evaluate = make_locomotion_evaluate(gene, steps=steps)
     report = run_design_search(propose=cpg_grid_proposer(), evaluate=evaluate, task_type="locomotion",
                                gates=task["gates"], max_evals=max_evals, on_node=on_node)
     best_cpg = (report.best.result.get("cpg") if report.best else None)
-    res = verify_submission(task_id, gene, _zero_policy_with_cpg(gene, best_cpg), steps=steps)
-    res["arm"] = "B"; res["method"] = f"CPG-search harness ({report.n_evals} evals, {report.stopped_reason})"
-    res["searched"] = best_cpg; res["n_evals"] = report.n_evals
-    return res
+    sv = verify_submission(task_id, gene, _zero_policy_with_cpg(gene, best_cpg), steps=steps)
+    candidates.append((sv, f"CPG-search harness ({report.n_evals} evals, {report.stopped_reason})",
+                       {"searched": best_cpg}))
+
+    # keep the BEST-verified candidate: a pass beats a fail, then higher forward travel
+    def _key(c):
+        r = c[0]
+        return (bool(r.get("verified_pass")), float((r.get("metrics") or {}).get("forward_m", 0.0)))
+    best_res, method, extras = max(candidates, key=_key)
+    out = dict(best_res)
+    out["arm"] = "B"; out["method"] = method; out["n_evals"] = report.n_evals
+    out["searched"] = best_cpg; out["recalled"] = recalled if extras.get("recalled") else None
+    return out
 
 
-def run_dev_scoreboard(*, steps: int = 600, max_evals: int = 12) -> dict:
+def run_dev_scoreboard(*, steps: int = 600, max_evals: int = 12, use_memory: bool = True,
+                       models_dir: str = "build/models") -> dict:
     """Run both arms over the dev-split LOCOMOTION tasks; return an honest, verifier-scored A-vs-B scoreboard.
-    ``B_solved - A_solved`` is the measured value of the search harness on this slice."""
+    ``B_solved - A_solved`` is the measured value of the full harness (search + memory) on this slice."""
     rows = []
     for task in list_tasks("dev"):
         if task["family"] != "locomotion":
             continue
         a = run_arm_a(task["id"], steps=steps)
-        b = run_arm_b(task["id"], steps=steps, max_evals=max_evals)
+        b = run_arm_b(task["id"], steps=steps, max_evals=max_evals, use_memory=use_memory, models_dir=models_dir)
         rows.append({"task": task["id"], "A_pass": bool(a["verified_pass"]), "B_pass": bool(b["verified_pass"]),
                      "A_fwd": a["metrics"].get("forward_m"), "B_fwd": b["metrics"].get("forward_m"),
-                     "B_searched": b.get("searched"), "B_n_evals": b.get("n_evals")})
+                     "B_searched": b.get("searched"), "B_recalled": b.get("recalled"), "B_n_evals": b.get("n_evals")})
     return {"rows": rows, "A_solved": sum(r["A_pass"] for r in rows),
             "B_solved": sum(r["B_pass"] for r in rows), "n_tasks": len(rows),
             "harness_delta": sum(r["B_pass"] for r in rows) - sum(r["A_pass"] for r in rows)}

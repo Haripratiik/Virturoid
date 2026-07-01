@@ -10,7 +10,7 @@ from virturoid.services.virt_bench_arms import run_arm_a, run_arm_b, run_dev_sco
 class VirtBenchArmsTests(unittest.TestCase):
     def test_both_arms_return_verified_verdicts(self):
         a = run_arm_a("L1_quad_walk", steps=120)
-        b = run_arm_b("L1_quad_walk", steps=120, max_evals=4)
+        b = run_arm_b("L1_quad_walk", steps=120, max_evals=4, use_memory=False)  # search-only: deterministic
         for r, arm in ((a, "A"), (b, "B")):
             self.assertEqual(r["arm"], arm)
             self.assertIsInstance(r["verified_pass"], bool)      # a real re-run verdict, not a self-claim
@@ -19,8 +19,20 @@ class VirtBenchArmsTests(unittest.TestCase):
         self.assertGreaterEqual(b["n_evals"], 1)
         self.assertIsNotNone(b["searched"])
 
+    def test_arm_b_memory_recall_is_verified(self):
+        # the MEMORY path: with a controlled pool holding a forward-transferring seed, Arm B recalls + VERIFIES it.
+        # build/models holds the banked forward-quad policy that transfers forward to the quad body.
+        import os
+        if not os.path.isdir("build/models"):
+            self.skipTest("no banked models dir")
+        b = run_arm_b("L1_quad_walk", steps=200, max_evals=2, use_memory=True, models_dir="build/models")
+        self.assertEqual(b["arm"], "B")
+        self.assertIsInstance(b["verified_pass"], bool)          # verifier re-ran whichever candidate won
+        # if memory won, `recalled` names the seed; either way the result is an independent verify, not a claim
+        self.assertIn("forward_m", b["metrics"])
+
     def test_dev_scoreboard_is_honest(self):
-        sb = run_dev_scoreboard(steps=120, max_evals=4)
+        sb = run_dev_scoreboard(steps=120, max_evals=4, use_memory=False)
         self.assertGreaterEqual(sb["n_tasks"], 1)                # at least L1 in the dev locomotion split
         # every solved count is grounded in an independent verify, never a self-report
         self.assertEqual(sb["harness_delta"], sb["B_solved"] - sb["A_solved"])
