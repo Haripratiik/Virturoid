@@ -69,9 +69,12 @@ _SCHEMA = {
 }
 
 
-def propose_task(prompt: str, gene, *, llm="auto") -> TaskSpec:
+def propose_task(prompt: str, gene, *, llm="auto", prior_knowledge: str = "") -> TaskSpec:
     """Propose a verified TaskSpec for ``prompt`` on ``gene``. Falls back to a single-skill task offline
-    or when the LLM proposal fails verification."""
+    or when the LLM proposal fails verification.
+
+    ``prior_knowledge`` (Phase 2 RAG): a retrieved PRIOR-KNOWLEDGE block for this body, prepended so the
+    planner proposes tasks the morphology has actually accomplished before."""
     if llm == "auto":
         from virturoid.services.llm_client import get_llm
         llm = get_llm("planner")
@@ -80,7 +83,8 @@ def propose_task(prompt: str, gene, *, llm="auto") -> TaskSpec:
             from virturoid.services.task_verifier import verify_task
             system = _SYSTEM_TMPL.format(menu=skill_menu(),
                                          ops=", ".join(o.value for o in PredicateOp))
-            raw = llm.complete_json(system, f"Task: {prompt}", _SCHEMA, max_tokens=2000)
+            user = f"{prior_knowledge}\n\nTask: {prompt}" if prior_knowledge else f"Task: {prompt}"
+            raw = llm.complete_json(system, user, _SCHEMA, max_tokens=2000)
             spec = TaskSpec.from_dict(raw)
             spec.prompt, spec.source = prompt, "llm"
             if verify_task(spec, gene)["ok"]:            # only accept a feasible proposal

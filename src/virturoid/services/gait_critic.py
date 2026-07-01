@@ -55,11 +55,13 @@ _SYSTEM = (
 )
 
 
-def critique_gait(diagnosis: dict, config: dict, llm, *, history: list | None = None) -> dict | None:
+def critique_gait(diagnosis: dict, config: dict, llm, *, history: list | None = None,
+                  prior_knowledge: str = "") -> dict | None:
     """Given a gait ``diagnosis`` (from gait_diagnostics.diagnose_gait) and the current reward ``config``
     (weights), return ``{weights, failure_diagnosis, key_change, rationale, changes}`` with NEW, clamped reward
     weights — or None if no LLM backend. ``history`` = prior ``[{weights, gait_quality, summary}]`` rounds so the
-    LLM reflects on what helped/hurt (Eureka reflection)."""
+    LLM reflects on what helped/hurt (Eureka reflection). ``prior_knowledge`` (Phase 2 RAG) = a retrieved
+    PRIOR-KNOWLEDGE block (trainer tips + nearest walking skill's recipe for this body), prepended."""
     if llm is None:
         return None
 
@@ -72,7 +74,8 @@ def critique_gait(diagnosis: dict, config: dict, llm, *, history: list | None = 
             f"gait='{h.get('summary', '')[:90]}'"
             for i, h in enumerate(history))
     user = (
-        f"GAIT DIAGNOSIS: {diagnosis}\n"
+        (f"{prior_knowledge}\n\n" if prior_knowledge else "")
+        + f"GAIT DIAGNOSIS: {diagnosis}\n"
         f"CURRENT reward weights: {cur}\n"
         f"Bounds (min,max): { {k: (v[0], v[1]) for k, v in GAIT_REWARD_KNOBS.items()} }"
         f"{hist_txt}\n\n"

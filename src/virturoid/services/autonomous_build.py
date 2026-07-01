@@ -856,7 +856,7 @@ def _maybe_gene_build(prompt, output_dir, target, memory_dir, emit, *, train: bo
                 "Reasoned redesign: no physical body limit (reach/torque/structure) found; the shortfall is "
                 "control/grasp, not morphology — deferred to a learned skill (RL).")
     # Structured objective for the requested task (lift/spray/carry/…), gated + advisory.
-    reward = _maybe_translate_reward(prompt, emit)
+    reward = _maybe_translate_reward(prompt, emit, gene=gene, memory_dir=memory_dir, task_type=task_type)
     if reward is not None:
         spec = reward["spec"]
         report.notes.append(
@@ -939,6 +939,17 @@ def _maybe_gene_build(prompt, output_dir, target, memory_dir, emit, *, train: bo
                 + (f" (variant; morphology distance {placement['distance']:.2f})" if placement["action"] == "classified"
                    else f" — a new species under {placement['parent']!r} by morphology.")
             )
+            # Write-back (Phase 4): on a VERIFIED pass, bank a retrievable tip keyed to this species so the
+            # next similar build recalls what worked (the flywheel turning). Verified-only + idempotent.
+            if final >= target:
+                try:
+                    from virturoid.services.knowledge_writer import record_verified_knowledge
+                    wb = record_verified_knowledge(db, gene, placement["species_pattern"],
+                                                   task_type=task_type, success=final, target=target)
+                    if wb.get("wrote_tip"):
+                        report.notes.append(f"Banked a verified tip for reuse: \"{wb['tip']}\"")
+                except Exception:  # noqa: BLE001 - write-back is best-effort
+                    pass
     except Exception:  # noqa: BLE001 - memory is best-effort
         pass
     _write_report(output_dir, report)
@@ -1258,12 +1269,16 @@ def _maybe_recommend_transfer(prompt: str, robot_class: str, task_type: str, mem
     return None
 
 
-def _maybe_translate_reward(prompt: str, emit) -> dict | None:
+def _maybe_translate_reward(prompt: str, emit, *, gene=None, memory_dir=None, task_type=None) -> dict | None:
     """Translate the task into a structured RewardSpec (Language-to-Rewards), if a backend is set.
 
     Gated + offline-safe. The sparse success criterion + bounded dense terms are the trainable
     objective that lets the platform handle diverse tasks (lift/spray/carry) rather than only
     the hard-coded sort. Advisory today (recorded); drives RL skills once MJX is online.
+
+    Phase 2 RAG: when a ``gene`` + ``memory_dir`` are available, prepend a retrieved PRIOR-KNOWLEDGE
+    block (nearest skill's reward recipe + trainer tips for this body) so the reward is designed with
+    what worked before — the reasoner reasons about THIS body, not blind.
     """
     try:
         from virturoid.services.llm_client import get_llm
@@ -1273,7 +1288,15 @@ def _maybe_translate_reward(prompt: str, emit) -> dict | None:
         llm = get_llm("task_graph")  # reasoning role
         if llm is None:
             return None
-        result = translate_task_to_reward(prompt, build_requirements_from_prompt(prompt), llm)
+        prior = ""
+        if gene is not None and memory_dir is not None:
+            try:
+                from virturoid.services.knowledge_context import assemble_prior_knowledge
+                prior = assemble_prior_knowledge(memory_dir, gene=gene, task_type=task_type)
+            except Exception:  # noqa: BLE001 - RAG is best-effort; never break the build
+                prior = ""
+        result = translate_task_to_reward(prompt, build_requirements_from_prompt(prompt), llm,
+                                          prior_knowledge=prior)
         if result and result.get("valid"):
             emit("reward", f"Reward translator ({result['backend']}): success = '{result['spec'].sparse_success.expression}'.")
             return result

@@ -78,13 +78,19 @@ _SYSTEM = (
 )
 
 
-def translate_task_to_reward(prompt: str, requirements, llm, max_repairs: int = 2) -> dict | None:
-    """NL task -> validated RewardSpec dict. None if no LLM backend (offline-safe)."""
+def translate_task_to_reward(prompt: str, requirements, llm, max_repairs: int = 2,
+                             prior_knowledge: str = "") -> dict | None:
+    """NL task -> validated RewardSpec dict. None if no LLM backend (offline-safe).
+
+    ``prior_knowledge`` (Phase 2 RAG): a retrieved PRIOR-KNOWLEDGE block (nearest skill's reward recipe,
+    trainer tips for this body) prepended to the prompt so the reward is designed with what worked before.
+    """
     if llm is None:
         return None
 
     user = (
-        f"Task: {prompt}\n"
+        (f"{prior_knowledge}\n\n" if prior_knowledge else "")
+        + f"Task: {prompt}\n"
         f"Robot class: {getattr(requirements, 'robot_class', '') or 'unknown'}. "
         f"Payload: {getattr(requirements, 'payload_kg', None)} kg. Reach: {getattr(requirements, 'reach_m', None)} m.\n"
         f"Allowed dense-term quantities: {sorted(ALLOWED_QUANTITIES)}.\n"

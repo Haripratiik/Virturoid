@@ -75,8 +75,13 @@ _SYSTEM = (
 
 
 def classify_or_create_species(prompt: str, requirements, existing_nodes: list[dict],
-                               known_roots: list[str], llm, max_repairs: int = 2) -> dict | None:
-    """Classify into an existing species or propose a new one. None if no backend."""
+                               known_roots: list[str], llm, max_repairs: int = 2,
+                               prior_knowledge: str = "") -> dict | None:
+    """Classify into an existing species or propose a new one. None if no backend.
+
+    ``prior_knowledge`` (Phase 2 RAG): a retrieved PRIOR-ART block (similar past builds + reusable skills)
+    prepended to the prompt so the designer reuses/amends proven morphology instead of proposing cold.
+    """
     if llm is None:
         return None
 
@@ -87,7 +92,8 @@ def classify_or_create_species(prompt: str, requirements, existing_nodes: list[d
         for n in existing_nodes
     ) or "(none yet)"
     user = (
-        f"Request: {prompt}\n"
+        (f"{prior_knowledge}\n\n" if prior_knowledge else "")
+        + f"Request: {prompt}\n"
         f"Existing species:\n{listing}\n"
         f"Known robot-class roots: {sorted(known_roots)}\n"
         "Classify into an existing species_pattern, or create a new one with a parent and genes. "

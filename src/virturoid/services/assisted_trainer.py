@@ -61,16 +61,27 @@ def _gpu_train_and_diagnose(gene, weights, *, iters, envs, models_dir, init_npz,
 
 
 def ai_critic_gait_loop(gene, *, llm=None, rounds: int = 3, iters: int = 35, envs: int = 1024,
-                        models_dir: str = "models", progress=None, _train_diagnose=None) -> dict:
+                        models_dir: str = "models", progress=None, _train_diagnose=None,
+                        memory_dir=None) -> dict:
     """The AI-assisted REWARD loop (Eureka / Language-to-Rewards), wired end-to-end: train a GPU burst with the
     current reward weights -> diagnose the gait -> the LLM gait_critic REDESIGNS the weights -> retrain (warm-started),
     until it walks or ``rounds`` is hit. Offline-safe: ``llm=None`` -> one default-weight run, no critic (graceful).
-    Returns ``{npz, walking, rounds, weights, history}``. ``_train_diagnose`` is injectable for tests."""
+    Returns ``{npz, walking, rounds, weights, history}``. ``_train_diagnose`` is injectable for tests.
+
+    Phase 2 RAG: with ``memory_dir`` set, the gait_critic gets a PRIOR-KNOWLEDGE block (trainer tips +
+    nearest walking skill's recipe for this body) so it redesigns the reward from what worked before."""
     from virturoid.services.gait_critic import GAIT_REWARD_KNOBS, critique_gait
 
     def say(m):
         if progress:
             progress(m)
+    prior = ""
+    if memory_dir is not None:
+        try:
+            from virturoid.services.knowledge_context import assemble_prior_knowledge
+            prior = assemble_prior_knowledge(memory_dir, gene=gene, task_type="locomotion")
+        except Exception:  # noqa: BLE001 - RAG is best-effort; never break training
+            prior = ""
     td = _train_diagnose or _gpu_train_and_diagnose
     weights = {k: float(v[2]) for k, v in GAIT_REWARD_KNOBS.items()}     # start from the trainer's default weights
     history, best_npz, walking, init_npz = [], None, False, None
@@ -89,7 +100,7 @@ def ai_critic_gait_loop(gene, *, llm=None, rounds: int = 3, iters: int = 35, env
         if llm is None:                                                # no LLM -> can't redesign the reward; stop
             say("AI-critic loop: no LLM backend — kept default reward weights (offline)")
             break
-        prop = critique_gait(diag, weights, llm, history=history)
+        prop = critique_gait(diag, weights, llm, history=history, prior_knowledge=prior)
         if not prop or not prop.get("weights"):
             break
         weights = prop["weights"]
