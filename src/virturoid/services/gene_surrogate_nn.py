@@ -26,44 +26,46 @@ def gene_graph(gene: RobotGene):
     """(node_features [N,_NODE_DIM], edge_index [2,E] parent<->child) for a gene.
 
     Node features = 9 kinematic (length / radius / mass / actuated / torque / joint-axis / is-EE) + 4 TopoPE
-    (Topology Positional Encoding: tree depth, child count, sin/cos of depth). TopoPE lets the message-passing
-    GNN tell structurally-different bodies with identical link params apart (the GNN symmetry blind spot;
-    BodyGen arXiv:2503.00533) — so an unseen morphology gets a STRUCTURALLY-sensible latent instead of an
-    arbitrary one (the fix for the OOD z_body gap).
+    (Topology Positional Encoding: the edit-invariant root->node path-hash, ``topo_pe.topo_path_vector``). TopoPE
+    lets the message-passing GNN tell structurally-different bodies with identical link params apart (the GNN
+    symmetry blind spot; BodyGen arXiv:2503.00533) — so an unseen morphology gets a STRUCTURALLY-sensible latent
+    instead of an arbitrary one (the fix for the OOD z_body gap), aligned across bodies for transfer.
     """
-    import math
-
     import torch
+
+    from virturoid.services.topo_pe import topo_path_vector
 
     idx = {s.name: i for i, s in enumerate(gene.segments)}
     by_name = {s.name: s for s in gene.segments}
-    child_count: dict = {}
+    # Edit-invariant TopoPE (BodyGen path-hash), UNIFIED with the tokenizer via topo_pe.topo_path_vector:
+    # each node's positional code depends only on its root->node child-index path, so adding a limb elsewhere
+    # doesn't renumber existing nodes and structurally-similar limbs across different robots get aligned codes
+    # (replaces the fragile depth-based PE) — the property that lets the design latent transfer across bodies.
+    kids_order: dict = {}
     for s in gene.segments:
-        if s.parent is not None:
-            child_count[s.parent] = child_count.get(s.parent, 0) + 1
+        kids_order.setdefault(s.parent, []).append(s.name)
 
-    def _depth(seg) -> int:
-        d, cur, seen = 0, seg, set()
-        while cur.parent is not None and cur.parent in by_name and cur.name not in seen:
-            seen.add(cur.name)
+    def _topo_path(seg) -> list:
+        chain, cur, guard = [], seg, 0
+        while cur.parent is not None and cur.parent in by_name and guard <= len(gene.segments):
+            sibs = kids_order.get(cur.parent, [])
+            chain.append(sibs.index(cur.name) if cur.name in sibs else 0)
             cur = by_name[cur.parent]
-            d += 1
-            if d > 64:
-                break
-        return d
+            guard += 1
+        chain.reverse()
+        return chain
 
     feats = []
     for s in gene.segments:
         act = 1.0 if s.joint_type in ("revolute", "prismatic") else 0.0
         ax = s.joint_axis if act else (0.0, 0.0, 0.0)
-        dp = _depth(s)
-        cc = child_count.get(s.name, 0)
+        pe = topo_path_vector(_topo_path(s), dim=4)
         feats.append([
             s.length_m, s.radius_m, s.mass_kg, act,
             (s.actuator_torque_nm or 0.0) / 50.0,   # scaled
             float(ax[0]), float(ax[1]), float(ax[2]),
             1.0 if s.is_end_effector else 0.0,
-            dp / 8.0, min(cc, 6) / 6.0, math.sin(dp), math.cos(dp),   # TopoPE
+            pe[0], pe[1], pe[2], pe[3],             # TopoPE (edit-invariant path-hash)
         ])
     src, dst = [], []
     for s in gene.segments:

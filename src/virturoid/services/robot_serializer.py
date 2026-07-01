@@ -20,6 +20,7 @@ physics disposes" — this is the read side that lets the LLM propose *about a s
 from __future__ import annotations
 
 from virturoid.schemas.gene import GeneSegment, RobotGene
+from virturoid.services.topo_pe import topo_path_vector
 
 _AXIS_LABELS = ("x", "y", "z")
 
@@ -77,6 +78,7 @@ def robot_tokens(gene: RobotGene) -> list[dict]:
     kids = _children_map(gene)
     tokens: list[dict] = []
     for s in gene.actuated_joints():
+        path = _topo_path(gene, s, kids)
         tokens.append({
             "name": s.name,
             "joint_type": s.joint_type,                       # revolute | prismatic
@@ -90,7 +92,8 @@ def robot_tokens(gene: RobotGene) -> list[dict]:
             "radius_m": round(s.radius_m, 4),
             "parent": s.parent,
             "depth": _depth(gene, s),
-            "topo_path": _topo_path(gene, s, kids),           # TopoPE positional code (edit-invariant)
+            "topo_path": path,                                # child-index path root->part
+            "topo_pe": [round(v, 4) for v in topo_path_vector(path)],   # edit-invariant TopoPE vector
             "is_end_effector": s.is_end_effector,
         })
     return tokens

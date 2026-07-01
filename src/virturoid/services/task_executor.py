@@ -57,17 +57,26 @@ def run_task(spec, gene, *, verify: bool = True, record: bool = False) -> dict:
             "grasp_success_rate": grasp_success_rate}
 
 
-def evaluate_task(prompt: str, gene, *, llm="auto", record: bool = False) -> dict:
+def evaluate_task(prompt: str, gene, *, llm="auto", record: bool = False, memory_dir=None) -> dict:
     """General entry point: PROPOSE a TaskSpec from a free prompt, VERIFY it against the robot, and RUN
     it — the morphology-agnostic replacement for per-class dispatch. Returns the executor result plus the
     planned skills + provenance (so the UI can show what it tried and whether the plan was feasible).
-    ``record=True`` captures a replayable episode of the run for the viewport."""
+    ``record=True`` captures a replayable episode of the run for the viewport. ``memory_dir`` (Phase 2 RAG):
+    when set, the planner gets a PRIOR-KNOWLEDGE block for this body so it proposes tasks the morphology has
+    accomplished before."""
     if gene is None:                                      # defensive: never crash the caller on a missing robot
         return {"feasible": False, "success": False, "score": 0.0, "goal_met": 0, "goal_total": 0,
                 "steps": [], "issues": ["no robot to run the task on"], "view": None, "model_xml": None,
                 "task": "none", "task_source": "none", "steps_planned": []}
     from virturoid.services.task_proposer import propose_task
-    spec = propose_task(prompt, gene, llm=llm)
+    prior = ""
+    if memory_dir is not None:
+        try:
+            from virturoid.services.knowledge_context import assemble_prior_knowledge
+            prior = assemble_prior_knowledge(memory_dir, gene=gene)
+        except Exception:  # noqa: BLE001 - RAG is best-effort; never break task execution
+            prior = ""
+    spec = propose_task(prompt, gene, llm=llm, prior_knowledge=prior)
     result = run_task(spec, gene, record=record)
     result.update({"task": spec.name, "task_source": spec.source,
                    "steps_planned": [s.skill for s in spec.steps]})

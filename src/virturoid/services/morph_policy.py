@@ -21,12 +21,22 @@ class MorphPolicy:
     # weights transfer like the rest of the policy (see [[perception-next-keystone]]).
     PERCEPT_DIM = 10                                          # 8 rangefinder distances + (vx_cmd, wz_cmd)
 
-    def __init__(self, feature_dim: int, hidden: int = 32, seed: int = 0):
+    def __init__(self, feature_dim: int, hidden: int = 32, seed: int = 0, *,
+                 film: bool = False, topo_bias: bool = False, topo_buckets: int = 8):
         import numpy as np
 
         self.feature_dim = feature_dim
         self.hidden = hidden
         self.percept_dim = self.PERCEPT_DIM
+        # Phase-5 tokenizer upgrades, OPT-IN so default policies are byte-identical (and n_params unchanged):
+        #   film  -> FiLM joint-attribute conditioning (2603.00182): (1+gamma)*e + beta from the obs datasheet
+        #   topo_bias -> topology-aware attention bias theta_{d(i,j)} on kinematic hop distance
+        # Both weights are ZERO-init, so even when ON-but-untrained the forward is identical to OFF; GPU/ES
+        # training moves them. Extra weights are appended LAST + tracked in an instance order, so a default
+        # policy's parameter vector + n_params are exactly as before (banked policies load unchanged).
+        self.film = bool(film)
+        self.topo_bias = bool(topo_bias)
+        self.topo_buckets = int(topo_buckets)
         # Anti-collapse RECIPE deploy metadata, banked WITH the policy (see recipe_rollout_morph): a non-None
         # obs_mean marks this as a recipe (PD-to-default + obs-norm) policy, so the deploy/replay paths drive it
         # with the SAME control + normalization it was trained under (a torque-residual rollout would NOT walk it).
@@ -50,20 +60,36 @@ class MorphPolicy:
             # so the global perception token enters the attention block WITHOUT widening per-token obs.
             "Wrange": rng.normal(0, s, (self.PERCEPT_DIM, hidden)), "brange": np.zeros(hidden),
         }
+        # Instance parameter order = base order (+ opt-in weights, appended last, zero-init = identity when off).
+        self._order = list(self._ORDER)
+        if self.film:
+            self._arrs["Wfilm"] = np.zeros((feature_dim, 2 * hidden))   # -> (gamma, beta) per joint token
+            self._order.append("Wfilm")
+        if self.topo_bias:
+            self._arrs["Wtopo"] = np.zeros(self.topo_buckets + 1)       # learned bias per hop distance 0..buckets
+            self._order.append("Wtopo")
 
-    def act(self, obs, ranges=None, cmd=None):
+    def act(self, obs, ranges=None, cmd=None, hop=None):
         """(n_tokens, feature_dim) -> (n_tokens,) actions in [-1, 1].
 
         With ``ranges`` (a length-``n_rays`` distance vector) and optional ``cmd`` ([vx, wz] goal-velocity
         bias), a single GLOBAL perception token is appended and mixed through the SAME attention block, so
         the body can act on what it SENSES. ``ranges=None`` is byte-identical to the proprioception-only
-        forward (perception-blind), so locomotion and every banked policy behave exactly as before."""
+        forward (perception-blind), so locomotion and every banked policy behave exactly as before.
+
+        ``hop`` (an ``n_tokens x n_tokens`` kinematic hop-distance matrix, from ``topo_pe.hop_distance_matrix``)
+        adds the topology-aware attention bias when this policy was built with ``topo_bias`` — else ignored.
+        Both Phase-5 upgrades (FiLM, topo-bias) are identity when their weights are zero, so an off / untrained
+        policy is byte-identical to before."""
         import numpy as np
 
         if obs.shape[0] == 0:
             return np.zeros(0)
         a = self._arrs
         e = np.tanh(obs @ a["We"] + a["be"])                 # (N, H) per-token embedding
+        if self.film and "Wfilm" in a:                       # FiLM: modulate each token by its own datasheet
+            gb = obs @ a["Wfilm"]                            # (N, 2H) -> (gamma, beta); zero-init -> identity
+            e = (1.0 + gb[:, :self.hidden]) * e + gb[:, self.hidden:]
         if ranges is not None:
             r = np.asarray(ranges, dtype=float).ravel()
             c = np.asarray(cmd if cmd is not None else [0.0, 0.0], dtype=float).ravel()
@@ -74,6 +100,12 @@ class MorphPolicy:
             e = np.vstack([e, pt[None, :]])                    # (N+1, H): joints + one perception token
         q, k, v = e @ a["Wq"], e @ a["Wk"], e @ a["Wv"]      # (N(+1), H)
         scores = (q @ k.T) / np.sqrt(self.hidden)            # (N(+1), N(+1))
+        if self.topo_bias and hop is not None and "Wtopo" in a:   # structure-aware attention bias theta_{d(i,j)}
+            nj = obs.shape[0]
+            hop = np.asarray(hop)
+            if hop.shape == (nj, nj):
+                tb = a["Wtopo"]
+                scores[:nj, :nj] += tb[np.clip(hop.astype(int), 0, len(tb) - 1)]   # zero-init -> no change
         scores -= scores.max(axis=1, keepdims=True)
         att = np.exp(scores); att /= att.sum(axis=1, keepdims=True)
         z = (att @ v) @ a["Wo"]                              # cross-token mixing (joints attend to perception)
@@ -86,13 +118,13 @@ class MorphPolicy:
 
     def get_params(self):
         import numpy as np
-        return np.concatenate([self._arrs[k].ravel() for k in self._ORDER])
+        return np.concatenate([self._arrs[k].ravel() for k in self._order])
 
     def set_params(self, flat):
         import numpy as np
         flat = np.asarray(flat, dtype=float)
         i = 0
-        for kk in self._ORDER:
+        for kk in self._order:
             arr = self._arrs[kk]; n = arr.size
             arr[...] = flat[i:i + n].reshape(arr.shape); i += n
 
@@ -109,12 +141,20 @@ class MorphPolicy:
 
         d = np.load(path)
         feature_dim, hidden = int(d["meta"][0]), int(d["meta"][1])
-        p = cls(feature_dim, hidden=hidden)
+        # Phase-5 opt-in weights are detected by key presence (same philosophy as Wrange): a policy trained
+        # with FiLM / topo-bias carries "Wfilm" / "Wtopo"; older npz have neither -> the plain policy.
+        buckets = int(len(d["Wtopo"]) - 1) if "Wtopo" in d.files else 8
+        p = cls(feature_dim, hidden=hidden, film=("Wfilm" in d.files),
+                topo_bias=("Wtopo" in d.files), topo_buckets=buckets)
         # Load only keys present in the file: pre-perception npz (8 keys, no Wrange/brange) load fine and
         # run perception-blind (the seeded Wrange/brange are never read unless act() is given ranges).
-        for k in cls._ORDER:
+        for k in p._order:
             if k in d.files:
-                p._arrs[k][...] = np.asarray(d[k])
+                arr = np.asarray(d[k], dtype=float)
+                if p._arrs[k].shape == arr.shape:
+                    p._arrs[k][...] = arr
+                else:
+                    p._arrs[k] = arr                          # adopt the saved shape (e.g. a different topo_buckets)
         # RECIPE policies bank their obs normalizer alongside the weights (older npz files have neither key ->
         # obs_mean stays None -> they deploy on the legacy residual path exactly as before).
         p.obs_mean = np.asarray(d["obs_mean"], dtype=float) if "obs_mean" in d.files else None
@@ -141,7 +181,7 @@ class MorphPolicy:
         if norm is not None:
             extra = {"obs_mean": np.asarray(norm[0], dtype=float), "obs_std": np.asarray(norm[1], dtype=float)}
             recipe_flag = 1.0
-        np.savez(path, **{k: self._arrs[k] for k in self._ORDER}, **extra,
+        np.savez(path, **{k: self._arrs[k] for k in self._order}, **extra,
                  meta=np.asarray([float(self.feature_dim), float(self.hidden), recipe_flag, float(score),
                                   1.0 if getattr(self, "adaptive_gains", False) else 0.0,
                                   1.0 if getattr(self, "cpg", None) else 0.0]))
