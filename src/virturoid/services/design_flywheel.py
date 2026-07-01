@@ -14,7 +14,8 @@ import json
 
 
 def co_design_with_memory(gene, prompt: str, db, *, iterations: int = 3, population: int = 6,
-                          seed: int = 0, best_response: bool = False, archive_path=None) -> dict:
+                          seed: int = 0, best_response: bool = False, archive_path=None,
+                          br_samples: int = 3, br_iters: int = 1, br_steps: int = 400) -> dict:
     """Warm-start general co-design from the best banked design for this (class, task), run it, and bank
     the result. Returns the co-design result plus ``warm_started`` + ``prior_best``.
 
@@ -38,7 +39,8 @@ def co_design_with_memory(gene, prompt: str, db, *, iterations: int = 3, populat
             warm = None
 
     r = co_design_general(gene, prompt, iterations=iterations, population=population, seed=seed,
-                          warm_start=warm if isinstance(warm, dict) else None, best_response=best_response)
+                          warm_start=warm if isinstance(warm, dict) else None, best_response=best_response,
+                          br_samples=br_samples, br_iters=br_iters, br_steps=br_steps)
 
     db.record_run(prompt=prompt, robot_class=cls, task_type=task, converged_design=r["changed"],
                   success_rate=r["best_value"], species=getattr(gene, "species", None),
