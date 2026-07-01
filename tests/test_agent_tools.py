@@ -60,6 +60,35 @@ class AgentToolsTests(unittest.TestCase):
         self.assertTrue(r["ok"])
         self.assertTrue(r["result"])   # registry summary or the known-tasks fallback
 
+    def test_understanding_tools_are_registered(self):
+        names = {s["name"] for s in tool_specs()}
+        self.assertLessEqual({"describe_robot", "diagnose_body", "nearest_bodies", "recall_knowledge"}, names)
+
+    def test_diagnose_body_tool(self):
+        r = call_tool("diagnose_body", {"prompt": "a tabletop arm that grasps a cube"})
+        self.assertTrue(r["ok"], r)
+        self.assertIn("observations", r["result"])
+        self.assertIn("stats", r["result"])
+
+    def test_recall_knowledge_tool_retrieves_seeded_tip(self):
+        from virturoid.fixtures.gene_library import tabletop_arm_gene
+        from virturoid.services.memory_db import MemoryDB
+        from virturoid.services.species_discovery import auto_place_species
+        with tempfile.TemporaryDirectory() as tmp:
+            with MemoryDB(Path(tmp) / "virturoid_memory.db") as db:
+                sp = auto_place_species(tabletop_arm_gene(), db)["species_pattern"]
+                db.add_species_tip(sp, "keep the wrist DOF wide for top-down grasps", audience="builder")
+            r = call_tool("recall_knowledge", {"prompt": "a tabletop arm that grasps",
+                                               "memory_dir": tmp, "task_type": "grasp"})
+            self.assertTrue(r["ok"], r)
+            self.assertTrue(r["result"]["tips"])
+
+    def test_recall_knowledge_tool_without_memory_is_graceful(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            r = call_tool("recall_knowledge", {"prompt": "an arm", "memory_dir": tmp})
+            self.assertTrue(r["ok"])
+            self.assertIn("note", r["result"])
+
 
 if __name__ == "__main__":
     unittest.main()

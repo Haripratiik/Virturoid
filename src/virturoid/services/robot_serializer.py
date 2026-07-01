@@ -174,3 +174,39 @@ def describe_robot(gene: RobotGene) -> dict:
     tokens = robot_tokens(gene)
     stats = robot_stats(gene)
     return {"tokens": tokens, "summary_text": _summary_text(gene, stats, tokens), "stats": stats}
+
+
+def structural_diagnosis(gene: RobotGene) -> dict:
+    """A fast, PHYSICS-FREE structural read of a body: ``{stats, reach_m, observations}``.
+
+    Grounded, unambiguous facts an agent can reason over to understand what the body *is* and its structural
+    limits (DOF, reach, end effector, limb count) — the cheap "understand this robot" tool. Not a physics
+    evaluation: it makes no claim about whether the body will actually succeed at a task (that needs the
+    simulator); every observation here is read straight off the gene.
+    """
+    stats = robot_stats(gene)
+    by_name = {s.name: s for s in gene.segments}
+    kids = _children_map(gene)
+
+    def _chain_len(name: str, guard: int = 0) -> float:
+        s = by_name.get(name)
+        if s is None or guard > len(gene.segments):
+            return 0.0
+        ch = kids.get(name, [])
+        return s.length_m + (max((_chain_len(k, guard + 1) for k in ch), default=0.0))
+
+    root = gene.root()
+    reach = _chain_len(root.name) if root else sum(s.length_m for s in gene.segments)
+
+    obs: list[str] = [f"{stats['dof']} actuated DOF"
+                      + (" - low articulation (<3 DOF), limited dexterity" if stats["dof"] < 3 else "")]
+    obs.append(f"reach ~{reach:.2f} m along the longest kinematic chain")
+    if stats["end_effector_type"] in (None, "none"):
+        obs.append("no end effector - a locomotion/mobility body, not a manipulator")
+    else:
+        obs.append(f"end effector: {stats['end_effector_type']} (link '{stats['end_effector_link']}')")
+    if stats["n_chains"] >= 3:
+        obs.append(f"{stats['n_chains']} kinematic chains off the base (legged / multi-limb)")
+    if stats["n_prismatic"] and not stats["n_revolute"]:
+        obs.append("prismatic-only articulation (linear stages, no rotation)")
+    return {"stats": stats, "reach_m": round(reach, 3), "observations": obs}

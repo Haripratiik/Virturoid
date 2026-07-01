@@ -55,6 +55,60 @@ def _describe_robot(args: dict) -> dict:
     return describe_robot(compose_robot(prompt))
 
 
+def _diagnose_body(args: dict) -> dict:
+    """Fast, physics-free structural read of a body composed from the prompt (DOF, reach, end effector,
+    limb count) — the cheap "understand what this robot IS + its structural limits" tool."""
+    prompt = args["prompt"]
+    from virturoid.services.morphology_composer import compose_robot
+    from virturoid.services.robot_serializer import structural_diagnosis
+    return structural_diagnosis(compose_robot(prompt))
+
+
+def _nearest_bodies(args: dict) -> dict:
+    """Prior bodies most morphologically similar to the prompt's body (the design flywheel's read side —
+    "what have we built that's shaped like this?")."""
+    prompt = args["prompt"]
+    from virturoid.services.morphology_composer import compose_robot
+    gene = compose_robot(prompt)
+    vm, closer = _open_vector_memory(args.get("memory_dir"))
+    if vm is None:
+        return {"bodies": [], "note": "no memory yet"}
+    try:
+        vm.index_species_bodies()
+        return {"bodies": vm.nearest_bodies(gene, k=int(args.get("k", 5)))}
+    finally:
+        closer()
+
+
+def _recall_knowledge(args: dict) -> dict:
+    """Retrieve prior tips + lessons + skills for the prompt's body, keyed by its morphology embedding —
+    the recall organ ("what worked on robots like this?"), so an agent reasons with prior experience."""
+    prompt = args["prompt"]
+    from virturoid.services.morphology_composer import compose_robot
+    gene = compose_robot(prompt)
+    vm, closer = _open_vector_memory(args.get("memory_dir"))
+    if vm is None:
+        return {"tips": [], "lessons": [], "skills": [], "note": "no memory yet"}
+    try:
+        return vm.recall_knowledge(gene, args.get("task_type"), failure_code=args.get("failure_code"),
+                                   k=int(args.get("k", 3)))
+    finally:
+        closer()
+
+
+def _open_vector_memory(memory_dir):
+    """Open the vector memory for a memory dir. Returns ``(vm, closer)``; ``(None, noop)`` if absent."""
+    from pathlib import Path
+    memory_dir = Path(memory_dir or "build/memory")
+    db_path = memory_dir / "virturoid_memory.db"
+    if not db_path.exists():
+        return None, (lambda: None)
+    from virturoid.services.memory_db import MemoryDB
+    from virturoid.services.robotics_vector_memory import RoboticsVectorMemory
+    db = MemoryDB(db_path)
+    return RoboticsVectorMemory(db), db.close
+
+
 def _build_robot(args: dict) -> dict:
     """Compose + physics-build a robot from a prompt (REAL MuJoCo; slow). Returns an honest summary."""
     from virturoid.services.autonomous_build import autonomous_build
@@ -127,6 +181,30 @@ TOOLS: dict[str, dict] = {
         "parameters": {"type": "object", "required": ["prompt"], "properties": {
             "prompt": {"type": "string", "description": "what robot to describe (e.g. 'a dog that walks')"}}},
         "handler": _describe_robot, "heavy": False,
+    },
+    "diagnose_body": {
+        "description": "Fast, physics-free structural read of a body (DOF, reach, end effector, limb count) "
+                       "— understand what a robot IS and its structural limits. No physics.",
+        "parameters": {"type": "object", "required": ["prompt"], "properties": {
+            "prompt": {"type": "string"}}},
+        "handler": _diagnose_body, "heavy": False,
+    },
+    "nearest_bodies": {
+        "description": "Prior bodies most morphologically similar to the prompt's body (the design flywheel "
+                       "read: 'what have we built shaped like this?').",
+        "parameters": {"type": "object", "required": ["prompt"], "properties": {
+            "prompt": {"type": "string"}, "k": {"type": "integer", "default": 5},
+            "memory_dir": {"type": "string", "description": "shared memory dir (default build/memory)"}}},
+        "handler": _nearest_bodies, "heavy": False,
+    },
+    "recall_knowledge": {
+        "description": "Retrieve prior tips + lessons + reusable skills for the prompt's body, keyed by its "
+                       "morphology embedding — the recall organ ('what worked on robots like this?').",
+        "parameters": {"type": "object", "required": ["prompt"], "properties": {
+            "prompt": {"type": "string"}, "task_type": {"type": "string"},
+            "failure_code": {"type": "string"}, "k": {"type": "integer", "default": 3},
+            "memory_dir": {"type": "string", "description": "shared memory dir (default build/memory)"}}},
+        "handler": _recall_knowledge, "heavy": False,
     },
     "evaluate_robot": {
         "description": "Compose a robot for a prompt and score it on its morphology-implied task (real MuJoCo).",
