@@ -685,12 +685,23 @@ def _maybe_gene_build(prompt, output_dir, target, memory_dir, emit, *, train: bo
     reused_from = None
     try:
         from virturoid.schemas.gene import RobotGene
+        from virturoid.services.map_elites_archive import descriptor
         from virturoid.services.memory_db import MemoryDB
         with MemoryDB(Path(memory_dir) / "virturoid_memory.db") as _db:
             stored = _db.find_gene_for_class(requested_class)
         if stored:
             candidate = RobotGene.from_dict(stored)
-            if not candidate.validate():
+            # Reuse a banked body ONLY when it shares the COMPOSED body's morphology NICHE — so a distinct
+            # prompt (a six-legged, niche (6,8,3), vs the banked quad, (3,6,3)) keeps its own composed body and
+            # illuminates a NEW archive niche instead of collapsing onto the banked one; same-morphology
+            # rebuilds still amend the prior gene (the flywheel). Diagnosed empirically: the composer DOES build
+            # distinct bodies per prompt, but the class-level reuse was overriding them (the flywheel-proof
+            # coverage collapse — every legged prompt became the quad).
+            try:
+                same_niche = descriptor(candidate) == descriptor(gene)
+            except Exception:  # noqa: BLE001 - if either can't be described, keep the old class-level reuse
+                same_niche = True
+            if not candidate.validate() and same_niche:
                 gene, reused_from = candidate, candidate.species
     except Exception:  # noqa: BLE001 - reuse is best-effort; fall back to the seed gene
         pass
