@@ -52,14 +52,26 @@ def main(argv=None) -> int:
                                       [gnn.embed(genes[i]) for i in te], yte, k=args.k)
     head = round(pearson([gnn.predict(genes[i]) for i in te], yte), 4)   # the GNN's own success head (reference)
 
+    # HYBRID: L2-normalized concat of the deterministic vector AND the learned latent -- does the learned
+    # latent ADD signal on top of the hand-crafted vector? (closes the strategic #1: beat the baseline)
+    def _hyb(gene):
+        d, z = embed_gene(gene), gnn.embed(gene)
+        nd = (sum(x * x for x in d) ** 0.5) or 1.0
+        nz = (sum(x * x for x in z) ** 0.5) or 1.0
+        return [x / nd for x in d] + [x / nz for x in z]
+
+    hybrid = knn_success_correlation([_hyb(genes[i]) for i in tr], ytr,
+                                     [_hyb(genes[i]) for i in te], yte, k=args.k)
+
     print(f"  deterministic embed_gene : pearson={det['pearson']:+.4f}  spearman={det['spearman']:+.4f}")
     print(f"  learned GNN latent (kNN) : pearson={learned['pearson']:+.4f}  spearman={learned['spearman']:+.4f}")
+    print(f"  HYBRID (determ ++ latent): pearson={hybrid['pearson']:+.4f}  spearman={hybrid['spearman']:+.4f}")
     print(f"  GNN success head (direct): pearson={head:+.4f}")
-    margin = learned["pearson"] - det["pearson"]
-    verdict = ("LEARNED z_body wins -> activate for warm-start-by-quality"
-               if margin > 0.05 else
-               "DETERMINISTIC z_body wins/ties -> keep the hand-crafted embedding (honest)")
-    print(f"\nVERDICT (learned-minus-deterministic pearson = {margin:+.4f}): {verdict}")
+    margin, hmargin = learned["pearson"] - det["pearson"], hybrid["pearson"] - det["pearson"]
+    best = ("HYBRID" if (hmargin > 0.02 and hybrid["pearson"] >= learned["pearson"])
+            else "LEARNED" if margin > 0.05 else "DETERMINISTIC")
+    print(f"\nVERDICT: hybrid-minus-deterministic = {hmargin:+.4f}; learned-minus-deterministic = {margin:+.4f}"
+          f"  -> {best} z_body is best for warm-start-by-quality")
     return 0
 
 
