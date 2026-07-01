@@ -105,12 +105,13 @@ def run_arm_b(task_id: str, *, steps: int = 600, max_evals: int = 12, on_node=No
     return out
 
 
-def run_dev_scoreboard(*, steps: int = 600, max_evals: int = 12, use_memory: bool = True,
-                       models_dir: str = "build/models") -> dict:
-    """Run both arms over the dev-split LOCOMOTION tasks; return an honest, verifier-scored A-vs-B scoreboard.
-    ``B_solved - A_solved`` is the measured value of the full harness (search + memory) on this slice."""
+def run_scoreboard(*, split: str | None = "dev", steps: int = 600, max_evals: int = 12, use_memory: bool = True,
+                   models_dir: str = "build/models") -> dict:
+    """Run both arms over the LOCOMOTION tasks in ``split`` (``"dev"`` / ``"held_out"`` / ``None`` = all) and
+    return an honest, verifier-scored A-vs-B scoreboard. ``B_solved - A_solved`` is the measured value of the
+    full harness (search + memory) -- the head-to-head number for "beats Claude+MCP" on this slice."""
     rows = []
-    for task in list_tasks("dev"):
+    for task in list_tasks(split):
         if task["family"] != "locomotion":
             continue
         a = run_arm_a(task["id"], steps=steps)
@@ -121,3 +122,9 @@ def run_dev_scoreboard(*, steps: int = 600, max_evals: int = 12, use_memory: boo
     return {"rows": rows, "A_solved": sum(r["A_pass"] for r in rows),
             "B_solved": sum(r["B_pass"] for r in rows), "n_tasks": len(rows),
             "harness_delta": sum(r["B_pass"] for r in rows) - sum(r["A_pass"] for r in rows)}
+
+
+def run_dev_scoreboard(**kw) -> dict:
+    """The dev-split scoreboard (thin wrapper over ``run_scoreboard`` for back-compat)."""
+    kw.setdefault("split", "dev")
+    return run_scoreboard(**kw)
