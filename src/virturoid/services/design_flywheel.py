@@ -14,14 +14,16 @@ import json
 
 
 def co_design_with_memory(gene, prompt: str, db, *, iterations: int = 3, population: int = 6,
-                          seed: int = 0, best_response: bool = False) -> dict:
+                          seed: int = 0, best_response: bool = False, archive_path=None) -> dict:
     """Warm-start general co-design from the best banked design for this (class, task), run it, and bank
     the result. Returns the co-design result plus ``warm_started`` + ``prior_best``.
 
     ``best_response=True`` scores candidate bodies by their best-response controller (the Stackelberg /
     trainability objective — Pillar 1). When this build warm-started from a prior design, a provenance
     edge (with the measured search improvement Δ = best - baseline over the prior best) is recorded in the
-    robotics vector memory so cross-build compounding is *provable, not asserted* (Pillar 2)."""
+    robotics vector memory so cross-build compounding is *provable, not asserted* (Pillar 2). ``archive_path``
+    (a JSON MAP-Elites archive) makes this the full Designer→Trainer→Curator step: the result is inserted
+    into its morphology niche, so the flywheel illuminates DIVERSE bodies (guards diversity collapse)."""
     from virturoid.services.gene_codesign import co_design_general
     from virturoid.services.task_matched_eval import robot_kind
 
@@ -57,6 +59,21 @@ def co_design_with_memory(gene, prompt: str, db, *, iterations: int = 3, populat
                                      meta={"robot_class": cls, "task": task, "prompt": prompt})
                 r["provenance_delta"] = delta
         except Exception:  # noqa: BLE001 - provenance is observability; never break the flywheel
+            pass
+    # Curator: illuminate the MAP-Elites archive with this build (best body + its follower), so the
+    # flywheel covers DIVERSE morphology niches rather than a single global best.
+    r["archive_action"] = None
+    if archive_path is not None:
+        try:
+            from pathlib import Path
+
+            from virturoid.services.map_elites_archive import MapElitesArchive
+            arc = MapElitesArchive.load(archive_path) if Path(archive_path).exists() else MapElitesArchive()
+            r["archive_action"] = arc.insert(r["gene"], r["best_value"], controller=r.get("best_controller"),
+                                             meta={"robot_class": cls, "task": task, "prompt": prompt})
+            arc.save(archive_path)
+            r["archive_summary"] = arc.summary()
+        except Exception:  # noqa: BLE001 - the archive is observability; never break the flywheel
             pass
     return r
 

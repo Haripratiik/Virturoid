@@ -38,6 +38,20 @@ class DesignFlywheelTests(unittest.TestCase):
                 self.assertGreaterEqual(summary["edges"], 1)
                 self.assertGreaterEqual(summary["seeded_builds"], 1)
 
+    def test_build_illuminates_the_map_elites_archive(self):
+        from virturoid.services.design_flywheel import co_design_with_memory
+        from virturoid.services.map_elites_archive import MapElitesArchive
+        from virturoid.services.memory_db import MemoryDB
+
+        with tempfile.TemporaryDirectory() as td:
+            arc_path = Path(td) / "design_archive.json"
+            with MemoryDB(Path(td) / "mem.db") as db:
+                r = co_design_with_memory(_quad(), "a quadruped that walks", db,
+                                          iterations=1, population=3, seed=0, archive_path=arc_path)
+            self.assertEqual(r["archive_action"], "added")          # first build fills the quad's niche
+            self.assertTrue(arc_path.exists())
+            self.assertGreaterEqual(MapElitesArchive.load(arc_path).coverage(), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
