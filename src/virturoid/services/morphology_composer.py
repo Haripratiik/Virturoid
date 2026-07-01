@@ -670,7 +670,7 @@ def _fallback_gene(prompt: str, heuristic_spec: dict, *, target_height_m: float 
 
 def compose_working_robot(prompt: str, *, llm=None, reach_m: float | None = None,
                           payload_kg: float | None = None, iterations: int = 4, population: int = 8,
-                          scene_count: int = 4, seed: int = 0) -> dict:
+                          scene_count: int = 4, seed: int = 0, best_response: bool | None = None) -> dict:
     """Compose a robot from blocks AND co-design it into a WORKING one (the full autonomous path).
 
     Composes a gene (``compose_robot``), then co-designs it for ITS task — generalized across
@@ -683,7 +683,8 @@ def compose_working_robot(prompt: str, *, llm=None, reach_m: float | None = None
     from virturoid.services.task_matched_eval import robot_kind
 
     gene = compose_robot(prompt, llm=llm, reach_m=reach_m, payload_kg=payload_kg)
-    if robot_kind(gene) == "manipulator":
+    kind = robot_kind(gene)
+    if kind == "manipulator":
         from virturoid.services.gene_codesign import co_optimize_gene
         from virturoid.services.task_runtime import generate_task_scenes, select_task_spec
         spec = select_task_spec(prompt)
@@ -691,11 +692,17 @@ def compose_working_robot(prompt: str, *, llm=None, reach_m: float | None = None
         # the task's real object->target assignments so co-design scores the actual task, not a vacuous default
         return co_optimize_gene(gene, scenes, assignments=spec.assignments, iterations=iterations,
                                 population=population, seed=seed)
-    # legged / mobile / spray: body co-design against the general task metric (scripted controllers)
+    # legged / mobile / spray: body co-design against the general task metric. A LEGGED body is scored by
+    # its best-response controller (the Stackelberg / trainability keystone) so the search selects a body
+    # that is easy to make WALK, and returns the follower it found; mobile/spray keep the fixed-controller
+    # metric (best_response_score has no follower for them yet). Auto-on for legged; override via best_response.
     from virturoid.services.gene_codesign import co_design_general
-    r = co_design_general(gene, prompt, iterations=iterations, population=population, seed=seed)
-    return {"gene": r["gene"], "controller_params": None, "success_rate": r["best_value"],
-            "baseline_success": r["baseline_value"], "history": r["history"]}
+    use_br = (kind == "legged") if best_response is None else bool(best_response)
+    r = co_design_general(gene, prompt, iterations=iterations, population=population, seed=seed,
+                          best_response=use_br)
+    return {"gene": r["gene"], "controller_params": r.get("best_controller"),
+            "success_rate": r["best_value"], "baseline_success": r["baseline_value"],
+            "history": r["history"]}
 
 
 _LINK_SCHEMA = {

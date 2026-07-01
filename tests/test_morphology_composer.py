@@ -216,6 +216,17 @@ class MorphologyComposerTests(unittest.TestCase):
         self.assertIn("controller_params", res)
 
     @unittest.skipUnless(_MUJOCO, "MuJoCo not installed.")
+    def test_compose_working_robot_legged_uses_best_response(self):
+        # a legged body is co-designed by its best-response controller (the Stackelberg keystone made
+        # live in the compose path), so the result carries the follower it found -- not None
+        from virturoid.services.morphology_composer import compose_working_robot
+        res = compose_working_robot("a quadruped robot that walks", iterations=1, population=2, seed=0)
+        self.assertEqual(res["gene"].validate(), [])
+        self.assertIsNotNone(res["controller_params"])                 # the best-response follower
+        self.assertIn("leg_flip", res["controller_params"])
+        self.assertGreaterEqual(res["success_rate"], res["baseline_success"] - 1e-6)   # never regress
+
+    @unittest.skipUnless(_MUJOCO, "MuJoCo not installed.")
     def test_composed_robots_compile_and_auto_place(self):
         import tempfile
         from pathlib import Path
