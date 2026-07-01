@@ -74,6 +74,26 @@ class AutonomousBuildTests(unittest.TestCase):
             self.assertTrue((out / "reports" / "memory_effectiveness_report.json").exists())
             self.assertIn("memory_effectiveness_report", report.exported_artifacts)
 
+    def test_legged_build_runs_the_keystone_and_illuminates_the_archive(self):
+        # the Stackelberg keystone is now LIVE in the real legged build path: a walker body is chosen by
+        # its best-response controller (trainability) and the MAP-Elites archive is illuminated + a
+        # provenance edge recorded -- the body co-design step the legged path previously lacked.
+        from virturoid.services.autonomous_build import autonomous_build
+        from virturoid.services.map_elites_archive import MapElitesArchive
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out = Path(tmpdir) / "robot"
+            memory_dir = Path(tmpdir) / "memory"
+            report = autonomous_build("a quadruped robot that walks", out,
+                                      target_success_rate=0.8, memory_dir=memory_dir)
+            self.assertTrue(report.validate().ok, report.validate().issues)
+            self.assertIn(report.robot_class, {"quadruped", "legged"})
+            stages = {d.stage for d in report.decisions}
+            self.assertIn("keystone_codesign", stages)          # the keystone body-selection actually ran
+            arc_path = memory_dir / "design_archive.json"       # the Curator illuminated the archive
+            self.assertTrue(arc_path.exists())
+            self.assertGreaterEqual(MapElitesArchive.load(arc_path).coverage(), 1)
+
     def test_nonsort_manipulation_tasks_route_to_gene_path_not_sort_only_legacy(self):
         """Stack / place-on-shelf / push tasks must run the general gene path (their REAL task eval), not the
         tuned legacy arm path -- which only scores the colour sort, so every other manipulation task read a

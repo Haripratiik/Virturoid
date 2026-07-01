@@ -614,6 +614,36 @@ def _prompt_task_type(prompt: str) -> str | None:
         return None
 
 
+def _maybe_keystone_codesign(gene, prompt, memory_dir, emit):
+    """Keystone (Pillar 1) for a LEGGED body: choose the body by its BEST-RESPONSE controller (the
+    Stackelberg trainability objective) + illuminate the MAP-Elites archive + record a provenance edge —
+    all via one ``co_design_with_memory`` call, warm-started from the banked best design.
+
+    Returns ``(gene, follower, result)`` — the (possibly co-designed) gene, the follower controller it was
+    selected with, and the result dict — or ``(gene, None, None)`` for non-legged bodies or on any failure.
+    Best-effort (never fails a build); auto-on for legged, disable with ``VIRTUROID_KEYSTONE_CODESIGN=0``.
+    The body selection is the value here; the headline score + viewer still use the shipped bare-CPG/banked
+    controller (so the reported number can't contradict the 3D replay), and the follower is reserved for
+    warm-starting the ES policy trainer.
+    """
+    import os
+    try:
+        from virturoid.services.task_matched_eval import robot_kind
+        if robot_kind(gene) != "legged" or os.environ.get("VIRTUROID_KEYSTONE_CODESIGN", "1") == "0":
+            return gene, None, None
+        from virturoid.services.design_flywheel import co_design_with_memory
+        from virturoid.services.memory_db import MemoryDB
+        emit("keystone", "Choosing the walker body by its best-response controller (trainability) and "
+                         "illuminating the design archive...")
+        with MemoryDB(Path(memory_dir) / "virturoid_memory.db") as db:
+            r = co_design_with_memory(gene, prompt, db, iterations=1, population=3, seed=0,
+                                      best_response=True, archive_path=Path(memory_dir) / "design_archive.json",
+                                      br_samples=2, br_iters=1, br_steps=300)
+        return r["gene"], r.get("best_controller"), r
+    except Exception:  # noqa: BLE001 - keystone co-design is best-effort; fall back to the composed gene
+        return gene, None, None
+
+
 def _maybe_gene_build(prompt, output_dir, target, memory_dir, emit, *, train: bool = False) -> AutonomyReport | None:
     """Build+run a robot from its gene for gene-only classes (e.g. humanoid). None otherwise.
 
@@ -669,6 +699,11 @@ def _maybe_gene_build(prompt, output_dir, target, memory_dir, emit, *, train: bo
     if not mujoco_available():
         return None  # let the legacy path produce the validated foundation package
 
+    # Keystone (Pillar 1): a LEGGED body is chosen by its best-response controller (trainability) and the
+    # design archive is illuminated + a provenance edge recorded — the body co-design step the live legged
+    # path lacked. Non-legged / disabled -> gene unchanged. Best-effort.
+    gene, keystone_follower, keystone_res = _maybe_keystone_codesign(gene, prompt, memory_dir, emit)
+
     from virturoid.services.compute_provenance import RealComputeMeter
     from virturoid.services.gene_build import build_gene_package
 
@@ -721,6 +756,16 @@ def _maybe_gene_build(prompt, output_dir, target, memory_dir, emit, *, train: bo
                                  else "ran real pick-and-place on the gene-built robot"),
                          detail=f"success={final}", success_before=0.0, success_after=final),
     ]
+    if keystone_res is not None:   # the keystone body-selection step ran (legged) -> surface it honestly
+        fl = keystone_follower or {}
+        decisions.insert(1, AutonomyDecision(
+            iteration=0, stage="keystone_codesign",
+            action="selected the walker body by its best-response controller (Stackelberg trainability); illuminated the design archive",
+            detail=(f"best_response_score={keystone_res.get('best_value')}, "
+                    f"follower(freq={fl.get('freq')}, leg_flip={fl.get('leg_flip')}), "
+                    f"delta_vs_prior={keystone_res.get('provenance_delta')}, "
+                    f"archive={keystone_res.get('archive_action')} {keystone_res.get('archive_summary')}"),
+            success_before=0.0, success_after=float(keystone_res.get("best_value") or 0.0)))
     # Pick-place builds emit object scenes (compiled_scene_index + scene_set); a locomotion build has no
     # object scenes, so only list the artifacts that were actually written (honest report).
     gene_artifacts = {
