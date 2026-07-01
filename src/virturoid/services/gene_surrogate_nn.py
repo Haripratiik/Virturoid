@@ -67,7 +67,8 @@ class GeneGNN:
         self.head = nn.Sequential(nn.Linear(h, h), nn.ReLU(), nn.Linear(h, 1))
         self.module = nn.ModuleList([self.enc, self.msg1, self.msg2, self.head]).to(self.device)
 
-    def _forward_one(self, x, edge_index):
+    def _encode_one(self, x, edge_index):
+        """Message-pass + graph-mean pool -> the pooled graph latent (``z_body``), pre-head."""
         import torch
         import torch.nn.functional as F
 
@@ -83,7 +84,27 @@ class GeneGNN:
                 h = F.relu(h + msg(agg / deg))
             else:
                 h = F.relu(h + msg(h))
-        return torch.sigmoid(self.head(h.mean(dim=0)))  # graph-mean pool -> success
+        return h.mean(dim=0)  # graph-mean pool
+
+    def _forward_one(self, x, edge_index):
+        import torch
+
+        return torch.sigmoid(self.head(self._encode_one(x, edge_index)))  # -> success
+
+    def embed(self, gene: RobotGene) -> list[float]:
+        """The pooled graph latent for a gene — the learned ``z_body`` for the robotics vector memory
+        (``robotics_vector_memory.embed_body(gene, latent=gnn.embed(gene))``).
+
+        This is the seam the embeddings research calls for: the encoder trunk already exists here, it
+        just fed only the success head. Untrained weights give a deterministic random projection; after
+        ``fit()``/``load()`` it is the morphology representation the success head is trained to read.
+        """
+        import torch
+
+        self.module.eval()
+        with torch.no_grad():
+            x, ei = gene_graph(gene)
+            return self._encode_one(x, ei).cpu().tolist()
 
     def predict(self, gene: RobotGene) -> float:
         import torch

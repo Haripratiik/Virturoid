@@ -607,12 +607,40 @@ class MemoryDB:
         ).fetchall()
         return [dict(r) for r in rows]
 
-    def similar_runs(self, prompt: str, robot_class: str | None = None, limit: int = 5) -> list[dict]:
-        """Most similar prior runs by task text (token Jaccard over prompt + task_type).
+    def vector_memory(self):
+        """The robotics vector store over THIS db's connection (lazy; shared SQLite file, §33).
 
-        This is the retrieval seam: swap the scoring for embeddings/pgvector later
-        without changing callers.
+        Returns ``None`` if the store can't be constructed, so every memory read keeps working with
+        its deterministic fallback regardless. See ``robotics_vector_memory`` (Pillar 2 core).
         """
+        vm = getattr(self, "_vector_memory", None)
+        if vm is None:
+            try:
+                from virturoid.services.robotics_vector_memory import RoboticsVectorMemory
+                vm = RoboticsVectorMemory(self)
+            except Exception:  # noqa: BLE001 - vector store optional; string retrieval still works
+                vm = None
+            self._vector_memory = vm
+        return vm
+
+    def similar_runs(self, prompt: str, robot_class: str | None = None, limit: int = 5,
+                     *, semantic: bool = True) -> list[dict]:
+        """Most similar prior runs to ``prompt`` — embedding cosine when available, else token Jaccard.
+
+        This is the retrieval seam the schema docstring named. With ``semantic=True`` (default) it
+        routes through ``robotics_vector_memory`` (a feature-hashing text embedding -> cosine kNN over
+        the ``run`` sub-space), which retrieves sub-word-similar prior work that Jaccard misses
+        ("grasp" ~ "grasping"). It falls back to the original Jaccard scan when the vector store is
+        empty or unavailable, so retrieval is never worse than before.
+        """
+        if semantic:
+            try:
+                hits = self._similar_runs_semantic(prompt, robot_class, limit)
+                if hits:
+                    return hits
+            except Exception:  # noqa: BLE001 - the vector path must never break a memory read
+                pass
+        # --- token-Jaccard fallback (the original behavior) ---
         q = "SELECT * FROM runs"
         params: tuple = ()
         if robot_class:
@@ -629,6 +657,30 @@ class MemoryDB:
                 scored.append(d)
         scored.sort(key=lambda d: d["similarity"], reverse=True)
         return scored[:limit]
+
+    def _similar_runs_semantic(self, prompt: str, robot_class: str | None, limit: int) -> list[dict]:
+        """Vector-store path for ``similar_runs``: embed the query, cosine-kNN the ``run`` sub-space."""
+        from virturoid.services.robotics_vector_memory import RUN, embed_task
+        vm = self.vector_memory()
+        if vm is None:
+            return []
+        vm.index_runs()  # incremental backfill so newly-recorded runs are immediately searchable
+        pool = vm.count(RUN) if robot_class else max(limit * 3, limit)
+        hits = vm.nearest(RUN, embed_task(prompt, robot_class=robot_class),
+                          k=max(pool, limit), min_sim=1e-6)
+        out = []
+        for h in hits:
+            if robot_class and (h["meta"] or {}).get("robot_class") != robot_class:
+                continue
+            row = self.conn.execute("SELECT * FROM runs WHERE id=?", (int(h["obj_id"]),)).fetchone()
+            if row is None:
+                continue
+            d = _run_to_dict(row)
+            d["similarity"] = round(h["similarity"], 4)
+            out.append(d)
+            if len(out) >= limit:
+                break
+        return out
 
     # ----------------------------------------------------------------- learning export
     def training_dataset(self, min_success: float = 0.0, require_opt_in: bool = True) -> list[dict]:
