@@ -46,10 +46,21 @@ class EngineerModeTests(unittest.TestCase):
             self.assertTrue(any("wrist DOF" in u for _, u in llm.calls))  # the seeded tip reached the prompt
 
     def test_offline_uses_heuristic_and_still_searches(self):
+        # auto_llm=False forces the LLM-free path regardless of any VIRTUROID_LLM_BACKEND in the env (deterministic)
         rep = run_engineer_search(task="grasp", gene=tabletop_arm_gene(), evaluate=_evaluate, llm=None,
-                                  task_type="grasp", max_evals=3,
+                                  auto_llm=False, task_type="grasp", max_evals=3,
                                   heuristic=lambda p, h: {"edit_kind": "gains", "params": {"kp": 45.0}})
         self.assertTrue(rep.solved)                                     # heuristic proposes kp=45 -> passes
+
+    def test_auto_llm_wires_a_configured_backend(self):
+        # brain-default-on (gap-audit G1): when llm is None + auto_llm, the harness resolves get_llm() and USES it.
+        import unittest.mock as mock
+        llm = _FakeLLM()
+        with mock.patch("virturoid.services.llm_client.get_llm", return_value=llm):
+            rep = run_engineer_search(task="grasp a cube", gene=tabletop_arm_gene(), evaluate=_evaluate,
+                                      llm=None, auto_llm=True, task_type="grasp", max_evals=3)
+        self.assertTrue(any(kind == "proposer" for kind, _ in llm.calls))   # the resolved backend drove the Proposer
+        self.assertTrue(rep.solved)
 
     def test_no_memory_is_graceful(self):
         rep = run_engineer_search(task="grasp", gene=tabletop_arm_gene(), evaluate=_evaluate, llm=_FakeLLM(),

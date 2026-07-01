@@ -17,15 +17,24 @@ from virturoid.services.design_search import SearchReport, run_design_search
 from virturoid.services.search_operators import make_llm_proposer
 
 
-def run_engineer_search(*, task: str, gene, evaluate, llm=None, memory=None, memory_dir=None,
-                        gates: dict | None = None, task_type: str = "locomotion", max_evals: int = 20,
-                        patience: int = 6, k: int = 3, heuristic=None) -> SearchReport:
+def run_engineer_search(*, task: str, gene, evaluate, llm=None, auto_llm: bool = True, memory=None,
+                        memory_dir=None, gates: dict | None = None, task_type: str = "locomotion",
+                        max_evals: int = 20, patience: int = 6, k: int = 3, heuristic=None) -> SearchReport:
     """Run one Engineer-mode design search over ``gene`` for ``task``.
 
     ``evaluate(spec) -> result`` runs a candidate (fidelity-ladder adapter / test double). ``llm`` drives the
-    Proposer/Critic (None → the ``heuristic`` proposer, i.e. the LLM-free path). ``memory``/``memory_dir`` (a
+    Proposer/Critic. If ``llm`` is None and ``auto_llm`` (default), the backend is resolved from the environment
+    via ``get_llm`` -- so the LLM Proposer is BRAIN-DEFAULT-ON when ``VIRTUROID_LLM_BACKEND`` is configured, and
+    transparently falls back to the ``heuristic`` (LLM-free) proposer when it's ``off`` (the default -> None ->
+    tests/offline are deterministic; the gap-audit G1 "brain wiring default-on"). ``memory``/``memory_dir`` (a
     RoboticsVectorMemory/MemoryDB or a dir) feeds the morphology-keyed PRIOR-KNOWLEDGE block into every proposal
     prompt (H5). Returns the ``SearchReport`` (best node + honest tree)."""
+    if llm is None and auto_llm:
+        try:
+            from virturoid.services.llm_client import get_llm
+            llm = get_llm("designer")                          # None when VIRTUROID_LLM_BACKEND=off (the default)
+        except Exception:  # noqa: BLE001 - LLM resolution is best-effort; fall back to the heuristic proposer
+            llm = None
     memory_block = ""
     src = memory if memory is not None else memory_dir
     if src is not None and gene is not None:
