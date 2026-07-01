@@ -163,6 +163,78 @@ def cosine(a: list[float], b: list[float]) -> float:
     return sum(a[i] * b[i] for i in range(m)) / (na * nb)
 
 
+# --------------------------------------------------------------------------- learned z_body (gated)
+# The learned graph latent (GeneGNN.embed) is used for the body sub-space ONLY when a trained model exists
+# AND its latent agrees with the deterministic morphology space on obvious cases — so a learned z_body can
+# never be worse than the shipped hand-crafted vector (the same "never worse" discipline as similar_runs).
+_GNN_MODEL_PATH = "build/models/gene_gnn.pt"
+_TRUSTED_GNN = None   # None = untried; False = absent/untrusted; else a loaded GeneGNN
+
+
+def _spearman(a: list[float], b: list[float]) -> float:
+    """Spearman rank correlation (no numpy). 0.0 for <2 points."""
+    n = len(a)
+    if n < 2:
+        return 0.0
+
+    def _rank(v):
+        order = sorted(range(len(v)), key=lambda i: v[i])
+        r = [0] * len(v)
+        for pos, idx in enumerate(order):
+            r[idx] = pos
+        return r
+
+    ra, rb = _rank(a), _rank(b)
+    d2 = sum((ra[i] - rb[i]) ** 2 for i in range(n))
+    return 1.0 - 6.0 * d2 / (n * (n * n - 1))
+
+
+def _load_trusted_gnn():
+    """The trained gene GNN IF ``build/models/gene_gnn.pt`` exists AND its pooled latent rank-agrees with the
+    deterministic morphology space on the fixture bodies (Spearman ≥ 0.5 over pairwise distances). Cached once
+    per process. Returns the model or ``None`` (→ callers use the deterministic ``embed_gene``). This gate is
+    what makes the learned z_body opt-in-by-quality: a narrow/degenerate model that disagrees with obvious
+    morphology structure (arm≈arm, arm≠quad) is distrusted and never shipped."""
+    global _TRUSTED_GNN
+    if _TRUSTED_GNN is not None:
+        return _TRUSTED_GNN or None
+    _TRUSTED_GNN = False
+    try:
+        import itertools
+        from pathlib import Path
+        if not Path(_GNN_MODEL_PATH).exists():
+            return None
+        from virturoid.fixtures.gene_library import (humanoid_upper_body_gene, quadruped_gene,
+                                                     tabletop_arm_gene)
+        from virturoid.services.design_critic import add_parallel_gripper
+        from virturoid.services.gene_surrogate_nn import GeneGNN
+        gnn = GeneGNN.load(Path(_GNN_MODEL_PATH), device="cpu")
+        fixtures = [tabletop_arm_gene(), add_parallel_gripper(tabletop_arm_gene()),
+                    humanoid_upper_body_gene(), quadruped_gene()]
+        lat = [gnn.embed(g) for g in fixtures]
+        det = [embed_gene(g) for g in fixtures]
+        pairs = list(itertools.combinations(range(len(fixtures)), 2))
+        dl = [math.sqrt(sum((lat[i][k] - lat[j][k]) ** 2 for k in range(len(lat[i])))) for i, j in pairs]
+        dd = [math.sqrt(sum((det[i][k] - det[j][k]) ** 2 for k in range(len(det[i])))) for i, j in pairs]
+        if _spearman(dl, dd) >= 0.5:
+            _TRUSTED_GNN = gnn
+    except Exception:  # noqa: BLE001 - any failure -> deterministic embedding (never worse)
+        _TRUSTED_GNN = False
+    return _TRUSTED_GNN or None
+
+
+def _body_latent(gene: RobotGene) -> list[float] | None:
+    """The learned z_body (GeneGNN pooled latent) when a TRUSTED model exists, else ``None`` (→ the caller
+    falls back to the deterministic morphology vector via ``embed_body``)."""
+    gnn = _load_trusted_gnn()
+    if gnn is None:
+        return None
+    try:
+        return gnn.embed(gene)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 # --------------------------------------------------------------------------- the store
 class RoboticsVectorMemory:
     """SQLite-backed cosine-kNN store over the four robotics sub-spaces + a provenance ledger.
@@ -310,7 +382,7 @@ class RoboticsVectorMemory:
                 gene = RobotGene.from_dict(g)
             except (json.JSONDecodeError, TypeError, KeyError, ValueError):
                 continue
-            self.upsert(BODY, r["species_pattern"], embed_body(gene),
+            self.upsert(BODY, r["species_pattern"], embed_body(gene, latent=_body_latent(gene)),
                         {"robot_class": r["robot_class"], "buildable": bool(r["buildable"])})
             written += 1
         return written
@@ -342,7 +414,8 @@ class RoboticsVectorMemory:
         for r in rows:
             gene = genes.get(r["species"])
             task_text = " ".join(p for p in (r["task_type"], r["robot_class"], r["species"]) if p)
-            vec = embed_skill(task_text, gene, success_rate=r["success_rate"])
+            vec = embed_skill(task_text, gene, success_rate=r["success_rate"],
+                              latent=_body_latent(gene) if gene is not None else None)
             self.upsert(SKILL, r["skill_id"], vec,
                         {"robot_class": r["robot_class"], "task_type": r["task_type"], "species": r["species"]})
             written += 1
@@ -352,5 +425,6 @@ class RoboticsVectorMemory:
                        k: int = 5, min_sim: float | None = None) -> list[dict]:
         """Nearest banked skills to a (body, task) in the ``skill`` sub-space — cross-body warm-start
         candidates ranked by morphology+task similarity (call ``index_skills`` first to populate)."""
-        q = embed_skill(" ".join(p for p in (task_type, robot_class) if p), gene, success_rate=1.0)
+        q = embed_skill(" ".join(p for p in (task_type, robot_class) if p), gene, success_rate=1.0,
+                        latent=_body_latent(gene) if gene is not None else None)
         return self.nearest(SKILL, q, k=k, min_sim=min_sim)

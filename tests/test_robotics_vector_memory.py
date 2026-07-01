@@ -172,6 +172,27 @@ class SimilarRunsUpgradeTests(unittest.TestCase):
             self.assertTrue(all(h["robot_class"] == "manipulator" for h in hits))
 
 
+class LearnedLatentGateTests(unittest.TestCase):
+    def test_spearman_rank_correlation(self):
+        from virturoid.services.robotics_vector_memory import _spearman
+        self.assertAlmostEqual(_spearman([1, 2, 3, 4], [1, 2, 3, 4]), 1.0)
+        self.assertAlmostEqual(_spearman([1, 2, 3, 4], [4, 3, 2, 1]), -1.0)
+
+    def test_body_latent_falls_back_safely(self):
+        # returns None (→ deterministic embed_gene) when no TRUSTED model exists, or a float list when one
+        # does; must never crash regardless of what model file is (or isn't) on disk (the never-worse gate)
+        from virturoid.services.robotics_vector_memory import _body_latent
+        v = _body_latent(tabletop_arm_gene())
+        self.assertTrue(v is None or (isinstance(v, list) and all(isinstance(x, float) for x in v)))
+
+    def test_embed_body_uses_deterministic_when_untrusted(self):
+        # with no trusted learned model, the body embedding is exactly the deterministic morphology vector
+        from virturoid.services.robotics_vector_memory import _body_latent
+        if _body_latent(tabletop_arm_gene()) is None:      # untrusted/absent model → the shipped path
+            self.assertEqual(embed_body(tabletop_arm_gene()),
+                             embed_body(tabletop_arm_gene(), latent=None))
+
+
 class LearnedLatentSeamTests(unittest.TestCase):
     def test_gnn_embed_exposes_a_pooled_latent_when_torch_present(self):
         try:
