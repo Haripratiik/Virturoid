@@ -14,9 +14,14 @@ import json
 
 
 def co_design_with_memory(gene, prompt: str, db, *, iterations: int = 3, population: int = 6,
-                          seed: int = 0) -> dict:
+                          seed: int = 0, best_response: bool = False) -> dict:
     """Warm-start general co-design from the best banked design for this (class, task), run it, and bank
-    the result. Returns the co-design result plus ``warm_started`` + ``prior_best``."""
+    the result. Returns the co-design result plus ``warm_started`` + ``prior_best``.
+
+    ``best_response=True`` scores candidate bodies by their best-response controller (the Stackelberg /
+    trainability objective — Pillar 1). When this build warm-started from a prior design, a provenance
+    edge (with the measured search improvement Δ = best - baseline over the prior best) is recorded in the
+    robotics vector memory so cross-build compounding is *provable, not asserted* (Pillar 2)."""
     from virturoid.services.gene_codesign import co_design_general
     from virturoid.services.task_matched_eval import robot_kind
 
@@ -31,13 +36,28 @@ def co_design_with_memory(gene, prompt: str, db, *, iterations: int = 3, populat
             warm = None
 
     r = co_design_general(gene, prompt, iterations=iterations, population=population, seed=seed,
-                          warm_start=warm if isinstance(warm, dict) else None)
+                          warm_start=warm if isinstance(warm, dict) else None, best_response=best_response)
 
     db.record_run(prompt=prompt, robot_class=cls, task_type=task, converged_design=r["changed"],
                   success_rate=r["best_value"], species=getattr(gene, "species", None),
                   design_source="co_design_general")
     r["warm_started"] = isinstance(warm, dict)
     r["prior_best"] = (prior or {}).get("success_rate")
+    r["provenance_delta"] = None
+    if r["warm_started"]:
+        # The compounding proof: record what seeded this build + the measured improvement over it.
+        try:
+            vm = db.vector_memory()
+            if vm is not None:
+                child = getattr(gene, "species", None) or f"{cls}.{task}"
+                parent = (prior or {}).get("species") or f"{cls}.{task}.prior"
+                delta = round(float(r["best_value"]) - float(r["baseline_value"]), 4)
+                vm.record_provenance("design", str(child), parent_type="design", parent_id=str(parent),
+                                     kind="warm_start", delta=delta,
+                                     meta={"robot_class": cls, "task": task, "prompt": prompt})
+                r["provenance_delta"] = delta
+        except Exception:  # noqa: BLE001 - provenance is observability; never break the flywheel
+            pass
     return r
 
 

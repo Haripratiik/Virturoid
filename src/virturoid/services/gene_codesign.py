@@ -71,13 +71,21 @@ def _seed_vec(gene: RobotGene) -> dict:
 
 def co_design_general(gene: RobotGene, prompt: str = "", *, iterations: int = 3, population: int = 6,
                       seed: int = 0, elite_frac: float = 0.4, warm_start: dict | None = None,
-                      ground: bool = False) -> dict:
+                      ground: bool = False, best_response: bool = False, br_samples: int = 3,
+                      br_iters: int = 1, br_steps: int = 400, br_warm: dict | None = None) -> dict:
     """Body co-design for ANY morphology — CEM over (length_scale, torque_scale) scored by the topology-
     dispatched task metric (``task_matched_eval.evaluate_robot``): a quadruped is tuned for locomotion
     distance, a rover for goal-reach rate, an arm for grasp/pick-place. One routine instead of a
     per-class optimizer (Theme 3). Never regresses (the baseline body is always a candidate). CPU MuJoCo.
 
-    Returns ``{gene, baseline_value, best_value, history, changed}`` — ``gene`` is the best variant.
+    With ``best_response=True`` each candidate BODY is scored by the best CONTROLLER that can be trained on
+    it (``stackelberg_codesign.best_response_score`` — the Stackelberg follower), so the search selects for
+    TRAINABILITY rather than for flattering one fixed controller (the Pillar 1 keystone). Off by default so
+    existing callers are byte-identical; when on, the returned ``best_controller`` is the follower for the
+    winning body.
+
+    Returns ``{gene, baseline_value, best_value, history, changed, best_controller}`` — ``gene`` is the
+    best variant; ``best_controller`` is ``None`` unless ``best_response``.
     """
     import numpy as np
 
@@ -86,12 +94,20 @@ def co_design_general(gene: RobotGene, prompt: str = "", *, iterations: int = 3,
     seedv = _seed_vec(gene)
     lo = np.array([_BOUNDS["length_scale"][0], _BOUNDS["torque_scale"][0]])
     hi = np.array([_BOUNDS["length_scale"][1], _BOUNDS["torque_scale"][1]])
+    _ctrl: dict = {}                                            # best_response: cache each vec's follower
 
     def eval_vec(v) -> float:
         vec = {"length_scale": float(v[0]), "torque_scale": float(v[1]),
                "mount_pitch": seedv["mount_pitch"], "kp": seedv["kp"], "kd": seedv["kd"]}
         try:
-            return float(evaluate_robot(_variant(gene, vec, ground=ground), prompt=prompt)["value"])
+            variant = _variant(gene, vec, ground=ground)
+            if best_response:
+                from virturoid.services.stackelberg_codesign import best_response_score
+                res = best_response_score(variant, prompt=prompt, samples=br_samples, iters=br_iters,
+                                          steps=br_steps, warm_start=br_warm, seed=seed)
+                _ctrl[(round(float(v[0]), 4), round(float(v[1]), 4))] = res["controller"]
+                return float(res["score"])
+            return float(evaluate_robot(variant, prompt=prompt)["value"])
         except Exception:  # noqa: BLE001 - a broken variant scores worst, never crashes the search
             return -1e9
 
@@ -120,10 +136,19 @@ def co_design_general(gene: RobotGene, prompt: str = "", *, iterations: int = 3,
         history.append(round(best_val, 4))
     best_vec = {"length_scale": float(best_v[0]), "torque_scale": float(best_v[1]),
                 "mount_pitch": seedv["mount_pitch"], "kp": seedv["kp"], "kd": seedv["kd"]}
+    best_controller = None
+    if best_response:
+        best_controller = _ctrl.get((round(float(best_v[0]), 4), round(float(best_v[1]), 4)))
+        if best_controller is None:                            # rounding miss -> recompute the winner's follower
+            from virturoid.services.stackelberg_codesign import best_response_score
+            best_controller = best_response_score(_variant(gene, best_vec, ground=ground), prompt=prompt,
+                                                  samples=br_samples, iters=br_iters, steps=br_steps,
+                                                  warm_start=br_warm, seed=seed)["controller"]
     return {"gene": _variant(gene, best_vec, ground=ground), "baseline_value": round(base, 4),
             "best_value": round(best_val, 4), "history": history,
             "changed": {"length_scale": round(float(best_v[0]), 3),
-                        "torque_scale": round(float(best_v[1]), 3)}}
+                        "torque_scale": round(float(best_v[1]), 3)},
+            "best_controller": best_controller}
 
 
 def co_optimize_gene(gene: RobotGene, scenes, *, assignments: dict | None = None, iterations: int = 4,

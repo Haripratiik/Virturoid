@@ -31,6 +31,12 @@ class DesignFlywheelTests(unittest.TestCase):
                 self.assertIsNotNone(r2["prior_best"])
                 # the flywheel: the 2nd build starts from the 1st's improved design -> never below it
                 self.assertGreaterEqual(r2["best_value"], r1["best_value"] - 1e-6)
+                # the compounding proof: the warm-started build recorded a provenance edge with a
+                # measured search-improvement delta (Pillar 2 — the moat made measurable)
+                self.assertIsNotNone(r2["provenance_delta"])
+                summary = db.vector_memory().compounding_summary()
+                self.assertGreaterEqual(summary["edges"], 1)
+                self.assertGreaterEqual(summary["seeded_builds"], 1)
 
 
 if __name__ == "__main__":

@@ -65,6 +65,15 @@ class BestResponseTests(unittest.TestCase):
         self.assertIn("length_scale", out["changed"])
         self.assertTrue(out["gene"].segments)               # returns a valid, buildable body
 
+    def test_co_design_general_best_response_flag_returns_a_follower(self):
+        # the opt-in wiring into the general co-design entry (Pillar 1 keystone, default off)
+        from virturoid.services.gene_codesign import co_design_general
+        r = co_design_general(quadruped_gene(), "a quadruped that walks", iterations=1, population=2,
+                              seed=0, best_response=True, br_samples=2, br_iters=1, br_steps=150)
+        self.assertIsNotNone(r["best_controller"])          # the winning body's trained follower
+        self.assertIn("leg_flip", r["best_controller"])
+        self.assertGreaterEqual(r["best_value"], r["baseline_value"] - 1e-6)
+
 
 if __name__ == "__main__":
     unittest.main()
