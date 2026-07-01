@@ -18,24 +18,52 @@ from pathlib import Path
 
 from virturoid.schemas.gene import RobotGene
 
-# Per-node (segment) features. Kept explicit so the model is inspectable and extensible.
-_NODE_DIM = 9
+# Per-node (segment) features: 9 kinematic + 4 TopoPE. Kept explicit so the model is inspectable.
+_NODE_DIM = 13
 
 
 def gene_graph(gene: RobotGene):
-    """(node_features [N,_NODE_DIM], edge_index [2,E] parent<->child) for a gene."""
+    """(node_features [N,_NODE_DIM], edge_index [2,E] parent<->child) for a gene.
+
+    Node features = 9 kinematic (length / radius / mass / actuated / torque / joint-axis / is-EE) + 4 TopoPE
+    (Topology Positional Encoding: tree depth, child count, sin/cos of depth). TopoPE lets the message-passing
+    GNN tell structurally-different bodies with identical link params apart (the GNN symmetry blind spot;
+    BodyGen arXiv:2503.00533) — so an unseen morphology gets a STRUCTURALLY-sensible latent instead of an
+    arbitrary one (the fix for the OOD z_body gap).
+    """
+    import math
+
     import torch
 
     idx = {s.name: i for i, s in enumerate(gene.segments)}
+    by_name = {s.name: s for s in gene.segments}
+    child_count: dict = {}
+    for s in gene.segments:
+        if s.parent is not None:
+            child_count[s.parent] = child_count.get(s.parent, 0) + 1
+
+    def _depth(seg) -> int:
+        d, cur, seen = 0, seg, set()
+        while cur.parent is not None and cur.parent in by_name and cur.name not in seen:
+            seen.add(cur.name)
+            cur = by_name[cur.parent]
+            d += 1
+            if d > 64:
+                break
+        return d
+
     feats = []
     for s in gene.segments:
         act = 1.0 if s.joint_type in ("revolute", "prismatic") else 0.0
         ax = s.joint_axis if act else (0.0, 0.0, 0.0)
+        dp = _depth(s)
+        cc = child_count.get(s.name, 0)
         feats.append([
             s.length_m, s.radius_m, s.mass_kg, act,
             (s.actuator_torque_nm or 0.0) / 50.0,   # scaled
             float(ax[0]), float(ax[1]), float(ax[2]),
             1.0 if s.is_end_effector else 0.0,
+            dp / 8.0, min(cc, 6) / 6.0, math.sin(dp), math.cos(dp),   # TopoPE
         ])
     src, dst = [], []
     for s in gene.segments:
@@ -65,10 +93,13 @@ class GeneGNN:
         self.msg1 = nn.Linear(h, h)
         self.msg2 = nn.Linear(h, h)
         self.head = nn.Sequential(nn.Linear(h, h), nn.ReLU(), nn.Linear(h, 1))
-        self.module = nn.ModuleList([self.enc, self.msg1, self.msg2, self.head]).to(self.device)
+        # graph-autoencoder decoder: reconstruct node features from per-node latents -> the objective that
+        # shapes the pooled latent into a reusable DESIGN manifold (GLSO), not just a success scalar.
+        self.dec = nn.Sequential(nn.Linear(h, h), nn.ReLU(), nn.Linear(h, _NODE_DIM))
+        self.module = nn.ModuleList([self.enc, self.msg1, self.msg2, self.head, self.dec]).to(self.device)
 
-    def _encode_one(self, x, edge_index):
-        """Message-pass + graph-mean pool -> the pooled graph latent (``z_body``), pre-head."""
+    def _message_pass(self, x, edge_index):
+        """Message-pass -> per-NODE hidden states h [N, hidden] (pre-pool)."""
         import torch
         import torch.nn.functional as F
 
@@ -84,12 +115,20 @@ class GeneGNN:
                 h = F.relu(h + msg(agg / deg))
             else:
                 h = F.relu(h + msg(h))
-        return h.mean(dim=0)  # graph-mean pool
+        return h
+
+    def _encode_one(self, x, edge_index):
+        """Message-pass + graph-mean pool -> the pooled graph latent (``z_body``), pre-head."""
+        return self._message_pass(x, edge_index).mean(dim=0)
 
     def _forward_one(self, x, edge_index):
         import torch
 
         return torch.sigmoid(self.head(self._encode_one(x, edge_index)))  # -> success
+
+    def _recon_one(self, x, edge_index):
+        """Reconstruct node features from per-node latents (the graph-autoencoder objective)."""
+        return self.dec(self._message_pass(x, edge_index))
 
     def embed(self, gene: RobotGene) -> list[float]:
         """The pooled graph latent for a gene — the learned ``z_body`` for the robotics vector memory
@@ -119,7 +158,11 @@ class GeneGNN:
         scored.sort(key=lambda t: t[1], reverse=True)
         return scored
 
-    def fit(self, genes: list[RobotGene], successes: list[float], *, epochs: int = 200, lr: float = 1e-2):
+    def fit(self, genes: list[RobotGene], successes: list[float], *, epochs: int = 200, lr: float = 1e-2,
+            recon_weight: float = 0.3):
+        """Multi-task fit: success-prediction MSE + ``recon_weight`` * node-reconstruction MSE (the
+        autoencoder term that makes the latent a reusable design manifold). ``final_loss``/``first_loss``
+        report the SUCCESS loss (the ranking objective); ``recon_loss`` is the auxiliary reconstruction."""
         import torch
 
         graphs = [gene_graph(g) for g in genes]
@@ -128,14 +171,18 @@ class GeneGNN:
         lossfn = torch.nn.MSELoss()
         self.module.train()
         history = []
+        recon_last = 0.0
         for _ in range(epochs):
             opt.zero_grad()
             preds = torch.stack([self._forward_one(x, ei).squeeze() for x, ei in graphs])
-            loss = lossfn(preds, y)
-            loss.backward()
+            s_loss = lossfn(preds, y)
+            r_loss = torch.stack([lossfn(self._recon_one(x, ei), x.to(self.device)) for x, ei in graphs]).mean()
+            (s_loss + recon_weight * r_loss).backward()
             opt.step()
-            history.append(float(loss.item()))
-        return {"final_loss": history[-1], "first_loss": history[0], "device": self.device, "epochs": epochs}
+            history.append(float(s_loss.item()))
+            recon_last = float(r_loss.item())
+        return {"final_loss": history[-1], "first_loss": history[0], "recon_loss": recon_last,
+                "device": self.device, "epochs": epochs}
 
     def save(self, path: Path) -> None:
         import torch
