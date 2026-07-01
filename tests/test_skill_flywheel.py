@@ -75,6 +75,21 @@ class SkillFlywheelTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, self._db(tmp) as db:
             self.assertIsNone(warm_start_for(db, "manipulator", "grasp"))
 
+    def test_warm_start_transfer_is_body_aware_semantic(self):
+        # the skill sub-space made live: a banked grasp skill on an arm is retrieved as a transfer
+        # candidate for a near-morphology gripper-arm via embedding cosine (routed through similar_skills)
+        from virturoid.fixtures.gene_library import tabletop_arm_gene
+        from virturoid.services.design_critic import add_parallel_gripper
+        from virturoid.services.species_discovery import auto_place_species
+        with tempfile.TemporaryDirectory() as tmp, self._db(tmp) as db:
+            arm_sp = auto_place_species(tabletop_arm_gene(), db)["species_pattern"]
+            db.record_skill("grasp__arm", "manipulator", "grasp", success_rate=0.9,
+                            species=arm_sp, params_path="p.npz", obs_dim=34, act_dim=5)
+            grip_sp = auto_place_species(add_parallel_gripper(tabletop_arm_gene()), db)["species_pattern"]
+            ws = warm_start_for(db, "humanoid", "grasp", species=grip_sp, obs_dim=40, act_dim=6)
+            self.assertIsNotNone(ws)
+            self.assertEqual(ws["warm_start"], "transfer")       # near-morphology skill seeds the new build
+
 
 if __name__ == "__main__":
     unittest.main()

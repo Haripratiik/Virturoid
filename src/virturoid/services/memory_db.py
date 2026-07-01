@@ -365,12 +365,23 @@ class MemoryDB:
         return _skill_to_dict(rows[0])
 
     def similar_skills(self, task_type: str, species: str, *, robot_class: str | None = None,
-                       limit: int = 5) -> list[dict]:
+                       limit: int = 5, semantic: bool = True) -> list[dict]:
         """Banked skills ranked by relevance to a new (task, species) — cross-body transfer candidates.
 
-        Used when there is no exact class+task skill: score by task match + species token similarity,
-        so a related body's grasp skill can still seed a new one (skill-library transfer research).
+        Used when there is no exact class+task skill. With ``semantic=True`` (default) it ranks by
+        embedding cosine over the ``skill`` sub-space (z_skill = body ⊕ task ⊕ success — body recovered
+        from the query species' gene when available), so a NEAR-MORPHOLOGY skill is retrieved even when
+        the species strings barely overlap (the skill-transfer moat made semantic). Falls back to task
+        match + species token Jaccard when the vector store is empty/unavailable — never worse.
         """
+        if semantic:
+            try:
+                hits = self._similar_skills_semantic(task_type, species, robot_class, limit)
+                if hits:
+                    return hits
+            except Exception:  # noqa: BLE001 - the vector path must never break a warm-start read
+                pass
+        # --- task-match + species token-Jaccard fallback (the original behavior) ---
         q = "SELECT * FROM skills"
         params: tuple = ()
         if robot_class:
@@ -385,6 +396,41 @@ class MemoryDB:
                 scored.append(d)
         scored.sort(key=lambda d: (d["relevance"], d.get("success_rate") or 0), reverse=True)
         return scored[:limit]
+
+    def _similar_skills_semantic(self, task_type: str, species: str, robot_class: str | None,
+                                 limit: int) -> list[dict]:
+        """Vector-store path for ``similar_skills``: embed the (task, body) query, cosine-kNN the ``skill``
+        sub-space. Body is recovered from the query species' banked gene when the node has one."""
+        from virturoid.services.robotics_vector_memory import SKILL, embed_skill
+        vm = self.vector_memory()
+        if vm is None:
+            return []
+        vm.index_skills()  # incremental backfill so newly-banked skills are searchable
+        query_gene = None
+        node = self.species_node(species) if species else None
+        if node and isinstance(node.get("genes"), dict) and node["genes"].get("segments"):
+            try:
+                from virturoid.schemas.gene import RobotGene
+                query_gene = RobotGene.from_dict(node["genes"])
+            except Exception:  # noqa: BLE001 - fall back to a text-only query body
+                query_gene = None
+        q = embed_skill(" ".join(p for p in (task_type, species, robot_class) if p),
+                        query_gene, success_rate=1.0)
+        pool = vm.count(SKILL) if robot_class else max(limit * 3, limit)
+        hits = vm.nearest(SKILL, q, k=max(pool, limit), min_sim=1e-6)
+        out = []
+        for h in hits:
+            if robot_class and (h["meta"] or {}).get("robot_class") != robot_class:
+                continue
+            row = self.conn.execute("SELECT * FROM skills WHERE skill_id=?", (h["obj_id"],)).fetchone()
+            if row is None:
+                continue
+            d = _skill_to_dict(row)
+            d["relevance"] = round(h["similarity"], 4)
+            out.append(d)
+            if len(out) >= limit:
+                break
+        return out
 
     def skills_for_class(self, robot_class: str, limit: int = 20) -> list[dict]:
         """All banked skills for a robot class (input for the Trainer agent / reports)."""
