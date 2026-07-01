@@ -41,6 +41,7 @@ _TOKEN_RE = re.compile(r"[a-z0-9]+")
 
 # object-type namespaces (each a separate kNN sub-space in the shared table)
 BODY, SKILL, EPISODE, TASK, RUN = "body", "skill", "episode", "task", "run"
+TIP, LESSON = "tip", "lesson"   # knowledge sub-spaces: semantic tips + procedural lessons, keyed by z_body
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS vectors (
@@ -428,6 +429,103 @@ class RoboticsVectorMemory:
         q = embed_skill(" ".join(p for p in (task_type, robot_class) if p), gene, success_rate=1.0,
                         latent=_body_latent(gene) if gene is not None else None)
         return self.nearest(SKILL, q, k=k, min_sim=min_sim)
+
+    def nearest_bodies(self, gene: RobotGene, *, k: int = 5, min_sim: float | None = None,
+                       exclude_id: str | None = None) -> list[dict]:
+        """Nearest prior bodies to a gene in the ``body`` sub-space (call ``index_species_bodies`` first).
+
+        The morphology-retrieval primitive the understanding layer exposes ("what have we built that's
+        shaped like this?") — the read that ``nearest(BODY, ...)`` had no production caller for (audit gap).
+        """
+        return self.nearest(BODY, embed_body(gene, latent=_body_latent(gene)), k=k, min_sim=min_sim,
+                            exclude_id=exclude_id)
+
+    # ----------------------------------------------------------------- knowledge (tips + lessons), z_body-keyed
+    def index_tips(self, *, incremental: bool = True) -> int:
+        """Embed every species **tip** into the ``tip`` sub-space, keyed by the ``z_body`` of the species it
+        was written for — so a tip written for one body is retrievable for a NEAR-morphology body (this
+        un-dead-ends the tips: they were write-only and string-keyed to one exact species, read by no LLM).
+        The tip text lives in ``meta``. Incremental: only newly-seen ``species#i`` tips are embedded."""
+        existing = ({r["obj_id"] for r in self.conn.execute(
+            "SELECT obj_id FROM vectors WHERE obj_type=?", (TIP,)).fetchall()} if incremental else set())
+        rows = self.conn.execute(
+            "SELECT species_pattern, robot_class, genes, tips FROM species_tree "
+            "WHERE tips IS NOT NULL AND genes IS NOT NULL AND merged_into IS NULL"
+        ).fetchall()
+        added = 0
+        for r in rows:
+            try:
+                tips = json.loads(r["tips"]) or []
+                g = json.loads(r["genes"])
+                if not (isinstance(g, dict) and g.get("segments") and isinstance(g["segments"][0], dict)):
+                    continue
+                gene = RobotGene.from_dict(g)
+            except (json.JSONDecodeError, TypeError, KeyError, ValueError):
+                continue
+            zb = embed_body(gene, latent=_body_latent(gene))
+            for i, t in enumerate(tips):
+                oid = f"{r['species_pattern']}#{i}"
+                if oid in existing:
+                    continue
+                self.upsert(TIP, oid, zb, {"species": r["species_pattern"], "robot_class": r["robot_class"],
+                                          "audience": t.get("audience"), "tip": t.get("tip")})
+                added += 1
+        return added
+
+    def index_lessons(self, *, incremental: bool = True) -> int:
+        """Embed every proven **lesson** (diagnosed failure -> the fix) into the ``lesson`` sub-space, keyed
+        by ``z_body(class-representative body) ⊕ embed_text(failure_code+task+class)`` — so a lesson learned
+        on one body is retrievable for a near-morphology body hitting a near failure (it was EXACT
+        class+failure_code string match only, via ``recall_lesson``). The fix lives in ``meta``. Incremental."""
+        existing = ({r["obj_id"] for r in self.conn.execute(
+            "SELECT obj_id FROM vectors WHERE obj_type=?", (LESSON,)).fetchall()} if incremental else set())
+        genes_by_class: dict = {}
+        for gene in self._species_genes().values():
+            genes_by_class.setdefault(gene.robot_class, gene)
+        rows = self.conn.execute(
+            "SELECT id, robot_class, task_type, failure_code, root_cause, operator, params, improvement, "
+            "times_applied FROM lessons WHERE improvement > 0"
+        ).fetchall()
+        added = 0
+        for r in rows:
+            oid = str(r["id"])
+            if oid in existing:
+                continue
+            rep = genes_by_class.get(r["robot_class"])
+            body = embed_body(rep) if rep is not None else [0.0] * BODY_DIM
+            key_text = " ".join(p for p in (r["failure_code"], r["task_type"], r["robot_class"]) if p)
+            self.upsert(LESSON, oid, _l2(body + embed_text(key_text)),
+                        {"robot_class": r["robot_class"], "task_type": r["task_type"],
+                         "failure_code": r["failure_code"], "root_cause": r["root_cause"],
+                         "operator": r["operator"], "params": r["params"],
+                         "improvement": r["improvement"], "times_applied": r["times_applied"]})
+            added += 1
+        return added
+
+    def recall_knowledge(self, gene: RobotGene, task_type: str | None = None, *,
+                         failure_code: str | None = None, k: int = 3, refresh: bool = True) -> dict:
+        """The **recall organ**: retrieve prior tips + lessons + skills for THIS body, keyed by its
+        morphology embedding — so an LLM role reasons with "what worked on bodies like this", not blind.
+
+        Returns ``{"tips":[...], "lessons":[...], "skills":[...]}``, each ``[{obj_id, similarity, meta}]``.
+        ``refresh`` re-indexes the (append-mostly) tip/lesson spaces + populates body/skill spaces if empty,
+        so a fresh caller gets correct results without a separate indexing step.
+        """
+        if refresh:
+            self.index_tips()
+            self.index_lessons()
+            if self.count(BODY) == 0:
+                self.index_species_bodies()
+            if self.count(SKILL) == 0:
+                self.index_skills()
+        zb = embed_body(gene, latent=_body_latent(gene))
+        lesson_q = _l2(embed_body(gene) + embed_text(
+            " ".join(p for p in (failure_code, task_type, gene.robot_class) if p)))
+        return {
+            "tips": self.nearest(TIP, zb, k=k),
+            "lessons": self.nearest(LESSON, lesson_q, k=k),
+            "skills": self.nearest_skills(gene, task_type or "", robot_class=gene.robot_class, k=k),
+        }
 
     def index_episode(self, obj_id: str, features: dict, meta: dict | None = None) -> None:
         """Embed one episode's behavior features (a walk's cadence/upright/forward, a grasp's success/…) into
