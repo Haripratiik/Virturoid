@@ -74,5 +74,17 @@ class OperatorTests(unittest.TestCase):
         self.assertEqual(rep.best.artifact["failure_mode"], "walking")
 
 
+class RationaleLineageTests(unittest.TestCase):
+    def test_priors_block_surfaces_rationale(self):
+        # EoH (plan v2 §4.5): the diversity-reflection prompt shows each prior's REASONING, not just its params
+        from virturoid.services.search_operators import _priors_block
+        block = _priors_block([{"edit_kind": "cpg", "params": {"calf_phase": 0.0},
+                                "rationale": "flip the gait phase to face forward"}])
+        self.assertIn("flip the gait phase to face forward", block)   # lineage of ideas threaded
+        self.assertIn("cpg", block)
+        # a spec with no rationale still lists cleanly (back-compat)
+        self.assertIn("gains", _priors_block([{"edit_kind": "gains", "params": {"kp": 40}}]))
+
+
 if __name__ == "__main__":
     unittest.main()

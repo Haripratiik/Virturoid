@@ -60,9 +60,20 @@ _CRITIC_SYSTEM = (
 
 
 def _priors_block(prior_specs: list) -> str:
+    """List prior candidates for the diversity-reflection prompt. EoH (plan v2 §4.5): surface each prior's
+    RATIONALE, not just its params, so the Proposer evolves the lineage of IDEAS (why a thing was tried) and
+    can diverge from a reasoning that already failed — not just avoid a numeric duplicate. EoH beat FunSearch
+    with 100-1000x fewer LLM queries on exactly this 'evolve thoughts + code' mechanic."""
     if not prior_specs:
         return "(no prior candidates yet)"
-    return "\n".join(f"  {i}. {s.get('edit_kind', '?')}: {s.get('params', {})}" for i, s in enumerate(prior_specs))
+    lines = []
+    for i, s in enumerate(prior_specs):
+        line = f"  {i}. {s.get('edit_kind', '?')}: {s.get('params', {})}"
+        why = (s.get("rationale") or "").strip()
+        if why:
+            line += f"  — rationale: {why[:200]}"
+        lines.append(line)
+    return "\n".join(lines)
 
 
 def propose_designs(task: str, artifact: dict, prior_specs: list, llm, *, memory_block: str = "",
