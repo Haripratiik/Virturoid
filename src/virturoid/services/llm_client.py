@@ -330,6 +330,57 @@ def get_llm(role: str = "designer") -> LLMClient | None:
     return None
 
 
+class SpendCapExceeded(RuntimeError):
+    """Raised by SpendGuard when a per-run cap is hit. Design-search operators already treat any LLM exception as
+    'no backend' and fall back to the heuristic (fail-OPEN), so a breached cap degrades gracefully to LLM-free."""
+
+
+class SpendGuard:
+    """Wrap an ``LLMClient`` with per-run HARD CAPS (plan v2 §4.2, layer 1: fail-open-to-heuristic). Tracks calls
+    and ESTIMATED tokens/cost per role; when ``max_calls`` or ``max_usd`` would be exceeded, ``complete_json``
+    raises :class:`SpendCapExceeded` BEFORE the call, so the caller falls back to the heuristic. ``price_in``/
+    ``price_out`` are USD per 1M tokens (see the stream-3 pricing table); token counts are a ~len/4 estimate,
+    good enough for a budget ceiling. ``on_spend(report)`` streams the running total into the run artifact.
+
+    This is the transparent drop-in wrapper — ``SpendGuard(get_llm(role), max_calls=..., max_usd=...)`` — so the
+    operators (Proposer/Critic/Diagnostician) need no changes; the guard IS an LLMClient."""
+
+    def __init__(self, client, *, max_calls: int | None = None, max_usd: float | None = None,
+                 price_in: float = 0.0, price_out: float = 0.0, role: str = "designer", on_spend=None) -> None:
+        self.client = client
+        self.name = f"guarded:{getattr(client, 'name', '?')}"
+        self.max_calls, self.max_usd = max_calls, max_usd
+        self.price_in, self.price_out, self.role, self.on_spend = price_in, price_out, role, on_spend
+        self.calls = self.tokens_in = self.tokens_out = 0
+        self.usd = 0.0
+
+    @staticmethod
+    def _est_tokens(text: str) -> int:
+        return max(1, len(text or "") // 4)
+
+    def report(self) -> dict:
+        return {"role": self.role, "calls": self.calls, "tokens_in": self.tokens_in,
+                "tokens_out": self.tokens_out, "usd": round(self.usd, 4),
+                "max_calls": self.max_calls, "max_usd": self.max_usd}
+
+    def complete_json(self, system: str, user: str, schema: dict, max_tokens: int = 2048,
+                      reasoning_effort: str | None = None) -> dict:
+        if self.max_calls is not None and self.calls >= self.max_calls:
+            raise SpendCapExceeded(f"call cap {self.max_calls} reached for role {self.role!r}")
+        if self.max_usd is not None and self.usd >= self.max_usd:
+            raise SpendCapExceeded(f"spend cap ${self.max_usd} reached for role {self.role!r} (spent ${self.usd:.4f})")
+        self.calls += 1
+        ti = self._est_tokens(system) + self._est_tokens(user)
+        self.tokens_in += ti
+        out = self.client.complete_json(system, user, schema, max_tokens=max_tokens, reasoning_effort=reasoning_effort)
+        to = self._est_tokens(json.dumps(out, default=str))
+        self.tokens_out += to
+        self.usd += ti / 1e6 * self.price_in + to / 1e6 * self.price_out
+        if self.on_spend is not None:
+            self.on_spend(self.report())
+        return out
+
+
 def _parse_json_object(text: str) -> dict:
     """Parse a JSON object out of a model response, tolerating fences/prose.
 
