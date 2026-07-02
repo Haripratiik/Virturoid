@@ -111,6 +111,40 @@ def run_detector(src: str, episode: dict, *, timeout: float = 10.0, allowed_impo
     return {"ok": bool(r["ok"]), "score": float(score)}
 
 
+_DETECTOR_SYSTEM = (
+    "You write a Python success-detector for a robot task. Output ONLY JSON {code, rationale}. `code` MUST "
+    "define exactly one function `def detect(ep):` that takes an episode-metrics dict and returns "
+    "{'ok': bool, 'score': float}. Use ONLY the math/json/statistics/numpy modules; no I/O, no imports of os/sys; "
+    "no introspection dunders. Judge success strictly from the metrics; ok=True only when the task is achieved.")
+_DETECTOR_SCHEMA = {
+    "type": "object",
+    "properties": {"code": {"type": "string"}, "rationale": {"type": "string"}},
+    "required": ["code"], "additionalProperties": False,
+}
+
+
+def generate_detector(task_prompt: str, pass_fixtures: list, fail_fixtures: list, llm, *,
+                      timeout: float = 10.0, max_tokens: int = 900) -> dict:
+    """G2/§4.4 GENERATION half: ask ``llm`` to WRITE a ``detect(ep)`` for ``task_prompt``, then GATE it through
+    the sandbox's fail-closed calibration on known pass/fail fixtures. Returns ``{code, trusted, reason,
+    calibration}`` -- ``code`` is used ONLY if ``trusted`` (it separated the fixtures + ran safely). ``llm`` None
+    or any failure -> ``trusted=False`` (never trust an ungenerated/unvalidated detector)."""
+    if llm is None:
+        return {"code": None, "trusted": False, "reason": "no llm backend", "calibration": None}
+    try:
+        user = (f"Task: {task_prompt}\nExample metrics that MUST score ok=True:\n{pass_fixtures}\n"
+                f"Example metrics that MUST score ok=False:\n{fail_fixtures}\nWrite detect(ep).")
+        out = llm.complete_json(_DETECTOR_SYSTEM, user, _DETECTOR_SCHEMA, max_tokens=max_tokens)
+        code = (out or {}).get("code")
+        if not code:
+            return {"code": None, "trusted": False, "reason": "llm returned no code", "calibration": None}
+        cal = calibrate_detector(code, pass_fixtures, fail_fixtures, timeout=timeout)
+        return {"code": code if cal["trusted"] else None, "trusted": cal["trusted"],
+                "reason": cal["reason"], "calibration": cal}
+    except Exception as e:  # noqa: BLE001 - any LLM/sandbox failure -> not trusted (fail-closed)
+        return {"code": None, "trusted": False, "reason": f"generation error: {e}", "calibration": None}
+
+
 def calibrate_detector(src: str, pass_fixtures: list, fail_fixtures: list, *, timeout: float = 10.0) -> dict:
     """FAIL-CLOSED calibration gate (§4.4): a generated detector is trusted ONLY if it classifies EVERY known-PASS
     fixture as ok=True and EVERY known-FAIL fixture as ok=False. Returns ``{trusted, reason, pass_ok, fail_ok}``.
