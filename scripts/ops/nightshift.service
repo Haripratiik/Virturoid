@@ -1,0 +1,28 @@
+# Night-shift supervisor unit (plan v2 §5.5). Install to /etc/systemd/system/nightshift.service on the WSL2 box,
+# then: sudo systemctl daemon-reload && sudo systemctl enable --now nightshift ; journalctl -fu nightshift
+# NOTE: systemd alone does NOT keep the WSL instance alive — pair with the Windows Task-Scheduler keep-alive
+# (see README_nightshift_ops.md §2), else the instance (and this unit) stops when the last client session ends.
+[Unit]
+Description=Virturoid Dreamer-mode night shift (autonomous design search)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hari
+WorkingDirectory=/home/hari/virturoid
+Environment=PYTHONPATH=src
+Environment=XLA_PYTHON_CLIENT_MEM_FRACTION=.85
+Environment=XLA_FLAGS=--xla_gpu_autotune_level=0
+# ExecStart: the night-shift runner CLI (wraps run_night_shift with the NightProposer + laddered_evaluate_for +
+# golden_suite gate + resumable journal). Runner entrypoint is the M4 wiring step; template shown here.
+ExecStart=/home/hari/rl/bin/python -m virturoid.night_runner --resume --journal runs/night.jsonl
+Restart=on-failure
+RestartSec=30
+StartLimitIntervalSec=600
+StartLimitBurst=5
+MemoryMax=11G
+OOMScoreAdjust=-500
+
+[Install]
+WantedBy=multi-user.target
