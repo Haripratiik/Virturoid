@@ -49,6 +49,17 @@ class NightRunnerTests(unittest.TestCase):
             self.assertIn("banking_enabled", rep)
             self.assertIsInstance(rep["banking_enabled"], bool)
 
+    def test_morphology_mutation_grows_the_frontier(self):
+        # WS2-phase-2 / N20: the mutate arm emits NOVEL morphologies (not just the 3 fixed zoo bodies).
+        import random
+        from virturoid.services.night_runner import mutate_morphology
+        rng = random.Random(0)
+        names = {mutate_morphology(rng)[0] for _ in range(12)}
+        self.assertGreater(len(names), 1)                      # more than one distinct morphology sampled
+        self.assertTrue(all(n.startswith("morph_") for n in names))
+        _, gene = mutate_morphology(random.Random(1))
+        self.assertTrue(gene.actuated_joints())                # a real actuated legged body (would stall the night if broken)
+
 
 if __name__ == "__main__":
     unittest.main()

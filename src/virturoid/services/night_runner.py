@@ -35,16 +35,34 @@ def _walk_candidate(name, gene, rng):
             "gates": dict(_GATES), "gate_target": _GATES["forward_m"], "heuristic": cpg_grid_proposer()}
 
 
-def make_arms(zoo=None, *, seed: int = 0):
-    """Bind the NightProposer's three arms to a body zoo. mutate/transfer pick a body + a CPG-search candidate
-    (transfer relies on the laddered evaluator to warm-start from the best banked seed); explore is left to the
-    LLM path (None here -> the LLM-free night). Returns ``(mutate, transfer, explore)`` callables."""
+def mutate_morphology(rng):
+    """A real MORPHOLOGY-mutation operator (plan gap-closure WS2-phase-2 / N20): sample a NOVEL body from the
+    steerable-legged design space (n_legs x dofs_per_leg x bilateral) instead of re-picking one of 3 fixed zoo
+    bodies. This is the minimal POET-style open-endedness step — the frontier can now grow new morphologies, so
+    QD coverage / ANNECS-V measure genuine novelty rather than saturating on a static zoo. Returns ``(name, gene)``."""
+    from virturoid.services.steerable_body import steerable_quadruped
+    n_legs = rng.choice([4, 6, 8])
+    dofs = rng.choice([2, 3])                                 # 3 = hip-yaw (steerable); 2 = sagittal-only
+    bilateral = (n_legs != 4) and (rng.random() < 0.85)       # multi-leg bodies walk as bilateral (L,R) pairs
+    gene = steerable_quadruped(n_legs=n_legs, dofs_per_leg=dofs, bilateral=bilateral)
+    name = f"morph_{n_legs}L{dofs}d{'bi' if bilateral else ''}"
+    return name, gene
+
+
+def make_arms(zoo=None, *, seed: int = 0, mutate_prob: float = 0.5):
+    """Bind the NightProposer's three arms to a body zoo. The mutate arm now, with probability ``mutate_prob``,
+    emits a NOVEL morphology (``mutate_morphology``) rather than re-picking a fixed zoo body -> the frontier grows
+    (WS2-phase-2). transfer picks a zoo body + relies on the laddered evaluator to warm-start from the best banked
+    seed; explore is the LLM path (None here -> LLM-free night). Returns ``(mutate, transfer, explore)``."""
     import random
     zoo = zoo if zoo is not None else default_body_zoo()
     rng = random.Random(seed)
 
     def mutate():
-        name, gene = zoo[rng.randrange(len(zoo))]
+        if rng.random() < mutate_prob:
+            name, gene = mutate_morphology(rng)              # NOVEL body from the design space (open-endedness)
+        else:
+            name, gene = zoo[rng.randrange(len(zoo))]        # or refine a known body
         return _walk_candidate(name, gene, rng)
 
     def transfer():
