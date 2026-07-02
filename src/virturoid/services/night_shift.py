@@ -76,7 +76,8 @@ def _append_journal(path, rec):
 
 def laddered_evaluate_for(*, cpu_steps: int = 600, gpu_iters: int = 60, gpu_envs: int = 2048,
                           decimation: int = 10, action_lpf: float = 0.2, base_reward_weights: dict | None = None,
-                          promote=None, train_fn=None, verify_fn=None):
+                          promote=None, warm_start_pool: str | None = "build/models", train_fn=None,
+                          verify_fn=None):
     """Production ``evaluate_for`` (plan v2 §5.1/N8): give each candidate a FIDELITY-LADDERED evaluate — a cheap
     CPU screen (pure-CPG rollout, seconds) that gates a GPU residual-training rung carrying the deploy-gap fixes
     (50 Hz decimation + action-LPF + keep-checkpoints, deploy==train). Returns ``evaluate_for(candidate) ->
@@ -87,10 +88,20 @@ def laddered_evaluate_for(*, cpu_steps: int = 600, gpu_iters: int = 60, gpu_envs
 
     def evaluate_for(cand):
         gene = cand["gene"]
+        # TRANSFER ARM made real (§5.2, the cheapest compounding lever): warm-start the GPU rung from the banked
+        # policy that best TRANSFERS forward to THIS body -- the measured fix for the from-scratch backward basin
+        # (a hexapod warm-started from a forward quad). A candidate can override via cand["init_npz"].
+        seed = cand.get("init_npz")
+        if seed is None and warm_start_pool:
+            try:
+                from virturoid.services.transfer_seed import transfer_policy_for
+                _pol, seed, _ranked = transfer_policy_for(gene, models_dir=warm_start_pool, steps=cpu_steps)
+            except Exception:  # noqa: BLE001 - transfer recall is best-effort; train from scratch if it fails
+                seed = None
         screen = make_locomotion_evaluate(gene, steps=cpu_steps)
         hifi = make_gpu_locomotion_hifi(gene, iters=gpu_iters, envs=gpu_envs, decimation=decimation,
                                         action_lpf=action_lpf, base_reward_weights=base_reward_weights,
-                                        train_fn=train_fn, verify_fn=verify_fn)
+                                        init_npz=seed, train_fn=train_fn, verify_fn=verify_fn)
         return make_laddered_evaluate(screen, hifi, promote=promote)
 
     return evaluate_for

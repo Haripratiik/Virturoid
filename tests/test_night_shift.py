@@ -94,7 +94,8 @@ class LadderedEvaluateForTests(unittest.TestCase):
             seen["decimation"], seen["action_lpf"] = decimation, action_lpf
             return out_path                                          # "trained" npz
 
-        ev_for = laddered_evaluate_for(cpu_steps=120, decimation=10, action_lpf=0.2, train_fn=fake_train,
+        ev_for = laddered_evaluate_for(cpu_steps=120, decimation=10, action_lpf=0.2, warm_start_pool=None,
+                                       train_fn=fake_train,
                                        verify_fn=lambda g, npz, *, steps, decimation=1, action_lpf=0.0:
                                        {"forward": 0.8, "survived": True})
         evaluate = ev_for({"id": "q", "gene": quadruped_gene(), "task": "walk"})
