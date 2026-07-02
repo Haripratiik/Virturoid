@@ -123,7 +123,9 @@ def train_gene_on_gpu(gene, *, out_path: str, iters: int = 80, envs: int = 1024,
                       cpg: bool = False, dr: bool = False, init_npz: str | None = None,
                       adaptive: bool = False, ep_len: int | None = None,
                       film: bool = False, topo_bias: bool = False,
-                      calf_phase: float | None = None, cpg_freq: float | None = None) -> str | None:
+                      calf_phase: float | None = None, cpg_freq: float | None = None,
+                      decimation: int | None = None, action_lpf: float | None = None,
+                      keep_checkpoints: bool = False) -> str | None:
     """Sync repo+gene to the box, run MJX PPO, fetch the trained policy to ``out_path``. Returns the local
     npz path, or ``None`` on any failure so the caller can fall back to CPU. ``reward_weights`` (the AI gait
     critic's redesigned weights) are passed as trainer flags; ``cpg``/``dr`` enable the trot-CPG prior and
@@ -143,6 +145,12 @@ def train_gene_on_gpu(gene, *, out_path: str, iters: int = 80, envs: int = 1024,
             extra += f" --calf-phase {float(calf_phase)}"
         if cpg_freq is not None:
             extra += f" --cpg-freq {float(cpg_freq)}"
+        if decimation and int(decimation) > 1:               # plan v2 T1.1: 50Hz control (deploy-gap root-cause fix)
+            extra += f" --decimation {int(decimation)}"
+        if action_lpf and float(action_lpf) > 0.0:           # plan v2 T1.2: action low-pass (train==deploy)
+            extra += f" --action-lpf {float(action_lpf)}"
+        if keep_checkpoints:                                 # plan v2 T0.1: numbered checkpoints for deploy-sim selection
+            extra += " --keep-checkpoints"
         if ep_len:
             extra += f" --ep-len {int(ep_len)}"
         if init_npz:

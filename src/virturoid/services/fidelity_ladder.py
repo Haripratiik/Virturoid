@@ -48,7 +48,8 @@ def make_laddered_evaluate(screen_evaluate, hifi_evaluate, *, promote=None, on_r
 
 def make_gpu_locomotion_hifi(gene, *, iters: int = 60, envs: int = 2048, out_dir: str | None = None,
                              verify_steps: int = 900, base_reward_weights: dict | None = None,
-                             init_npz: str | None = None, train_fn=None, verify_fn=None):
+                             init_npz: str | None = None, decimation: int = 1, action_lpf: float = 0.0,
+                             train_fn=None, verify_fn=None):
     """The REAL hi-fi rung: train a residual on the GPU for ``gene`` under a spec's edits, fetch the policy, and
     VERIFY it with an independent CPU rollout -> result dict ``{forward,cadence,upright_frac,survived,npz,trained}``.
     ``spec`` edits map to trainer flags: ``cpg`` params (calf_phase/freq) + ``reward`` params (prog_w/fwd_gate_w/…).
@@ -72,13 +73,15 @@ def make_gpu_locomotion_hifi(gene, *, iters: int = 60, envs: int = 2048, out_dir
             if k in p:
                 reward_weights[k] = float(p[k])
         seed = p.get("init_npz", init_npz)                    # a spec can override the warm-start seed per candidate
+        dec = int(p.get("decimation", decimation))            # plan v2 T1.1/T1.2 (deploy-gap): a spec can tune them
+        lpf = float(p.get("action_lpf", action_lpf))
         npz = os.path.join(outd, f"hifi_{abs(hash(repr(sorted(p.items())))) % 10_000_000}.npz")
         trained = _train(gene, out_path=npz, iters=iters, envs=envs, cpg=cpg, reward_weights=reward_weights,
-                         init_npz=seed)
+                         init_npz=seed, decimation=dec, action_lpf=lpf)
         if not trained:
             return {"forward": 0.0, "cadence": 0.0, "upright_frac": 0.0, "survived": False, "trained": False,
                     "npz": None, "note": "gpu_unavailable_or_train_failed"}
-        r = _verify(gene, trained, steps=verify_steps)
+        r = _verify(gene, trained, steps=verify_steps, decimation=dec, action_lpf=lpf)   # deploy == train
         r["trained"] = True
         r["npz"] = trained
         return r
@@ -86,18 +89,20 @@ def make_gpu_locomotion_hifi(gene, *, iters: int = 60, envs: int = 2048, out_dir
     return hifi
 
 
-def _default_gpu_train(gene, *, out_path, iters, envs, cpg, reward_weights, init_npz=None):
+def _default_gpu_train(gene, *, out_path, iters, envs, cpg, reward_weights, init_npz=None,
+                       decimation=1, action_lpf=0.0):
     from virturoid.services.gpu_trainer import train_gene_on_gpu
     calf = cpg.get("calf_phase")
     freq = cpg.get("freq")
     return train_gene_on_gpu(gene, out_path=out_path, iters=iters, envs=envs, cpg=bool(cpg),
                              calf_phase=calf, cpg_freq=freq, reward_weights=reward_weights or None,
-                             init_npz=init_npz)
+                             init_npz=init_npz, decimation=decimation, action_lpf=action_lpf,
+                             keep_checkpoints=True)
 
 
-def _default_cpu_verify(gene, npz_path, *, steps):
+def _default_cpu_verify(gene, npz_path, *, steps, decimation=1, action_lpf=0.0):
     from virturoid.services.morph_policy import MorphPolicy, recipe_rollout_morph
-    pol = MorphPolicy.from_npz(npz_path)
-    r = recipe_rollout_morph(gene, pol, steps=steps)
+    pol = MorphPolicy.from_npz(npz_path)   # banked meta carries decimation/lpf; explicit args override for deploy==train
+    r = recipe_rollout_morph(gene, pol, steps=steps, decimation=decimation, action_lpf=action_lpf)
     return {"forward": float(r.get("forward", 0.0)), "cadence": float(r.get("cadence", 0.0)),
             "upright_frac": r.get("upright_frac"), "survived": bool(r.get("survived"))}

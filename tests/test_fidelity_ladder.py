@@ -45,14 +45,19 @@ class FidelityLadderTests(unittest.TestCase):
         # a successful train returns an npz path; the ladder then VERIFIES it via verify_fn (independent re-run)
         seen = {}
 
-        def fake_train(gene, *, out_path, iters, envs, cpg, reward_weights, init_npz=None):
+        def fake_train(gene, *, out_path, iters, envs, cpg, reward_weights, init_npz=None,
+                       decimation=1, action_lpf=0.0):
             seen["cpg"] = cpg
             seen["reward_weights"] = reward_weights
             seen["init_npz"] = init_npz
+            seen["decimation"] = decimation
+            seen["action_lpf"] = action_lpf
             return out_path                                       # "trained" -> npz path
 
-        hifi = make_gpu_locomotion_hifi(gene=object(), init_npz="seed.npz", train_fn=fake_train,
-                                        verify_fn=lambda g, npz, *, steps: {"forward": 0.7, "survived": True})
+        hifi = make_gpu_locomotion_hifi(gene=object(), init_npz="seed.npz", decimation=10, action_lpf=0.2,
+                                        train_fn=fake_train,
+                                        verify_fn=lambda g, npz, *, steps, decimation=1, action_lpf=0.0:
+                                        {"forward": 0.7, "survived": True, "dec_seen": decimation})
         r = hifi({"params": {"calf_phase": 0.0, "freq": 1.5, "fwd_gate_w": 0.85, "prog_w": 6.0}})
         self.assertTrue(r["trained"])
         self.assertAlmostEqual(r["forward"], 0.7)
@@ -60,6 +65,9 @@ class FidelityLadderTests(unittest.TestCase):
         self.assertEqual(seen["reward_weights"]["fwd_gate_w"], 0.85)       # reward edits routed to trainer
         self.assertEqual(seen["reward_weights"]["prog_w"], 6.0)
         self.assertEqual(seen["init_npz"], "seed.npz")                     # warm-start seed routed to trainer
+        self.assertEqual(seen["decimation"], 10)                           # T1.1 decimation routed to trainer
+        self.assertEqual(seen["action_lpf"], 0.2)                          # T1.2 LPF routed to trainer
+        self.assertEqual(r["dec_seen"], 10)                                # verify deploys at the SAME rate (deploy==train)
 
 
 if __name__ == "__main__":
