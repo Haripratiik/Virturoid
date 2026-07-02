@@ -12,7 +12,9 @@ class VirtBenchTests(unittest.TestCase):
         self.assertTrue(list_tasks())
         self.assertTrue(all(k in get_task("L1_quad_walk")
                             for k in ("family", "task_type", "gates", "split", "steps", "seed")))
-        self.assertEqual({t["id"] for t in list_tasks("dev")}, {"L1_quad_walk", "M1_arm_grasp"})
+        self.assertEqual({t["id"] for t in list_tasks("dev")},
+                         {"L1_quad_walk", "L4_decapod_walk", "M1_arm_grasp", "M4_arm_transport"})
+        self.assertEqual(len(list_tasks()), 8)                 # WS5: 4 locomotion + 4 manipulation
         with self.assertRaises(KeyError):
             get_task("nope")
 
