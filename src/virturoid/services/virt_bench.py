@@ -54,7 +54,7 @@ def list_tasks(split: str | None = None) -> list[dict]:
 
 
 def verify_submission(task_id: str, gene, policy=None, *, steps: int | None = None,
-                      decimation: int | None = None) -> dict:
+                      decimation: int | None = None, seed: int | None = None) -> dict:
     """Independently verify a submitted (gene, controller) against a frozen task by RE-RUNNING it in physics and
     applying the honesty gate. Returns ``{task, verified_pass, failure_mode, metrics, summary, verifier}`` — the
     arm's own claim is never consulted. ``policy`` is a MorphPolicy (locomotion) / controller handle; ``None`` =
@@ -67,7 +67,9 @@ def verify_submission(task_id: str, gene, policy=None, *, steps: int | None = No
     the policy's banked ``decimation`` metadata, else 1."""
     task = get_task(task_id)
     eval_steps = int(task.get("steps", 900) if steps is None else steps)
-    seed = int(task.get("seed", 0))
+    # SEED is frozen in the task (§3.1); a caller may OVERRIDE it for the multi-seed protocol (plan gap-closure
+    # N18 / WS4 -- ≥3 seeds for mean±SEM), which is recorded in ``verifier`` so provenance stays honest.
+    seed = int(task.get("seed", 0) if seed is None else seed)
     dec = int(decimation if decimation is not None else getattr(policy, "decimation", 1) or 1)
     lpf = float(getattr(policy, "action_lpf", 0.0) or 0.0)    # deploy at the policy's banked LPF (T1.2, deploy==train)
     sf = bool(getattr(policy, "sphere_feet", False))          # deploy with the policy's banked foot model (T1.4)

@@ -49,8 +49,9 @@ def _zero_policy_with_cpg(gene, cpg: dict | None):
     return pol
 
 
-def run_arm_a(task_id: str, *, steps: int = 600) -> dict:
-    """Baseline arm: compose the body + the DEFAULT CPG gait, NO search -> independent verify."""
+def run_arm_a(task_id: str, *, steps: int = 600, seed: int | None = None) -> dict:
+    """Baseline arm: compose the body + the DEFAULT CPG gait, NO search -> independent verify. ``seed`` overrides
+    the task's frozen verify seed (multi-seed protocol, WS4)."""
     from virturoid.services.morph_policy import CPG_DEFAULT
     task = get_task(task_id)
     gene = _task_body(task)
@@ -61,7 +62,7 @@ def run_arm_a(task_id: str, *, steps: int = 600) -> dict:
         pol, method = _zero_policy_with_cpg(gene, CPG_DEFAULT), "fixed-pipeline: default CPG, no search"
     else:                                                     # manipulation: the verifier runs the built-in skill
         pol, method = None, "fixed-pipeline: default grasp skill, no search"
-    res = verify_submission(task_id, gene, pol)               # FROZEN horizon (§3.1)
+    res = verify_submission(task_id, gene, pol, seed=seed)    # FROZEN horizon (§3.1); seed override for WS4
     res["arm"] = "A"; res["method"] = method
     res["claimed_pass"] = bool(res.get("verified_pass"))      # A has no self-eval: it submits the default + verifies
     return res
@@ -69,7 +70,7 @@ def run_arm_a(task_id: str, *, steps: int = 600) -> dict:
 
 def run_arm_b(task_id: str, *, steps: int = 600, max_evals: int = 12, on_node=None, use_memory: bool = True,
               use_gpu: bool = False, gpu_iters: int = 60, gpu_envs: int = 1024, gpu_hifi=None,
-              models_dir: str = "build/models") -> dict:
+              models_dir: str = "build/models", seed: int | None = None) -> dict:
     """Full-harness arm with up to THREE candidate sources, all scored by the SAME independent verifier at the
     frozen horizon: (1) MEMORY -- recall the banked policy that best transfers to this body (the flywheel moat);
     (2) SEARCH the CPG gait direction on the cheap CPU rung; (3) GPU RESIDUAL (plan gap-closure WS1/#66) -- when
@@ -92,7 +93,7 @@ def run_arm_b(task_id: str, *, steps: int = 600, max_evals: int = 12, on_node=No
     # the composed arm verified (memory-recall of a banked arm design/skill is the future edge; today A==B for
     # manip, reported honestly so the scoreboard covers the family without faking a delta).
     if task["family"] != "locomotion":
-        res = verify_submission(task_id, gene, None)
+        res = verify_submission(task_id, gene, None, seed=seed)
         res["arm"] = "B"; res["method"] = "full harness: default grasp skill (no manip search yet)"
         res["searched"] = None; res["recalled"] = None; res["n_evals"] = 0
         res["claimed_pass"] = bool(res.get("verified_pass"))   # no separate self-eval here: claim == verify
@@ -112,7 +113,7 @@ def run_arm_b(task_id: str, *, steps: int = 600, max_evals: int = 12, on_node=No
             pol, npz, _ranked = transfer_policy_for(gene, models_dir=models_dir, steps=recall_steps)
             if pol is not None:
                 recalled = npz
-                rv = verify_submission(task_id, gene, pol)             # FROZEN horizon (§3.1)
+                rv = verify_submission(task_id, gene, pol, seed=seed)  # FROZEN horizon (§3.1)
                 candidates.append((rv, f"memory transfer-recall ({npz.split('/')[-1]})", {"recalled": npz},
                                    bool(rv.get("verified_pass"))))     # memory has no optimistic self-eval: claim==verify
         except Exception:  # noqa: BLE001 - memory is best-effort; the search path still runs
@@ -123,7 +124,7 @@ def run_arm_b(task_id: str, *, steps: int = 600, max_evals: int = 12, on_node=No
     report = run_design_search(propose=cpg_grid_proposer(), evaluate=evaluate, task_type="locomotion",
                                gates=task["gates"], max_evals=max_evals, on_node=on_node)
     best_cpg = (report.best.result.get("cpg") if report.best else None)
-    sv = verify_submission(task_id, gene, _zero_policy_with_cpg(gene, best_cpg))   # FROZEN horizon (§3.1)
+    sv = verify_submission(task_id, gene, _zero_policy_with_cpg(gene, best_cpg), seed=seed)   # FROZEN (§3.1)
     # the search's OWN gate verdict on its best candidate is its CLAIM; the independent verifier confirms/denies it.
     candidates.append((sv, f"CPG-search harness ({report.n_evals} evals, {report.stopped_reason})",
                        {"searched": best_cpg}, bool(report.solved)))
@@ -147,7 +148,7 @@ def run_arm_b(task_id: str, *, steps: int = 600, max_evals: int = 12, on_node=No
             if tr.get("trained") and tr.get("npz"):
                 gpu_npz = tr["npz"]
                 gp = MorphPolicy.from_npz(gpu_npz)
-                gv = verify_submission(task_id, gene, gp)      # independent FROZEN-horizon verify (honest gate)
+                gv = verify_submission(task_id, gene, gp, seed=seed)   # independent FROZEN-horizon verify (honest gate)
                 warm = "warm(mem)" if (use_memory and recalled) else "cold"
                 candidates.append((gv, f"GPU residual ({gpu_iters} iters, {warm})", {"gpu_npz": gpu_npz},
                                    bool(gv.get("verified_pass"))))     # selected by deploy verify: claim==verify
@@ -207,7 +208,7 @@ def _metric(res: dict):
 def run_head_to_head(*, split: str | None = "held_out", steps: int = 600, max_evals: int = 12,
                      models_dir: str = "build/models", families=("locomotion", "manipulation"),
                      use_gpu: bool = False, gpu_iters: int = 60, gpu_envs: int = 1024, gpu_hifi=None,
-                     prereg_path: str | None = None) -> dict:
+                     seed: int | None = None, prereg_path: str | None = None) -> dict:
     """M5 pre-registered THREE-ARM head-to-head — the plan's decisive comparison, separating the value of the
     agentic SEARCH from the value of the flywheel MEMORY, and auditing each arm's honesty.
 
@@ -232,11 +233,11 @@ def run_head_to_head(*, split: str | None = "held_out", steps: int = 600, max_ev
     for task in list_tasks(split):
         if task["family"] not in families:
             continue
-        a = run_arm_a(task["id"], steps=steps)
+        a = run_arm_a(task["id"], steps=steps, seed=seed)
         # A+ = search+GPU, memory COLD (use_memory=False -> no recall AND GPU warm-start init_npz=None: N17 isolation).
         # B  = search+GPU, memory WARM. Both spend the SAME GPU iters -> harness_delta/transfer_delta compare search
         # intelligence and flywheel value, not compute (N16 budget parity, asserted via the per-arm ledger below).
-        gk = dict(use_gpu=use_gpu, gpu_iters=gpu_iters, gpu_envs=gpu_envs, gpu_hifi=gpu_hifi)
+        gk = dict(use_gpu=use_gpu, gpu_iters=gpu_iters, gpu_envs=gpu_envs, gpu_hifi=gpu_hifi, seed=seed)
         ap = run_arm_b(task["id"], steps=steps, max_evals=max_evals, use_memory=False, models_dir=models_dir, **gk)
         b = run_arm_b(task["id"], steps=steps, max_evals=max_evals, use_memory=True, models_dir=models_dir, **gk)
         rows.append({"task": task["id"], "family": task["family"],
@@ -267,3 +268,43 @@ def run_head_to_head(*, split: str | None = "held_out", steps: int = 600, max_ev
     return {"rows": rows, "n_tasks": len(rows), "A_solved": A, "Aplus_solved": Ap, "B_solved": B,
             "harness_delta": Ap - A, "transfer_delta": B - Ap, "honesty": honesty, "budget": budget,
             "prereg": prereg}
+
+
+def _mean_sem_iqm(xs: list) -> dict:
+    """Point estimate + uncertainty for a small sample of per-seed scores. Reports mean±SEM (plan v2 §3.7) AND
+    the INTERQUARTILE MEAN (Agarwal et al. NeurIPS 2021, WS4): the middle-50% mean, robust to the outlier runs
+    that make point estimates on few seeds misleading. ``ci95`` is the normal-approx 1.96·SEM band."""
+    import math
+    xs = sorted(float(x) for x in xs)
+    n = len(xs)
+    if n == 0:
+        return {"mean": 0.0, "sem": 0.0, "ci95": 0.0, "iqm": 0.0, "n": 0}
+    mean = sum(xs) / n
+    var = sum((x - mean) ** 2 for x in xs) / (n - 1) if n > 1 else 0.0
+    sem = math.sqrt(var / n) if n > 1 else 0.0
+    lo, hi = n // 4, n - n // 4                                # drop the bottom/top quartile for the IQM
+    mid = xs[lo:hi] or xs
+    iqm = sum(mid) / len(mid)
+    return {"mean": round(mean, 4), "sem": round(sem, 4), "ci95": round(1.96 * sem, 4),
+            "iqm": round(iqm, 4), "n": n}
+
+
+def run_head_to_head_multiseed(*, seeds=(20260701, 20260702, 20260703), base_prereg_path: str | None = None,
+                               **kw) -> dict:
+    """M5 statistically-hardened head-to-head (plan gap-closure WS4): run the 3-arm comparison at ≥3 SEEDS and
+    report each metric with UNCERTAINTY, not a single point estimate (few-seed point estimates are the exact trap
+    §3.7 warns against). ``seeds`` overrides the per-run verify seed (N18). ``kw`` forwards to ``run_head_to_head``
+    (split/steps/max_evals/use_gpu/…). Returns per-seed runs + aggregated ``A_solved``/``Aplus_solved``/``B_solved``
+    and ``harness_delta``/``transfer_delta`` each as {mean, sem, ci95, iqm, n}. Writes one pre-registration
+    manifest with the full seed table when ``base_prereg_path`` is given (the honest external timestamp)."""
+    kw.pop("seed", None)
+    kw.pop("prereg_path", None)
+    prereg = None
+    if base_prereg_path is not None:
+        from virturoid.services.prereg import write_prereg
+        prereg = write_prereg(base_prereg_path, arms=("A", "A+", "B"), seeds=list(seeds),
+                              split=kw.get("split", "held_out"))
+    runs = [run_head_to_head(seed=int(s), **kw) for s in seeds]
+    agg = {k: _mean_sem_iqm([r[k] for r in runs])
+           for k in ("A_solved", "Aplus_solved", "B_solved", "harness_delta", "transfer_delta")}
+    return {"seeds": list(seeds), "n_seeds": len(seeds), "per_seed": runs, "aggregate": agg, "prereg": prereg}

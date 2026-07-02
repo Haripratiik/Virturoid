@@ -5,7 +5,8 @@ build priority (honest compass)."""
 import unittest
 
 from virturoid.services import virt_bench_arms
-from virturoid.services.virt_bench_arms import run_arm_a, run_arm_b, run_dev_scoreboard, run_head_to_head
+from virturoid.services.virt_bench_arms import (run_arm_a, run_arm_b, run_dev_scoreboard, run_head_to_head,
+                                                run_head_to_head_multiseed, _mean_sem_iqm)
 
 
 class VirtBenchArmsTests(unittest.TestCase):
@@ -132,6 +133,45 @@ class HeadToHeadTests(unittest.TestCase):
                 self.assertIn("arms_sha256", man)                # the arms module is version-pinned in the freeze
         finally:
             M.run_arm_a, M.run_arm_b, M.list_tasks = M2
+
+
+class MultiSeedTests(unittest.TestCase):
+    def test_mean_sem_iqm(self):
+        s = _mean_sem_iqm([1.0, 2.0, 3.0])
+        self.assertAlmostEqual(s["mean"], 2.0)
+        self.assertEqual(s["n"], 3)
+        self.assertGreater(s["sem"], 0.0)                      # >1 sample -> nonzero uncertainty
+        self.assertAlmostEqual(s["iqm"], 2.0)                  # middle-50% of [1,2,3] centers on 2
+        self.assertEqual(_mean_sem_iqm([])["n"], 0)            # empty is safe
+
+    def test_multiseed_aggregates_across_seeds(self):
+        # WS4: run the 3-arm comparison at 3 seeds, aggregate with uncertainty. Stub the arms + task list so this
+        # tests the seed loop + aggregation (not physics). Each arm's verdict is fixed here -> zero variance.
+        import virturoid.services.virt_bench_arms as M
+        tasks = [{"id": "t1", "family": "locomotion"}]
+        seen_seeds = []
+
+        def fake_arm_a(tid, *, steps=600, seed=None):
+            seen_seeds.append(("A", seed))
+            return {"verified_pass": True, "claimed_pass": True, "metrics": {"forward_m": 0.6}}
+
+        def fake_arm_b(tid, *, use_memory, seed=None, **kw):
+            return {"verified_pass": bool(use_memory), "claimed_pass": bool(use_memory),
+                    "metrics": {"forward_m": 0.6 if use_memory else 0.0}, "recalled": None, "searched": None,
+                    "budget": {"cpu_evals": 1, "gpu_iters": 0, "llm_calls": 0}}
+
+        orig = (M.list_tasks, M.run_arm_a, M.run_arm_b)
+        M.list_tasks, M.run_arm_a, M.run_arm_b = (lambda split: tasks), fake_arm_a, fake_arm_b
+        try:
+            r = run_head_to_head_multiseed(seeds=(11, 22, 33), split=None, families=("locomotion",))
+        finally:
+            M.list_tasks, M.run_arm_a, M.run_arm_b = orig
+
+        self.assertEqual(r["n_seeds"], 3)
+        self.assertEqual([s for _, s in seen_seeds], [11, 22, 33])   # the override seed reached the arms
+        self.assertEqual(r["aggregate"]["transfer_delta"]["mean"], 1.0)  # B(mem)=1 - A+(no mem)=0 every seed
+        self.assertEqual(r["aggregate"]["transfer_delta"]["sem"], 0.0)   # identical across seeds -> no variance
+        self.assertEqual(r["aggregate"]["B_solved"]["n"], 3)
 
 
 if __name__ == "__main__":
