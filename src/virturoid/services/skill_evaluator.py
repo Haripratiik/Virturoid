@@ -46,7 +46,7 @@ def _mlp(layers, x):
     return x @ w + b
 
 
-def _grasp_rollout(gene, cfg: dict, layers, gx: float, gy: float, record: bool = False):
+def _grasp_rollout(gene, cfg: dict, layers, gx: float, gy: float, record: bool = False, friction: float = 1.0):
     """One CPU-MuJoCo grasp episode with the learned policy; returns the outcome dict (and, if
     ``record``, an ``outcome["trajectory"]`` of per-step obs/action/reward/robot+object state for the
     demonstration-dataset system §41).
@@ -69,7 +69,7 @@ def _grasp_rollout(gene, cfg: dict, layers, gx: float, gy: float, record: bool =
     L, fclose = int(cfg.get("ep_len", 200)), float(cfg.get("fclose", 0.045))
 
     cube = SceneObject("box", "cube", (gx, gy, 0.05, 0, 0, 0), mass_kg=0.03, material="gray_block",
-                       friction=1.0, scale=1.0)
+                       friction=float(friction), scale=1.0)   # WS9: parameterized friction (hard grasp scene)
     mj = mujoco.MjModel.from_xml_string(compile_gene_with_scene(gene, [cube]))
     mj.opt.iterations = 20; mj.opt.ls_iterations = 10
     tcp = mujoco.mj_name2id(mj, mujoco.mjtObj.mjOBJ_SITE, "grasp_site")

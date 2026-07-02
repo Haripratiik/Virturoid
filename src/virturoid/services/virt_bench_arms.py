@@ -21,6 +21,9 @@ def _task_body(task: dict):
     """Deterministically compose the body a locomotion task calls for (returns None for unsupported families)."""
     if task["family"] == "manipulation":                      # §3.5: manipulation tasks get a tabletop arm; the
         from virturoid.fixtures.gene_library import tabletop_arm_gene   # verifier runs the grasp/sort skill (evaluate_robot)
+        if task["id"] == "M5_arm_grasp_hard":                 # WS9: the friction-hard grasp uses the PARALLEL-GRIPPER
+            from virturoid.services.design_critic import add_parallel_gripper   # arm the learned residual was trained on
+            return add_parallel_gripper(tabletop_arm_gene())  #   (matches the residual's obs/act dims -> it deploys)
         return tabletop_arm_gene()
     if task["family"] != "locomotion":
         return None

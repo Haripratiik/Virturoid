@@ -67,6 +67,13 @@ VIRT_TASKS = [
     {"id": "M4_arm_transport", "family": "manipulation", "task_type": "pick_place_sort",
      "prompt": "design an arm that transports blocks into a bin", "gates": {"success_rate": 0.6}, "split": "dev",
      "steps": 900, "seed": 20260701},
+    # WS9 (plan v3): a FRICTION-HARD grasp. scene_params lowers the cube friction so the scripted grasp is
+    # brittle (slips) -> a learned grasp residual (submitted as controller_params.residual_params_path) has real
+    # room to win. Acceptance target: the learned residual beats the scripted floor by >= 0.15 success.
+    {"id": "M5_arm_grasp_hard", "family": "manipulation", "task_type": "grasp",
+     "prompt": "design an arm that grasps and lifts a low-friction cube",
+     "gates": {"success_rate": 0.5}, "scene_params": {"friction": 0.35},
+     "split": "held_out", "steps": 900, "seed": 20260701},
 ]
 
 _BY_ID = {t["id"]: t for t in VIRT_TASKS}
@@ -122,7 +129,8 @@ def verify_submission(task_id: str, gene, policy=None, *, steps: int | None = No
         # WITH them. ``None`` (or a non-dict) = the default built-in skill (the honest floor). Either way the
         # verifier owns the physics re-run and the gate; the arm never grades itself.
         controller_params = policy if isinstance(policy, dict) else None
-        res = evaluate_robot(gene, prompt=task["prompt"], controller_params=controller_params)
+        res = evaluate_robot(gene, prompt=task["prompt"], controller_params=controller_params,
+                             scene_params=task.get("scene_params"))   # WS9: task difficulty (e.g. hard friction)
         result = {"success_rate": res.get("value"), "metric": res.get("metric")}
 
     art = build_diagnosis_artifact(result, task_type=task["task_type"], gates=task["gates"])

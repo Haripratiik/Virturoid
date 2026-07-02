@@ -35,7 +35,8 @@ def robot_kind(gene: RobotGene) -> str:
     return "manipulator"
 
 
-def evaluate_robot(gene: RobotGene, *, prompt: str = "", controller_params: dict | None = None) -> dict:
+def evaluate_robot(gene: RobotGene, *, prompt: str = "", controller_params: dict | None = None,
+                   scene_params: dict | None = None) -> dict:
     """Evaluate ``gene`` on its morphology-implied task (dispatched by STRUCTURE — see ``robot_kind`` — so
     any LLM-designed body routes to the right controller). Returns ``{task, metric, value, detail}``.
 
@@ -78,7 +79,9 @@ def evaluate_robot(gene: RobotGene, *, prompt: str = "", controller_params: dict
     if kind == "manipulator" and ee in ("gripper", "hand") \
             and any(w in p for w in grasp_words) and not any(w in p for w in transport_words):
         from virturoid.services.grasp_eval import evaluate_grasp_lift
-        r = evaluate_grasp_lift(gene)
+        # WS9: controller_params may carry a learned residual_params_path; scene_params sets the difficulty
+        # (M5_arm_grasp_hard lowers friction so the scripted grasp is brittle and the residual has room to win).
+        r = evaluate_grasp_lift(gene, controller_params=controller_params, **(scene_params or {}))
         return {"task": "grasp_lift", "metric": "success_rate", "value": r["success_rate"], "detail": r}
 
     # default: a manipulator does pick-place (sort / place-to-target), scored on real physics. Give it a

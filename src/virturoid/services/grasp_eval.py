@@ -15,6 +15,8 @@ object without its links knocking the table or the box.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 
 def _set_grasp_contacts(mj, finger_bodies, box_body):
     """Match the M3 contact model: the box collides with everything, fingers with the box, the
@@ -34,7 +36,7 @@ def _set_grasp_contacts(mj, finger_bodies, box_body):
 def grasp_lift_attempt(gene, gx: float, gy: float, *, ep_len: int = 260, kpj: float = 150.0,
                        kdj: float = 18.0, kpf: float = 300.0, kdf: float = 10.0, dq: float = 0.06,
                        phases=(0.18, 0.5, 0.62), fclose: float = 0.05, success_lift: float = 0.05,
-                       hover_z: float = 0.16, lift_z: float = 0.22, aim_xy=None,
+                       hover_z: float = 0.16, lift_z: float = 0.22, aim_xy=None, friction: float = 1.0,
                        record_frames: bool = False, frame_every: int = 18, cam_px: int = 240) -> dict:
     """One scripted top-down grasp-and-lift attempt. The box sits at ``(gx, gy)``; the arm AIMS at ``aim_xy``
     (defaults to the box). Pass a separate ``aim_xy`` to grasp a perceived/predicted position while the box is
@@ -52,7 +54,7 @@ def grasp_lift_attempt(gene, gx: float, gy: float, *, ep_len: int = 260, kpj: fl
     )
 
     cube = SceneObject("box", "cube", (gx, gy, 0.05, 0, 0, 0), mass_kg=0.03, material="gray_block",
-                       friction=1.0, scale=1.0)
+                       friction=float(friction), scale=1.0)   # WS9: lower friction -> a harder, slippier grasp
     mj = mujoco.MjModel.from_xml_string(compile_gene_with_scene(gene, [cube]))
     mj.opt.iterations = 30
     mj.opt.ls_iterations = 12
@@ -170,13 +172,32 @@ def grasp_lift_attempt(gene, gx: float, gy: float, *, ep_len: int = 260, kpj: fl
             "d_tcp": round(d_tcp, 4), "reason": reason, "frames": frames}
 
 
-def evaluate_grasp_lift(gene, *, positions=None, seed: int = 0, **kw) -> dict:
+def evaluate_grasp_lift(gene, *, positions=None, seed: int = 0, controller_params: dict | None = None,
+                        friction: float = 1.0, **kw) -> dict:
     """Evaluate real grasp-and-lift over a few object positions. Returns ``{success_rate, mean_lift,
     max_lift, mean_tilt_deg, attempts}`` — a real friction-grasp metric usable as the honest grasp
-    score and as the residual-free base reward for the learned grasp skill."""
+    score and as the residual-free base reward for the learned grasp skill.
+
+    WS9 residual dispatch: if ``controller_params`` carries a ``residual_params_path`` (a banked learned grasp
+    residual MLP) that exists on disk, each attempt is run WITH that residual on top of the gravity-comp PD
+    (``skill_evaluator._grasp_rollout``); otherwise the scripted grasp is the honest floor. ``friction`` sets
+    the object's friction (the M5_arm_grasp_hard scene lowers it so the scripted grasp is brittle and a learned
+    residual has room to win). Other ``controller_params`` (gains/phases) become the residual rollout's cfg."""
     if positions is None:
         positions = [(0.40, 0.0), (0.44, 0.06), (0.44, -0.06), (0.48, 0.0)]
-    attempts = [grasp_lift_attempt(gene, float(gx), float(gy), **kw) for gx, gy in positions]
+    cp = controller_params or {}
+    res_path = cp.get("residual_params_path")
+    use_residual = bool(res_path) and Path(res_path).exists()
+    if use_residual:                                              # LEARNED residual on top of the PD base
+        from virturoid.services.skill_evaluator import _grasp_rollout, _load_policy
+        layers = _load_policy(res_path)
+        cfg = {k: v for k, v in cp.items() if k in ("kpj", "kdj", "kpf", "kdf", "alpha", "dq", "phases",
+                                                    "ep_len", "fclose")}
+        attempts = [_grasp_rollout(gene, cfg, layers, float(gx), float(gy), friction=float(friction))
+                    for gx, gy in positions]
+    else:                                                         # scripted grasp (the honest floor)
+        attempts = [grasp_lift_attempt(gene, float(gx), float(gy), friction=float(friction), **kw)
+                    for gx, gy in positions]
     n = max(1, len(attempts))
     succ = sum(a["success"] for a in attempts)
     tilts = [a["tilt_deg"] for a in attempts if a.get("tilt_deg") is not None]
@@ -185,5 +206,6 @@ def evaluate_grasp_lift(gene, *, positions=None, seed: int = 0, **kw) -> dict:
         "mean_lift": round(sum(a["lifted"] for a in attempts) / n, 4),
         "max_lift": round(max(a["lifted"] for a in attempts), 4),
         "mean_tilt_deg": round(sum(tilts) / len(tilts), 2) if tilts else None,
+        "residual": bool(use_residual),
         "attempts": attempts,
     }
