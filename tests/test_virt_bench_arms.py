@@ -4,7 +4,8 @@ build priority (honest compass)."""
 
 import unittest
 
-from virturoid.services.virt_bench_arms import run_arm_a, run_arm_b, run_dev_scoreboard
+from virturoid.services import virt_bench_arms
+from virturoid.services.virt_bench_arms import run_arm_a, run_arm_b, run_dev_scoreboard, run_head_to_head
 
 
 class VirtBenchArmsTests(unittest.TestCase):
@@ -37,6 +38,71 @@ class VirtBenchArmsTests(unittest.TestCase):
         # every solved count is grounded in an independent verify, never a self-report
         self.assertEqual(sb["harness_delta"], sb["B_solved"] - sb["A_solved"])
         self.assertTrue(all(isinstance(r["A_pass"], bool) and isinstance(r["B_pass"], bool) for r in sb["rows"]))
+
+
+class HeadToHeadTests(unittest.TestCase):
+    def test_three_arm_deltas_and_honesty_aggregate_correctly(self):
+        # Stub the three arms + task list so we test the AGGREGATION (deltas + honesty), not re-run physics.
+        # Scenario over 3 tasks: A solves 1, A+ solves 2 (one an over-claim: claim yes / verify no), B solves 3.
+        import virturoid.services.virt_bench_arms as M
+        tasks = [{"id": "t1", "family": "locomotion"}, {"id": "t2", "family": "locomotion"},
+                 {"id": "t3", "family": "locomotion"}]
+
+        def fake_list_tasks(split):
+            return tasks
+
+        # per-task scripted verdicts: (verified_pass, claimed_pass)
+        A = {"t1": (True, True), "t2": (False, False), "t3": (False, False)}
+        Aplus = {"t1": (True, True), "t2": (True, True), "t3": (False, True)}   # t3 = OVERCLAIM (claim>verify)
+        B = {"t1": (True, True), "t2": (True, True), "t3": (True, True)}
+
+        def fake_arm_a(task_id, **kw):
+            v, c = A[task_id]
+            return {"verified_pass": v, "claimed_pass": c, "metrics": {"forward_m": 0.5 if v else 0.0}}
+
+        def fake_arm_b(task_id, *, use_memory, **kw):
+            v, c = (B if use_memory else Aplus)[task_id]
+            return {"verified_pass": v, "claimed_pass": c, "metrics": {"forward_m": 0.6 if v else 0.0},
+                    "recalled": "seed.npz" if use_memory else None, "searched": {"freq": 1.5}}
+
+        orig = (M.list_tasks, M.run_arm_a, M.run_arm_b)
+        M.list_tasks, M.run_arm_a, M.run_arm_b = fake_list_tasks, fake_arm_a, fake_arm_b
+        try:
+            r = run_head_to_head(split=None, families=("locomotion",))
+        finally:
+            M.list_tasks, M.run_arm_a, M.run_arm_b = orig
+
+        self.assertEqual((r["A_solved"], r["Aplus_solved"], r["B_solved"]), (1, 2, 3))
+        self.assertEqual(r["harness_delta"], 1)                   # A+ - A = 2 - 1
+        self.assertEqual(r["transfer_delta"], 1)                  # B  - A+ = 3 - 2
+        # honesty: A+ claimed 3 but verified 2 -> overclaim 1 (the deploy-gap detector); A and B honest (0)
+        self.assertEqual(r["honesty"]["A+"]["overclaim"], 1)
+        self.assertEqual(r["honesty"]["A"]["overclaim"], 0)
+        self.assertEqual(r["honesty"]["B"]["overclaim"], 0)
+        self.assertEqual(len(r["rows"]), 3)
+
+    def test_prereg_manifest_is_written_and_hashed(self):
+        import json
+        import tempfile
+        from pathlib import Path
+        import virturoid.services.virt_bench_arms as M
+        # stub arms so this is fast; we only assert the pre-registration side-effect
+        M2 = (M.run_arm_a, M.run_arm_b, M.list_tasks)
+        M.run_arm_a = lambda tid, **kw: {"verified_pass": False, "claimed_pass": False, "metrics": {"forward_m": 0.0}}
+        M.run_arm_b = lambda tid, **kw: {"verified_pass": False, "claimed_pass": False, "metrics": {"forward_m": 0.0},
+                                         "recalled": None, "searched": None}
+        M.list_tasks = lambda split: []
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                p = Path(d) / "prereg.json"
+                r = run_head_to_head(split="held_out", prereg_path=str(p))
+                self.assertTrue(p.exists())
+                self.assertIsInstance(r["prereg"], str)          # returned the manifest_hash
+                man = json.loads(p.read_text())
+                self.assertEqual(man["manifest_hash"], r["prereg"])
+                self.assertIn("arms_sha256", man)                # the arms module is version-pinned in the freeze
+        finally:
+            M.run_arm_a, M.run_arm_b, M.list_tasks = M2
 
 
 if __name__ == "__main__":

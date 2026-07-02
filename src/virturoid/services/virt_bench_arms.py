@@ -60,6 +60,7 @@ def run_arm_a(task_id: str, *, steps: int = 600) -> dict:
         pol, method = None, "fixed-pipeline: default grasp skill, no search"
     res = verify_submission(task_id, gene, pol)               # FROZEN horizon (§3.1)
     res["arm"] = "A"; res["method"] = method
+    res["claimed_pass"] = bool(res.get("verified_pass"))      # A has no self-eval: it submits the default + verifies
     return res
 
 
@@ -84,6 +85,7 @@ def run_arm_b(task_id: str, *, steps: int = 600, max_evals: int = 12, on_node=No
         res = verify_submission(task_id, gene, None)
         res["arm"] = "B"; res["method"] = "full harness: default grasp skill (no manip search yet)"
         res["searched"] = None; res["recalled"] = None; res["n_evals"] = 0
+        res["claimed_pass"] = bool(res.get("verified_pass"))   # no separate self-eval here: claim == verify
         return res
 
     candidates = []                                            # (verified_result, method, extras)
@@ -118,6 +120,10 @@ def run_arm_b(task_id: str, *, steps: int = 600, max_evals: int = 12, on_node=No
     out = dict(best_res)
     out["arm"] = "B"; out["method"] = method; out["n_evals"] = report.n_evals
     out["searched"] = best_cpg; out["recalled"] = recalled if extras.get("recalled") else None
+    # honesty axis (plan §3): the search's OWN gate verdict on its best candidate is the arm's CLAIM; the
+    # independent verifier (verified_pass) confirms or denies it. claimed>verified = an over-claim (the deploy
+    # gap / a lenient selection eval), which run_head_to_head aggregates into the honesty_delta.
+    out["claimed_pass"] = bool(report.solved)
     return out
 
 
@@ -149,3 +155,59 @@ def run_dev_scoreboard(**kw) -> dict:
     """The dev-split scoreboard (thin wrapper over ``run_scoreboard`` for back-compat)."""
     kw.setdefault("split", "dev")
     return run_scoreboard(**kw)
+
+
+def _metric(res: dict):
+    """The task's headline metric from a verdict (forward travel for locomotion, success rate for manipulation)."""
+    m = res.get("metrics") or {}
+    return m.get("forward_m") if m.get("forward_m") is not None else m.get("success_rate")
+
+
+def run_head_to_head(*, split: str | None = "held_out", steps: int = 600, max_evals: int = 12,
+                     models_dir: str = "build/models", families=("locomotion", "manipulation"),
+                     prereg_path: str | None = None) -> dict:
+    """M5 pre-registered THREE-ARM head-to-head — the plan's decisive comparison, separating the value of the
+    agentic SEARCH from the value of the flywheel MEMORY, and auditing each arm's honesty.
+
+      A   fixed pipeline (default controller, NO search, NO memory) — the "Claude + MCP: one move" baseline.
+      A+  full harness SEARCH but memory DISABLED (``run_arm_b(use_memory=False)``) — isolates the search loop.
+      B   full harness + memory TRANSFER from the warm banked pool (``use_memory=True``) — adds the flywheel.
+
+    Every arm is scored by the SAME independent verifier at the task-frozen horizon (§3.1), so no arm grades
+    itself. Returns per-task rows plus the three MEASURED deltas the plan calls for:
+      * ``harness_delta``  = A+solved − Asolved  (value of the agentic search over a stock build)
+      * ``transfer_delta`` = Bsolved  − A+solved (value of the memory/transfer flywheel — the moat)
+      * ``honesty``        = per-arm {claimed, verified, overclaim=claimed−verified} (SWE-bench-Verified check:
+                             an arm's own gate verdict vs the independent verifier; overclaim>0 = the deploy gap).
+    Pass ``prereg_path`` to FREEZE the protocol first (SHA256 manifest of tasks+verifier+seeds) so the run is
+    pre-registered, not post-hoc — the manifest is attached under ``prereg``."""
+    prereg = None
+    if prereg_path is not None:                               # freeze the protocol (task+verifier+arms SHA256) FIRST
+        from virturoid.services.prereg import write_prereg
+        prereg = write_prereg(prereg_path, arms=("A", "A+", "B"), split=split)
+
+    rows = []
+    for task in list_tasks(split):
+        if task["family"] not in families:
+            continue
+        a = run_arm_a(task["id"], steps=steps)
+        ap = run_arm_b(task["id"], steps=steps, max_evals=max_evals, use_memory=False, models_dir=models_dir)
+        b = run_arm_b(task["id"], steps=steps, max_evals=max_evals, use_memory=True, models_dir=models_dir)
+        rows.append({"task": task["id"], "family": task["family"],
+                     "A_pass": bool(a["verified_pass"]), "Aplus_pass": bool(ap["verified_pass"]),
+                     "B_pass": bool(b["verified_pass"]),
+                     "A_metric": _metric(a), "Aplus_metric": _metric(ap), "B_metric": _metric(b),
+                     "A_claim": bool(a.get("claimed_pass")), "Aplus_claim": bool(ap.get("claimed_pass")),
+                     "B_claim": bool(b.get("claimed_pass")),
+                     "B_recalled": b.get("recalled"), "B_searched": b.get("searched")})
+
+    def _solved(k):
+        return sum(1 for r in rows if r[k])
+
+    A, Ap, B = _solved("A_pass"), _solved("Aplus_pass"), _solved("B_pass")
+    honesty = {}
+    for arm, cl, ve in (("A", "A_claim", "A_pass"), ("A+", "Aplus_claim", "Aplus_pass"), ("B", "B_claim", "B_pass")):
+        claimed, verified = _solved(cl), _solved(ve)
+        honesty[arm] = {"claimed": claimed, "verified": verified, "overclaim": claimed - verified}
+    return {"rows": rows, "n_tasks": len(rows), "A_solved": A, "Aplus_solved": Ap, "B_solved": B,
+            "harness_delta": Ap - A, "transfer_delta": B - Ap, "honesty": honesty, "prereg": prereg}
