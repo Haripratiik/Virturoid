@@ -76,8 +76,8 @@ def _append_journal(path, rec):
 
 def laddered_evaluate_for(*, cpu_steps: int = 600, gpu_iters: int = 60, gpu_envs: int = 2048,
                           decimation: int = 10, action_lpf: float = 0.2, base_reward_weights: dict | None = None,
-                          promote=None, warm_start_pool: str | None = "build/models", train_fn=None,
-                          verify_fn=None):
+                          promote=None, warm_start_pool: str | None = "build/models", recall_steps: int = 900,
+                          train_fn=None, verify_fn=None):
     """Production ``evaluate_for`` (plan v2 §5.1/N8): give each candidate a FIDELITY-LADDERED evaluate — a cheap
     CPU screen (pure-CPG rollout, seconds) that gates a GPU residual-training rung carrying the deploy-gap fixes
     (50 Hz decimation + action-LPF + keep-checkpoints, deploy==train). Returns ``evaluate_for(candidate) ->
@@ -95,7 +95,11 @@ def laddered_evaluate_for(*, cpu_steps: int = 600, gpu_iters: int = 60, gpu_envs
         if seed is None and warm_start_pool:
             try:
                 from virturoid.services.transfer_seed import transfer_policy_for
-                _pol, seed, _ranked = transfer_policy_for(gene, models_dir=warm_start_pool, steps=cpu_steps)
+                # rank transfers at the DEPLOY horizon (recall_steps, default 900), NOT the short screen cpu_steps:
+                # a banked 50Hz-decimation walker (quaddec_fwd +0.668) needs the full episode to reveal its forward
+                # travel, so a 300-step recall mis-ranks it BELOW a policy that merely lunges early -> the quad would
+                # warm-start from the WRONG (hexapod) seed and fail. Same fix as run_arm_b's transfer recall.
+                _pol, seed, _ranked = transfer_policy_for(gene, models_dir=warm_start_pool, steps=recall_steps)
             except Exception:  # noqa: BLE001 - transfer recall is best-effort; train from scratch if it fails
                 seed = None
         screen = make_locomotion_evaluate(gene, steps=cpu_steps)
