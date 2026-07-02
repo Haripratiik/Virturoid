@@ -102,7 +102,14 @@ def laddered_evaluate_for(*, cpu_steps: int = 600, gpu_iters: int = 60, gpu_envs
         hifi = make_gpu_locomotion_hifi(gene, iters=gpu_iters, envs=gpu_envs, decimation=decimation,
                                         action_lpf=action_lpf, base_reward_weights=base_reward_weights,
                                         init_npz=seed, train_fn=train_fn, verify_fn=verify_fn)
-        return make_laddered_evaluate(screen, hifi, promote=promote)
+        # PROMOTE FIX: a body with a banked forward TRANSFER seed always earns the GPU rung -- the warm-start makes
+        # it walk, so gating GPU on PURE-CPG screen survival would wrongly reject a body that only walks with the
+        # learned residual (e.g. the quad, which the default CPG can't drive -> falls the screen -> never banks
+        # despite a +0.668 banked seed). The cheap screen-survival gate still applies to NOVEL bodies (no seed).
+        cand_promote = promote
+        if cand_promote is None and seed is not None:
+            cand_promote = lambda _r: True                    # transfer available -> spend GPU (it will warm-start)
+        return make_laddered_evaluate(screen, hifi, promote=cand_promote)
 
     return evaluate_for
 
