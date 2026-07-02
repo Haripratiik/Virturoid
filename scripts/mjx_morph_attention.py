@@ -28,6 +28,13 @@ def main(argv=None) -> int:
     ap.add_argument("--iters", type=int, default=200)
     ap.add_argument("--envs", type=int, default=1024)
     ap.add_argument("--ep-len", type=int, default=200)
+    ap.add_argument("--decimation", type=int, default=1, help="CONTROL DECIMATION (plan v2 T1.1, the confirmed "
+                    "deploy-gap root-cause fix): hold each policy action for D physics substeps (PD + CPG clock "
+                    "run every substep), so the policy decides at sim_hz/D instead of every step. 1 = act every "
+                    "step (byte-identical to pre-decimation). At timestep 0.002, D=10 -> 50 Hz control (the "
+                    "legged_gym/Playground canon). The control horizon is ep_len//D so total physics time is "
+                    "unchanged. Reward is computed once per CONTROL step with dt scaled to D*sim_dt (legged_gym "
+                    "computes reward at the control rate). Deploy with recipe_rollout_morph(decimation=D) to match.")
     ap.add_argument("--epochs", type=int, default=4)
     ap.add_argument("--minibatches", type=int, default=16)
     ap.add_argument("--hidden", type=int, default=32)
@@ -275,11 +282,15 @@ def main(argv=None) -> int:
     foot_idx = jp.asarray(_feet)
     foot_z0 = jp.asarray([float(_gz0[gi]) for gi in _feet])
     n_feet = len(_feet)
-    DT = float(mj.opt.timestep)                          # per-step dt for feet_air_time accumulation
+    DECIM = max(1, int(args.decimation))                 # control decimation (T1.1): physics substeps per action
+    DT = float(mj.opt.timestep) * DECIM                  # CONTROL dt for feet_air_time/reward (legged_gym rate)
+    if DECIM > 1:
+        print(f"control decimation: D={DECIM} -> {1.0 / DT:.0f} Hz control over {1.0 / mj.opt.timestep:.0f} Hz "
+              f"physics; control horizon {args.ep_len // DECIM} steps", flush=True)
     F = static.shape[1] + 4 + 9
     H = args.hidden
     GAMMA, LAM, CLIP, ENT, VF, LR = 0.99, 0.95, 0.2, 5e-3, 0.5, 3e-4
-    N, L = args.envs, args.ep_len
+    N, L = args.envs, max(5, args.ep_len // DECIM)       # L = CONTROL steps (physics time = L*DECIM ~ ep_len)
 
     key = jax.random.PRNGKey(0)
     def W(k, shape, s=0.3):
@@ -370,24 +381,33 @@ def main(argv=None) -> int:
             logp = (-0.5 * (((act - means) / std) ** 2 + 2 * jp.log(std) + jp.log(2 * jp.pi))).sum(-1)
             a_clip = jp.clip(act, -1, 1)
             off = jp.tanh(act)                            # the bounded control OFFSET actually applied (recipe)
-            if LEGACY:
-                grav = data.qfrc_bias[:, act_dof]
-                ctrl = jp.clip(grav + a_clip * args.alpha * clamps, -clamps, clamps)
-            else:
+            # CONTROL DECIMATION (T1.1): `_ctrl_of(d)` computes ctrl from the CURRENT substep state (CPG clock
+            # advances via d.time, PD tracks the held target as the body moves) with the learned action `off`/
+            # `a_clip` HELD. Step it DECIM times. DECIM=1 -> one step from the INPUT state = byte-identical.
+            def _ctrl_of(d):
+                if LEGACY:
+                    grav = d.qfrc_bias[:, act_dof]
+                    return jp.clip(grav + a_clip * args.alpha * clamps, -clamps, clamps), None
                 # RECIPE: position-PD to the DEFAULT standing pose + a small learned offset (self-righting prior),
                 # per ACTUATED-JOINT token (qadr/vadr), then scattered to actuator-indexed ctrl via act_u.
                 # CPG prior (if --cpg): feed-forward trot offset on the PD target; policy learns the RESIDUAL.
-                cpg_off = (cpg_amp_j[None, :] * jp.sin(TWO_PI * CPG_FREQ * jp.reshape(data.time, (-1, 1)) + cpg_phase_j[None, :])
+                cpg_off = (cpg_amp_j[None, :] * jp.sin(TWO_PI * CPG_FREQ * jp.reshape(d.time, (-1, 1)) + cpg_phase_j[None, :])
                            ) if CPG_ON else 0.0
                 tgt = q_default + cpg_off + ASCALE * (RES_SCALE if CPG_ON else 1.0) * off   # (N, NT) per-token target
                 KPe = KP * kp_s[:, None] if DR_ON else KP   # sim2real: per-env PD stiffness (proxy joint friction/damping)
                 KDe = KD * kd_s[:, None] if DR_ON else KD
-                tau = KPe * (tgt - data.qpos[:, qadr]) - KDe * data.qvel[:, vadr]
-                ctrl_tok = jp.clip(tau, -clamps, clamps)                # (N, NT)
+                tau = KPe * (tgt - d.qpos[:, qadr]) - KDe * d.qvel[:, vadr]
+                ct = jp.clip(tau, -clamps, clamps)                     # (N, NT)
                 if DR_ON:
-                    ctrl_tok = jp.clip(ctrl_tok * gain_s[:, None], -clamps, clamps)   # per-env actuator-gain scale
-                ctrl = jp.zeros((N, nu)).at[:, act_u].set(ctrl_tok)     # scatter token -> actuator index
+                    ct = jp.clip(ct * gain_s[:, None], -clamps, clamps)   # per-env actuator-gain scale
+                return jp.zeros((N, nu)).at[:, act_u].set(ct), ct         # scatter token -> actuator index
+            ctrl, ctrl_tok = _ctrl_of(data)                              # first substep from the INPUT state
             data2 = step_v(mx, data.replace(ctrl=ctrl))
+            if DECIM > 1:                                                # (DECIM-1) more substeps HOLDING the action
+                def _substep(d, _):
+                    c, _ct = _ctrl_of(d)
+                    return step_v(mx, d.replace(ctrl=c)), None
+                data2, _ = jax.lax.scan(_substep, data2, None, length=DECIM - 1)
             if DR_ON and DR_PUSH > 0.0:                    # sim2real: random horizontal velocity PUSH on the base
                 do_push = (jax.random.uniform(pkey, (N,)) < DR_PUSH).astype(jp.float32)
                 kick = do_push[:, None] * DR_PUSH_MAG * jax.random.normal(jax.random.fold_in(pkey, 1), (N, 2))
