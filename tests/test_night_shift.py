@@ -90,14 +90,15 @@ class LadderedEvaluateForTests(unittest.TestCase):
         seen = {}
 
         def fake_train(gene, *, out_path, iters, envs, cpg, reward_weights, init_npz=None,
-                       decimation=1, action_lpf=0.0):
+                       decimation=1, action_lpf=0.0, sphere_feet=False, contact_dr=False):
             seen["decimation"], seen["action_lpf"] = decimation, action_lpf
+            seen["sphere_feet"], seen["contact_dr"] = sphere_feet, contact_dr
             return out_path                                          # "trained" npz
 
         ev_for = laddered_evaluate_for(cpu_steps=120, decimation=10, action_lpf=0.2, warm_start_pool=None,
                                        train_fn=fake_train,
-                                       verify_fn=lambda g, npz, *, steps, decimation=1, action_lpf=0.0:
-                                       {"forward": 0.8, "survived": True})
+                                       verify_fn=lambda g, npz, *, steps, decimation=1, action_lpf=0.0,
+                                       sphere_feet=False: {"forward": 0.8, "survived": True})
         evaluate = ev_for({"id": "q", "gene": quadruped_gene(), "task": "walk"})
         r = evaluate({"edit_kind": "cpg", "params": {"calf_phase": 1.5708, "freq": 1.5}})
         self.assertIn(r["rung"], ("screen", "hifi"))                 # screened; promoted iff it survived

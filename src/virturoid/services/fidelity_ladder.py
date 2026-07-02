@@ -49,6 +49,7 @@ def make_laddered_evaluate(screen_evaluate, hifi_evaluate, *, promote=None, on_r
 def make_gpu_locomotion_hifi(gene, *, iters: int = 60, envs: int = 2048, out_dir: str | None = None,
                              verify_steps: int = 900, base_reward_weights: dict | None = None,
                              init_npz: str | None = None, decimation: int = 1, action_lpf: float = 0.0,
+                             sphere_feet: bool = False, contact_dr: bool = False,
                              train_fn=None, verify_fn=None):
     """The REAL hi-fi rung: train a residual on the GPU for ``gene`` under a spec's edits, fetch the policy, and
     VERIFY it with an independent CPU rollout -> result dict ``{forward,cadence,upright_frac,survived,npz,trained}``.
@@ -73,15 +74,19 @@ def make_gpu_locomotion_hifi(gene, *, iters: int = 60, envs: int = 2048, out_dir
             if k in p:
                 reward_weights[k] = float(p[k])
         seed = p.get("init_npz", init_npz)                    # a spec can override the warm-start seed per candidate
-        dec = int(p.get("decimation", decimation))            # plan v2 T1.1/T1.2 (deploy-gap): a spec can tune them
-        lpf = float(p.get("action_lpf", action_lpf))
+        dec = int(p.get("decimation", decimation))            # plan v2 T1.1/T1.2/T1.4/T1.5 (deploy-gap): a spec can
+        lpf = float(p.get("action_lpf", action_lpf))          #   tune the control rate, action filter, and the two
+        sf = bool(p.get("sphere_feet", sphere_feet))          #   contact-model fixes (sphere feet + contact DR) per
+        cdr = bool(p.get("contact_dr", contact_dr))           #   candidate; all baked into train AND verify.
         npz = os.path.join(outd, f"hifi_{abs(hash(repr(sorted(p.items())))) % 10_000_000}.npz")
         trained = _train(gene, out_path=npz, iters=iters, envs=envs, cpg=cpg, reward_weights=reward_weights,
-                         init_npz=seed, decimation=dec, action_lpf=lpf)
+                         init_npz=seed, decimation=dec, action_lpf=lpf, sphere_feet=sf, contact_dr=cdr)
         if not trained:
             return {"forward": 0.0, "cadence": 0.0, "upright_frac": 0.0, "survived": False, "trained": False,
                     "npz": None, "note": "gpu_unavailable_or_train_failed"}
-        r = _verify(gene, trained, steps=verify_steps, decimation=dec, action_lpf=lpf)   # deploy == train
+        # deploy == train: sphere_feet rides in the banked policy meta[8] (verify auto-adopts); contact_dr is a
+        # TRAIN-only robustness aug (no deploy-side counterpart) so it is not threaded into verify.
+        r = _verify(gene, trained, steps=verify_steps, decimation=dec, action_lpf=lpf, sphere_feet=sf)
         r["trained"] = True
         r["npz"] = trained
         return r
@@ -90,19 +95,19 @@ def make_gpu_locomotion_hifi(gene, *, iters: int = 60, envs: int = 2048, out_dir
 
 
 def _default_gpu_train(gene, *, out_path, iters, envs, cpg, reward_weights, init_npz=None,
-                       decimation=1, action_lpf=0.0):
+                       decimation=1, action_lpf=0.0, sphere_feet=False, contact_dr=False):
     from virturoid.services.gpu_trainer import train_gene_on_gpu
     calf = cpg.get("calf_phase")
     freq = cpg.get("freq")
     return train_gene_on_gpu(gene, out_path=out_path, iters=iters, envs=envs, cpg=bool(cpg),
                              calf_phase=calf, cpg_freq=freq, reward_weights=reward_weights or None,
                              init_npz=init_npz, decimation=decimation, action_lpf=action_lpf,
-                             keep_checkpoints=True)
+                             sphere_feet=sphere_feet, contact_dr=contact_dr, keep_checkpoints=True)
 
 
-def _default_cpu_verify(gene, npz_path, *, steps, decimation=1, action_lpf=0.0):
+def _default_cpu_verify(gene, npz_path, *, steps, decimation=1, action_lpf=0.0, sphere_feet=False):
     from virturoid.services.morph_policy import MorphPolicy, recipe_rollout_morph
-    pol = MorphPolicy.from_npz(npz_path)   # banked meta carries decimation/lpf; explicit args override for deploy==train
-    r = recipe_rollout_morph(gene, pol, steps=steps, decimation=decimation, action_lpf=action_lpf)
+    pol = MorphPolicy.from_npz(npz_path)   # banked meta carries decimation/lpf/sphere_feet; args override for deploy==train
+    r = recipe_rollout_morph(gene, pol, steps=steps, decimation=decimation, action_lpf=action_lpf, sphere_feet=sphere_feet)
     return {"forward": float(r.get("forward", 0.0)), "cadence": float(r.get("cadence", 0.0)),
             "upright_frac": r.get("upright_frac"), "survived": bool(r.get("survived"))}

@@ -115,6 +115,11 @@ def main(argv=None) -> int:
                     "randomization (canonical MuJoCo-Playground pattern: batch geom_friction/body_mass/dof_"
                     "armature/dof_frictionloss as vmapped mjx.Model leaves), targeting the MJX<->CPU CONTACT gap "
                     "for vigorous learned gaits. Off (default) -> in_axes=(None,0) = byte-identical single model.")
+    ap.add_argument("--sphere-feet", action="store_true", help="plan v2 T1.4: convert the foot geoms to SPHERES "
+                    "with FEET-ONLY collision. A sphere-plane contact is the IDENTICAL 1-point manifold in MJX and "
+                    "C MuJoCo, so this removes the deploy-gap AT ITS SOURCE (capsule/box feet give a 2-point MJX "
+                    "manifold that MPR resolves differently on CPU). Applied to the SAME model MJX trains on and "
+                    "the CPU verifier deploys (banked in meta[8] so verify auto-matches). Off -> untouched.")
     ap.add_argument("--adaptive", action="store_true", help="ADAPTIVE per-joint PD gains from each DOF's effective "
                     "inertia (mj_fullM diag), so a heavy biped/humanoid joint gets the stiffness flat kp=32 can't "
                     "provide (it folds otherwise). Mirrors CPU morph_policy.recipe_gains; anchored to 32/1.5 on the "
@@ -203,6 +208,10 @@ def main(argv=None) -> int:
     if not args.mjcf_file:                                # generated bodies: force the physics-only geoms to collide
         for g in range(mj.ngeom):                         # (an imported robot keeps its native collision setup so
             mj.geom_contype[g] = 1; mj.geom_conaffinity[g] = 1   # visual meshes stay non-colliding -> MJX compiles)
+    if args.sphere_feet:                                  # plan v2 T1.4: manifold-invariant sphere feet + feet-only
+        from virturoid.services.sphere_feet import apply_sphere_feet   #   collision, applied to the model MJX trains
+        _sf = apply_sphere_feet(mj)                       #   on so train==deploy (verify reads meta[8] + mirrors this).
+        print(f"sphere-feet ON: {len(_sf)} foot geoms -> spheres + feet-only collision", flush=True)
     NACON, NJMAX = 64, 256
     mx = mjx.put_model(mj)
 
@@ -613,11 +622,13 @@ def main(argv=None) -> int:
         np.savez(dst, We=np.asarray(a["We"]), be=np.asarray(a["be"]), Wq=np.asarray(a["Wq"]),
                  Wk=np.asarray(a["Wk"]), Wv=np.asarray(a["Wv"]), Wo=np.asarray(a["Wo"]),
                  Wh=np.asarray(a["Wh"]), bh=np.asarray(a["bh"]), **extra,
-                 # meta layout MUST match MorphPolicy.from_npz: [F,H,NT,fwd, adaptive@4, cpg@5, decimation@6] so CPU
-                 # replay reads the right flags (adaptive gains + trot-CPG prior + control rate) and reproduces the gait.
+                 # meta layout MUST match MorphPolicy.from_npz: [F,H,NT,fwd, adaptive@4, cpg@5, decimation@6,
+                 # action_lpf@7, sphere_feet@8] so CPU replay reads the right flags (adaptive gains + trot-CPG prior +
+                 # control rate + action filter + foot contact model) and reproduces the gait it was trained with.
                  meta=np.asarray([F, H, NT, float(fwd),
                                   1.0 if args.adaptive else 0.0, 1.0 if CPG_ON else 0.0, float(DECIM),
-                                  float(ACTION_LPF)]))         # meta[7]: action LPF (T1.2) so deploy matches train
+                                  float(ACTION_LPF),           # meta[7]: action LPF (T1.2) so deploy matches train
+                                  1.0 if args.sphere_feet else 0.0]))   # meta[8]: sphere feet (T1.4); deploy==train
 
     if args.eval_npz:                                   # EVAL: deterministic single-env MJX rollout (recipe control)
         dd = np.load(args.eval_npz)

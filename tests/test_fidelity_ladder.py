@@ -46,18 +46,21 @@ class FidelityLadderTests(unittest.TestCase):
         seen = {}
 
         def fake_train(gene, *, out_path, iters, envs, cpg, reward_weights, init_npz=None,
-                       decimation=1, action_lpf=0.0):
+                       decimation=1, action_lpf=0.0, sphere_feet=False, contact_dr=False):
             seen["cpg"] = cpg
             seen["reward_weights"] = reward_weights
             seen["init_npz"] = init_npz
             seen["decimation"] = decimation
             seen["action_lpf"] = action_lpf
+            seen["sphere_feet"] = sphere_feet
+            seen["contact_dr"] = contact_dr
             return out_path                                       # "trained" -> npz path
 
         hifi = make_gpu_locomotion_hifi(gene=object(), init_npz="seed.npz", decimation=10, action_lpf=0.2,
-                                        train_fn=fake_train,
-                                        verify_fn=lambda g, npz, *, steps, decimation=1, action_lpf=0.0:
-                                        {"forward": 0.7, "survived": True, "dec_seen": decimation})
+                                        sphere_feet=True, contact_dr=True, train_fn=fake_train,
+                                        verify_fn=lambda g, npz, *, steps, decimation=1, action_lpf=0.0,
+                                        sphere_feet=False:
+                                        {"forward": 0.7, "survived": True, "dec_seen": decimation, "sf_seen": sphere_feet})
         r = hifi({"params": {"calf_phase": 0.0, "freq": 1.5, "fwd_gate_w": 0.85, "prog_w": 6.0}})
         self.assertTrue(r["trained"])
         self.assertAlmostEqual(r["forward"], 0.7)
@@ -67,7 +70,10 @@ class FidelityLadderTests(unittest.TestCase):
         self.assertEqual(seen["init_npz"], "seed.npz")                     # warm-start seed routed to trainer
         self.assertEqual(seen["decimation"], 10)                           # T1.1 decimation routed to trainer
         self.assertEqual(seen["action_lpf"], 0.2)                          # T1.2 LPF routed to trainer
+        self.assertTrue(seen["sphere_feet"])                               # T1.4 sphere feet routed to trainer
+        self.assertTrue(seen["contact_dr"])                                # T1.5 contact DR routed to trainer
         self.assertEqual(r["dec_seen"], 10)                                # verify deploys at the SAME rate (deploy==train)
+        self.assertTrue(r["sf_seen"])                                      # verify deploys with the SAME feet (deploy==train)
 
 
 if __name__ == "__main__":

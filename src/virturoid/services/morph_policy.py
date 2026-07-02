@@ -49,6 +49,7 @@ class MorphPolicy:
         self.cpg = None                                       # trot-CPG prior params (set when CPG-trained; see CPG_DEFAULT)
         self.decimation = 1                                   # control decimation (plan v2 T1.1): deploy hold-D-steps
         self.action_lpf = 0.0                                 # action EMA low-pass (plan v2 T1.2); 0 = off
+        self.sphere_feet = False                              # sphere feet + feet-only collision (plan v2 T1.4); off = untouched
         rng = np.random.default_rng(seed)
         s = 0.3
         # NOTE: Wrange/brange are appended LAST so the rng draw order for We/Wq/Wk/Wv/Wo/Wh is unchanged
@@ -176,6 +177,7 @@ class MorphPolicy:
         # and verify_submission read policy.decimation so deploy==train automatically.
         p.decimation = int(float(meta[6])) if len(meta) > 6 else 1
         p.action_lpf = float(meta[7]) if len(meta) > 7 else 0.0   # meta[7]: action EMA low-pass (T1.2); deploy==train
+        p.sphere_feet = bool(float(meta[8]) > 0.5) if len(meta) > 8 else False  # meta[8]: sphere feet (T1.4); deploy==train
         return p
 
     def to_npz(self, path, score: float = 0.0, *, normalizer=None):
@@ -197,7 +199,8 @@ class MorphPolicy:
                                   1.0 if getattr(self, "adaptive_gains", False) else 0.0,
                                   1.0 if getattr(self, "cpg", None) else 0.0,
                                   float(getattr(self, "decimation", 1) or 1),      # meta[6]: control decimation
-                                  float(getattr(self, "action_lpf", 0.0) or 0.0)]))   # meta[7]: action LPF
+                                  float(getattr(self, "action_lpf", 0.0) or 0.0),     # meta[7]: action LPF
+                                  1.0 if getattr(self, "sphere_feet", False) else 0.0]))  # meta[8]: sphere feet (T1.4)
         return str(path)
 
 
@@ -572,7 +575,7 @@ def recipe_rollout_morph(gene, policy: MorphPolicy | None = None, *, steps: int 
                          kd: float = 1.5, ascale: float = 0.4, vtgt: float = 0.3, normalizer=None,
                          adaptive: bool = False, cpg: dict | None = None, model_perturb=None,
                          seed: int = 0, record_frames: bool = False, frame_every: int = 5,
-                         decimation: int = 1, action_lpf: float = 0.0) -> dict:
+                         decimation: int = 1, action_lpf: float = 0.0, sphere_feet: bool = False) -> dict:
     """Drive ``gene`` with the anti-collapse RECIPE: position-PD to the default standing pose + learned offset,
     obs normalization (``normalizer=(mean,std)``), terminate-on-fall, clipped-non-negative velocity-tracking
     reward. Returns ``gait`` (recipe reward meaned over the horizon — the training fitness), ``forward`` travel,
@@ -583,7 +586,22 @@ def recipe_rollout_morph(gene, policy: MorphPolicy | None = None, *, steps: int 
 
     from virturoid.services.morph_graph import encode_robot
 
-    model = compiled_model(robot_mjcf(gene)); model.opt.iterations = 20
+    # deploy==train: a banked policy carries its own decimation/LPF/sphere-feet config (meta[6..8]); adopt it when
+    # the caller didn't override, so ANY rollout of a banked policy reproduces its training contact model + rate.
+    if policy is not None:
+        sphere_feet = sphere_feet or bool(getattr(policy, "sphere_feet", False))
+        if decimation == 1:
+            decimation = int(getattr(policy, "decimation", 1) or 1)
+        if action_lpf == 0.0:
+            action_lpf = float(getattr(policy, "action_lpf", 0.0) or 0.0)
+    model = compiled_model(robot_mjcf(gene))
+    if sphere_feet or model_perturb is not None:             # BOTH transforms mutate the model in place, but
+        import copy                                          # compiled_model returns a SHARED lru_cached MjModel —
+        model = copy.deepcopy(model)                         # mutating it would corrupt the cache (and DR would
+    model.opt.iterations = 20                                # COMPOUND across rollouts). Copy first when we will mutate.
+    if sphere_feet:                                          # T1.4: manifold-invariant sphere feet + feet-only collision
+        from virturoid.services.sphere_feet import apply_sphere_feet   # (default off -> untouched -> byte-identical)
+        apply_sphere_feet(model)                             # applied on train + deploy compile so contact model matches
     if model_perturb is not None:                            # sim2real: randomize dynamics in-place (gain/mass/damping)
         model_perturb(model)                                 # default None -> untouched -> byte-identical rollout
     data = mujoco.MjData(model); mujoco.mj_resetData(model, data); mujoco.mj_forward(model, data)
