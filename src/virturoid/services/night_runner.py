@@ -56,12 +56,34 @@ def make_arms(zoo=None, *, seed: int = 0):
     return mutate, transfer, None
 
 
+def _golden_policy_for(models_dir: str):
+    """A ``policy_for`` for the golden suite that recalls the BANKED capability for each case's body (so golden
+    protects the real flywheel capability, not the random default controller). Returns None when nothing is banked
+    for that body yet -> run_golden_suite skips the case (vacuous pass) so the first night can still bank."""
+    def pf(task_id):
+        try:
+            from virturoid.services.virt_bench import get_task
+            from virturoid.services.virt_bench_arms import _task_body
+            from virturoid.services.transfer_seed import transfer_policy_for
+            task = get_task(task_id)
+            if task.get("family") != "locomotion":
+                return None
+            gene = _task_body(task)
+            if gene is None:
+                return None
+            pol, _npz, _ranked = transfer_policy_for(gene, models_dir=models_dir, steps=int(task.get("steps", 900)))
+            return pol
+        except Exception:  # noqa: BLE001 - golden is best-effort; no banked policy -> skip (vacuous pass)
+            return None
+    return pf
+
+
 def run_night(*, memory_dir: str, journal_path=None, budget_evals: int = 200, n_candidates: int = 12,
               per_candidate_evals: int = 8, zoo=None, evaluate_for=None, probe=None, llm=None, archive=None,
-              run_golden: bool = True, seed: int = 0):
+              run_golden: bool = True, warm_start_pool: str = "build/models", seed: int = 0):
     """Run one night. Returns ``{golden, proposed, night}``. ``evaluate_for`` defaults to the real fidelity ladder
     (GPU); inject a stub for CPU tests. ``probe`` is the cheap learnability estimator (skipped if None). If the
-    golden suite regresses, banking is DISABLED for the night (probe-only), per §5.4."""
+    golden suite regresses (a BANKED capability degraded), banking is DISABLED for the night (probe-only), §5.4."""
     from virturoid.services.night_proposer import NightProposer, filter_learnable
     from virturoid.services.night_shift import laddered_evaluate_for, run_night_shift
 
@@ -69,7 +91,7 @@ def run_night(*, memory_dir: str, journal_path=None, budget_evals: int = 200, n_
     banking_ok = True
     if run_golden:
         from virturoid.services.golden_suite import run_golden_suite
-        golden = run_golden_suite()
+        golden = run_golden_suite(policy_for=_golden_policy_for(warm_start_pool))   # protect the BANKED capability
         banking_ok = golden["passed"]
 
     mutate, transfer, explore = make_arms(zoo, seed=seed)

@@ -49,8 +49,13 @@ def run_golden_suite(cases=None, *, policy_for=None, gene_for=None, verify=None,
 
     results, regressions = [], []
     for c in cases:
-        gene = gene_for(c.task_id)
         pol = policy_for(c.task_id) if policy_for is not None else None
+        # If a real ``policy_for`` is supplied (the night recalls the BANKED capability) but returns None, there is
+        # no banked policy to protect for this case yet -> vacuous PASS (skip), so a fresh system can still bank its
+        # FIRST capability instead of the sealed floor false-alarming on the random default controller.
+        if policy_for is not None and pol is None:
+            continue
+        gene = gene_for(c.task_id)
         res = verify(c.task_id, gene, pol, **({"steps": steps} if steps is not None else {}))
         metric = float((res.get("metrics") or {}).get(c.metric_key, 0.0) or 0.0)
         regressed = metric < c.min_metric
