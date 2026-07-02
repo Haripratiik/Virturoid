@@ -41,13 +41,17 @@ def build_prereg_manifest(*, arms=("A", "A+", "B"), seeds=(20260701, 20260702, 2
     predictions = predictions or {"A": "2-4/12", "A+": "4-7/12", "B": "9-12/12",
                                   "transfer_delta": ">=3x repeat-task speedup (memory on vs off)",
                                   "honesty_delta": "~0 for B (claimed==verified)"}
+    arm_defs = {
+        "A0": "the literal Claude+MCP control: an LLM agent drives the PRIMITIVE MCP tools (inspect + simulate) "
+              "and submits a controller — NO verified search harness, NO memory (plan v3 M1)",
+        "A": "fixed pipeline: compose body + default controller, no search, NO memory (writes disabled)",
+        "A+": "A + memory infra ON but COLD (no flywheel warm-start)",
+        "B": "full harness: search + transfer-recall memory warm from the flywheel",
+    }
     body = {
         "benchmark": "VIRT-Bench",
-        "arms": {
-            "A": "fixed pipeline: compose body + default controller, no search, NO memory (writes disabled)",
-            "A+": "A + memory infra ON but COLD (no flywheel warm-start)",
-            "B": "full harness: search + transfer-recall memory warm from the flywheel",
-        } if set(arms) >= {"A", "A+", "B"} else {a: a for a in arms},
+        "arm_ids": list(arms),                                # the exact arm set is part of the frozen protocol
+        "arms": ({a: arm_defs[a] for a in arms if a in arm_defs} or {a: a for a in arms}),
         "tasks": tasks,
         "task_registry_sha256": _sha256(task_json),
         "verifier_sha256": _module_hash(virt_bench),          # the grader is code, and it is versioned
