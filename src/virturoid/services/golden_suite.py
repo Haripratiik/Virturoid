@@ -33,6 +33,51 @@ GOLDEN_CASES = [
 ]
 
 
+_DEFAULT_FLOORS = "build/golden_floors.json"
+
+
+def seal_golden_floor(task_id: str, verified_value: float, *, metric_key: str = "forward_m", margin: float = 0.9,
+                      path: str = _DEFAULT_FLOORS) -> float:
+    """Ratchet the golden floor for a NEWLY-BANKED capability to ``margin * verified`` (plan gap-closure N21):
+    the drift alarm now protects what the flywheel just learned. NEVER lowers an existing floor (anti-Goodhart —
+    a case is only ever tightened). Persisted to ``path`` so it survives across nights. Returns the sealed floor."""
+    import json
+    from pathlib import Path
+    p = Path(path)
+    floors = {}
+    if p.exists():
+        try:
+            floors = json.loads(p.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001 - a corrupt registry must not crash a night; start fresh
+            floors = {}
+    key = f"{task_id}:{metric_key}"
+    new_floor = round(margin * float(verified_value), 4)
+    if key not in floors or new_floor > float(floors[key]["min_metric"]):
+        floors[key] = {"task_id": task_id, "metric_key": metric_key, "min_metric": new_floor}
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(floors, indent=2, sort_keys=True), encoding="utf-8")
+    return float(floors[key]["min_metric"])
+
+
+def load_golden_cases(path: str = _DEFAULT_FLOORS) -> list:
+    """The base sealed cases PLUS any ratcheted floors persisted from banking nights (N21). A persisted floor that
+    is HIGHER than the base replaces it (tighter is fine); the base list is never dropped or loosened."""
+    import json
+    from pathlib import Path
+    cases = {f"{c.task_id}:{c.metric_key}": c for c in GOLDEN_CASES}
+    p = Path(path)
+    if p.exists():
+        try:
+            for key, f in json.loads(p.read_text(encoding="utf-8")).items():
+                base = cases.get(key)
+                floor = float(f["min_metric"])
+                if base is None or floor > base.min_metric:
+                    cases[key] = GoldenCase(f["task_id"], min_metric=floor, metric_key=f["metric_key"])
+        except Exception:  # noqa: BLE001 - a corrupt registry falls back to the base cases (never fewer)
+            pass
+    return list(cases.values())
+
+
 def run_golden_suite(cases=None, *, policy_for=None, gene_for=None, verify=None, steps: int | None = None) -> dict:
     """Re-run the sealed cases through the independent verifier and flag regressions (verified metric below the
     sealed floor). Returns ``{passed, regressions, results}``; ``passed`` False -> the night loop must BLOCK

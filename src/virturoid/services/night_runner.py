@@ -90,8 +90,10 @@ def run_night(*, memory_dir: str, journal_path=None, budget_evals: int = 200, n_
     golden = None
     banking_ok = True
     if run_golden:
-        from virturoid.services.golden_suite import run_golden_suite
-        golden = run_golden_suite(policy_for=_golden_policy_for(warm_start_pool))   # protect the BANKED capability
+        from virturoid.services.golden_suite import load_golden_cases, run_golden_suite
+        # load_golden_cases picks up floors RATCHETED by previous nights (N21); policy_for recalls the banked
+        # capability each case protects (so a case is checked against the real flywheel policy, not the default).
+        golden = run_golden_suite(cases=load_golden_cases(), policy_for=_golden_policy_for(warm_start_pool))
         banking_ok = golden["passed"]
 
     mutate, transfer, explore = make_arms(zoo, seed=seed)
@@ -110,7 +112,40 @@ def run_night(*, memory_dir: str, journal_path=None, budget_evals: int = 200, n_
     night = run_night_shift(cands, evaluate_for, memory_dir=memory_dir, llm=llm,
                             budget_evals=(budget_evals if banking_ok else 0),
                             per_candidate_evals=per_candidate_evals, journal_path=journal_path, archive=archive)
-    return {"golden": golden, "banking_enabled": banking_ok, "proposed": len(cands), "night": night}
+    sealed = None
+    if banking_ok and getattr(night, "banked", 0):           # N21 ratchet: seal floors for what the night banked
+        sealed = ratchet_golden_floors(warm_start_pool)
+    return {"golden": golden, "banking_enabled": banking_ok, "proposed": len(cands), "night": night,
+            "sealed_floors": sealed}
+
+
+def ratchet_golden_floors(models_dir: str = "build/models") -> dict:
+    """N21: after a banking night, re-verify each locomotion task against the best banked transfer and SEAL its
+    golden floor to 0.9× the verified metric (only ever tightening). This is how new flywheel capabilities become
+    drift-protected — without it the golden suite stays vacuous for everything banked after night 1. Returns the
+    ``{task_id: floor}`` that were sealed/raised this call."""
+    from virturoid.services.golden_suite import seal_golden_floor
+    from virturoid.services.virt_bench import list_tasks, verify_submission
+    from virturoid.services.virt_bench_arms import _task_body
+    recall = _golden_policy_for(models_dir)
+    sealed = {}
+    for task in list_tasks(None):
+        if task.get("family") != "locomotion":
+            continue
+        try:
+            pol = recall(task["id"])
+            if pol is None:
+                continue
+            gene = _task_body(task)
+            if gene is None:
+                continue
+            r = verify_submission(task["id"], gene, pol)
+            fwd = (r.get("metrics") or {}).get("forward_m")
+            if fwd is not None and float(fwd) > 0.0:
+                sealed[task["id"]] = seal_golden_floor(task["id"], float(fwd), metric_key="forward_m")
+        except Exception:  # noqa: BLE001 - ratcheting is best-effort; never break the night's completion
+            continue
+    return sealed
 
 
 def _main(argv=None):
