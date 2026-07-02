@@ -59,7 +59,7 @@ class FidelityLadderTests(unittest.TestCase):
         hifi = make_gpu_locomotion_hifi(gene=object(), init_npz="seed.npz", decimation=10, action_lpf=0.2,
                                         sphere_feet=True, contact_dr=True, train_fn=fake_train,
                                         verify_fn=lambda g, npz, *, steps, decimation=1, action_lpf=0.0,
-                                        sphere_feet=False:
+                                        sphere_feet=False, **_kw:
                                         {"forward": 0.7, "survived": True, "dec_seen": decimation, "sf_seen": sphere_feet})
         r = hifi({"params": {"calf_phase": 0.0, "freq": 1.5, "fwd_gate_w": 0.85, "prog_w": 6.0}})
         self.assertTrue(r["trained"])

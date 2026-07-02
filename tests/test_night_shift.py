@@ -109,7 +109,7 @@ class LadderedEvaluateForTests(unittest.TestCase):
         ev_for = laddered_evaluate_for(cpu_steps=120, decimation=10, action_lpf=0.2, warm_start_pool=None,
                                        train_fn=fake_train,
                                        verify_fn=lambda g, npz, *, steps, decimation=1, action_lpf=0.0,
-                                       sphere_feet=False: {"forward": 0.8, "survived": True})
+                                       sphere_feet=False, **_kw: {"forward": 0.8, "survived": True})
         evaluate = ev_for({"id": "q", "gene": quadruped_gene(), "task": "walk"})
         r = evaluate({"edit_kind": "cpg", "params": {"calf_phase": 1.5708, "freq": 1.5}})
         self.assertIn(r["rung"], ("screen", "hifi"))                 # screened; promoted iff it survived

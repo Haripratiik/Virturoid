@@ -85,10 +85,12 @@ def make_gpu_locomotion_hifi(gene, *, iters: int = 60, envs: int = 2048, out_dir
             return {"forward": 0.0, "cadence": 0.0, "upright_frac": 0.0, "survived": False, "trained": False,
                     "npz": None, "note": "gpu_unavailable_or_train_failed"}
         # deploy == train: sphere_feet rides in the banked policy meta[8] (verify auto-adopts); contact_dr is a
-        # TRAIN-only robustness aug (no deploy-side counterpart) so it is not threaded into verify.
-        r = _verify(gene, trained, steps=verify_steps, decimation=dec, action_lpf=lpf, sphere_feet=sf)
+        # TRAIN-only robustness aug (no deploy-side counterpart) so it is not threaded into verify. ``seed`` (the
+        # warm-start) is passed so the verify can DEPLOY-SELECT over {seed, checkpoints, final} -- the flywheel keeps
+        # the best of "what we had vs. what we trained" (a degrading re-train still banks the good warm/checkpoint).
+        r = _verify(gene, trained, steps=verify_steps, decimation=dec, action_lpf=lpf, sphere_feet=sf, seed=seed)
         r["trained"] = True
-        r["npz"] = trained
+        r["npz"] = r.get("selected_npz") or trained            # bank the DEPLOY-SELECTED policy, not the final
         return r
 
     return hifi
@@ -105,9 +107,26 @@ def _default_gpu_train(gene, *, out_path, iters, envs, cpg, reward_weights, init
                              sphere_feet=sphere_feet, contact_dr=contact_dr, keep_checkpoints=True)
 
 
-def _default_cpu_verify(gene, npz_path, *, steps, decimation=1, action_lpf=0.0, sphere_feet=False):
+def _default_cpu_verify(gene, npz_path, *, steps, decimation=1, action_lpf=0.0, sphere_feet=False, seed=None):
+    import glob
+    import os
     from virturoid.services.morph_policy import MorphPolicy, recipe_rollout_morph
-    pol = MorphPolicy.from_npz(npz_path)   # banked meta carries decimation/lpf/sphere_feet; args override for deploy==train
+    from virturoid.services.transfer_seed import best_checkpoint_by_deploy
+    # DEPLOY-SELECT (plan v2 T0.1) over {warm-start seed, numbered checkpoints, final}: never trust the FINAL by
+    # train reward -- the measured MJX->CPU divergence means an earlier checkpoint (or the warm-start itself) can
+    # deploy far better. Fetched checkpoints live at <stem>_it{N}.npz beside npz_path.
+    cands = [npz_path] + sorted(glob.glob(npz_path[:-4] + "_it*.npz"))
+    if seed and os.path.isfile(seed):
+        cands.append(seed)
+    cands = [c for c in dict.fromkeys(cands) if os.path.isfile(c)]
+    best = npz_path
+    if len(cands) > 1:
+        try:
+            best, _ranked = best_checkpoint_by_deploy(gene, cands, steps=steps, decimation=decimation)
+        except Exception:  # noqa: BLE001 - selection is best-effort; fall back to the final
+            best = npz_path
+    best = best or npz_path
+    pol = MorphPolicy.from_npz(best)
     r = recipe_rollout_morph(gene, pol, steps=steps, decimation=decimation, action_lpf=action_lpf, sphere_feet=sphere_feet)
     return {"forward": float(r.get("forward", 0.0)), "cadence": float(r.get("cadence", 0.0)),
-            "upright_frac": r.get("upright_frac"), "survived": bool(r.get("survived"))}
+            "upright_frac": r.get("upright_frac"), "survived": bool(r.get("survived")), "selected_npz": best}

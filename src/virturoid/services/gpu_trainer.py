@@ -56,7 +56,7 @@ def _sync_repo(say) -> None:
 
 
 def _poll_and_fetch(remote_npz: str, out_path: str, *, progress, timeout: float, say,
-                    proc_name: str = "mjx_morph_attention") -> str | None:
+                    proc_name: str = "mjx_morph_attention", fetch_checkpoints: bool = False) -> str | None:
     deadline = time.time() + timeout
     started = time.time()
     misses = 0
@@ -93,6 +93,25 @@ def _poll_and_fetch(remote_npz: str, out_path: str, *, progress, timeout: float,
     Path(out_path).write_bytes(npz)
     import numpy as np
     np.load(out_path)                                    # validate it loads
+    if fetch_checkpoints:
+        # also fetch the numbered checkpoints (plan v2 T0.1) to local siblings <out_stem>_it{N}.npz so the caller
+        # can DEPLOY-SELECT the best (never trust the final by train-reward -- it can deploy WORSE than an earlier
+        # one, the measured MJX->CPU divergence). Best-effort: a missing checkpoint just isn't a candidate.
+        base = remote_npz.split("/")[-1][:-4]            # e.g. "app_gene"
+        out_stem = out_path[:-4]
+        try:
+            listing = _ssh(f"ls -1 ~/virturoid/{remote_npz[:-4]}_it*.npz 2>/dev/null",
+                           timeout=40).stdout.decode("utf-8", "ignore")
+            for remote in listing.split():
+                remote = remote.strip()
+                nm = remote.split("/")[-1]               # "app_gene_it30.npz"
+                if not nm.startswith(base):
+                    continue
+                data = _ssh(f"cat {remote}", timeout=120).stdout
+                if len(data) >= 200:
+                    Path(out_stem + nm[len(base):]).write_bytes(data)   # <out_stem>_it30.npz
+        except Exception:  # noqa: BLE001 - checkpoint fetch is best-effort; the final still verifies
+            pass
     return out_path
 
 
@@ -179,7 +198,8 @@ def train_gene_on_gpu(gene, *, out_path: str, iters: int = 80, envs: int = 1024,
                   f"--save runs/app_gene.npz{extra} </dev/null >~/app_train.log 2>&1 & echo LAUNCHED")
         if not _launch_ok(launch, "mjx_morph_attention"):
             return None
-        return _poll_and_fetch("runs/app_gene.npz", out_path, progress=progress, timeout=timeout, say=say)
+        return _poll_and_fetch("runs/app_gene.npz", out_path, progress=progress, timeout=timeout, say=say,
+                               fetch_checkpoints=keep_checkpoints)
     except Exception:  # noqa: BLE001 - any failure -> caller uses the CPU trainer
         return None
 
