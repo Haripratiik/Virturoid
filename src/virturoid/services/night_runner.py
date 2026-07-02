@@ -98,7 +98,8 @@ def _golden_policy_for(models_dir: str):
 
 def run_night(*, memory_dir: str, journal_path=None, budget_evals: int = 200, n_candidates: int = 12,
               per_candidate_evals: int = 8, zoo=None, evaluate_for=None, probe=None, llm=None, archive=None,
-              run_golden: bool = True, warm_start_pool: str = "build/models", seed: int = 0):
+              run_golden: bool = True, warm_start_pool: str = "build/models", mutate_prob: float = 0.5,
+              seed: int = 0):
     """Run one night. Returns ``{golden, proposed, night}``. ``evaluate_for`` defaults to the real fidelity ladder
     (GPU); inject a stub for CPU tests. ``probe`` is the cheap learnability estimator (skipped if None). If the
     golden suite regresses (a BANKED capability degraded), banking is DISABLED for the night (probe-only), §5.4."""
@@ -114,7 +115,7 @@ def run_night(*, memory_dir: str, journal_path=None, budget_evals: int = 200, n_
         golden = run_golden_suite(cases=load_golden_cases(), policy_for=_golden_policy_for(warm_start_pool))
         banking_ok = golden["passed"]
 
-    mutate, transfer, explore = make_arms(zoo, seed=seed)
+    mutate, transfer, explore = make_arms(zoo, seed=seed, mutate_prob=mutate_prob)
     proposer = NightProposer(mutate=mutate, transfer=transfer, explore=explore, seed=seed)
     cands = proposer.propose(n_candidates)
     if probe is not None:
