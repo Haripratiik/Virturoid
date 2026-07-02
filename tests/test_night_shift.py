@@ -1,12 +1,15 @@
 """Night-shift engine core (WS2/N1): autonomous loop over candidate proposals — runs bounded searches, banks
 verified wins, counts ANNECS-V novelty, and resumes from a journal (G8). LLM-free, fake evaluators, no MuJoCo."""
 
+import importlib.util
 import tempfile
 import unittest
 from pathlib import Path
 
 from virturoid.fixtures.gene_library import (humanoid_upper_body_gene, quadruped_gene, tabletop_arm_gene)
-from virturoid.services.night_shift import run_night_shift
+from virturoid.services.night_shift import laddered_evaluate_for, run_night_shift
+
+_MUJOCO = importlib.util.find_spec("mujoco") is not None
 
 _SOLVE = lambda p, h: {"edit_kind": "gains", "params": {"kp": 45.0}}
 _FAIL = lambda p, h: {"edit_kind": "gains", "params": {"kp": 10.0}}
@@ -77,6 +80,30 @@ class NightShiftTests(unittest.TestCase):
             self.assertEqual(rep.qd["filled"], 2)              # arm + quad banked into distinct DOF niches
             self.assertGreaterEqual(rep.qd["annecs_v"], 1)
             self.assertGreater(rep.qd["qd_score"], 0.0)
+
+
+class LadderedEvaluateForTests(unittest.TestCase):
+    @unittest.skipUnless(_MUJOCO, "MuJoCo not installed.")
+    def test_production_evaluate_for_screens_then_routes(self):
+        # plan v2 §5.1/N8: each candidate gets a CPU-screen -> GPU-rung ladder. Real screen (short quad rollout),
+        # STUB GPU rung (inject train/verify) so it runs on CPU. A surviving screen promotes to the hi-fi verdict.
+        seen = {}
+
+        def fake_train(gene, *, out_path, iters, envs, cpg, reward_weights, init_npz=None,
+                       decimation=1, action_lpf=0.0):
+            seen["decimation"], seen["action_lpf"] = decimation, action_lpf
+            return out_path                                          # "trained" npz
+
+        ev_for = laddered_evaluate_for(cpu_steps=120, decimation=10, action_lpf=0.2, train_fn=fake_train,
+                                       verify_fn=lambda g, npz, *, steps, decimation=1, action_lpf=0.0:
+                                       {"forward": 0.8, "survived": True})
+        evaluate = ev_for({"id": "q", "gene": quadruped_gene(), "task": "walk"})
+        r = evaluate({"edit_kind": "cpg", "params": {"calf_phase": 1.5708, "freq": 1.5}})
+        self.assertIn(r["rung"], ("screen", "hifi"))                 # screened; promoted iff it survived
+        if r["rung"] == "hifi":
+            self.assertAlmostEqual(r["forward"], 0.8)                # the GPU-rung verdict
+            self.assertEqual(seen["decimation"], 10)                 # deploy-gap fixes routed to the trainer
+            self.assertEqual(seen["action_lpf"], 0.2)
 
 
 if __name__ == "__main__":
