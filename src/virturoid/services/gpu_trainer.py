@@ -159,7 +159,17 @@ def train_gene_on_gpu(gene, *, out_path: str, iters: int = 80, envs: int = 1024,
         if ep_len:
             extra += f" --ep-len {int(ep_len)}"
         if init_npz:
-            extra += f" --init-npz {init_npz}"
+            # WARM-START seed: if it is a LOCAL file (e.g. build/models/quaddec_fwd.npz from the flywheel), UPLOAD
+            # it to the box first -- the trainer's --init-npz runs box-side and can't see a local path (the night's
+            # transfer warm-start silently fell here: the box had no such file -> trainer errored -> candidate fell).
+            # A box-relative path (runs/…) is passed through as-is.
+            from pathlib import Path
+            _seed = Path(init_npz)
+            if _seed.is_file():
+                _ssh("cat > ~/app_init.npz", timeout=120, stdin=_seed.read_bytes())
+                extra += " --init-npz ~/app_init.npz"
+            else:
+                extra += f" --init-npz {init_npz}"
         for k, v in (reward_weights or {}).items():          # critic weights -> --clear-w / --prog-w / ... flags
             if k in _REWARD_FLAGS:
                 extra += f" --{k.replace('_', '-')} {float(v)}"
