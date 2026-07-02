@@ -55,6 +55,16 @@ VIRT_TASKS = [
      "gates": {"forward_m": -1.0, "cadence": 3.0, "upright": 0.5, "track": 0.5},
      "command_schedule": [[0.4, 225], [0.0, 225], [0.5, 225], [-0.2, 225]],
      "split": "held_out", "steps": 900, "seed": 20260701},
+    # WS10 Rung 0 (plan v3): the honest INTERIM humanoid deliverable -- a certified STANDING biped. CPG off,
+    # PD-to-default-pose + upright + alive: forward/cadence are disabled (standing, not walking); upright + a
+    # full-horizon survival are required. On nominal dynamics the 8-DOF humanoid holds this stand. NOTE (Rung-0
+    # kill criterion, measured): under mild domain-randomized dynamics it survives 0/6 -- with no hip-roll/ankle
+    # DOF it has no balance-recovery authority, so a ROBUST stand/walk (Rung 1+) requires widening the anatomy
+    # (hip-roll + ankle-pitch) BEFORE any GPU walk spend. See docs/plan_v3_gap_closure.md WS10.
+    {"id": "H1_humanoid_stand", "family": "locomotion", "task_type": "locomotion",
+     "prompt": "design a humanoid that stands upright",
+     "gates": {"forward_m": -1.0, "cadence": 0.0, "upright": 0.6},
+     "split": "held_out", "steps": 900, "seed": 20260701},
     {"id": "M1_arm_grasp", "family": "manipulation", "task_type": "grasp",
      "prompt": "design an arm that picks up a 3 cm cube", "gates": {"success_rate": 0.6}, "split": "dev",
      "steps": 900, "seed": 20260701},

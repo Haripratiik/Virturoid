@@ -36,6 +36,11 @@ def _task_body(task: dict):
         return steerable_quadruped(n_legs=8, bilateral=True)
     if task["id"] == "L4_decapod_walk":
         return steerable_quadruped(n_legs=10, bilateral=True)
+    if task["id"] == "L6_command_track":                      # WS8: a quad that should track a commanded speed
+        return steerable_quadruped(n_legs=4)
+    if task["id"] == "H1_humanoid_stand":                     # WS10 Rung 0: the 8-DOF anthropometric biped
+        from virturoid.services.humanoid_anatomy import build_anthropometric_humanoid
+        return build_anthropometric_humanoid()
     return None                                               # N22 hygiene: unknown legged task -> explicit
     #                                                           unsupported_task, never silently verify a WRONG body
 
@@ -64,7 +69,11 @@ def run_arm_a(task_id: str, *, steps: int = 600, seed: int | None = None) -> dic
         return {"task": task_id, "arm": "A", "verified_pass": False, "failure_mode": "unsupported_task",
                 "metrics": {}, "method": "fixed-pipeline (no search)"}
     if task["family"] == "locomotion":
-        pol, method = _zero_policy_with_cpg(gene, CPG_DEFAULT), "fixed-pipeline: default CPG, no search"
+        # A STAND task (cadence gate disabled) gets the pure PD-to-default-pose controller (no gait prior); a WALK
+        # task gets the default CPG gait. Either way ZERO residual = the honest fixed-pipeline floor.
+        is_stand = float(task["gates"].get("cadence", 3.0)) <= 0.0
+        pol = _zero_policy_with_cpg(gene, None if is_stand else CPG_DEFAULT)
+        method = "fixed-pipeline: PD stand, no search" if is_stand else "fixed-pipeline: default CPG, no search"
     else:                                                     # manipulation: the verifier runs the built-in skill
         pol, method = None, "fixed-pipeline: default grasp skill, no search"
     res = verify_submission(task_id, gene, pol, seed=seed)    # FROZEN horizon (§3.1); seed override for WS4

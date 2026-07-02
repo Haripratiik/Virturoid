@@ -14,7 +14,7 @@ class VirtBenchTests(unittest.TestCase):
                             for k in ("family", "task_type", "gates", "split", "steps", "seed")))
         self.assertEqual({t["id"] for t in list_tasks("dev")},
                          {"L1_quad_walk", "L4_decapod_walk", "M1_arm_grasp", "M4_arm_transport"})
-        self.assertEqual(len(list_tasks()), 10)                # 4 walk + 4 manip + L6 (WS8) + M5 grasp-hard (WS9)
+        self.assertEqual(len(list_tasks()), 11)                # +L6 (WS8) +M5 grasp-hard (WS9) +H1 humanoid stand (WS10)
         with self.assertRaises(KeyError):
             get_task("nope")
 
@@ -73,6 +73,18 @@ class VirtBenchTests(unittest.TestCase):
                               {"residual_params_path": "build/skills/grasp_tabletop_arm.npz"})
         self.assertGreaterEqual((r["metrics"]["success_rate"] or 0.0) - floor, 0.15)   # WS9 acceptance: >= +0.15
         self.assertTrue(r["verified_pass"])
+
+    def test_ws10_humanoid_stand_certifies_on_nominal(self):
+        # WS10 Rung 0: the 8-DOF anthropometric humanoid holds a certified STAND (upright + full-horizon survival)
+        # on nominal dynamics -- the honest interim biped deliverable (the walk is the deferred GPU frontier).
+        from virturoid.services.virt_bench_arms import _task_body, _zero_policy_with_cpg
+        gene = _task_body(get_task("H1_humanoid_stand"))
+        self.assertEqual(len(gene.actuated_joints()), 8)       # hips+knees+shoulders+elbows, no ankle/hip-roll
+        stand = _zero_policy_with_cpg(gene, None)              # PD-to-default-pose, no gait, zero residual
+        res = verify_submission("H1_humanoid_stand", gene, stand, steps=400)
+        self.assertTrue(res["metrics"]["survived"])            # stays up for the horizon
+        self.assertGreaterEqual(res["metrics"]["upright"], 0.6)
+        self.assertTrue(res["verified_pass"])                  # certified standing biped (nominal)
 
     def test_ws8_command_track_constant_gait_fails(self):
         # WS8: L6 scores forward-speed TRACKING vs a fast->stop->faster->reverse command. A constant gait — even a
