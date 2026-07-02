@@ -50,6 +50,21 @@ class RecipeRolloutTests(unittest.TestCase):
         d10 = recipe_rollout_morph(self.g, pol, steps=200, decimation=10)["forward"]
         self.assertNotEqual(base, d10)                     # holding the action 10 steps changes the rollout
 
+    def test_decimation_round_trips_through_npz(self):
+        # plan v2 T1.1: a policy trained at 50Hz (D=10) must DEPLOY at the same rate -> decimation rides in meta[6]
+        import tempfile
+        from pathlib import Path
+        from virturoid.services.morph_policy import MorphPolicy
+        pol = MorphPolicy(self.fd, seed=11)
+        pol.decimation = 10
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "dec.npz"
+            pol.to_npz(str(p), score=0.5)
+            loaded = MorphPolicy.from_npz(str(p))
+            self.assertEqual(loaded.decimation, 10)        # banked control rate travels with the weights
+        fresh = MorphPolicy(self.fd)
+        self.assertEqual(fresh.decimation, 1)              # default = every-step (unchanged)
+
     def test_obs_normalizer_shape_and_applied(self):
         import numpy as np
         from virturoid.services.morph_policy import MorphPolicy, recipe_obs_normalizer, recipe_rollout_morph

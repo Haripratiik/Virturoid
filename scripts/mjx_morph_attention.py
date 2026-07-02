@@ -134,6 +134,9 @@ def main(argv=None) -> int:
     ap.add_argument("--calf-phase", type=float, default=None, help="override the trot-CPG calf phase (rad); "
                     "per-body gait direction (quad walks fwd at 1.5708, a bilateral hexapod at 0.0)")
     ap.add_argument("--cpg-freq", type=float, default=None, help="override the trot-CPG frequency (Hz)")
+    ap.add_argument("--keep-checkpoints", action="store_true", help="plan v2 T0.1: also save NUMBERED checkpoints "
+                    "(runs/<name>_it{N}.npz every 10 iters) so DEPLOY-SIM checkpoint selection can pick best-by-CPU "
+                    "(MJX reward can rise while CPU deploy flips sign -- never select on train-sim reward).")
     args = ap.parse_args(argv)
     if args.smoke:
         args.envs, args.iters, args.ep_len, args.minibatches = 2, 2, 20, 1
@@ -558,10 +561,11 @@ def main(argv=None) -> int:
         (params, opt_state, _), _ = jax.lax.scan(epoch, (params, opt_state, key), jp.arange(args.epochs))
         return params, opt_state
 
-    def _save(p, fwd):
+    def _save(p, fwd, path=None):
+        dst = path or args.save
         a = p["att"]
         # save in the MorphPolicy._ORDER so the CPU policy loads straight in (transfer to any body)
-        Path(args.save).parent.mkdir(parents=True, exist_ok=True)
+        Path(dst).parent.mkdir(parents=True, exist_ok=True)
         # Phase-5 opt-in weights ride alongside (detected by key presence in MorphPolicy.from_npz).
         extra = {}
         if FILM:
@@ -572,13 +576,13 @@ def main(argv=None) -> int:
             extra["cpg_arr"] = np.asarray([CPG_PARAMS["freq"], CPG_PARAMS["thigh_amp"], CPG_PARAMS["calf_amp"],
                                            CPG_PARAMS["calf_phase"], CPG_PARAMS["residual_scale"],
                                            1.0 if CPG_PARAMS.get("leg_flip") else 0.0])
-        np.savez(args.save, We=np.asarray(a["We"]), be=np.asarray(a["be"]), Wq=np.asarray(a["Wq"]),
+        np.savez(dst, We=np.asarray(a["We"]), be=np.asarray(a["be"]), Wq=np.asarray(a["Wq"]),
                  Wk=np.asarray(a["Wk"]), Wv=np.asarray(a["Wv"]), Wo=np.asarray(a["Wo"]),
                  Wh=np.asarray(a["Wh"]), bh=np.asarray(a["bh"]), **extra,
-                 # meta layout MUST match MorphPolicy.from_npz: [F,H,NT,fwd, adaptive@4, cpg@5] so CPU replay reads
-                 # the right flags (adaptive gains + the trot-CPG prior) and reproduces the GPU gait.
+                 # meta layout MUST match MorphPolicy.from_npz: [F,H,NT,fwd, adaptive@4, cpg@5, decimation@6] so CPU
+                 # replay reads the right flags (adaptive gains + trot-CPG prior + control rate) and reproduces the gait.
                  meta=np.asarray([F, H, NT, float(fwd),
-                                  1.0 if args.adaptive else 0.0, 1.0 if CPG_ON else 0.0]))
+                                  1.0 if args.adaptive else 0.0, 1.0 if CPG_ON else 0.0, float(DECIM)]))
 
     if args.eval_npz:                                   # EVAL: deterministic single-env MJX rollout (recipe control)
         dd = np.load(args.eval_npz)
@@ -631,6 +635,9 @@ def main(argv=None) -> int:
         # so it still walks) even when the box is killed early -- the difference between a usable run and a None.
         if args.save and it > 0 and it % 10 == 0:
             _save(params, ep_fwd); print(f"  [checkpoint @ iter {it}]", flush=True)
+            if args.keep_checkpoints:                        # plan v2 T0.1: keep NUMBERED checkpoints so deploy-sim
+                _save(params, ep_fwd, path=args.save.replace(".npz", f"_it{it}.npz"))   # selection can pick best-by-CPU
+                #   (the divergence curve: MJX reward rises while CPU-deploy can flip sign -> never trust the final)
     print(f"done: attention {args.robot}, fwd_vel {float(ep_fwd):+.3f}, {time.time()-t0:.0f}s", flush=True)
     if args.save:
         _save(params, ep_fwd)

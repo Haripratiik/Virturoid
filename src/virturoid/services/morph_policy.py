@@ -47,6 +47,7 @@ class MorphPolicy:
         # that was tuned on the reference quadruped also walks a humanoid/heavy/spider body (the "any robot" leg).
         self.adaptive_gains = False
         self.cpg = None                                       # trot-CPG prior params (set when CPG-trained; see CPG_DEFAULT)
+        self.decimation = 1                                   # control decimation (plan v2 T1.1): deploy hold-D-steps
         rng = np.random.default_rng(seed)
         s = 0.3
         # NOTE: Wrange/brange are appended LAST so the rng draw order for We/Wq/Wk/Wv/Wo/Wh is unchanged
@@ -169,6 +170,10 @@ class MorphPolicy:
             c = np.asarray(d["cpg_arr"], dtype=float)
             p.cpg = {"freq": float(c[0]), "thigh_amp": float(c[1]), "calf_amp": float(c[2]),
                      "calf_phase": float(c[3]), "residual_scale": float(c[4]), "leg_flip": bool(c[5] > 0.5)}
+        # CONTROL DECIMATION rides in meta[6] (plan v2 T1.1): a policy trained at 50 Hz (D=10) MUST deploy at the
+        # same rate or the gait mismatches. Older <=6-element meta -> 1 (every-step, unchanged). recipe_rollout_morph
+        # and verify_submission read policy.decimation so deploy==train automatically.
+        p.decimation = int(float(meta[6])) if len(meta) > 6 else 1
         return p
 
     def to_npz(self, path, score: float = 0.0, *, normalizer=None):
@@ -188,7 +193,8 @@ class MorphPolicy:
         np.savez(path, **{k: self._arrs[k] for k in self._order}, **extra,
                  meta=np.asarray([float(self.feature_dim), float(self.hidden), recipe_flag, float(score),
                                   1.0 if getattr(self, "adaptive_gains", False) else 0.0,
-                                  1.0 if getattr(self, "cpg", None) else 0.0]))
+                                  1.0 if getattr(self, "cpg", None) else 0.0,
+                                  float(getattr(self, "decimation", 1) or 1)]))   # meta[6]: control decimation
         return str(path)
 
 
