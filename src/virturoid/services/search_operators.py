@@ -122,13 +122,46 @@ def critique_design(spec: dict, task: str, artifact: dict, llm) -> dict:
         return {"viable": True, "reason": "critic error -> defer to physics gate"}
 
 
+def _too_similar(spec: dict, seen: list, *, num_tol: float = 0.05) -> bool:
+    """ShinkaEvolve-style NOVELTY REJECTION (plan v3 G37 / WS7b): is ``spec`` a near-duplicate of one already
+    tried? Two edits are 'the same' when they share ``edit_kind`` and the SAME param keys and every numeric param
+    is within ``num_tol`` (relative) while all non-numeric params match. Killing a near-duplicate BEFORE the
+    physics gate saves a full evaluation rung -- ShinkaEvolve rejects candidates above a similarity threshold
+    pre-evaluation and finds SOTA in 150 samples; AlphaEvolve's cascade weeds weak candidates cheaply."""
+    kind = spec.get("edit_kind")
+    params = spec.get("params", {}) or {}
+    for s in seen:
+        if s.get("edit_kind") != kind:
+            continue
+        sp = s.get("params", {}) or {}
+        if set(sp) != set(params):
+            continue
+        same = True
+        for key, v in params.items():
+            u = sp.get(key)
+            if isinstance(v, bool) or isinstance(u, bool):
+                same = (v == u)
+            elif isinstance(v, (int, float)) and isinstance(u, (int, float)):
+                denom = max(1e-9, abs(float(v)), abs(float(u)))
+                same = abs(float(v) - float(u)) / denom <= num_tol
+            else:
+                same = (v == u)
+            if not same:
+                break
+        if same:
+            return True
+    return False
+
+
 def make_llm_proposer(task: str, llm, *, memory_block: str = "", k: int = 3, screen: bool = True,
-                      heuristic=None):
+                      dedup: bool = True, heuristic=None):
     """Adapt the operators into the harness's ``propose(parent, history) -> spec`` callable.
 
     Maintains a queue of proposals; refills via ``propose_designs`` using the parent's artifact + ALL prior
     specs (diversity reflection) whenever empty. If ``screen``, each proposal is Critic-screened and skipped if
-    non-viable. ``heuristic(parent, history) -> spec`` is the offline/empty fallback (the LLM-free N1 path)."""
+    non-viable. If ``dedup`` (default), a proposal that is a near-duplicate of one already tried is rejected
+    BEFORE it can consume an evaluation (novelty-rejection, plan v3 G37). ``heuristic(parent, history) -> spec``
+    is the offline/empty fallback (the LLM-free N1 path)."""
     queue: list[dict] = []
     seen: list[dict] = []
 
@@ -141,6 +174,12 @@ def make_llm_proposer(task: str, llm, *, memory_block: str = "", k: int = 3, scr
             tries += 1
             batch = propose_designs(task, artifact, seen, llm, memory_block=memory_block, k=k)
             for spec in batch:
+                # NOVELTY-REJECTION (G37): drop a near-duplicate of anything already tried OR already queued,
+                # before spending a critic call or an evaluation on it.
+                if dedup and _too_similar(spec, seen + queue):
+                    if not any(_too_similar(spec, [s]) for s in seen):
+                        seen.append(spec)                      # remember it so the diversity block diverges from it
+                    continue
                 if screen and not critique_design(spec, task, artifact, llm).get("viable", True):
                     seen.append(spec)                          # remember rejects too (don't re-propose them)
                     continue

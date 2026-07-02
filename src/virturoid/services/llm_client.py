@@ -293,6 +293,28 @@ def _openai_model_for_role(role: str) -> str:
     return fast_model if role in _FAST_ROLES else reasoning_model
 
 
+# LOCAL (Ollama/vLLM) cheap-for-breadth / strong-for-depth routing (plan v3 M2/WS7b, AlphaEvolve Flash+Pro
+# pattern). The search operators dominate volume: Proposer/Critic are high-fan-out breadth (cheap model), the
+# Diagnostician/codegen are the rare deep calls (strong model). Back-compat: if the FAST/BUILD envs are unset,
+# EVERY role uses the single VIRTUROID_LOCAL_LLM_MODEL (today's behavior, unchanged).
+_LOCAL_FAST_ROLES = _FAST_ROLES | {"proposer", "critic"}
+_LOCAL_STRONG_ROLES = _BUILD_ROLES | {"diagnostician", "codegen", "designer"}
+
+
+def _local_model_for_role(role: str) -> str:
+    """Pick the LOCAL model for a role: a cheap high-throughput model for breadth roles
+    (``VIRTUROID_LOCAL_LLM_FAST_MODEL``), a strong model for deep roles (``VIRTUROID_LOCAL_LLM_BUILD_MODEL``),
+    else the single ``VIRTUROID_LOCAL_LLM_MODEL``. Unset overrides -> the main model for all roles (back-compat)."""
+    main = os.environ.get("VIRTUROID_LOCAL_LLM_MODEL", "nvidia/nemotron")
+    fast = os.environ.get("VIRTUROID_LOCAL_LLM_FAST_MODEL")
+    strong = os.environ.get("VIRTUROID_LOCAL_LLM_BUILD_MODEL")
+    if fast and role in _LOCAL_FAST_ROLES:
+        return fast
+    if strong and role in _LOCAL_STRONG_ROLES:
+        return strong
+    return main
+
+
 def get_llm(role: str = "designer") -> LLMClient | None:
     """Resolve a backend from environment, or None to use the deterministic fallback.
 
@@ -324,7 +346,7 @@ def get_llm(role: str = "designer") -> LLMClient | None:
         return OpenAILLM(model=model, fallback_model=fallback)
     if backend == "local":
         url = os.environ.get("VIRTUROID_LOCAL_LLM_URL", "http://localhost:8000/v1")
-        model = os.environ.get("VIRTUROID_LOCAL_LLM_MODEL", "nvidia/nemotron")
+        model = _local_model_for_role(role)                    # role-aware breadth/depth routing (M2/WS7b)
         fmt = os.environ.get("VIRTUROID_LOCAL_LLM_FORMAT", "json_object").lower()
         return LocalLLM(base_url=url, model=model, format_mode=fmt)
     return None

@@ -74,6 +74,32 @@ class OperatorTests(unittest.TestCase):
         self.assertEqual(rep.best.artifact["failure_mode"], "walking")
 
 
+class NoveltyRejectionTests(unittest.TestCase):
+    def test_too_similar_predicate(self):
+        from virturoid.services.search_operators import _too_similar
+        seen = [{"edit_kind": "cpg", "params": {"calf_phase": 0.20}}]
+        self.assertTrue(_too_similar({"edit_kind": "cpg", "params": {"calf_phase": 0.205}}, seen))   # within 5%
+        self.assertFalse(_too_similar({"edit_kind": "cpg", "params": {"calf_phase": 0.5}}, seen))    # far -> novel
+        self.assertFalse(_too_similar({"edit_kind": "gains", "params": {"calf_phase": 0.2}}, seen))  # other kind
+        self.assertFalse(_too_similar({"edit_kind": "cpg", "params": {"freq": 0.2}}, seen))          # other keys
+
+    def test_proposer_rejects_near_duplicate_before_eval(self):
+        # the LLM keeps proposing (almost) the same edit; novelty-rejection kills the repeat BEFORE it spends an
+        # evaluation, so the heuristic fallback is reached (plan v3 G37 / ShinkaEvolve pre-eval rejection).
+        llm = _FakeLLM([[{"edit_kind": "cpg", "params": {"calf_phase": 0.2}}],
+                        [{"edit_kind": "cpg", "params": {"calf_phase": 0.201}}]])   # near-dup of the first
+        used = {"h": 0}
+
+        def heur(p, h):
+            used["h"] += 1
+            return {"edit_kind": "gains", "params": {"kp": 40}}
+
+        prop = make_llm_proposer("walk", llm, k=1, screen=False, heuristic=heur)
+        self.assertAlmostEqual(prop(None, [])["params"]["calf_phase"], 0.2)   # the novel one is returned
+        self.assertEqual(prop(None, [])["edit_kind"], "gains")               # the near-dup -> heuristic
+        self.assertEqual(used["h"], 1)
+
+
 class RationaleLineageTests(unittest.TestCase):
     def test_priors_block_surfaces_rationale(self):
         # EoH (plan v2 §4.5): the diversity-reflection prompt shows each prior's REASONING, not just its params
