@@ -80,6 +80,9 @@ def run_night(*, memory_dir: str, journal_path=None, budget_evals: int = 200, n_
 
     if evaluate_for is None:
         evaluate_for = laddered_evaluate_for()               # real fidelity ladder (GPU rung)
+    if archive is None:                                      # QD open-endedness dashboard (ANNECS-V/coverage/QD-score)
+        from virturoid.services.qd_archive import QDArchive
+        archive = QDArchive(dims=[("n_dof", 0, 30), ("forward", -0.5, 1.5)], bins=8)
 
     # golden regression -> probe-only: run with a zero budget so nothing is banked (still journals what it saw)
     night = run_night_shift(cands, evaluate_for, memory_dir=memory_dir, llm=llm,
