@@ -3,7 +3,10 @@ is a transparent LLMClient wrapper, so operators need no changes."""
 
 import unittest
 
-from virturoid.services.llm_client import MockLLM, SpendCapExceeded, SpendGuard
+import unittest.mock as mock
+
+from virturoid.services.llm_client import (MockLLM, PER_ROLE_CALL_CAPS, SpendCapExceeded, SpendGuard,
+                                           make_routed_llm)
 
 
 class SpendGuardTests(unittest.TestCase):
@@ -35,6 +38,17 @@ class SpendGuardTests(unittest.TestCase):
         self.assertEqual(rep["role"], "diagnostician")
         self.assertGreater(rep["tokens_in"], 0)
         self.assertGreater(rep["usd"], 0.0)
+
+    def test_make_routed_llm_wraps_with_per_role_cap(self):
+        # backend off (default) -> None (caller uses heuristic)
+        with mock.patch("virturoid.services.llm_client.get_llm", return_value=None):
+            self.assertIsNone(make_routed_llm("diagnostician"))
+        # a configured backend -> a SpendGuard carrying the role's call cap
+        with mock.patch("virturoid.services.llm_client.get_llm", return_value=MockLLM(fixed={"ok": True})):
+            g = make_routed_llm("diagnostician")
+            self.assertIsInstance(g, SpendGuard)
+            self.assertEqual(g.role, "diagnostician")
+            self.assertEqual(g.max_calls, PER_ROLE_CALL_CAPS["diagnostician"])
 
     def test_fail_open_lets_operators_fall_back(self):
         # the design-search Proposer treats ANY LLM error as 'no backend' -> heuristic. A cap=0 guard triggers that.

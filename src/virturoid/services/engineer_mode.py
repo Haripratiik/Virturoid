@@ -31,8 +31,8 @@ def run_engineer_search(*, task: str, gene, evaluate, llm=None, auto_llm: bool =
     prompt (H5). Returns the ``SearchReport`` (best node + honest tree)."""
     if llm is None and auto_llm:
         try:
-            from virturoid.services.llm_client import get_llm
-            llm = get_llm("designer")                          # None when VIRTUROID_LLM_BACKEND=off (the default)
+            from virturoid.services.llm_client import make_routed_llm
+            llm = make_routed_llm("designer")                  # SPEND-GUARDED + role-routed; None when backend=off
         except Exception:  # noqa: BLE001 - LLM resolution is best-effort; fall back to the heuristic proposer
             llm = None
     memory_block = ""

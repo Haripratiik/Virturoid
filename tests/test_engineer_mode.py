@@ -17,7 +17,7 @@ class _FakeLLM:
     def __init__(self):
         self.calls = []
 
-    def complete_json(self, system, user, schema, max_tokens=None):
+    def complete_json(self, system, user, schema, max_tokens=None, reasoning_effort=None):
         props = schema.get("properties", {})
         if "proposals" in props:
             self.calls.append(("proposer", user))

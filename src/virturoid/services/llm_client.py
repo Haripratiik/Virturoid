@@ -381,6 +381,25 @@ class SpendGuard:
         return out
 
 
+# Per-role call caps (plan v2 §4.2 layer-1). A diverse Proposer batch is cheap + high-volume; the Critic screens
+# every candidate; the Diagnostician is the expensive strong-tier call, kept rare; codegen (detectors/reward) is
+# rarest. Tuned to keep a run's LLM spend in the single-dollar range (stream-3 pricing). Fail-open when hit.
+PER_ROLE_CALL_CAPS = {"designer": 40, "proposer": 40, "critic": 80, "diagnostician": 10, "codegen": 6}
+
+
+def make_routed_llm(role: str = "designer", *, max_calls: int | None = None, max_usd: float | None = None,
+                    on_spend=None):
+    """Resolve the env-configured backend for ``role`` (``get_llm`` already routes roles to models -- cheap for
+    high-volume roles, strong for reasoning) and wrap it in a :class:`SpendGuard` with the per-role call cap
+    (plan v2 §4.2). Returns ``None`` when no backend is configured (``VIRTUROID_LLM_BACKEND=off`` -> the caller
+    falls back to the heuristic). This is the one call the harness uses so caps ALWAYS apply."""
+    client = get_llm(role)
+    if client is None:
+        return None
+    cap = max_calls if max_calls is not None else PER_ROLE_CALL_CAPS.get(role, 40)
+    return SpendGuard(client, max_calls=cap, max_usd=max_usd, role=role, on_spend=on_spend)
+
+
 def _parse_json_object(text: str) -> dict:
     """Parse a JSON object out of a model response, tolerating fences/prose.
 
