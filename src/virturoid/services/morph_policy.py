@@ -492,10 +492,15 @@ def _trot_cpg_tokens(model, graph, params: dict):
             base = [np.pi, 0.0, 0.0, np.pi] if params.get("leg_flip") else [0.0, np.pi, np.pi, 0.0]
             leg_phase = {legs[i]: base[i] for i in range(4)}  # diagonal pairs anti-phase (proven quad trot)
         else:
-            # GENERAL N-leg body (hexapod/octopod/…): adjacent legs anti-phase -> an alternating-tripod gait
-            # (for a radial hexapod, legs {0,2,4} vs {1,3,5}). Gives ANY procedural legged body a stepping rhythm
-            # instead of the scalar-recipe shuffle — the locomotion-generality fix. Quad path above is untouched.
-            leg_phase = {lg: (np.pi * (i % 2)) for i, lg in enumerate(legs)}
+            # GENERAL N-leg body (hexapod/octopod/…): ALTERNATING TRIPOD (plan gap-closure N15). The bodies we
+            # build are BILATERAL — steerable_quadruped mounts legs as (L,R) pairs front→back, so the leg index
+            # enumerates FL,FR,ML,MR,HL,HR,... The old `π·(i%2)` grouped {0,2,4}=all-LEFT vs {1,3,5}=all-RIGHT →
+            # a lateral PACE (both sides rock together) with no alternating support triangle → ≈0 net forward
+            # thrust (the measured "hexapod won't walk"). The canonical hexapod tripod alternates
+            # {FL,MR,HL} vs {FR,ML,HR}: within each L/R pair the two legs are anti-phase AND consecutive stations
+            # flip, which is exactly `phase = π·((i//2 + i%2) % 2)` for the (L,R)-pairs enumeration (→ tripod A =
+            # {0,3,4}, tripod B = {1,2,5}; generalizes to an alternating tetrapod for octopods). Quad path untouched.
+            leg_phase = {lg: (np.pi * (((i // 2) + (i % 2)) % 2)) for i, lg in enumerate(legs)}
         for k in range(n):
             if tok_leg[k] is None:
                 continue
