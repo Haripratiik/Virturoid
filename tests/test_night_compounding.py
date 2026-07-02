@@ -55,6 +55,22 @@ class NightCompoundingTests(unittest.TestCase):
         self.assertFalse(c["compounding"])
         self.assertIn("no nights", render_ascii(c))
 
+    def test_run_night_series_driver(self):
+        # the multi-night DRIVER runs n nights (injected run_one) + records each -> the accumulated series.
+        from virturoid.services.night_compounding import run_night_series
+        reports = iter([
+            {"night": {"banked": 1, "qd": {"coverage": 0.10, "annecs_v": 1}}},
+            {"night": {"banked": 2, "qd": {"coverage": 0.22, "annecs_v": 2}}},
+            {"night": {"banked": 1, "qd": {"coverage": 0.30, "annecs_v": 1}}},
+        ])
+        with tempfile.TemporaryDirectory() as tmp:
+            log = os.path.join(tmp, "series.jsonl")
+            c = run_night_series(lambda: next(reports), 3, log_path=log)
+            self.assertEqual(c["n_nights"], 3)
+            self.assertEqual(c["cumulative_banked"], 4)      # 1+2+1
+            self.assertTrue(c["compounding"])                # grows + coverage climbs
+            self.assertEqual(len(load_nights(log)), 3)       # each night recorded
+
 
 if __name__ == "__main__":
     unittest.main()

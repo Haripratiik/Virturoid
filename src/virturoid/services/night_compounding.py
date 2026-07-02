@@ -75,6 +75,17 @@ def compounding_series(snapshots: list) -> dict:
             "coverage_regressed": cov_regressed, "compounding": compounding, "headline": headline}
 
 
+def run_night_series(run_one, n: int, *, log_path: str) -> dict:
+    """Run ``n`` sequential nights (``run_one() -> a run_night report``), record each snapshot to ``log_path``,
+    and return the accumulated compounding series. ``run_one`` is injected so this is testable without GPU (a
+    fake report) and reusable with the real ``night_runner.run_night`` bound to its config. The nights-log is
+    APPEND, so a later invocation continues the series (resumable multi-night, the overnight-in-chunks pattern)."""
+    for _ in range(int(n)):
+        rep = run_one()
+        append_night(rep, log_path)
+    return compounding_series(load_nights(log_path))
+
+
 def render_ascii(chart: dict, *, width: int = 28) -> str:
     """Dependency-free bar chart of cumulative banked capabilities per night (the flywheel compounding)."""
     series = chart.get("series", [])
