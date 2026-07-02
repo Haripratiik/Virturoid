@@ -89,6 +89,12 @@ def main(argv=None) -> int:
                     "penalize normalized PD torque (ctrl/clamp)^2 so the policy can't crank destabilizing targets "
                     "for free — gives the reward something shaping the APPROACH to a step, not just the fall cliff")
     ap.add_argument("--air-target", type=float, default=0.5, help="feet_air_time target swing duration (s)")
+    ap.add_argument("--upright-hi", type=float, default=0.7, help="upright-ramp SATURATION height (fraction of "
+                    "standing z where the continuous upright reward hits 1.0). Default 0.7 (byte-identical; the "
+                    "quad walks). RAISE toward ~0.9 for bodies that FARM the reward by CROUCHING: at 0.7 a "
+                    "0.67-height slide already earns ~85% upright, so PPO never stands tall enough to swing its "
+                    "legs (the hexapod crouch-slide, cadence 0). Higher saturation -> a crouch earns far less -> "
+                    "the policy stands up and STEPS. Fall line stays at 0.5*z_stand.")
     ap.add_argument("--vz-w", type=float, default=0.4, help="lin_vel_z penalty (legged_gym): penalize vertical "
                     "base bouncing so the gait is forward, not a pogo")
     ap.add_argument("--wxy-w", type=float, default=0.04, help="ang_vel_xy penalty (legged_gym): penalize base "
@@ -251,6 +257,7 @@ def main(argv=None) -> int:
     ACTION_LPF = float(args.action_lpf)                       # T1.2: EMA low-pass on the action offset (0 = off)
     AIR_W, AIR_TGT, VZ_W, WXY_W = args.air_w, args.air_target, args.vz_w, args.wxy_w   # legged_gym reward terms
     TORQUE_W = args.torque_w                              # actuator-effort penalty (anti-crank stabilizer)
+    UPRIGHT_HI = max(0.55, float(args.upright_hi))        # upright-ramp saturation height (anti-crouch; default 0.7)
     # TROT-CPG PRIOR (opt-in --cpg): per-token feed-forward amplitude/phase from the SAME logic as the CPU recipe
     # (morph_policy._trot_cpg_tokens + CPG_DEFAULT), so a GPU-trained policy transfers to / replays on the CPU path.
     # The phase is driven by the live sim clock data.time (no carry surgery; continuous across chunks, resets per ep).
@@ -469,10 +476,11 @@ def main(argv=None) -> int:
             else:
                 quat = data2.qpos[:, base_qadr + 3:base_qadr + 7]
                 upr = 1.0 - 2.0 * (quat[:, 1] ** 2 + quat[:, 2] ** 2)   # world-up . body-up
-                up = jp.clip((z - 0.5 * z_stand) / (0.2 * z_stand), 0.0, 1.0)   # CONTINUOUS upright RAMP (0 at the
-                #   fall line z=0.5*z_stand, 1 at standing z>=0.7*z_stand): a smooth gradient OUT of a crouch instead
-                #   of a binary cliff that paid exactly 0 the instant z dipped below 0.7 (so a half-collapsed body
-                #   got no signal to climb back up). This is the core of the iter-35 collapse fix.
+                up = jp.clip((z - 0.5 * z_stand) / ((UPRIGHT_HI - 0.5) * z_stand), 0.0, 1.0)   # CONTINUOUS upright
+                #   RAMP: 0 at the fall line z=0.5*z_stand, 1 at standing z>=UPRIGHT_HI*z_stand (default 0.7): a smooth
+                #   gradient OUT of a crouch instead of a binary cliff that paid 0 the instant z dipped (so a
+                #   half-collapsed body got no signal to climb back up). --upright-hi RAISES the saturation so a
+                #   crouch-slide can no longer farm ~full upright reward -> the body must stand tall to STEP.
                 fell = (z < 0.5 * z_stand).astype(jp.float32)           # FALLEN -> terminate
                 alive2 = alive * (1.0 - fell)                           # 0 once fallen, stays 0 thereafter
                 progress = jp.clip(fwd, -VTGT, VTGT)                  # forward speed up to vtgt; BACKWARD now PENALIZED
