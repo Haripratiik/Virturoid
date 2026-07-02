@@ -220,7 +220,8 @@ def _metric(res: dict):
 def run_head_to_head(*, split: str | None = "held_out", steps: int = 600, max_evals: int = 12,
                      models_dir: str = "build/models", families=("locomotion", "manipulation"),
                      use_gpu: bool = False, gpu_iters: int = 60, gpu_envs: int = 1024, gpu_hifi=None,
-                     seed: int | None = None, prereg_path: str | None = None) -> dict:
+                     seed: int | None = None, prereg_path: str | None = None,
+                     with_baseline: bool = False, baseline_llm=None) -> dict:
     """M5 pre-registered THREE-ARM head-to-head — the plan's decisive comparison, separating the value of the
     agentic SEARCH from the value of the flywheel MEMORY, and auditing each arm's honesty.
 
@@ -235,38 +236,56 @@ def run_head_to_head(*, split: str | None = "held_out", steps: int = 600, max_ev
       * ``honesty``        = per-arm {claimed, verified, overclaim=claimed−verified} (SWE-bench-Verified check:
                              an arm's own gate verdict vs the independent verifier; overclaim>0 = the deploy gap).
     Pass ``prereg_path`` to FREEZE the protocol first (SHA256 manifest of tasks+verifier+seeds) so the run is
-    pre-registered, not post-hoc — the manifest is attached under ``prereg``."""
+    pre-registered, not post-hoc — the manifest is attached under ``prereg``.
+
+    ``with_baseline`` adds **Arm 0** — the LITERAL Claude+MCP control (plan v3 M1): an LLM agent (``baseline_llm``,
+    else the env backend) drives the primitive MCP tools and submits a controller, scored by the SAME verifier.
+    The headline ``baseline_delta = B_solved − A0_solved`` is the honest "beats Claude+MCP" number; until Arm 0
+    is run, the defensible claim is only "beats our fixed pipeline (Arm A)"."""
     prereg = None
+    arms = ("A0", "A", "A+", "B") if with_baseline else ("A", "A+", "B")
     if prereg_path is not None:                               # freeze the protocol (task+verifier+arms SHA256) FIRST
         from virturoid.services.prereg import write_prereg
-        prereg = write_prereg(prereg_path, arms=("A", "A+", "B"), split=split)
+        prereg = write_prereg(prereg_path, arms=arms, split=split)
 
     rows = []
     for task in list_tasks(split):
         if task["family"] not in families:
             continue
         a = run_arm_a(task["id"], steps=steps, seed=seed)
+        a0 = None
+        if with_baseline:
+            from virturoid.services.virt_bench_baseline import run_arm_0
+            a0 = run_arm_0(task["id"], llm=baseline_llm, seed=seed)
         # A+ = search+GPU, memory COLD (use_memory=False -> no recall AND GPU warm-start init_npz=None: N17 isolation).
         # B  = search+GPU, memory WARM. Both spend the SAME GPU iters -> harness_delta/transfer_delta compare search
         # intelligence and flywheel value, not compute (N16 budget parity, asserted via the per-arm ledger below).
         gk = dict(use_gpu=use_gpu, gpu_iters=gpu_iters, gpu_envs=gpu_envs, gpu_hifi=gpu_hifi, seed=seed)
         ap = run_arm_b(task["id"], steps=steps, max_evals=max_evals, use_memory=False, models_dir=models_dir, **gk)
         b = run_arm_b(task["id"], steps=steps, max_evals=max_evals, use_memory=True, models_dir=models_dir, **gk)
-        rows.append({"task": task["id"], "family": task["family"],
-                     "A_pass": bool(a["verified_pass"]), "Aplus_pass": bool(ap["verified_pass"]),
-                     "B_pass": bool(b["verified_pass"]),
-                     "A_metric": _metric(a), "Aplus_metric": _metric(ap), "B_metric": _metric(b),
-                     "A_claim": bool(a.get("claimed_pass")), "Aplus_claim": bool(ap.get("claimed_pass")),
-                     "B_claim": bool(b.get("claimed_pass")),
-                     "Aplus_budget": ap.get("budget"), "B_budget": b.get("budget"),
-                     "B_recalled": b.get("recalled"), "B_searched": b.get("searched"), "B_gpu_npz": b.get("gpu_npz")})
+        row = {"task": task["id"], "family": task["family"],
+               "A_pass": bool(a["verified_pass"]), "Aplus_pass": bool(ap["verified_pass"]),
+               "B_pass": bool(b["verified_pass"]),
+               "A_metric": _metric(a), "Aplus_metric": _metric(ap), "B_metric": _metric(b),
+               "A_claim": bool(a.get("claimed_pass")), "Aplus_claim": bool(ap.get("claimed_pass")),
+               "B_claim": bool(b.get("claimed_pass")),
+               "Aplus_budget": ap.get("budget"), "B_budget": b.get("budget"),
+               "B_recalled": b.get("recalled"), "B_searched": b.get("searched"), "B_gpu_npz": b.get("gpu_npz")}
+        if a0 is not None:
+            row.update({"A0_pass": bool(a0["verified_pass"]), "A0_metric": _metric(a0),
+                        "A0_claim": bool(a0.get("claimed_pass")), "A0_budget": a0.get("budget"),
+                        "A0_mode": a0.get("failure_mode")})
+        rows.append(row)
 
     def _solved(k):
-        return sum(1 for r in rows if r[k])
+        return sum(1 for r in rows if r.get(k))
 
     A, Ap, B = _solved("A_pass"), _solved("Aplus_pass"), _solved("B_pass")
+    honesty_arms = [("A", "A_claim", "A_pass"), ("A+", "Aplus_claim", "Aplus_pass"), ("B", "B_claim", "B_pass")]
+    if with_baseline:
+        honesty_arms.insert(0, ("A0", "A0_claim", "A0_pass"))
     honesty = {}
-    for arm, cl, ve in (("A", "A_claim", "A_pass"), ("A+", "Aplus_claim", "Aplus_pass"), ("B", "B_claim", "B_pass")):
+    for arm, cl, ve in honesty_arms:
         claimed, verified = _solved(cl), _solved(ve)
         honesty[arm] = {"claimed": claimed, "verified": verified, "overclaim": claimed - verified}
     # N16 budget ledger: total spend per arm (identical GPU iters between A+ and B is the parity check).
@@ -277,9 +296,15 @@ def run_head_to_head(*, split: str | None = "held_out", steps: int = 600, max_ev
                 tot[kk] = tot.get(kk, 0) + int(vv)
         return tot
     budget = {"A+": _budget("Aplus_budget"), "B": _budget("B_budget")}
-    return {"rows": rows, "n_tasks": len(rows), "A_solved": A, "Aplus_solved": Ap, "B_solved": B,
-            "harness_delta": Ap - A, "transfer_delta": B - Ap, "honesty": honesty, "budget": budget,
-            "prereg": prereg}
+    out = {"rows": rows, "n_tasks": len(rows), "A_solved": A, "Aplus_solved": Ap, "B_solved": B,
+           "harness_delta": Ap - A, "transfer_delta": B - Ap, "honesty": honesty, "budget": budget,
+           "prereg": prereg}
+    if with_baseline:                                          # M1: the literal Claude+MCP control
+        A0 = _solved("A0_pass")
+        out["A0_solved"] = A0
+        out["baseline_delta"] = B - A0                         # THE headline "beats Claude+MCP" number
+        budget["A0"] = _budget("A0_budget")
+    return out
 
 
 def _mean_sem_iqm(xs: list) -> dict:
