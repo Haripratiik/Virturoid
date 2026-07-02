@@ -28,14 +28,23 @@ def make_laddered_evaluate(screen_evaluate, hifi_evaluate, *, promote=None, on_r
     gate = promote or _promote_default
 
     def evaluate(spec):
-        s = dict(screen_evaluate(spec))
+        try:                                                    # M6 chaos-safety: an un-compilable/un-rolloutable
+            s = dict(screen_evaluate(spec))                     #   body is a CHEAP REJECT, never a crash that aborts
+        except Exception as e:  # noqa: BLE001                  #   the whole search.
+            return {"survived": False, "rung": "screen", "promoted": False,
+                    "note": f"screen_error: {type(e).__name__}"}
         s["rung"] = "screen"
         if on_rung is not None:
             on_rung("screen", spec, s)
         if not gate(s):
             s["promoted"] = False
             return s                                            # cheap reject -> the expensive rung is never touched
-        h = dict(hifi_evaluate(spec))
+        try:                                                    # M6: a GPU crash on the expensive rung degrades to the
+            h = dict(hifi_evaluate(spec))                       #   screen verdict (not promoted), never a crash.
+        except Exception as e:  # noqa: BLE001
+            s["promoted"] = False
+            s["note"] = f"hifi_error: {type(e).__name__}"
+            return s
         h["rung"] = "hifi"
         h["promoted"] = True
         h.setdefault("screen", {k: s.get(k) for k in ("forward", "cadence", "upright_frac", "survived")})
@@ -79,8 +88,12 @@ def make_gpu_locomotion_hifi(gene, *, iters: int = 60, envs: int = 2048, out_dir
         sf = bool(p.get("sphere_feet", sphere_feet))          #   contact-model fixes (sphere feet + contact DR) per
         cdr = bool(p.get("contact_dr", contact_dr))           #   candidate; all baked into train AND verify.
         npz = os.path.join(outd, f"hifi_{abs(hash(repr(sorted(p.items())))) % 10_000_000}.npz")
-        trained = _train(gene, out_path=npz, iters=iters, envs=envs, cpg=cpg, reward_weights=reward_weights,
-                         init_npz=seed, decimation=dec, action_lpf=lpf, sphere_feet=sf, contact_dr=cdr)
+        try:                                                    # M6 chaos-safety: a trainer CRASH/TIMEOUT (CUDA OOM,
+            trained = _train(gene, out_path=npz, iters=iters, envs=envs, cpg=cpg, reward_weights=reward_weights,
+                             init_npz=seed, decimation=dec, action_lpf=lpf, sphere_feet=sf, contact_dr=cdr)
+        except Exception as e:  # noqa: BLE001                  #   box down, ssh drop) degrades to the honest floor,
+            return {"forward": 0.0, "cadence": 0.0, "upright_frac": 0.0, "survived": False, "trained": False,
+                    "npz": None, "note": f"train_error: {type(e).__name__}"}   # so the night never banks garbage.
         if not trained:
             return {"forward": 0.0, "cadence": 0.0, "upright_frac": 0.0, "survived": False, "trained": False,
                     "npz": None, "note": "gpu_unavailable_or_train_failed"}
@@ -88,7 +101,11 @@ def make_gpu_locomotion_hifi(gene, *, iters: int = 60, envs: int = 2048, out_dir
         # TRAIN-only robustness aug (no deploy-side counterpart) so it is not threaded into verify. ``seed`` (the
         # warm-start) is passed so the verify can DEPLOY-SELECT over {seed, checkpoints, final} -- the flywheel keeps
         # the best of "what we had vs. what we trained" (a degrading re-train still banks the good warm/checkpoint).
-        r = _verify(gene, trained, steps=verify_steps, decimation=dec, action_lpf=lpf, sphere_feet=sf, seed=seed)
+        try:                                                    # M6 chaos-safety: a CORRUPT/un-loadable checkpoint
+            r = _verify(gene, trained, steps=verify_steps, decimation=dec, action_lpf=lpf, sphere_feet=sf, seed=seed)
+        except Exception as e:  # noqa: BLE001                  #   must not be banked -- honest survived=False floor.
+            return {"forward": 0.0, "cadence": 0.0, "upright_frac": 0.0, "survived": False, "trained": True,
+                    "npz": None, "note": f"verify_error: {type(e).__name__}"}
         r["trained"] = True
         r["npz"] = r.get("selected_npz") or trained            # bank the DEPLOY-SELECTED policy, not the final
         return r
