@@ -595,7 +595,8 @@ def recipe_rollout_morph(gene, policy: MorphPolicy | None = None, *, steps: int 
                          kd: float = 1.5, ascale: float = 0.4, vtgt: float = 0.3, normalizer=None,
                          adaptive: bool = False, cpg: dict | None = None, model_perturb=None,
                          seed: int = 0, record_frames: bool = False, frame_every: int = 5,
-                         decimation: int = 1, action_lpf: float = 0.0, sphere_feet: bool = False) -> dict:
+                         decimation: int = 1, action_lpf: float = 0.0, sphere_feet: bool = False,
+                         command_schedule: list | None = None) -> dict:
     """Drive ``gene`` with the anti-collapse RECIPE: position-PD to the default standing pose + learned offset,
     obs normalization (``normalizer=(mean,std)``), terminate-on-fall, clipped-non-negative velocity-tracking
     reward. Returns ``gait`` (recipe reward meaned over the horizon — the training fitness), ``forward`` travel,
@@ -692,6 +693,18 @@ def recipe_rollout_morph(gene, policy: MorphPolicy | None = None, *, steps: int 
     c_prev = (np.asarray(data.geom_xpos[feet_idx, 2]) < fz0 + 0.02) if len(feet_idx) else np.zeros(0, bool)
     lifts = 0; up_steps = 0; support_steps = 0
     tau_up = upright_height_ratio(len(feet_idx))            # per-body upright stance-height threshold (WS3)
+    # COMMAND-TRACKING (WS8): with a command_schedule = [(vx_cmd, n_steps), ...] measure how well the body's
+    # forward SPEED tracks a time-varying commanded speed. A constant "always walk forward" gait can't slow/stop/
+    # reverse -> high error -> low track_score. L6_command_track is scored on tracking, so a constant gait FAILS.
+    cmd_seq = None; terr = 0.0; tsteps = 0
+    cmd_conditioned = bool(getattr(policy, "command_conditioned", False)) if policy is not None else False
+    _zero_rng = None
+    if command_schedule:
+        cmd_seq = []
+        for vx_c, n in command_schedule:
+            cmd_seq.extend([float(vx_c)] * int(n))
+        if cmd_conditioned:                                 # a conditioned policy READS the command (perception token)
+            _zero_rng = np.zeros(max(0, int(getattr(policy, "percept_dim", 8)) - 2))
     dec = max(1, int(decimation))                            # CONTROL DECIMATION (plan v2 T1.1): recompute the
     lpf = float(action_lpf)                                  #   learned action only every `dec` physics steps and
     a = a_filt = None                                        #   HOLD it between (the CPG clock + PD loop still run
@@ -700,7 +713,11 @@ def recipe_rollout_morph(gene, policy: MorphPolicy | None = None, *, steps: int 
             obs = graph.observe(model, data)
             if mean is not None:
                 obs = (obs - mean) / std
-            a_raw = policy.act(obs, hop=hop)                 # ACTION LPF (plan v2 T1.2): EMA-smooth the offset at the
+            if cmd_conditioned and cmd_seq is not None:      # feed the current command to a conditioned policy (WS8)
+                _vc = cmd_seq[min(t, len(cmd_seq) - 1)]
+                a_raw = policy.act(obs, ranges=_zero_rng, cmd=[_vc, 0.0], hop=hop)
+            else:
+                a_raw = policy.act(obs, hop=hop)             # ACTION LPF (plan v2 T1.2): EMA-smooth the offset at the
             a_filt = a_raw if a_filt is None else lpf * a_filt + (1.0 - lpf) * a_raw   # control rate (Playground ~5Hz
             a = a_filt                                       #   filter); lpf=0 -> a=a_raw -> unchanged.
         cphase = _two_pi * cpg_freq * t * dt if cpg_on else 0.0
@@ -718,6 +735,9 @@ def recipe_rollout_morph(gene, policy: MorphPolicy | None = None, *, steps: int 
         upr = 1.0 - 2.0 * (float(q[1]) ** 2 + float(q[2]) ** 2)   # world-up . body-up (orientation)
         z = float(data.qpos[bq + 2]); hr = min(1.0, max(0.0, z / z0)); x = float(data.qpos[bq])
         vx = (x - px) / dt; px = x
+        if cmd_seq is not None:                                   # accumulate command-tracking error (WS8)
+            _vc = cmd_seq[min(t, len(cmd_seq) - 1)]
+            terr += (vx - _vc) ** 2; tsteps += 1
         if z < 0.5 * z0:                                          # FALLEN -> terminate (stop earning)
             alive = t; break
         up = min(1.0, max(0.0, (z - 0.5 * z0) / (0.2 * z0)))      # CONTINUOUS upright ramp (mirror of the GPU
@@ -740,12 +760,17 @@ def recipe_rollout_morph(gene, policy: MorphPolicy | None = None, *, steps: int 
     cadence = round(lifts / _T, 2)                                # foot liftoffs per second (0 for a stiff slide)
     upright_frac = round(up_steps / max(1, alive), 3)            # fraction of alive steps upright at stance height
     support_frac = round(support_steps / max(1, alive), 3)      # fraction of alive steps in genuine stepping support
-    return {"finite": True, "gait": round(R / max(1, steps), 4), "forward": round(forward, 3),
-            "height_ratio": round(hr, 3), "alive": alive, "survived": bool(alive >= steps and hr > 0.6),
-            "speed": round(forward / max(1, alive) / dt, 3), "frames": frames or [],
-            "cadence": cadence, "upright_frac": upright_frac, "support_frac": support_frac,
-            "upright_tau": round(tau_up, 3), "n_feet": int(len(feet_idx)),
-            "n_tokens": graph.n_tokens, "feature_dim": graph.feature_dim}
+    out = {"finite": True, "gait": round(R / max(1, steps), 4), "forward": round(forward, 3),
+           "height_ratio": round(hr, 3), "alive": alive, "survived": bool(alive >= steps and hr > 0.6),
+           "speed": round(forward / max(1, alive) / dt, 3), "frames": frames or [],
+           "cadence": cadence, "upright_frac": upright_frac, "support_frac": support_frac,
+           "upright_tau": round(tau_up, 3), "n_feet": int(len(feet_idx)),
+           "n_tokens": graph.n_tokens, "feature_dim": graph.feature_dim}
+    if cmd_seq is not None:                                       # WS8: RMS speed-tracking error -> a legged_gym
+        track_err = (terr / max(1, tsteps)) ** 0.5              #   exp(-err^2/sigma^2) score (higher = better; a
+        out["track_err"] = round(track_err, 4)                 #   constant gait mistracks a varied command -> low)
+        out["track_score"] = round(float(np.exp(-(track_err ** 2) / 0.05)), 4)
+    return out
 
 
 def recipe_robustness(gene, policy: MorphPolicy | None = None, *, n: int = 8, gain: float = 0.15,

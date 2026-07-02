@@ -14,7 +14,7 @@ class VirtBenchTests(unittest.TestCase):
                             for k in ("family", "task_type", "gates", "split", "steps", "seed")))
         self.assertEqual({t["id"] for t in list_tasks("dev")},
                          {"L1_quad_walk", "L4_decapod_walk", "M1_arm_grasp", "M4_arm_transport"})
-        self.assertEqual(len(list_tasks()), 8)                 # WS5: 4 locomotion + 4 manipulation
+        self.assertEqual(len(list_tasks()), 9)                 # 4 walk + 4 manip + L6_command_track (WS8)
         with self.assertRaises(KeyError):
             get_task("nope")
 
@@ -51,6 +51,18 @@ class VirtBenchTests(unittest.TestCase):
         self.assertAlmostEqual(upright_height_ratio(6), 0.55)                    # hexapod low tripod
         self.assertAlmostEqual(upright_height_ratio(8), 0.50)                    # octopod
         self.assertAlmostEqual(upright_height_ratio(10), 0.50)                   # decapod
+
+    def test_ws8_command_track_constant_gait_fails(self):
+        # WS8: L6 scores forward-speed TRACKING vs a fast->stop->faster->reverse command. A constant gait — even a
+        # GOOD forward walker that passes L1 — CANNOT track it (can't slow/stop/reverse) -> fails on the track gate.
+        from virturoid.services.morph_policy import CPG_DEFAULT
+        from virturoid.services.steerable_body import steerable_quadruped
+        from virturoid.services.virt_bench_arms import _zero_policy_with_cpg
+        gene = steerable_quadruped(n_legs=4)
+        res = verify_submission("L6_command_track", gene, _zero_policy_with_cpg(gene, CPG_DEFAULT), steps=450)
+        self.assertIn("track", res["metrics"])                 # a real tracking score, from the schedule re-run
+        self.assertFalse(res["verified_pass"])                 # a fixed gait cannot follow a varied command
+        self.assertIsNotNone(res["verifier"].get("track_err"))  # RMS tracking error recorded for provenance
 
 
 if __name__ == "__main__":

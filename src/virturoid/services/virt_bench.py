@@ -45,6 +45,16 @@ VIRT_TASKS = [
      "prompt": "design a ten-legged robot that walks",
      "gates": {"forward_m": 0.4, "cadence": 3.0, "upright": 0.6, "support": 0.3},
      "split": "dev", "steps": 900, "seed": 20260701},
+    # WS8 (plan v3): COMMAND-CONDITIONED locomotion. Scored on TRACKING ERROR of the body's forward speed vs a
+    # time-varying commanded speed (fast -> stop -> faster -> reverse) -- NOT on distance -- so a constant "always
+    # walk forward" gait CANNOT pass (it can't slow/stop/reverse). ``track`` = mean exp(-err^2/0.05) in [0,1];
+    # forward_m is disabled (-1) because net distance is not the objective, tracking is. The conditioned policy is
+    # a GPU port of scripts/mjx_morph_vel.py; the task + verifier + "constant gait fails" property are the CPU half.
+    {"id": "L6_command_track", "family": "locomotion", "task_type": "locomotion",
+     "prompt": "design a quadruped that walks at a commanded speed",
+     "gates": {"forward_m": -1.0, "cadence": 3.0, "upright": 0.5, "track": 0.5},
+     "command_schedule": [[0.4, 225], [0.0, 225], [0.5, 225], [-0.2, 225]],
+     "split": "held_out", "steps": 900, "seed": 20260701},
     {"id": "M1_arm_grasp", "family": "manipulation", "task_type": "grasp",
      "prompt": "design an arm that picks up a 3 cm cube", "gates": {"success_rate": 0.6}, "split": "dev",
      "steps": 900, "seed": 20260701},
@@ -96,12 +106,15 @@ def verify_submission(task_id: str, gene, policy=None, *, steps: int | None = No
                 "action_lpf": lpf, "sphere_feet": sf}
     if task["family"] == "locomotion":
         from virturoid.services.morph_policy import recipe_rollout_morph
+        cmd_sched = task.get("command_schedule")             # WS8: L6 scores speed-TRACKING, not distance
         r = recipe_rollout_morph(gene, policy, steps=eval_steps, seed=seed, decimation=dec,
-                                 action_lpf=lpf, sphere_feet=sf)
+                                 action_lpf=lpf, sphere_feet=sf, command_schedule=cmd_sched)
         result = {"forward": r.get("forward"), "cadence": r.get("cadence"),
                   "upright_frac": r.get("upright_frac"), "support_frac": r.get("support_frac"),
-                  "survived": r.get("survived")}
+                  "track_score": r.get("track_score"), "survived": r.get("survived")}
         verifier["upright_tau"] = r.get("upright_tau")        # per-body upright height threshold (WS3 provenance)
+        if cmd_sched is not None:
+            verifier["track_err"] = r.get("track_err")       # RMS speed-tracking error (WS8 provenance)
     else:
         from virturoid.services.task_matched_eval import evaluate_robot
         # MANIPULATION controller channel (plan gap-closure N22/WS6): an arm may SUBMIT searched skill parameters

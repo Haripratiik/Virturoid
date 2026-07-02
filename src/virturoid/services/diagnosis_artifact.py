@@ -120,6 +120,16 @@ def build_diagnosis_artifact(result: dict, *, task_type: str = "locomotion", gat
             support = _num(result.get("support_frac"), default=1.0)
             gate_report.append(_gate_row("support", support, g["support"]))
             metrics["support"] = round(support, 3)
+        # COMMAND-TRACKING gate (WS8): a task may add ``track`` (mean exp(-err^2/sigma) of forward-speed tracking).
+        # A constant gait tracks a varied command poorly -> low track_score -> fails; absent -> 1.0 (untracked tasks).
+        if "track" in g:
+            track = _num(result.get("track_score"), default=1.0)
+            gate_report.append(_gate_row("track", track, g["track"]))
+            metrics["track"] = round(track, 3)
+            if track < g["track"]:                            # name it: real gait, but won't FOLLOW the command
+                mode, explanation = ("poor_tracking",
+                    f"does not track the commanded speed (track {track:.2f} < {g['track']}) — a fixed gait "
+                    "can't slow/stop/reverse; needs a command-conditioned policy (WS8), not more forward reward.")
         if late_speed is not None:
             metrics["late_speed"] = round(_num(late_speed), 3)
     else:
@@ -176,6 +186,8 @@ def _next_actions(mode, fam):
         "leaning": ["stiffen posture gains / add an upright reward term", "check spawn height (standing_spawn_z)"],
         "lunge_stall": ["penalize energy/impulse spikes", "add a sustained-velocity (late-speed) reward term"],
         "weak_forward": ["increase propulsion-reward weight", "raise per-joint torque/gains via adaptive gains"],
+        "poor_tracking": ["train a command-conditioned policy (mjx_morph_vel: v_x/w_z in obs + tracking reward)",
+                          "verify at the frozen command schedule; a fixed gait cannot pass"],
         "fell": ["reduce control authority / add alive bonus", "check gains + spawn penetration", "simplify the body"],
         "grasped": ["accept + bank"],
         "miss": ["fix top-down IK aim / approach pose", "verify the object is in the reachable region"],
