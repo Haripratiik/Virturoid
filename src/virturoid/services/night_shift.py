@@ -38,18 +38,18 @@ class NightReport:
 
 
 def default_night_descriptor(cand, search) -> tuple:
-    """A default behavior descriptor for the QD archive: ``(num_actuated_joints, best_forward)`` -- a cheap
-    (morphology-size, behavior-speed) niche key. ``search`` is the SearchReport; the gene comes from ``cand``."""
-    gene = cand.get("gene")
-    try:
-        n_dof = float(len(gene.actuated_joints()))
-    except Exception:  # noqa: BLE001 - unknown gene shape -> put it in the 0-DOF edge cell
-        n_dof = 0.0
-    fwd = 0.0
+    """A BEHAVIORAL descriptor for the QD archive: ``(best_forward, cadence)`` (plan gap-closure N19). The old
+    ``(num_actuated_joints, forward)`` keyed one axis on morphology SIZE, but the fixed zoo spans only a few n_dof
+    values → most of that axis is unreachable → coverage% inflated (reads "empty" even after productive nights).
+    A behavioral (speed × cadence) descriptor is the MAP-Elites-appropriate key: even ONE body fills many cells
+    with diverse gaits, so coverage tracks real gait diversity. (Body-size diversity returns as an axis once WS2
+    phase-2 adds a morphology-mutation operator that actually grows the frontier.)"""
+    fwd = cad = 0.0
     if search.best is not None:
         m = search.best.artifact.get("metrics") or {}
         fwd = float(m.get("forward_m", m.get("forward", 0.0)) or 0.0)
-    return (n_dof, fwd)
+        cad = float(m.get("cadence", 0.0) or 0.0)
+    return (fwd, cad)
 
 
 def _load_journal(path):

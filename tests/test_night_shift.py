@@ -72,10 +72,21 @@ class NightShiftTests(unittest.TestCase):
 
     def test_qd_archive_records_niches(self):
         from virturoid.services.qd_archive import QDArchive
+        # This test targets the ARCHIVE mechanism, so it supplies its OWN (n_dof, success) descriptor to match its
+        # archive dims (the default descriptor is behavioral (forward, cadence) — N19 — which these grasp candidates
+        # would collapse into one cell since forward/cadence are 0 for manipulation).
+        def _desc(cand, search):
+            g = cand.get("gene")
+            ndof = float(len(g.actuated_joints())) if g is not None else 0.0
+            succ = 0.0
+            if search.best is not None:
+                m = search.best.artifact.get("metrics") or {}
+                succ = float(m.get("success_rate", 0.0) or 0.0)
+            return (ndof, succ)
         with tempfile.TemporaryDirectory() as tmp:
             arch = QDArchive(dims=[("n_dof", 0, 30), ("success", 0.0, 2.0)], bins=6)
             rep = run_night_shift(_cands(), _evaluate_for, memory_dir=tmp, llm=None, per_candidate_evals=3,
-                                  archive=arch)
+                                  archive=arch, descriptor_for=_desc)
             self.assertIsNotNone(rep.qd)                        # dashboard snapshot present when an archive is passed
             self.assertEqual(rep.qd["filled"], 2)              # arm + quad banked into distinct DOF niches
             self.assertGreaterEqual(rep.qd["annecs_v"], 1)
