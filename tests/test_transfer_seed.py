@@ -7,7 +7,8 @@ import unittest
 import tempfile
 from pathlib import Path
 
-from virturoid.services.transfer_seed import best_transfer_seed, gather_banked_policies, transfer_policy_for
+from virturoid.services.transfer_seed import (best_checkpoint_by_deploy, best_transfer_seed,
+                                              gather_banked_policies, transfer_policy_for)
 
 
 class TransferSeedTests(unittest.TestCase):
@@ -55,6 +56,19 @@ class TransferSeedTests(unittest.TestCase):
         pol, npz, ranked = transfer_policy_for(gene=None, candidates=[])   # empty pool -> nothing to warm-start from
         self.assertIsNone(pol)
         self.assertIsNone(npz)
+
+    def test_deploy_selection_picks_best_deploying_checkpoint(self):
+        # plan v2 T0.1: deploy-sim checkpoint selection — never select on train-sim reward. Encodes the divergence
+        # curve (iter-80 deploys WORSE than iter-10), so min_forward is disabled to still return the LEAST-bad if
+        # all are negative; here it picks the deploying-forward checkpoint over the latest. (best_checkpoint_by_deploy
+        # is best_transfer_seed with this same min_forward=-inf; exercised directly here to inject deterministic evals.)
+        table = {
+            "hexdec_it10.npz": {"npz": "hexdec_it10.npz", "forward": 0.108, "survived": True, "feature_dim": 24},
+            "hexdec_it80.npz": {"npz": "hexdec_it80.npz", "forward": -0.156, "survived": True, "feature_dim": 24},
+        }
+        best, ranked = best_transfer_seed(None, list(table), min_forward=-1e9, evaluate=lambda g, c: table[c])
+        self.assertEqual(best, "hexdec_it10.npz")          # the deploying-forward checkpoint, not the latest
+        self.assertTrue(callable(best_checkpoint_by_deploy))   # the T0.1 wrapper exists
 
 
 if __name__ == "__main__":

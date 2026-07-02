@@ -12,14 +12,26 @@ into a fine-tune of an already-forward gait -- and it is the flywheel's transfer
 from __future__ import annotations
 
 
-def evaluate_transfer(gene, npz_path, *, steps: int = 600) -> dict:
-    """Zero-shot: roll a banked policy on ``gene`` with NO training -> its transferred locomotion metrics."""
+def evaluate_transfer(gene, npz_path, *, steps: int = 600, decimation: int | None = None) -> dict:
+    """Zero-shot: roll a banked policy on ``gene`` with NO training -> its transferred locomotion metrics.
+    ``decimation`` = the CONTROL rate to deploy at (plan v2 T1.1); None -> the policy's banked ``decimation``
+    (so a 50 Hz-trained checkpoint is scored at 50 Hz, matching how it was trained)."""
     from virturoid.services.morph_policy import MorphPolicy, recipe_rollout_morph
     pol = MorphPolicy.from_npz(npz_path)
-    r = recipe_rollout_morph(gene, pol, steps=steps)
+    dec = int(decimation if decimation is not None else getattr(pol, "decimation", 1) or 1)
+    r = recipe_rollout_morph(gene, pol, steps=steps, decimation=dec)
     return {"npz": npz_path, "forward": float(r.get("forward", 0.0)), "cadence": float(r.get("cadence", 0.0)),
             "upright_frac": r.get("upright_frac"), "survived": bool(r.get("survived")),
-            "feature_dim": int(pol.feature_dim)}
+            "feature_dim": int(pol.feature_dim), "decimation": dec}
+
+
+def best_checkpoint_by_deploy(gene, npz_paths, *, steps: int = 900, decimation: int | None = None):
+    """Plan v2 T0.1: DEPLOY-SIM checkpoint selection. Roll each training checkpoint of ONE body on the deploy sim
+    (CPU) at its control rate and return ``(best_npz, ranked)`` by forward+upright — NEVER select on train-sim
+    reward (the divergence curve: MJX reward rises while CPU deploy can flip sign). Reuses ``best_transfer_seed``
+    (same rank-by-forward-survived logic); here the 'candidates' are checkpoints of the same policy."""
+    return best_transfer_seed(gene, list(npz_paths), steps=steps, require_survived=True, min_forward=-1e9,
+                              evaluate=lambda g, c: evaluate_transfer(g, c, steps=steps, decimation=decimation))
 
 
 def best_transfer_seed(gene, candidates, *, steps: int = 600, require_survived: bool = True,
