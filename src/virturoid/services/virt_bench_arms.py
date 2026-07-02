@@ -51,7 +51,7 @@ def run_arm_a(task_id: str, *, steps: int = 600) -> dict:
     if gene is None:
         return {"task": task_id, "arm": "A", "verified_pass": False, "failure_mode": "unsupported_task",
                 "metrics": {}, "method": "fixed-pipeline (no search)"}
-    res = verify_submission(task_id, gene, _zero_policy_with_cpg(gene, CPG_DEFAULT), steps=steps)
+    res = verify_submission(task_id, gene, _zero_policy_with_cpg(gene, CPG_DEFAULT))  # FROZEN horizon (§3.1)
     res["arm"] = "A"; res["method"] = "fixed-pipeline: default CPG, no search"
     return res
 
@@ -80,7 +80,7 @@ def run_arm_b(task_id: str, *, steps: int = 600, max_evals: int = 12, on_node=No
             pol, npz, _ranked = transfer_policy_for(gene, models_dir=models_dir, steps=steps)
             if pol is not None:
                 recalled = npz
-                rv = verify_submission(task_id, gene, pol, steps=steps)
+                rv = verify_submission(task_id, gene, pol)             # FROZEN horizon (§3.1)
                 candidates.append((rv, f"memory transfer-recall ({npz.split('/')[-1]})", {"recalled": npz}))
         except Exception:  # noqa: BLE001 - memory is best-effort; the search path still runs
             pass
@@ -90,7 +90,7 @@ def run_arm_b(task_id: str, *, steps: int = 600, max_evals: int = 12, on_node=No
     report = run_design_search(propose=cpg_grid_proposer(), evaluate=evaluate, task_type="locomotion",
                                gates=task["gates"], max_evals=max_evals, on_node=on_node)
     best_cpg = (report.best.result.get("cpg") if report.best else None)
-    sv = verify_submission(task_id, gene, _zero_policy_with_cpg(gene, best_cpg), steps=steps)
+    sv = verify_submission(task_id, gene, _zero_policy_with_cpg(gene, best_cpg))   # FROZEN horizon (§3.1)
     candidates.append((sv, f"CPG-search harness ({report.n_evals} evals, {report.stopped_reason})",
                        {"searched": best_cpg}))
 

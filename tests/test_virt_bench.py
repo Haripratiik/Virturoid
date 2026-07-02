@@ -10,10 +10,20 @@ from virturoid.services.virt_bench import get_task, list_tasks, verify_submissio
 class VirtBenchTests(unittest.TestCase):
     def test_task_registry(self):
         self.assertTrue(list_tasks())
-        self.assertTrue(all(k in get_task("L1_quad_walk") for k in ("family", "task_type", "gates", "split")))
+        self.assertTrue(all(k in get_task("L1_quad_walk")
+                            for k in ("family", "task_type", "gates", "split", "steps", "seed")))
         self.assertEqual({t["id"] for t in list_tasks("dev")}, {"L1_quad_walk", "M1_arm_grasp"})
         with self.assertRaises(KeyError):
             get_task("nope")
+
+    def test_verifier_records_frozen_provenance(self):
+        # §3.1/§3.2: the verdict records WHICH sim + the FROZEN horizon/seed + control decimation it ran under
+        res = verify_submission("L1_quad_walk", quadruped_gene(), policy=None, steps=120, decimation=5)
+        v = res["verifier"]
+        self.assertEqual(v["sim"], "cpu-mujoco")
+        self.assertEqual(v["steps"], 120)                  # explicit override honored (tests); default = task's 900
+        self.assertEqual(v["seed"], get_task("L1_quad_walk")["seed"])   # seed is FROZEN in the task, not caller-set
+        self.assertEqual(v["decimation"], 5)
 
     def test_verifier_reruns_and_gates_honestly(self):
         # submit a quad with the DEFAULT (untrained) controller -> the verifier re-runs it and honestly gates
