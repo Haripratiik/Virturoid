@@ -39,6 +39,17 @@ class RecipeRolloutTests(unittest.TestCase):
         self.assertLessEqual(r["alive"], 200)
         self.assertEqual(r["feature_dim"], self.fd)
 
+    def test_decimation_default_is_byte_identical_and_active_when_set(self):
+        # plan v2 T1.1: control decimation. dec=1 must be byte-identical (no behavior change for banked policies);
+        # dec>1 must actually change the trajectory (the action is held between recomputes).
+        from virturoid.services.morph_policy import MorphPolicy, recipe_rollout_morph
+        pol = MorphPolicy(self.fd, seed=7)
+        base = recipe_rollout_morph(self.g, pol, steps=200)["forward"]
+        d1 = recipe_rollout_morph(self.g, pol, steps=200, decimation=1)["forward"]
+        self.assertEqual(base, d1)                         # dec=1 == no-arg default (byte-identical)
+        d10 = recipe_rollout_morph(self.g, pol, steps=200, decimation=10)["forward"]
+        self.assertNotEqual(base, d10)                     # holding the action 10 steps changes the rollout
+
     def test_obs_normalizer_shape_and_applied(self):
         import numpy as np
         from virturoid.services.morph_policy import MorphPolicy, recipe_obs_normalizer, recipe_rollout_morph

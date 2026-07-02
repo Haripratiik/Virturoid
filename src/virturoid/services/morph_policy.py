@@ -562,7 +562,8 @@ def extract_gait_params(gene) -> dict | None:
 def recipe_rollout_morph(gene, policy: MorphPolicy | None = None, *, steps: int = 900, kp: float = 32.0,
                          kd: float = 1.5, ascale: float = 0.4, vtgt: float = 0.3, normalizer=None,
                          adaptive: bool = False, cpg: dict | None = None, model_perturb=None,
-                         seed: int = 0, record_frames: bool = False, frame_every: int = 5) -> dict:
+                         seed: int = 0, record_frames: bool = False, frame_every: int = 5,
+                         decimation: int = 1) -> dict:
     """Drive ``gene`` with the anti-collapse RECIPE: position-PD to the default standing pose + learned offset,
     obs normalization (``normalizer=(mean,std)``), terminate-on-fall, clipped-non-negative velocity-tracking
     reward. Returns ``gait`` (recipe reward meaned over the horizon — the training fitness), ``forward`` travel,
@@ -643,11 +644,14 @@ def recipe_rollout_morph(gene, policy: MorphPolicy | None = None, *, steps: int 
     fz0 = _gz0[feet_idx] if len(feet_idx) else np.zeros(0)
     c_prev = (np.asarray(data.geom_xpos[feet_idx, 2]) < fz0 + 0.02) if len(feet_idx) else np.zeros(0, bool)
     lifts = 0; up_steps = 0
-    for t in range(steps):
-        obs = graph.observe(model, data)
-        if mean is not None:
-            obs = (obs - mean) / std
-        a = policy.act(obs, hop=hop)
+    dec = max(1, int(decimation))                            # CONTROL DECIMATION (plan v2 T1.1): recompute the
+    a = None                                                 #   learned action only every `dec` physics steps and
+    for t in range(steps):                                   #   HOLD it between (the CPG clock + PD loop still run
+        if t % dec == 0:                                     #   every step). dec=1 -> recompute every step ->
+            obs = graph.observe(model, data)                 #   byte-identical to the pre-decimation rollout.
+            if mean is not None:
+                obs = (obs - mean) / std
+            a = policy.act(obs, hop=hop)
         cphase = _two_pi * cpg_freq * t * dt if cpg_on else 0.0
         for k in range(graph.n_tokens):
             cpg_off = float(cpg_amp[k] * np.sin(cphase + cpg_phase[k])) if cpg_on else 0.0
