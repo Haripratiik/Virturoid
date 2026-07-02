@@ -68,3 +68,37 @@ def cpg_grid_proposer(grid: list[dict] | None = None):
         return {"edit_kind": "cpg", "params": params, "rationale": "grid sweep of CPG gait direction/frequency"}
 
     return propose
+
+
+def make_manip_evaluate(gene, *, prompt: str = ""):
+    """Manipulation rung of the fidelity ladder (plan gap-closure WS6): evaluate a candidate's grasp-skill
+    parameters (``spec['params']``: grip/PD gains, phase_steps) with the REAL task-matched pick-place eval, so
+    the harness can SEARCH manip controllers the way it searches CPG gaits. Returns ``{success_rate, params}`` for
+    the honesty gate (task_type grasp/pick_place gates on success_rate)."""
+    from virturoid.services.task_matched_eval import evaluate_robot
+
+    def evaluate(spec):
+        params = (spec or {}).get("params")
+        res = evaluate_robot(gene, prompt=prompt, controller_params=params)
+        return {"success_rate": float(res.get("value", 0.0) or 0.0), "params": params}
+
+    return evaluate
+
+
+def manip_grid_proposer(grid: list[dict] | None = None):
+    """LLM-free manip proposer: sweep a coarse grid of grasp-skill PD/timing params (the controller_params the
+    task-matched eval accepts), then stop. The honesty gate selects the best-VERIFIED — so a searched grip beats
+    the default skill only if it actually raises the verified success rate (mirror of ``cpg_grid_proposer``)."""
+    if grid is None:
+        grid = [{"kp": kp, "kd": kd, "phase_steps": ps}
+                for kp in (7.0, 9.0, 12.0) for kd in (1.0, 1.4) for ps in (250, 300)]
+    state = {"i": 0}
+
+    def propose(parent, history):
+        if state["i"] >= len(grid):
+            return None                                       # grid exhausted -> proposer_exhausted
+        params = dict(grid[state["i"]])
+        state["i"] += 1
+        return {"edit_kind": "manip", "params": params, "rationale": "grid sweep of grasp PD/timing params"}
+
+    return propose

@@ -83,7 +83,12 @@ def verify_submission(task_id: str, gene, policy=None, *, steps: int | None = No
                   "upright_frac": r.get("upright_frac"), "survived": r.get("survived")}
     else:
         from virturoid.services.task_matched_eval import evaluate_robot
-        res = evaluate_robot(gene, prompt=task["prompt"])
+        # MANIPULATION controller channel (plan gap-closure N22/WS6): an arm may SUBMIT searched skill parameters
+        # (a dict: grip/PD gains, phase_steps, approach offsets) as ``policy`` -> the verifier re-runs the skill
+        # WITH them. ``None`` (or a non-dict) = the default built-in skill (the honest floor). Either way the
+        # verifier owns the physics re-run and the gate; the arm never grades itself.
+        controller_params = policy if isinstance(policy, dict) else None
+        res = evaluate_robot(gene, prompt=task["prompt"], controller_params=controller_params)
         result = {"success_rate": res.get("value"), "metric": res.get("metric")}
 
     art = build_diagnosis_artifact(result, task_type=task["task_type"], gates=task["gates"])
