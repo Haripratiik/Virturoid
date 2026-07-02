@@ -95,7 +95,11 @@ def run_arm_b(task_id: str, *, steps: int = 600, max_evals: int = 12, on_node=No
     if use_memory:
         try:
             from virturoid.services.transfer_seed import transfer_policy_for
-            pol, npz, _ranked = transfer_policy_for(gene, models_dir=models_dir, steps=steps)
+            # rank transfers at the FROZEN VERIFY horizon, not the short search `steps`: a banked 50Hz-decimation
+            # walker needs the full episode to show its forward travel, so a short horizon mis-ranks it below a
+            # policy that merely lunges early. Selecting at the deploy horizon = recall the one that actually verifies.
+            recall_steps = int(task.get("steps", 900))
+            pol, npz, _ranked = transfer_policy_for(gene, models_dir=models_dir, steps=recall_steps)
             if pol is not None:
                 recalled = npz
                 rv = verify_submission(task_id, gene, pol)             # FROZEN horizon (§3.1)
