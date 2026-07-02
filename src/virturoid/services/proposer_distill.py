@@ -75,6 +75,66 @@ def build_sft_dataset(pairs: list[tuple[str, RobotGene]], *, min_success: float 
     return examples
 
 
+def _round_floats(obj, ndigits: int = 2):
+    if isinstance(obj, float):
+        return round(obj, ndigits)
+    if isinstance(obj, dict):
+        return {k: _round_floats(v, ndigits) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_round_floats(v, ndigits) for v in obj]
+    return obj
+
+
+def _distinct_key(example: dict) -> tuple:
+    """A (prompt-family, normalized-design) fingerprint for de-duplication: the prompt's first few words + the
+    assistant design JSON with floats rounded, so near-identical designs collapse to one."""
+    msgs = example.get("messages", [])
+    prompt = next((m.get("content", "") for m in msgs if m.get("role") == "user"), "")
+    design = next((m.get("content", "") for m in msgs if m.get("role") == "assistant"), "")
+    try:
+        norm = json.dumps(_round_floats(json.loads(design)), sort_keys=True)
+    except Exception:  # noqa: BLE001 - a non-JSON design de-dups on its raw string
+        norm = str(design)
+    return (" ".join(str(prompt).lower().split()[:4]), norm)
+
+
+def dedup_distinct(examples: list[dict]) -> list[dict]:
+    """Keep only DISTINCT (prompt-family, design) examples (plan v3 WS12). Rejection-sampling SFT gains are driven
+    by the count of DISTINCT verified solutions, NOT raw volume — after de-dup, 100 samples yield only ~5 distinct
+    paths/problem (Yuan et al. 2023, arXiv:2308.01825); LIMA (2305.11206) shows quantity-without-diversity
+    plateaus. So the flywheel's banked designs must be de-duplicated before they count toward distillation."""
+    seen: set = set()
+    out: list[dict] = []
+    for ex in examples:
+        k = _distinct_key(ex)
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(ex)
+    return out
+
+
+def distillation_readiness(examples: list[dict], *, target_distinct: int = 1000) -> dict:
+    """Is the banked corpus ready to self-distill a small proposer? Reports DISTINCT-design count + prompt-family
+    coverage and gates on the evidence anchor (~1000 distinct: LIMA 2305.11206 / ReST^EM 2312.06585). Below that,
+    DIVERSITY dominates raw count and a run may only shift schema/format adherence (RFT 2308.01825) — so the
+    honest verdict is 'collect more distinct designs', not 'train now'. The SFT run itself is external GPU."""
+    distinct = dedup_distinct(examples)
+    fams = {_distinct_key(ex)[0] for ex in distinct}
+    n = len(distinct)
+    ready = n >= int(target_distinct)
+    if not examples:
+        verdict = "no verified designs banked yet — the flywheel must run to produce rejection-sampled successes"
+    elif ready:
+        verdict = (f"{n} distinct designs across {len(fams)} prompt-families >= {target_distinct} — ready to "
+                   "rejection-sampling-SFT an ~8B base for 1-2 rounds (ReST^EM: gains saturate after 1-2)")
+    else:
+        verdict = (f"{n} distinct designs across {len(fams)} prompt-families (< {target_distinct}); collect more — "
+                   "diversity dominates raw count; a run now may only shift schema adherence, not capability")
+    return {"n_examples": len(examples), "n_distinct": n, "n_prompt_families": len(fams),
+            "target_distinct": int(target_distinct), "ready": ready, "verdict": verdict}
+
+
 def export_sft_jsonl(examples: list[dict], path: Path) -> int:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
