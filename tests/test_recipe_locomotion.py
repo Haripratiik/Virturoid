@@ -50,6 +50,29 @@ class RecipeRolloutTests(unittest.TestCase):
         d10 = recipe_rollout_morph(self.g, pol, steps=200, decimation=10)["forward"]
         self.assertNotEqual(base, d10)                     # holding the action 10 steps changes the rollout
 
+    def test_action_lpf_default_identical_and_active_when_set(self):
+        # plan v2 T1.2: action EMA low-pass. lpf=0 must be byte-identical; lpf>0 must change the trajectory.
+        from virturoid.services.morph_policy import MorphPolicy, recipe_rollout_morph
+        pol = MorphPolicy(self.fd, seed=9)
+        base = recipe_rollout_morph(self.g, pol, steps=200)["forward"]
+        f0 = recipe_rollout_morph(self.g, pol, steps=200, action_lpf=0.0)["forward"]
+        self.assertEqual(base, f0)                         # lpf=0 == default (byte-identical)
+        f5 = recipe_rollout_morph(self.g, pol, steps=200, action_lpf=0.5)["forward"]
+        self.assertNotEqual(base, f5)                      # EMA-smoothing the offset changes the rollout
+
+    def test_action_lpf_round_trips_through_npz(self):
+        import tempfile
+        from pathlib import Path
+        from virturoid.services.morph_policy import MorphPolicy
+        pol = MorphPolicy(self.fd, seed=13); pol.action_lpf = 0.3; pol.decimation = 10
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "lpf.npz"
+            pol.to_npz(str(p), score=0.5)
+            loaded = MorphPolicy.from_npz(str(p))
+            self.assertAlmostEqual(loaded.action_lpf, 0.3)   # banked control filter travels with the weights
+            self.assertEqual(loaded.decimation, 10)          # meta[6] + meta[7] both round-trip
+        self.assertEqual(MorphPolicy(self.fd).action_lpf, 0.0)   # default off
+
     def test_decimation_round_trips_through_npz(self):
         # plan v2 T1.1: a policy trained at 50Hz (D=10) must DEPLOY at the same rate -> decimation rides in meta[6]
         import tempfile

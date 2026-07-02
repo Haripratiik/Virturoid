@@ -48,6 +48,7 @@ class MorphPolicy:
         self.adaptive_gains = False
         self.cpg = None                                       # trot-CPG prior params (set when CPG-trained; see CPG_DEFAULT)
         self.decimation = 1                                   # control decimation (plan v2 T1.1): deploy hold-D-steps
+        self.action_lpf = 0.0                                 # action EMA low-pass (plan v2 T1.2); 0 = off
         rng = np.random.default_rng(seed)
         s = 0.3
         # NOTE: Wrange/brange are appended LAST so the rng draw order for We/Wq/Wk/Wv/Wo/Wh is unchanged
@@ -174,6 +175,7 @@ class MorphPolicy:
         # same rate or the gait mismatches. Older <=6-element meta -> 1 (every-step, unchanged). recipe_rollout_morph
         # and verify_submission read policy.decimation so deploy==train automatically.
         p.decimation = int(float(meta[6])) if len(meta) > 6 else 1
+        p.action_lpf = float(meta[7]) if len(meta) > 7 else 0.0   # meta[7]: action EMA low-pass (T1.2); deploy==train
         return p
 
     def to_npz(self, path, score: float = 0.0, *, normalizer=None):
@@ -194,7 +196,8 @@ class MorphPolicy:
                  meta=np.asarray([float(self.feature_dim), float(self.hidden), recipe_flag, float(score),
                                   1.0 if getattr(self, "adaptive_gains", False) else 0.0,
                                   1.0 if getattr(self, "cpg", None) else 0.0,
-                                  float(getattr(self, "decimation", 1) or 1)]))   # meta[6]: control decimation
+                                  float(getattr(self, "decimation", 1) or 1),      # meta[6]: control decimation
+                                  float(getattr(self, "action_lpf", 0.0) or 0.0)]))   # meta[7]: action LPF
         return str(path)
 
 
@@ -569,7 +572,7 @@ def recipe_rollout_morph(gene, policy: MorphPolicy | None = None, *, steps: int 
                          kd: float = 1.5, ascale: float = 0.4, vtgt: float = 0.3, normalizer=None,
                          adaptive: bool = False, cpg: dict | None = None, model_perturb=None,
                          seed: int = 0, record_frames: bool = False, frame_every: int = 5,
-                         decimation: int = 1) -> dict:
+                         decimation: int = 1, action_lpf: float = 0.0) -> dict:
     """Drive ``gene`` with the anti-collapse RECIPE: position-PD to the default standing pose + learned offset,
     obs normalization (``normalizer=(mean,std)``), terminate-on-fall, clipped-non-negative velocity-tracking
     reward. Returns ``gait`` (recipe reward meaned over the horizon — the training fitness), ``forward`` travel,
@@ -651,13 +654,16 @@ def recipe_rollout_morph(gene, policy: MorphPolicy | None = None, *, steps: int 
     c_prev = (np.asarray(data.geom_xpos[feet_idx, 2]) < fz0 + 0.02) if len(feet_idx) else np.zeros(0, bool)
     lifts = 0; up_steps = 0
     dec = max(1, int(decimation))                            # CONTROL DECIMATION (plan v2 T1.1): recompute the
-    a = None                                                 #   learned action only every `dec` physics steps and
-    for t in range(steps):                                   #   HOLD it between (the CPG clock + PD loop still run
-        if t % dec == 0:                                     #   every step). dec=1 -> recompute every step ->
-            obs = graph.observe(model, data)                 #   byte-identical to the pre-decimation rollout.
+    lpf = float(action_lpf)                                  #   learned action only every `dec` physics steps and
+    a = a_filt = None                                        #   HOLD it between (the CPG clock + PD loop still run
+    for t in range(steps):                                   #   every step). dec=1 + action_lpf=0 -> byte-identical.
+        if t % dec == 0:
+            obs = graph.observe(model, data)
             if mean is not None:
                 obs = (obs - mean) / std
-            a = policy.act(obs, hop=hop)
+            a_raw = policy.act(obs, hop=hop)                 # ACTION LPF (plan v2 T1.2): EMA-smooth the offset at the
+            a_filt = a_raw if a_filt is None else lpf * a_filt + (1.0 - lpf) * a_raw   # control rate (Playground ~5Hz
+            a = a_filt                                       #   filter); lpf=0 -> a=a_raw -> unchanged.
         cphase = _two_pi * cpg_freq * t * dt if cpg_on else 0.0
         for k in range(graph.n_tokens):
             cpg_off = float(cpg_amp[k] * np.sin(cphase + cpg_phase[k])) if cpg_on else 0.0

@@ -66,10 +66,11 @@ def verify_submission(task_id: str, gene, policy=None, *, steps: int | None = No
     eval_steps = int(task.get("steps", 900) if steps is None else steps)
     seed = int(task.get("seed", 0))
     dec = int(decimation if decimation is not None else getattr(policy, "decimation", 1) or 1)
-    verifier = {"sim": "cpu-mujoco", "steps": eval_steps, "seed": seed, "decimation": dec}
+    lpf = float(getattr(policy, "action_lpf", 0.0) or 0.0)    # deploy at the policy's banked LPF (T1.2, deploy==train)
+    verifier = {"sim": "cpu-mujoco", "steps": eval_steps, "seed": seed, "decimation": dec, "action_lpf": lpf}
     if task["family"] == "locomotion":
         from virturoid.services.morph_policy import recipe_rollout_morph
-        r = recipe_rollout_morph(gene, policy, steps=eval_steps, seed=seed, decimation=dec)
+        r = recipe_rollout_morph(gene, policy, steps=eval_steps, seed=seed, decimation=dec, action_lpf=lpf)
         result = {"forward": r.get("forward"), "cadence": r.get("cadence"),
                   "upright_frac": r.get("upright_frac"), "survived": r.get("survived")}
     else:

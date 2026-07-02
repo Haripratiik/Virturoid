@@ -134,6 +134,10 @@ def main(argv=None) -> int:
     ap.add_argument("--calf-phase", type=float, default=None, help="override the trot-CPG calf phase (rad); "
                     "per-body gait direction (quad walks fwd at 1.5708, a bilateral hexapod at 0.0)")
     ap.add_argument("--cpg-freq", type=float, default=None, help="override the trot-CPG frequency (Hz)")
+    ap.add_argument("--action-lpf", type=float, default=0.0, help="plan v2 T1.2: EMA low-pass on the action offset "
+                    "at the control rate (Playground uses ~5Hz between policy and PD); fraction of the previous "
+                    "offset retained, in [0,1). 0 = off (byte-identical). ~0.2-0.4 strips high-freq content the "
+                    "policy would use to chase contact micro-dynamics. Deploy with recipe_rollout_morph(action_lpf=).")
     ap.add_argument("--keep-checkpoints", action="store_true", help="plan v2 T0.1: also save NUMBERED checkpoints "
                     "(runs/<name>_it{N}.npz every 10 iters) so DEPLOY-SIM checkpoint selection can pick best-by-CPU "
                     "(MJX reward can rise while CPU deploy flips sign -- never select on train-sim reward).")
@@ -231,6 +235,7 @@ def main(argv=None) -> int:
     SWING_W, SLIP_W, ALT_W, SMOOTH_W, PROG_W = args.swing_w, args.slip_w, args.alt_w, args.smooth_w, args.prog_w
     BACK_W = args.back_w                                       # G4: explicit backward-base-x penalty
     FGATE = args.fwd_gate_w                                    # G4 root-cause fix: gate gait-quality on forward speed
+    ACTION_LPF = float(args.action_lpf)                       # T1.2: EMA low-pass on the action offset (0 = off)
     AIR_W, AIR_TGT, VZ_W, WXY_W = args.air_w, args.air_target, args.vz_w, args.wxy_w   # legged_gym reward terms
     TORQUE_W = args.torque_w                              # actuator-effort penalty (anti-crank stabilizer)
     # TROT-CPG PRIOR (opt-in --cpg): per-token feed-forward amplitude/phase from the SAME logic as the CPU recipe
@@ -384,6 +389,8 @@ def main(argv=None) -> int:
             logp = (-0.5 * (((act - means) / std) ** 2 + 2 * jp.log(std) + jp.log(2 * jp.pi))).sum(-1)
             a_clip = jp.clip(act, -1, 1)
             off = jp.tanh(act)                            # the bounded control OFFSET actually applied (recipe)
+            if ACTION_LPF > 0.0:                          # ACTION LPF (T1.2): EMA-smooth the applied offset at the
+                off = ACTION_LPF * a_prev + (1.0 - ACTION_LPF) * off   # control rate (train==deploy); 0 -> unchanged.
             # CONTROL DECIMATION (T1.1): `_ctrl_of(d)` computes ctrl from the CURRENT substep state (CPG clock
             # advances via d.time, PD tracks the held target as the body moves) with the learned action `off`/
             # `a_clip` HELD. Step it DECIM times. DECIM=1 -> one step from the INPUT state = byte-identical.
@@ -582,7 +589,8 @@ def main(argv=None) -> int:
                  # meta layout MUST match MorphPolicy.from_npz: [F,H,NT,fwd, adaptive@4, cpg@5, decimation@6] so CPU
                  # replay reads the right flags (adaptive gains + trot-CPG prior + control rate) and reproduces the gait.
                  meta=np.asarray([F, H, NT, float(fwd),
-                                  1.0 if args.adaptive else 0.0, 1.0 if CPG_ON else 0.0, float(DECIM)]))
+                                  1.0 if args.adaptive else 0.0, 1.0 if CPG_ON else 0.0, float(DECIM),
+                                  float(ACTION_LPF)]))         # meta[7]: action LPF (T1.2) so deploy matches train
 
     if args.eval_npz:                                   # EVAL: deterministic single-env MJX rollout (recipe control)
         dd = np.load(args.eval_npz)
