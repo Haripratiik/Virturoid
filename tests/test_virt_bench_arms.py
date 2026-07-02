@@ -40,6 +40,35 @@ class VirtBenchArmsTests(unittest.TestCase):
         self.assertTrue(all(isinstance(r["A_pass"], bool) and isinstance(r["B_pass"], bool) for r in sb["rows"]))
 
 
+class ArmBGpuRungTests(unittest.TestCase):
+    def test_gpu_rung_composes_and_verifies(self):
+        # WS1/#66: with use_gpu, run_arm_b promotes the search winner to a GPU-trained residual, then INDEPENDENTLY
+        # verifies it at the frozen horizon. Inject a stub trainer that "returns" the banked forward-quad so the
+        # rung is exercised on CPU (no real GPU): the GPU candidate then verifies forward and wins.
+        import os
+        if not os.path.isfile("build/models/quaddec_fwd.npz"):
+            self.skipTest("no banked forward-quad to stand in for the GPU-trained policy")
+        seen = {}
+
+        def stub_hifi(spec):
+            seen["spec"] = spec
+            return {"trained": True, "npz": "build/models/quaddec_fwd.npz", "forward": 0.668, "survived": True}
+
+        b = run_arm_b("L1_quad_walk", steps=120, max_evals=2, use_memory=False, use_gpu=True,
+                      gpu_iters=40, gpu_hifi=stub_hifi)
+        self.assertTrue(b["verified_pass"])                    # the GPU-trained (stub) policy verified forward
+        self.assertIn("GPU residual", b["method"])             # the GPU candidate won the best-verified selection
+        self.assertEqual(b["gpu_npz"], "build/models/quaddec_fwd.npz")
+        self.assertEqual(b["budget"]["gpu_iters"], 40)         # N16 ledger records the GPU spend
+        self.assertIn("spec", seen)                            # the search winner was handed to the trainer
+
+    def test_gpu_off_is_unchanged(self):
+        # default use_gpu=False -> no GPU candidate, budget records 0 GPU iters (CPU-only arm behaves as before)
+        b = run_arm_b("L1_quad_walk", steps=120, max_evals=2, use_memory=False)
+        self.assertEqual(b["budget"]["gpu_iters"], 0)
+        self.assertIsNone(b.get("gpu_npz"))
+
+
 class HeadToHeadTests(unittest.TestCase):
     def test_three_arm_deltas_and_honesty_aggregate_correctly(self):
         # Stub the three arms + task list so we test the AGGREGATION (deltas + honesty), not re-run physics.
