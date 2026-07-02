@@ -31,6 +31,8 @@ def _task_body(task: dict):
         return steerable_quadruped(n_legs=6, bilateral=True)
     if task["id"] == "L3_octopod_walk":
         return steerable_quadruped(n_legs=8, bilateral=True)
+    if task["id"] == "L4_decapod_walk":
+        return steerable_quadruped(n_legs=10, bilateral=True)
     return None                                               # N22 hygiene: unknown legged task -> explicit
     #                                                           unsupported_task, never silently verify a WRONG body
 
