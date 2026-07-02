@@ -19,6 +19,9 @@ from virturoid.services.virt_bench import get_task, list_tasks, verify_submissio
 
 def _task_body(task: dict):
     """Deterministically compose the body a locomotion task calls for (returns None for unsupported families)."""
+    if task["family"] == "manipulation":                      # §3.5: manipulation tasks get a tabletop arm; the
+        from virturoid.fixtures.gene_library import tabletop_arm_gene   # verifier runs the grasp/sort skill (evaluate_robot)
+        return tabletop_arm_gene()
     if task["family"] != "locomotion":
         return None
     from virturoid.services.steerable_body import steerable_quadruped
@@ -51,8 +54,12 @@ def run_arm_a(task_id: str, *, steps: int = 600) -> dict:
     if gene is None:
         return {"task": task_id, "arm": "A", "verified_pass": False, "failure_mode": "unsupported_task",
                 "metrics": {}, "method": "fixed-pipeline (no search)"}
-    res = verify_submission(task_id, gene, _zero_policy_with_cpg(gene, CPG_DEFAULT))  # FROZEN horizon (§3.1)
-    res["arm"] = "A"; res["method"] = "fixed-pipeline: default CPG, no search"
+    if task["family"] == "locomotion":
+        pol, method = _zero_policy_with_cpg(gene, CPG_DEFAULT), "fixed-pipeline: default CPG, no search"
+    else:                                                     # manipulation: the verifier runs the built-in skill
+        pol, method = None, "fixed-pipeline: default grasp skill, no search"
+    res = verify_submission(task_id, gene, pol)               # FROZEN horizon (§3.1)
+    res["arm"] = "A"; res["method"] = method
     return res
 
 
@@ -69,6 +76,15 @@ def run_arm_b(task_id: str, *, steps: int = 600, max_evals: int = 12, on_node=No
     if gene is None:
         return {"task": task_id, "arm": "B", "verified_pass": False, "failure_mode": "unsupported_task",
                 "metrics": {}, "method": "full harness"}
+
+    # MANIPULATION: the CPG/locomotion search doesn't apply; the verifier runs the built-in skill. Arm B here =
+    # the composed arm verified (memory-recall of a banked arm design/skill is the future edge; today A==B for
+    # manip, reported honestly so the scoreboard covers the family without faking a delta).
+    if task["family"] != "locomotion":
+        res = verify_submission(task_id, gene, None)
+        res["arm"] = "B"; res["method"] = "full harness: default grasp skill (no manip search yet)"
+        res["searched"] = None; res["recalled"] = None; res["n_evals"] = 0
+        return res
 
     candidates = []                                            # (verified_result, method, extras)
 
@@ -106,18 +122,23 @@ def run_arm_b(task_id: str, *, steps: int = 600, max_evals: int = 12, on_node=No
 
 
 def run_scoreboard(*, split: str | None = "dev", steps: int = 600, max_evals: int = 12, use_memory: bool = True,
-                   models_dir: str = "build/models") -> dict:
-    """Run both arms over the LOCOMOTION tasks in ``split`` (``"dev"`` / ``"held_out"`` / ``None`` = all) and
-    return an honest, verifier-scored A-vs-B scoreboard. ``B_solved - A_solved`` is the measured value of the
-    full harness (search + memory) -- the head-to-head number for "beats Claude+MCP" on this slice."""
+                   models_dir: str = "build/models", families=("locomotion", "manipulation")) -> dict:
+    """Run both arms over the tasks in ``split`` (``"dev"`` / ``"held_out"`` / ``None`` = all) whose family is in
+    ``families`` (locomotion + manipulation by default) and return an honest, verifier-scored A-vs-B scoreboard.
+    ``B_solved - A_solved`` is the measured value of the full harness -- the head-to-head number for "beats
+    Claude+MCP" on this slice."""
     rows = []
     for task in list_tasks(split):
-        if task["family"] != "locomotion":
+        if task["family"] not in families:
             continue
         a = run_arm_a(task["id"], steps=steps)
         b = run_arm_b(task["id"], steps=steps, max_evals=max_evals, use_memory=use_memory, models_dir=models_dir)
-        rows.append({"task": task["id"], "A_pass": bool(a["verified_pass"]), "B_pass": bool(b["verified_pass"]),
-                     "A_fwd": a["metrics"].get("forward_m"), "B_fwd": b["metrics"].get("forward_m"),
+        rows.append({"task": task["id"], "family": task["family"],
+                     "A_pass": bool(a["verified_pass"]), "B_pass": bool(b["verified_pass"]),
+                     "A_metric": (a["metrics"].get("forward_m") if a["metrics"].get("forward_m") is not None
+                                  else a["metrics"].get("success_rate")),
+                     "B_metric": (b["metrics"].get("forward_m") if b["metrics"].get("forward_m") is not None
+                                  else b["metrics"].get("success_rate")),
                      "B_searched": b.get("searched"), "B_recalled": b.get("recalled"), "B_n_evals": b.get("n_evals")})
     return {"rows": rows, "A_solved": sum(r["A_pass"] for r in rows),
             "B_solved": sum(r["B_pass"] for r in rows), "n_tasks": len(rows),
