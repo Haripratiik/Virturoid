@@ -111,6 +111,10 @@ def main(argv=None) -> int:
     ap.add_argument("--dr-push", type=float, default=0.02, help="per-step probability of a random horizontal velocity "
                     "PUSH on the base (external disturbance robustness); 0 disables pushes")
     ap.add_argument("--dr-push-mag", type=float, default=0.5, help="push magnitude (m/s) of the random base kick")
+    ap.add_argument("--contact-dr", action="store_true", help="plan v2 T1.5: per-env MODEL-param domain "
+                    "randomization (canonical MuJoCo-Playground pattern: batch geom_friction/body_mass/dof_"
+                    "armature/dof_frictionloss as vmapped mjx.Model leaves), targeting the MJX<->CPU CONTACT gap "
+                    "for vigorous learned gaits. Off (default) -> in_axes=(None,0) = byte-identical single model.")
     ap.add_argument("--adaptive", action="store_true", help="ADAPTIVE per-joint PD gains from each DOF's effective "
                     "inertia (mj_fullM diag), so a heavy biped/humanoid joint gets the stiffness flat kp=32 can't "
                     "provide (it folds otherwise). Mirrors CPU morph_policy.recipe_gains; anchored to 32/1.5 on the "
@@ -261,6 +265,7 @@ def main(argv=None) -> int:
             print("--cpg requested but body is not a recognized legged body; using scalar recipe", flush=True)
     # SIM2REAL DR knobs (static -> every DR op below is guarded by DR_ON, so --dr off is byte-identical).
     DR_ON = bool(args.dr); DR_GAIN = float(args.dr_gain); DR_PD = float(args.dr_pd)
+    CONTACT_DR = bool(args.contact_dr)                        # T1.5: per-env MODEL-param DR (vmapped mjx.Model)
     DR_OBS = float(args.dr_obs); DR_PUSH = float(args.dr_push); DR_PUSH_MAG = float(args.dr_push_mag)
     if DR_ON:
         print(f"domain randomization ON: gain+-{DR_GAIN} pd+-{DR_PD} obs_noise={DR_OBS} push_p={DR_PUSH}@{DR_PUSH_MAG}m/s", flush=True)
@@ -348,7 +353,29 @@ def main(argv=None) -> int:
         vals = vmlp(P["vf"], pools)[:, 0]                                  # (N,)
         return means, vals
 
-    step_v = jax.vmap(mjx.step, in_axes=(None, 0))
+    # CONTACT-PARAM DR (T1.5): batch per-env mjx.Model leaves (friction/mass/armature/frictionloss) + a matching
+    # in_axes Model; vmap step/forward over (model, data). The canonical MuJoCo-Playground pattern, targeting the
+    # MJX<->CPU CONTACT gap for vigorous learned gaits. OFF -> mx_v=mx, mx_axes=None -> in_axes=(None,0) = the
+    # original single-model path (byte-identical). make_data keeps the UNBATCHED mx (shapes don't depend on leaves).
+    if CONTACT_DR:
+        def _rand_model(rng):
+            k = jax.random.split(rng, 4)
+            fr = mx.geom_friction.at[:, 0].set(
+                mx.geom_friction[:, 0] * jax.random.uniform(k[0], (mx.ngeom,), minval=0.7, maxval=1.4))
+            ma = mx.body_mass * jax.random.uniform(k[1], (mx.nbody,), minval=0.9, maxval=1.1)
+            ar = mx.dof_armature.at[6:].set(
+                mx.dof_armature[6:] * jax.random.uniform(k[2], (mx.nv - 6,), minval=1.0, maxval=1.05))
+            fl = mx.dof_frictionloss.at[6:].set(
+                mx.dof_frictionloss[6:] * jax.random.uniform(k[3], (mx.nv - 6,), minval=0.5, maxval=2.0))
+            return fr, ma, ar, fl
+        _fr, _ma, _ar, _fl = jax.vmap(_rand_model)(jax.random.split(jax.random.PRNGKey(7), N))
+        mx_v = mx.replace(geom_friction=_fr, body_mass=_ma, dof_armature=_ar, dof_frictionloss=_fl)
+        mx_axes = jax.tree_util.tree_map(lambda _x: None, mx).replace(
+            geom_friction=0, body_mass=0, dof_armature=0, dof_frictionloss=0)
+        print(f"contact-DR ON: per-env friction/mass/armature/frictionloss over {N} envs", flush=True)
+    else:
+        mx_v, mx_axes = mx, None
+    step_v = jax.vmap(mjx.step, in_axes=(mx_axes, 0))
 
     _spawn = jp.asarray(spawn_qpos) if spawn_qpos is not None else None  # imported robot's home pose
 
@@ -356,7 +383,7 @@ def main(argv=None) -> int:
         data = jax.vmap(lambda _: mjx.make_data(mx, naconmax=NACON, njmax=NJMAX))(jp.arange(N))
         if _spawn is not None:                            # spawn every env at the robot's standing home pose
             data = data.replace(qpos=jp.broadcast_to(_spawn, (N, _spawn.shape[0])))
-        return jax.vmap(lambda d: mjx.forward(mx, d))(data)
+        return jax.vmap(mjx.forward, in_axes=(mx_axes, 0))(mx_v, data)
 
     def legacy_reward_of(d):
         qd = jp.nan_to_num(d.qvel[:, base_vadr:base_vadr + 3], posinf=0.0, neginf=0.0)
@@ -412,11 +439,11 @@ def main(argv=None) -> int:
                     ct = jp.clip(ct * gain_s[:, None], -clamps, clamps)   # per-env actuator-gain scale
                 return jp.zeros((N, nu)).at[:, act_u].set(ct), ct         # scatter token -> actuator index
             ctrl, ctrl_tok = _ctrl_of(data)                              # first substep from the INPUT state
-            data2 = step_v(mx, data.replace(ctrl=ctrl))
+            data2 = step_v(mx_v, data.replace(ctrl=ctrl))
             if DECIM > 1:                                                # (DECIM-1) more substeps HOLDING the action
                 def _substep(d, _):
                     c, _ct = _ctrl_of(d)
-                    return step_v(mx, d.replace(ctrl=c)), None
+                    return step_v(mx_v, d.replace(ctrl=c)), None
                 data2, _ = jax.lax.scan(_substep, data2, None, length=DECIM - 1)
             if DR_ON and DR_PUSH > 0.0:                    # sim2real: random horizontal velocity PUSH on the base
                 do_push = (jax.random.uniform(pkey, (N,)) < DR_PUSH).astype(jp.float32)
