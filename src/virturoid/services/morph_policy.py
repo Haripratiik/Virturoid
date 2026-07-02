@@ -576,6 +576,21 @@ def extract_gait_params(gene) -> dict | None:
     }
 
 
+def upright_height_ratio(n_feet: int) -> float:
+    """Per-body "upright" stance-height threshold tau: how high (as a fraction of the standing z0) the trunk must
+    ride to count as *genuinely upright for this morphology* (WS3). A hexapod/octopod is statically stable in a
+    LOW tripod crouch and every hexapod-RL paper walks at ~0.15 m with NO upright reward at all
+    (arXiv:2511.03167) -- so gating a low, properly-stepping tripod as "not upright" (the old hardcoded z>0.7*z0)
+    was a quad-tuned cliff, not a morphology-correct bar. Quad/biped keep 0.70 (L1 baseline byte-identical);
+    more legs -> a lower natural stance. Paired with the ``support_frac`` companion so the bar moves SIDEWAYS to
+    morphology-correct (a low tripod must still show real stepping support), never DOWN to "easy"."""
+    if n_feet >= 7:
+        return 0.50                                             # octopod / decapod: broad, low, statically stable
+    if n_feet >= 5:
+        return 0.55                                             # hexapod: alternating-tripod low stance
+    return 0.70                                                 # quad / biped / tripod: unchanged (L1 preserved)
+
+
 def recipe_rollout_morph(gene, policy: MorphPolicy | None = None, *, steps: int = 900, kp: float = 32.0,
                          kd: float = 1.5, ascale: float = 0.4, vtgt: float = 0.3, normalizer=None,
                          adaptive: bool = False, cpg: dict | None = None, model_perturb=None,
@@ -675,7 +690,8 @@ def recipe_rollout_morph(gene, policy: MorphPolicy | None = None, *, steps: int 
     feet_idx = np.asarray(feet, dtype=int)
     fz0 = _gz0[feet_idx] if len(feet_idx) else np.zeros(0)
     c_prev = (np.asarray(data.geom_xpos[feet_idx, 2]) < fz0 + 0.02) if len(feet_idx) else np.zeros(0, bool)
-    lifts = 0; up_steps = 0
+    lifts = 0; up_steps = 0; support_steps = 0
+    tau_up = upright_height_ratio(len(feet_idx))            # per-body upright stance-height threshold (WS3)
     dec = max(1, int(decimation))                            # CONTROL DECIMATION (plan v2 T1.1): recompute the
     lpf = float(action_lpf)                                  #   learned action only every `dec` physics steps and
     a = a_filt = None                                        #   HOLD it between (the CPG clock + PD loop still run
@@ -710,19 +726,25 @@ def recipe_rollout_morph(gene, policy: MorphPolicy | None = None, *, steps: int 
         sm = 0.0 if a_prev is None else float(np.mean((a - a_prev) ** 2))
         R += max(0.0, float(np.exp(-((vx - vtgt) ** 2) / 0.25)) * up + 0.2 * up + 0.15 * max(0.0, upr) - 0.3 * sm)
         a_prev = a
-        if z > 0.7 * z0 and upr > 0.6:                            # sustained-upright fraction (genuinely standing tall)
-            up_steps += 1
+        if z > tau_up * z0 and upr > 0.6:                         # sustained-upright fraction at the body's MORPHOLOGY
+            up_steps += 1                                        #   stance height (tau_up: quad/biped 0.7, hex 0.55,
+        #   octopod+ 0.5 -- WS3 per-body upright; a low tripod is upright FOR A HEXAPOD, cite arXiv:2511.03167)
         if len(feet_idx):                                         # foot LIFTOFF count -> cadence (a slide never lifts)
             c_now = np.asarray(data.geom_xpos[feet_idx, 2]) < fz0 + 0.02
-            lifts += int(np.sum(c_prev & ~c_now)); c_prev = c_now
+            lifts += int(np.sum(c_prev & ~c_now))
+            ng = int(np.sum(c_now))                              # TRIPOD-SUPPORT companion (WS3): a genuine stepping
+            support_steps += int(0 < ng < len(feet_idx))        #   step has SOME feet down (support) AND some up
+            c_prev = c_now                                       #   (swing) -- a flat slide plants ALL feet every step
     forward = float(data.qpos[bq] - x0)
     _T = max(1, alive) * dt
     cadence = round(lifts / _T, 2)                                # foot liftoffs per second (0 for a stiff slide)
-    upright_frac = round(up_steps / max(1, alive), 3)            # fraction of alive steps genuinely standing tall
+    upright_frac = round(up_steps / max(1, alive), 3)            # fraction of alive steps upright at stance height
+    support_frac = round(support_steps / max(1, alive), 3)      # fraction of alive steps in genuine stepping support
     return {"finite": True, "gait": round(R / max(1, steps), 4), "forward": round(forward, 3),
             "height_ratio": round(hr, 3), "alive": alive, "survived": bool(alive >= steps and hr > 0.6),
             "speed": round(forward / max(1, alive) / dt, 3), "frames": frames or [],
-            "cadence": cadence, "upright_frac": upright_frac, "n_feet": int(len(feet_idx)),
+            "cadence": cadence, "upright_frac": upright_frac, "support_frac": support_frac,
+            "upright_tau": round(tau_up, 3), "n_feet": int(len(feet_idx)),
             "n_tokens": graph.n_tokens, "feature_dim": graph.feature_dim}
 
 

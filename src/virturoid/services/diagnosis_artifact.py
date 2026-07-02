@@ -113,6 +113,13 @@ def build_diagnosis_artifact(result: dict, *, task_type: str = "locomotion", gat
                        _gate_row("upright", upright, g["upright"]), _gate_row("survived", None, None, hard_bool=survived)]
         metrics = {"forward_m": round(fwd, 3), "cadence": round(cadence, 2), "upright": round(upright, 3),
                    "survived": survived}
+        # TRIPOD-SUPPORT companion gate (WS3): a task may add ``support`` so lowering the upright bar for a
+        # many-legged body moves the bar SIDEWAYS (a low tripod must still show real stepping support), never DOWN.
+        # Absent from a result -> default 1.0 (older/quad rollouts pass vacuously; only tasks that opt in are gated).
+        if "support" in g:
+            support = _num(result.get("support_frac"), default=1.0)
+            gate_report.append(_gate_row("support", support, g["support"]))
+            metrics["support"] = round(support, 3)
         if late_speed is not None:
             metrics["late_speed"] = round(_num(late_speed), 3)
     else:

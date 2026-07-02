@@ -56,6 +56,21 @@ class LocomotionArtifactTests(unittest.TestCase):
         self.assertEqual(art["trend"]["direction"], "up")
         self.assertAlmostEqual(art["trend"]["delta_vs_prev"], 0.15, places=4)
 
+    def test_ws3_support_gate_only_when_task_opts_in(self):
+        # WS3: a many-legged task adds a ``support`` gate. A flat slide (low support_frac) MISSES it even though
+        # upright/cadence pass; a proper tripod (high support) passes. A task WITHOUT the gate ignores support.
+        gates = {"forward_m": 0.4, "cadence": 3.0, "upright": 0.6, "support": 0.3}
+        slide = build_diagnosis_artifact({"forward": 0.5, "cadence": 4.0, "upright_frac": 0.9,
+                                          "support_frac": 0.05, "survived": True}, gates=gates)
+        self.assertFalse(next(r for r in slide["gate_report"] if r["gate"] == "support")["pass"])
+        self.assertEqual(slide["verdict"], "fail")             # a low, all-feet-planted slide is not a walk
+        step = build_diagnosis_artifact({"forward": 0.5, "cadence": 4.0, "upright_frac": 0.9,
+                                         "support_frac": 0.6, "survived": True}, gates=gates)
+        self.assertEqual(step["verdict"], "pass")              # real stepping support -> passes
+        nogate = build_diagnosis_artifact({"forward": 0.5, "cadence": 4.0, "upright_frac": 0.9, "survived": True})
+        self.assertFalse(any(r["gate"] == "support" for r in nogate["gate_report"]))   # quad L1 untouched
+        self.assertEqual(nogate["verdict"], "pass")
+
 
 class ManipulationArtifactTests(unittest.TestCase):
     def test_miss_vs_slip_vs_unreachable(self):

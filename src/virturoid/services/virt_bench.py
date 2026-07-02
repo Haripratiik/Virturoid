@@ -22,18 +22,28 @@ from virturoid.services.diagnosis_artifact import build_diagnosis_artifact
 # Plan v2 §3.1/N4: ``steps`` (eval horizon) and ``seed`` are FROZEN INSIDE the task so an arm cannot pick a
 # flattering horizon (gates are horizon-dependent: forward_m 0.4 @900 != @2400). The verifier ignores any
 # caller-supplied horizon by default and uses these. ``seed`` is disjoint from any training seed.
+#
+# WS3 (plan v3): ``upright`` is now MORPHOLOGY-RELATIVE. The deploy verifier's upright_frac counts steps at the
+# body's natural stance height (upright_height_ratio: quad/biped 0.7*z0, hexapod 0.55, octopod+ 0.5) -- because
+# no hexapod-RL result gates a low, statically-stable tripod as "not upright" (they walk at ~0.15 m with no
+# upright reward at all; arXiv:2511.03167). The bar moves SIDEWAYS not down: many-legged tasks add a ``support``
+# gate (tripod stepping-support fraction) so a low body must still show real feet-up/feet-down stepping, never a
+# flat slide. Quad L1 is byte-identical (tau stays 0.7, no support gate).
 VIRT_TASKS = [
     {"id": "L1_quad_walk", "family": "locomotion", "task_type": "locomotion",
      "prompt": "design a quadruped that walks", "gates": {"forward_m": 0.5, "cadence": 3.0, "upright": 0.6},
      "split": "dev", "steps": 900, "seed": 20260701},
     {"id": "L2_hex_walk", "family": "locomotion", "task_type": "locomotion",
-     "prompt": "design a hexapod that walks", "gates": {"forward_m": 0.4, "cadence": 3.0, "upright": 0.6},
+     "prompt": "design a hexapod that walks",
+     "gates": {"forward_m": 0.4, "cadence": 3.0, "upright": 0.6, "support": 0.3},
      "split": "held_out", "steps": 900, "seed": 20260701},
     {"id": "L3_octopod_walk", "family": "locomotion", "task_type": "locomotion",
-     "prompt": "design an octopod that walks", "gates": {"forward_m": 0.4, "cadence": 3.0, "upright": 0.6},
+     "prompt": "design an octopod that walks",
+     "gates": {"forward_m": 0.4, "cadence": 3.0, "upright": 0.6, "support": 0.3},
      "split": "held_out", "steps": 900, "seed": 20260701},
     {"id": "L4_decapod_walk", "family": "locomotion", "task_type": "locomotion",
-     "prompt": "design a ten-legged robot that walks", "gates": {"forward_m": 0.4, "cadence": 3.0, "upright": 0.6},
+     "prompt": "design a ten-legged robot that walks",
+     "gates": {"forward_m": 0.4, "cadence": 3.0, "upright": 0.6, "support": 0.3},
      "split": "dev", "steps": 900, "seed": 20260701},
     {"id": "M1_arm_grasp", "family": "manipulation", "task_type": "grasp",
      "prompt": "design an arm that picks up a 3 cm cube", "gates": {"success_rate": 0.6}, "split": "dev",
@@ -89,7 +99,9 @@ def verify_submission(task_id: str, gene, policy=None, *, steps: int | None = No
         r = recipe_rollout_morph(gene, policy, steps=eval_steps, seed=seed, decimation=dec,
                                  action_lpf=lpf, sphere_feet=sf)
         result = {"forward": r.get("forward"), "cadence": r.get("cadence"),
-                  "upright_frac": r.get("upright_frac"), "survived": r.get("survived")}
+                  "upright_frac": r.get("upright_frac"), "support_frac": r.get("support_frac"),
+                  "survived": r.get("survived")}
+        verifier["upright_tau"] = r.get("upright_tau")        # per-body upright height threshold (WS3 provenance)
     else:
         from virturoid.services.task_matched_eval import evaluate_robot
         # MANIPULATION controller channel (plan gap-closure N22/WS6): an arm may SUBMIT searched skill parameters

@@ -37,6 +37,21 @@ class VirtBenchTests(unittest.TestCase):
                       ("walking", "weak_forward", "walks_backward", "shuffle", "leaning", "fell"))
         self.assertIn("forward_m", res["metrics"])            # verified metrics from the re-run
 
+    def test_ws3_per_body_upright_and_support(self):
+        # WS3: many-legged tasks keep upright 0.6 (now MORPHOLOGY-relative via per-body tau) + add a tripod
+        # ``support`` gate so the bar moves SIDEWAYS not down; quad L1 has NO support gate (byte-identical).
+        from virturoid.services.morph_policy import upright_height_ratio
+        self.assertNotIn("support", get_task("L1_quad_walk")["gates"])          # quad untouched
+        for tid in ("L2_hex_walk", "L3_octopod_walk", "L4_decapod_walk"):
+            g = get_task(tid)["gates"]
+            self.assertEqual(g["upright"], 0.6)                                  # consistent bar, now per-body
+            self.assertIn("support", g)                                          # harder tripod companion
+        self.assertAlmostEqual(upright_height_ratio(4), 0.70)                    # quad unchanged (L1 preserved)
+        self.assertAlmostEqual(upright_height_ratio(2), 0.70)                    # biped stands tall
+        self.assertAlmostEqual(upright_height_ratio(6), 0.55)                    # hexapod low tripod
+        self.assertAlmostEqual(upright_height_ratio(8), 0.50)                    # octopod
+        self.assertAlmostEqual(upright_height_ratio(10), 0.50)                   # decapod
+
 
 if __name__ == "__main__":
     unittest.main()
