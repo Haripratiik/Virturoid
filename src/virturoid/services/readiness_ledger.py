@@ -190,6 +190,25 @@ def _probe_physics(pkg: Path, gene) -> StageRecord:
     # A REAL (non-pinned) contact grasp+lift, certified by grasp_eval.evaluate_grasp_lift (closes the fingers and
     # lifts the object by FRICTION — no _pin_block). This is the honest manipulation capability: if it passed, the
     # physics stage ATTAINS on a real grasp even though the higher-level sort/transport demo still uses the pin.
+    nav_rep = next((p for p in pkg.rglob("navigation_evaluation_report.json")), None)
+    if nav_rep is not None:
+        try:
+            nd = json.loads(nav_rep.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            nd = {}
+        sr = nd.get("success_rate")
+        if sr is not None:
+            evidence = {
+                "success_rate": sr,
+                "reached": nd.get("reached"),
+                "total_episodes": nd.get("total_episodes"),
+            }
+            if float(sr) >= 0.8:
+                return StageRecord("physics_evaluated", ATTAINED,
+                                   f"real navigation cleared the route gate in {nav_rep.name}", evidence)
+            return StageRecord("physics_evaluated", BELOW_GATE,
+                               f"real navigation only reached {float(sr):.0%} in {nav_rep.name}", evidence)
+
     grasp_rep = next((p for p in pkg.rglob("grasp_evaluation_report.json")), None)
     if grasp_rep is not None:
         try:

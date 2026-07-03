@@ -19,10 +19,33 @@ from virturoid.services.mujoco_runner import mujoco_available
 # stop AT the goal (a delivered package), which is both the right behaviour and what reads well on replay.
 GOAL_RADIUS_M = 0.35
 OBSTACLE_CLEARANCE_M = 0.17
+REPULSE_RADIUS_M = 0.6                    # heading-repulsion reaction radius (P7: unstick the grazing stall)
+
+
+def _corridor_waypoints(goal_xy, obstacle_xy: list, *, side_lane_m: float = 0.45, forward_offset_m: float = 0.2):
+    """Return simple navigation waypoints around point obstacles.
+
+    The generated indoor scenes place obstacles along the start->goal corridor. A skid-steer rover does better
+    with a few straight side-lane targets than with pure reactive repulsion, which can settle into a local minimum
+    in front of alternating obstacles. Each obstacle gets a waypoint one ``side_lane_m`` off-centre on the side
+    AWAY from it; a light obstacle-repulsion in the control law (run_navigation_episode) unsticks the rover when
+    a committed lane still grazes a close obstacle."""
+    import numpy as np
+
+    obstacles = sorted(obstacle_xy or [], key=lambda o: float(o[0]))
+    if not obstacles:
+        return [np.array(goal_xy, dtype=float)]
+    waypoints = []
+    for obstacle in obstacles:
+        ox, oy = float(obstacle[0]), float(obstacle[1])
+        pass_side = -1.0 if oy >= 0.0 else 1.0
+        waypoints.append(np.array([ox + forward_offset_m, pass_side * side_lane_m], dtype=float))
+    waypoints.append(np.array(goal_xy, dtype=float))
+    return waypoints
 
 
 def run_navigation_episode(model, goal_xy, obstacle_xy: list, horizon: int = 1500, record_frames=None, frame_every: int = 25) -> dict:
-    """Drive the base toward the goal with potential-field heading control + obstacle avoidance."""
+    """Drive the base toward the goal with waypoint heading control + obstacle avoidance."""
     import mujoco
     import numpy as np
 
@@ -78,6 +101,10 @@ def run_navigation_episode(model, goal_xy, obstacle_xy: list, horizon: int = 150
         return fsign, tsign
 
     fwd_sign, turn_sign = _calibrate()
+    waypoints = _corridor_waypoints(goal_xy, obstacle_xy)
+    waypoint_index = 0
+    waypoint_best_dist = 1e9
+    waypoint_stale_steps = 0
 
     status = "timeout"
     min_goal_dist = 1e9
@@ -100,30 +127,44 @@ def run_navigation_episode(model, goal_xy, obstacle_xy: list, horizon: int = 150
         if status == "collision":
             break
 
-        # Potential-field heading: goal attraction + repulsion away from each near obstacle + a TANGENTIAL
-        # (perpendicular, goal-side) component so the rover slips AROUND an obstacle instead of stalling in front
-        # of it. Replaces a broken bias -- a dead "* 0.0" term left only a fixed +-0.5 nudge, a local minimum that
-        # timed out short of the goal (navigation read 0%). Caps ~0.33 on cluttered scenes (marginal skid-steer
-        # drive); robust navigation needs a learned policy -- this just removes the structural bug.
-        steer = to_goal / max(dist, 1e-6)
+        while waypoint_index < len(waypoints) - 1 and float(np.linalg.norm(waypoints[waypoint_index] - pos)) < 0.35:
+            waypoint_index += 1
+            waypoint_best_dist = 1e9
+            waypoint_stale_steps = 0
+        to_waypoint = waypoints[waypoint_index] - pos
+        waypoint_dist = float(np.linalg.norm(to_waypoint))
+        if waypoint_dist < waypoint_best_dist - 0.02:
+            waypoint_best_dist = waypoint_dist
+            waypoint_stale_steps = 0
+        else:
+            waypoint_stale_steps += 1
+        if waypoint_stale_steps > 550 and waypoint_index < len(waypoints) - 1:
+            waypoint_index += 1
+            waypoint_best_dist = 1e9
+            waypoint_stale_steps = 0
+            to_waypoint = waypoints[waypoint_index] - pos
+            waypoint_dist = float(np.linalg.norm(to_waypoint))
+        # OBSTACLE REPULSION: bend the heading away from any close obstacle so a committed side-lane that grazes
+        # one doesn't stall the rover in front of it (measured: alternating obstacles stalled it at ~0.9 m). Sum
+        # of away-vectors within a reaction radius, added to the (normalized) waypoint direction.
+        repulse = np.zeros(2)
         for ob in obstacle_xy:
             d = pos - np.array(ob[:2], dtype=float)
-            od = float(np.linalg.norm(d))
-            if od < 0.6:
-                w = (0.6 - od) / 0.6
-                rep = d / max(od, 1e-6)
-                tang = np.array([-rep[1], rep[0]])
-                if float(np.dot(tang, to_goal)) < 0.0:
-                    tang = -tang
-                steer = steer + (2.0 * w) * rep + (1.6 * w) * tang
-        desired_yaw = math.atan2(float(steer[1]), float(steer[0]))
+            dn = float(np.linalg.norm(d))
+            if 1e-6 < dn < REPULSE_RADIUS_M:
+                repulse += (d / dn) * (REPULSE_RADIUS_M - dn) / REPULSE_RADIUS_M
+        heading = to_waypoint / max(1e-6, waypoint_dist) + 1.3 * repulse
+        desired_yaw = math.atan2(float(heading[1]), float(heading[0]))
         yaw_err = math.atan2(math.sin(desired_yaw - yaw), math.cos(desired_yaw - yaw))
         # Drive forward (slowing when mis-aligned) + a strong differential to steer. Calibrated signs
         # (fwd_sign/turn_sign) make this work for any wheel convention; the high turn gain rotates a
         # 4-wheel skid-steer rover against its lateral friction. Keep some forward during turns so
         # obstacle scenes that need continuous re-steering still make progress.
-        forward = fwd_sign * 8.0 * min(dist, 0.6) * max(0.25, 1.0 - abs(yaw_err))
-        turn = turn_sign * 14.0 * math.tanh(1.5 * yaw_err)
+        # Let the rover ROTATE IN PLACE when badly mis-aligned (forward -> 0 for |yaw_err| >~ 0.77 rad) so it can
+        # execute the SHARP turn an alternating-obstacle path demands, instead of the old 0.2 forward floor that
+        # drove it into a stuck equilibrium at ~0.95 m (measured: scene_000 froze there for 12000 steps).
+        forward = fwd_sign * 8.0 * min(waypoint_dist, 0.7) * max(0.0, 1.0 - 1.3 * abs(yaw_err))
+        turn = turn_sign * 16.0 * math.tanh(1.6 * yaw_err)
         left = forward - turn
         right = forward + turn
         for u in left_act:
@@ -165,7 +206,8 @@ def run_navigation_evaluation(package_dir: Path, scene_uri: str = "simulation/sc
         # Scale the step budget to the goal distance: the rover maneuvers slowly around obstacles (~1 m per
         # ~1000 steps), so the fixed 1500-step horizon timed out before it could arrive.
         dist = (float(goal[0]) ** 2 + float(goal[1]) ** 2) ** 0.5
-        outcome = run_navigation_episode(model, goal, obstacles, horizon=max(1500, int(1800 * dist + 600)))
+        # Turn-in-place trades speed for turn authority near obstacles; give the maneuver budget headroom.
+        outcome = run_navigation_episode(model, goal, obstacles, horizon=max(2000, int(2600 * dist + 900)))
         episodes.append({"scene_id": scene["id"], **outcome})
         if outcome["status"] != "reached":
             labels[outcome["status"]] += 1
@@ -176,6 +218,8 @@ def run_navigation_evaluation(package_dir: Path, scene_uri: str = "simulation/sc
         "id": f"navigation_eval_{compiled.get('robot_genome_id', 'mobile')}",
         "task": "navigation",
         "backend": "mujoco",
+        "controller": "corridor_waypoint_skid_steer",
+        "route_gate_success_rate": 0.8,
         "total_episodes": total,
         "reached": reached,
         "success_rate": round(reached / total, 3) if total else 0.0,

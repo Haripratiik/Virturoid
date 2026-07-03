@@ -20,10 +20,10 @@ class NavigationTaskLoopTests(unittest.TestCase):
 
             self.assertEqual("navigation", report["task"])
             self.assertGreater(report["total_episodes"], 0)
-            self.assertGreaterEqual(report["success_rate"], 0.0)
+            self.assertGreaterEqual(report["success_rate"], 0.75)
             self.assertLessEqual(report["success_rate"], 1.0)
-            # The base must actually reach the goal in at least one scene.
-            self.assertGreaterEqual(report["reached"], 1)
+            # The legacy two-wheel package must clear most route scenes, not merely move in one easy scene.
+            self.assertGreaterEqual(report["reached"], 3)
             self.assertTrue((project["output_dir"] / "reports" / "navigation_evaluation_report.json").exists())
 
     def test_composed_rover_navigates_omnidirectionally(self):
@@ -50,7 +50,8 @@ class NavigationTaskLoopTests(unittest.TestCase):
             self.assertEqual("mobile_base", report.robot_class)
             # The mobile base gets a real navigation task loop, not just a foundation package.
             self.assertTrue(any(d.stage == "navigate" for d in report.decisions))
-            self.assertGreaterEqual(report.final_success_rate, 0.0)
+            self.assertTrue(report.succeeded)
+            self.assertGreaterEqual(report.final_success_rate, report.target_success_rate)
             self.assertTrue(report.compute.get("physics_executed"))
 
 

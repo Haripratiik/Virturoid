@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from virturoid.schemas.readiness_ledger import ATTAINED, PLACEHOLDER, ProductReadinessLedger, StageRecord
+from virturoid.schemas.readiness_ledger import ATTAINED, BELOW_GATE, PLACEHOLDER, ProductReadinessLedger, StageRecord
 from virturoid.services.cad_geometry import is_real_cad
 from virturoid.services.readiness_ledger import build_product_readiness_ledger
 
@@ -58,6 +58,29 @@ class ReadinessLedgerTests(unittest.TestCase):
                                                "physics_evaluated"])
         self.assertFalse(led.safe_to_export)
         self.assertTrue(any("real_cad_exported" in i for i in led.validate()))
+
+    def test_navigation_report_gates_physics_stage(self):
+        with tempfile.TemporaryDirectory() as d:
+            pkg = Path(d)
+            (pkg / "reports").mkdir()
+            (pkg / "robot").mkdir()
+            (pkg / "robot" / "robot_genome.json").write_text(json.dumps({"id": "g"}), encoding="utf-8")
+            (pkg / "reports" / "navigation_evaluation_report.json").write_text(
+                json.dumps({"success_rate": 0.333, "reached": 2, "total_episodes": 6}),
+                encoding="utf-8",
+            )
+
+            ledger = build_product_readiness_ledger(pkg, robot_class="mobile_base", require=["physics_evaluated"])
+            self.assertEqual(BELOW_GATE, ledger.by_stage["physics_evaluated"].status)
+            self.assertFalse(ledger.safe_to_export)
+
+            (pkg / "reports" / "navigation_evaluation_report.json").write_text(
+                json.dumps({"success_rate": 1.0, "reached": 6, "total_episodes": 6}),
+                encoding="utf-8",
+            )
+            ledger = build_product_readiness_ledger(pkg, robot_class="mobile_base", require=["physics_evaluated"])
+            self.assertEqual(ATTAINED, ledger.by_stage["physics_evaluated"].status)
+            self.assertTrue(ledger.safe_to_export)
 
 
 if __name__ == "__main__":
