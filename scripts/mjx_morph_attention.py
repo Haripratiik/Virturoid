@@ -151,6 +151,9 @@ def main(argv=None) -> int:
                     "conditioning (adds Wfilm; the CPU MorphPolicy mirrors it)")
     ap.add_argument("--topo-bias", action="store_true", help="Phase-5 tokenizer upgrade: topology-aware "
                     "attention bias on kinematic hop distance (adds Wtopo)")
+    ap.add_argument("--phase-obs", action="store_true", help="P1 (plan v4): feed the CPG master-phase gait "
+                    "clock [sin,cos] as a percept token (Wrange) so the policy TIMES its steps (Siekmann); the "
+                    "CPU MorphPolicy mirrors it via meta[9] + recipe_rollout_morph. Use with --cpg.")
     ap.add_argument("--calf-phase", type=float, default=None, help="override the trot-CPG calf phase (rad); "
                     "per-body gait direction (quad walks fwd at 1.5708, a bilateral hexapod at 0.0)")
     ap.add_argument("--cpg-freq", type=float, default=None, help="override the trot-CPG frequency (Hz)")
@@ -292,6 +295,8 @@ def main(argv=None) -> int:
     # SIM2REAL DR knobs (static -> every DR op below is guarded by DR_ON, so --dr off is byte-identical).
     DR_ON = bool(args.dr); DR_GAIN = float(args.dr_gain); DR_PD = float(args.dr_pd)
     CONTACT_DR = bool(args.contact_dr)                        # T1.5: per-env MODEL-param DR (vmapped mjx.Model)
+    PHASE_OBS = bool(args.phase_obs)                          # P1: phase-clock obs token (Wrange percept); use with --cpg
+    PERCEPT_DIM = 10                                          # == MorphPolicy.PERCEPT_DIM (8 range slots + 2 cmd/clock)
     DR_OBS = float(args.dr_obs); DR_PUSH = float(args.dr_push); DR_PUSH_MAG = float(args.dr_push_mag)
     if DR_ON:
         print(f"domain randomization ON: gain+-{DR_GAIN} pd+-{DR_PD} obs_noise={DR_OBS} push_p={DR_PUSH}@{DR_PUSH_MAG}m/s", flush=True)
@@ -342,6 +347,8 @@ def main(argv=None) -> int:
         att["Wfilm"] = jp.zeros((F, 2 * H))               # -> (gamma, beta); zero-init = identity at start
     if TOPO_BIAS:
         att["Wtopo"] = jp.zeros(TOPO_BUCKETS + 1)         # learned bias per hop distance; zero-init = no bias
+    if PHASE_OBS:                                         # P1: perception encoder for the [sin,cos] gait-clock token
+        att["Wrange"] = W(ks[8], (PERCEPT_DIM, H)); att["brange"] = jp.zeros(H)   # ks[8] was previously unused
     vf = [(W(ks[6], (H, 64)) * (1 / H) ** 0.5, jp.zeros(64)), (W(ks[7], (64, 1)) * (1 / 64) ** 0.5, jp.zeros(1))]
     params = {"att": att, "vf": vf, "logstd": jp.zeros(1) - 0.5}
     if args.init_npz:                                    # WARM-START: chain short bursts (build on prior training)
@@ -365,18 +372,28 @@ def main(argv=None) -> int:
 
     from virturoid.services.morph_forward import attention_forward
 
-    def policy_mean_pool(P, obs):
+    def _phase_percept_1(tm):
+        """scalar sim time -> (PERCEPT_DIM,) percept: the global CPG master-phase gait clock [sin,cos] in the last
+        two slots (8,9), zeros elsewhere — EXACTLY what recipe_rollout_morph feeds on CPU (deploy==train)."""
+        mp = TWO_PI * CPG_FREQ * tm
+        return jp.concatenate([jp.zeros(PERCEPT_DIM - 2), jp.stack([jp.sin(mp), jp.cos(mp)])])
+
+    def policy_mean_pool(P, obs, percept=None):
         """obs (NT, F) -> (action_means (NT,), pooled_embed (H,)). Uses the SHARED forward (morph_forward)
-        so the GPU trainer is byte-identical to the CPU MorphPolicy — trained weights transfer to any body."""
-        return attention_forward(P["att"], obs, H, xp=jp, film=FILM, hop=HOP, topo_bias=TOPO_BIAS)
+        so the GPU trainer is byte-identical to the CPU MorphPolicy — trained weights transfer to any body.
+        ``percept`` (PERCEPT_DIM,) adds the P1 gait-clock token via Wrange (None -> proprioception-only)."""
+        return attention_forward(P["att"], obs, H, xp=jp, film=FILM, hop=HOP, topo_bias=TOPO_BIAS, percept=percept)
 
     def vmlp(ps, x):
         x = jp.tanh(x @ ps[0][0] + ps[0][1])
         return x @ ps[1][0] + ps[1][1]
 
-    def act_and_value(P, obs_b):                          # obs_b (N, NT, F)
-        means, pools = jax.vmap(lambda o: policy_mean_pool(P, o))(obs_b)   # (N,NT),(N,H)
-        vals = vmlp(P["vf"], pools)[:, 0]                                  # (N,)
+    def act_and_value(P, obs_b, percept_b=None):         # obs_b (N, NT, F); percept_b (N, PERCEPT_DIM) or None
+        if percept_b is None:
+            means, pools = jax.vmap(lambda o: policy_mean_pool(P, o))(obs_b)           # (N,NT),(N,H)
+        else:                                            # P1: per-env gait clock vmapped alongside obs
+            means, pools = jax.vmap(lambda o, pc: policy_mean_pool(P, o, pc))(obs_b, percept_b)
+        vals = vmlp(P["vf"], pools)[:, 0]                                              # (N,)
         return means, vals
 
     # CONTACT-PARAM DR (T1.5): batch per-env mjx.Model leaves (friction/mass/armature/frictionloss) + a matching
@@ -438,7 +455,8 @@ def main(argv=None) -> int:
             if DR_ON:                                     # sim2real: noisy obs + (below) randomized dynamics + pushes
                 key, okey, pkey = jax.random.split(key, 3)
                 obs = obs + DR_OBS * jax.random.normal(okey, obs.shape)
-            means, val = act_and_value(params, obs)       # (N,NT),(N,)
+            pcpt = jax.vmap(_phase_percept_1)(data.time) if PHASE_OBS else None   # P1 gait clock (N, PERCEPT_DIM)
+            means, val = act_and_value(params, obs, pcpt)   # (N,NT),(N,)
             act = means + std * jax.random.normal(key, means.shape)
             logp = (-0.5 * (((act - means) / std) ** 2 + 2 * jp.log(std) + jp.log(2 * jp.pi))).sum(-1)
             a_clip = jp.clip(act, -1, 1)
@@ -558,14 +576,21 @@ def main(argv=None) -> int:
                 rew = alive2 * jp.maximum(0.0, step_r - back_pen)       # non-negative; zero after a fall or if reversing
             # carry the action basis used for smoothness next step (applied offset for recipe; clipped for legacy)
             a_next = a_clip if LEGACY else off
-            return (data2, alive2, a_next, air_time2, last_contact2, stance_time2), (obs, act, logp, rew, val, fwd, alive2)
+            outs = (obs, act, logp, rew, val, fwd, alive2)
+            if PHASE_OBS:                                   # P1: carry the gait clock so loss_fn recomputes logp WITH it
+                outs = outs + (pcpt,)
+            return (data2, alive2, a_next, air_time2, last_contact2, stance_time2), outs
 
         return jax.lax.scan(body, carry, keys)
 
     @jax.jit
     def finish(params, data_last, traj):
-        obs, act, logp, rew, val, fwd, alive = traj
-        _, last_val = act_and_value(params, jax.vmap(obs_tokens)(data_last))
+        if PHASE_OBS:                                         # P1: the 8th buffer array is the per-step gait clock
+            obs, act, logp, rew, val, fwd, alive, pcpt = traj
+            last_pcpt = jax.vmap(_phase_percept_1)(data_last.time)   # bootstrap value uses the clock at data_last too
+        else:
+            obs, act, logp, rew, val, fwd, alive = traj; pcpt = last_pcpt = None
+        _, last_val = act_and_value(params, jax.vmap(obs_tokens)(data_last), last_pcpt)
 
         def gae(carry, x):
             nextval, adv = carry
@@ -574,7 +599,7 @@ def main(argv=None) -> int:
             adv = (delta + GAMMA * LAM * adv) * alive_t       # fallen steps contribute no gradient / no bootstrap
             return (val_t, adv), adv
         _, advs = jax.lax.scan(gae, (last_val, jp.zeros(N)), (rew, val, alive), reverse=True)
-        return obs, act, logp, advs, advs + val, rew.sum(0).mean(), fwd.mean(0).mean()
+        return obs, act, logp, advs, advs + val, rew.sum(0).mean(), fwd.mean(0).mean(), pcpt
 
     def rollout(params, key):
         rkey, key = jax.random.split(key)
@@ -598,12 +623,12 @@ def main(argv=None) -> int:
             carry, out = roll_chunk(params, dr, carry, jax.random.split(ck, CHUNK))
             jax.block_until_ready(carry[0].qpos)
             chunks.append(out)
-        traj = [jp.concatenate([c[i] for c in chunks], axis=0) for i in range(7)]
+        traj = [jp.concatenate([c[i] for c in chunks], axis=0) for i in range(len(chunks[0]))]  # 7, or 8 with phase-obs
         return finish(params, carry[0], traj)
 
-    def loss_fn(params, obs, act, old_logp, adv, ret):
+    def loss_fn(params, obs, act, old_logp, adv, ret, percept=None):
         std = jp.exp(params["logstd"])[0]
-        means, val = act_and_value(params, obs)
+        means, val = act_and_value(params, obs, percept)
         logp = (-0.5 * (((act - means) / std) ** 2 + 2 * jp.log(std) + jp.log(2 * jp.pi))).sum(-1)
         ratio = jp.exp(logp - old_logp)
         adv = (adv - adv.mean()) / (adv.std() + 1e-8)
@@ -612,7 +637,7 @@ def main(argv=None) -> int:
         return pg + VF * ((val - ret) ** 2).mean() - ENT * ent
 
     @jax.jit
-    def update(params, opt_state, obs, act, logp, adv, ret, key):
+    def update(params, opt_state, obs, act, logp, adv, ret, key, percept=None):
         B = obs.shape[0]; mb = B // args.minibatches
 
         def epoch(carry, _):
@@ -623,7 +648,8 @@ def main(argv=None) -> int:
             def mbstep(carry, i):
                 params, opt_state = carry
                 idx = jax.lax.dynamic_slice_in_dim(perm, i * mb, mb)
-                g = jax.grad(loss_fn)(params, obs[idx], act[idx], logp[idx], adv[idx], ret[idx])
+                pc = percept[idx] if percept is not None else None       # P1: the gait clock for this minibatch
+                g = jax.grad(loss_fn)(params, obs[idx], act[idx], logp[idx], adv[idx], ret[idx], pc)
                 upd, opt_state = opt.update(g, opt_state, params)
                 return (optax.apply_updates(params, upd), opt_state), None
             (params, opt_state), _ = jax.lax.scan(mbstep, (params, opt_state), jp.arange(args.minibatches))
@@ -642,6 +668,8 @@ def main(argv=None) -> int:
             extra["Wfilm"] = np.asarray(a["Wfilm"])
         if TOPO_BIAS:
             extra["Wtopo"] = np.asarray(a["Wtopo"])
+        if PHASE_OBS:                                         # P1: bank the perception encoder so CPU deploy matches
+            extra["Wrange"] = np.asarray(a["Wrange"]); extra["brange"] = np.asarray(a["brange"])
         if CPG_PARAMS is not None:                            # bank the EXACT CPG so CPU deploy matches training
             extra["cpg_arr"] = np.asarray([CPG_PARAMS["freq"], CPG_PARAMS["thigh_amp"], CPG_PARAMS["calf_amp"],
                                            CPG_PARAMS["calf_phase"], CPG_PARAMS["residual_scale"],
@@ -655,7 +683,8 @@ def main(argv=None) -> int:
                  meta=np.asarray([F, H, NT, float(fwd),
                                   1.0 if args.adaptive else 0.0, 1.0 if CPG_ON else 0.0, float(DECIM),
                                   float(ACTION_LPF),           # meta[7]: action LPF (T1.2) so deploy matches train
-                                  1.0 if args.sphere_feet else 0.0]))   # meta[8]: sphere feet (T1.4); deploy==train
+                                  1.0 if args.sphere_feet else 0.0,      # meta[8]: sphere feet (T1.4); deploy==train
+                                  1.0 if PHASE_OBS else 0.0]))           # meta[9]: P1 phase-clock obs; deploy==train
 
     if args.eval_npz:                                   # EVAL: deterministic single-env MJX rollout (recipe control)
         dd = np.load(args.eval_npz)
@@ -666,7 +695,8 @@ def main(argv=None) -> int:
         @jax.jit
         def estep(d):
             obs = obs_tokens(d)
-            means, _ = policy_mean_pool(params, obs)     # deterministic mean action (no exploration noise)
+            _pc = _phase_percept_1(d.time) if PHASE_OBS else None   # P1: single-env gait clock (deploy==train)
+            means, _ = policy_mean_pool(params, obs, _pc)   # deterministic mean action (no exploration noise)
             cpg_off = (cpg_amp_j * jp.sin(TWO_PI * CPG_FREQ * d.time + cpg_phase_j)) if CPG_ON else 0.0
             tgt = q_default + cpg_off + ASCALE * (RES_SCALE if CPG_ON else 1.0) * jp.tanh(means)
             tau = KP * (tgt - d.qpos[qadr]) - KD * d.qvel[vadr]
@@ -697,9 +727,13 @@ def main(argv=None) -> int:
     ep_fwd = 0.0
     for it in range(args.iters):
         key, rk, uk = jax.random.split(key, 3)
-        obs, act, logp, adv, ret, ep_rew, ep_fwd = rollout(params, rk)
+        obs, act, logp, adv, ret, ep_rew, ep_fwd, pcpt = rollout(params, rk)   # pcpt = gait clock (None w/o phase-obs)
         flat = lambda a: a.reshape((-1,) + a.shape[2:])
-        params, opt_state = update(params, opt_state, flat(obs), flat(act), flat(logp), flat(adv), flat(ret), uk)
+        if PHASE_OBS:                                        # P1: flatten + pass the clock so PPO minibatches carry it
+            params, opt_state = update(params, opt_state, flat(obs), flat(act), flat(logp), flat(adv), flat(ret),
+                                       uk, flat(pcpt))
+        else:
+            params, opt_state = update(params, opt_state, flat(obs), flat(act), flat(logp), flat(adv), flat(ret), uk)
         if it % 10 == 0 or it == args.iters - 1:
             print(f"  iter {it:>4}  ep_reward={float(ep_rew):8.2f}  fwd_vel={float(ep_fwd):+.3f}  "
                   f"({(time.time()-t0):.0f}s)", flush=True)
