@@ -29,6 +29,14 @@ def _att(F, H, rng, film, topo):
     return a
 
 
+def _att_percept(F, H, rng, film, topo):
+    """``_att`` + the perception encoder (Wrange/brange) so the percept-token path can be exercised."""
+    a = _att(F, H, rng, film, topo)
+    a["Wrange"] = rng.normal(0, 0.3, (MorphPolicy.PERCEPT_DIM, H))
+    a["brange"] = rng.normal(0, 0.1, H)
+    return a
+
+
 def _policy_from_att(att, F, H, film, topo):
     p = MorphPolicy(F, hidden=H, film=film, topo_bias=topo, topo_buckets=8)
     for k, v in att.items():
@@ -50,6 +58,26 @@ class MorphGpuParityTests(unittest.TestCase):
                                               hop=_HOP5 if topo else None, topo_bias=topo)
                 self.assertTrue(np.allclose(cpu, shared), f"mismatch film={film} topo={topo}")
 
+    def test_shared_forward_matches_cpu_policy_act_with_percept(self):
+        """The percept-token path (Wrange global perception/clock token) must ALSO byte-match MorphPolicy.act,
+        so a GPU-trained conditioned/clocked policy deploys identically on CPU — the P1/P2/P6 enabler."""
+        F, H = 24, 16
+        rng = np.random.default_rng(2)
+        obs = rng.normal(0, 1, (5, F))
+        ranges = rng.normal(1.0, 0.3, 8)                        # 8 rangefinder distances
+        cmd = [0.4, -0.2]                                       # [vx, wz] command (or a phase clock's sin/cos)
+        PD = MorphPolicy.PERCEPT_DIM
+        percept = np.concatenate([np.asarray(ranges), np.asarray(cmd)])[:PD]   # packed exactly as act packs it
+        for film in (False, True):
+            for topo in (False, True):
+                att = _att_percept(F, H, rng, film, topo)
+                p = _policy_from_att(att, F, H, film, topo)
+                cpu = p.act(obs, ranges=ranges, cmd=cmd, hop=_HOP5 if topo else None)
+                shared, _ = attention_forward(att, obs, H, xp=np, film=film,
+                                              hop=_HOP5 if topo else None, topo_bias=topo, percept=percept)
+                self.assertEqual(shared.shape, (obs.shape[0],))   # percept token carries no action
+                self.assertTrue(np.allclose(cpu, shared), f"percept mismatch film={film} topo={topo}")
+
     def test_numpy_and_jax_forward_are_identical(self):
         try:
             import jax.numpy as jp
@@ -58,11 +86,13 @@ class MorphGpuParityTests(unittest.TestCase):
         F, H = 24, 16
         rng = np.random.default_rng(1)
         obs = rng.normal(0, 1, (5, F))
-        att = _att(F, H, rng, film=True, topo=True)             # the hardest case: both upgrades on
-        np_out, np_pool = attention_forward(att, obs, H, xp=np, film=True, hop=_HOP5, topo_bias=True)
+        att = _att_percept(F, H, rng, film=True, topo=True)     # the hardest case: FiLM + topo + percept all on
+        percept = rng.normal(0, 1, MorphPolicy.PERCEPT_DIM)
+        np_out, np_pool = attention_forward(att, obs, H, xp=np, film=True, hop=_HOP5, topo_bias=True,
+                                            percept=percept)
         jatt = {k: jp.asarray(v) for k, v in att.items()}
         j_out, j_pool = attention_forward(jatt, jp.asarray(obs), H, xp=jp, film=True,
-                                          hop=jp.asarray(_HOP5), topo_bias=True)
+                                          hop=jp.asarray(_HOP5), topo_bias=True, percept=jp.asarray(percept))
         self.assertTrue(np.allclose(np_out, np.asarray(j_out), atol=1e-5))   # the GPU==CPU control guarantee
         self.assertTrue(np.allclose(np_pool, np.asarray(j_pool), atol=1e-5))
 
