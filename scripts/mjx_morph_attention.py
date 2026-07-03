@@ -126,6 +126,9 @@ def main(argv=None) -> int:
                     "randomization (canonical MuJoCo-Playground pattern: batch geom_friction/body_mass/dof_"
                     "armature/dof_frictionloss as vmapped mjx.Model leaves), targeting the MJX<->CPU CONTACT gap "
                     "for vigorous learned gaits. Off (default) -> in_axes=(None,0) = byte-identical single model.")
+    ap.add_argument("--dr-scale", type=float, default=1.0, help="P3 (plan v4): scale the contact-DR range WIDTH "
+                    "(deviation from 1.0). 1.0=canonical Go1/Barkour ranges (default, byte-identical); <1 = milder "
+                    "(e.g. 0.4) so a warm-started nominal policy adds robustness WITHOUT toppling under too-wide DR.")
     ap.add_argument("--sphere-feet", action="store_true", help="plan v2 T1.4: convert the foot geoms to SPHERES "
                     "with FEET-ONLY collision. A sphere-plane contact is the IDENTICAL 1-point manifold in MJX and "
                     "C MuJoCo, so this removes the deploy-gap AT ITS SOURCE (capsule/box feet give a 2-point MJX "
@@ -297,6 +300,7 @@ def main(argv=None) -> int:
     CONTACT_DR = bool(args.contact_dr)                        # T1.5: per-env MODEL-param DR (vmapped mjx.Model)
     PHASE_OBS = bool(args.phase_obs)                          # P1: phase-clock obs token (Wrange percept); use with --cpg
     PERCEPT_DIM = 10                                          # == MorphPolicy.PERCEPT_DIM (8 range slots + 2 cmd/clock)
+    DR_SCALE = float(args.dr_scale)                           # P3: contact-DR range-width scale (1.0 = canonical)
     DR_OBS = float(args.dr_obs); DR_PUSH = float(args.dr_push); DR_PUSH_MAG = float(args.dr_push_mag)
     if DR_ON:
         print(f"domain randomization ON: gain+-{DR_GAIN} pd+-{DR_PD} obs_noise={DR_OBS} push_p={DR_PUSH}@{DR_PUSH_MAG}m/s", flush=True)
@@ -403,13 +407,17 @@ def main(argv=None) -> int:
     if CONTACT_DR:
         def _rand_model(rng):
             k = jax.random.split(rng, 4)
+            def _rng(lo, hi):                                 # P3: scale the range's deviation from 1.0 by DR_SCALE
+                return 1.0 - (1.0 - lo) * DR_SCALE, 1.0 + (hi - 1.0) * DR_SCALE   # DR_SCALE=1.0 -> (lo, hi) unchanged
+            _fl, _fh = _rng(0.7, 1.4); _ml, _mh = _rng(0.9, 1.1)
+            _al, _ah = _rng(1.0, 1.05); _ll, _lh = _rng(0.5, 2.0)
             fr = mx.geom_friction.at[:, 0].set(
-                mx.geom_friction[:, 0] * jax.random.uniform(k[0], (mx.ngeom,), minval=0.7, maxval=1.4))
-            ma = mx.body_mass * jax.random.uniform(k[1], (mx.nbody,), minval=0.9, maxval=1.1)
+                mx.geom_friction[:, 0] * jax.random.uniform(k[0], (mx.ngeom,), minval=_fl, maxval=_fh))
+            ma = mx.body_mass * jax.random.uniform(k[1], (mx.nbody,), minval=_ml, maxval=_mh)
             ar = mx.dof_armature.at[6:].set(
-                mx.dof_armature[6:] * jax.random.uniform(k[2], (mx.nv - 6,), minval=1.0, maxval=1.05))
+                mx.dof_armature[6:] * jax.random.uniform(k[2], (mx.nv - 6,), minval=_al, maxval=_ah))
             fl = mx.dof_frictionloss.at[6:].set(
-                mx.dof_frictionloss[6:] * jax.random.uniform(k[3], (mx.nv - 6,), minval=0.5, maxval=2.0))
+                mx.dof_frictionloss[6:] * jax.random.uniform(k[3], (mx.nv - 6,), minval=_ll, maxval=_lh))
             return fr, ma, ar, fl
         _fr, _ma, _ar, _fl = jax.vmap(_rand_model)(jax.random.split(jax.random.PRNGKey(7), N))
         mx_v = mx.replace(geom_friction=_fr, body_mass=_ma, dof_armature=_ar, dof_frictionloss=_fl)

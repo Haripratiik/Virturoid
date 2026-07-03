@@ -146,7 +146,7 @@ def train_gene_on_gpu(gene, *, out_path: str, iters: int = 80, envs: int = 1024,
                       calf_phase: float | None = None, cpg_freq: float | None = None,
                       decimation: int | None = None, action_lpf: float | None = None,
                       sphere_feet: bool = False, contact_dr: bool = False,
-                      phase_obs: bool = False,
+                      phase_obs: bool = False, dr_scale: float = 1.0,
                       keep_checkpoints: bool = False) -> str | None:
     """Sync repo+gene to the box, run MJX PPO, fetch the trained policy to ``out_path``. Returns the local
     npz path, or ``None`` on any failure so the caller can fall back to CPU. ``reward_weights`` (the AI gait
@@ -177,6 +177,8 @@ def train_gene_on_gpu(gene, *, out_path: str, iters: int = 80, envs: int = 1024,
             extra += " --contact-dr"
         if phase_obs:                                        # P1 (plan v4): CPG master-phase gait clock as percept token
             extra += " --phase-obs"
+        if dr_scale != 1.0:                                  # P3 (plan v4): soften/widen the contact-DR range width
+            extra += f" --dr-scale {float(dr_scale)}"
         if keep_checkpoints:                                 # plan v2 T0.1: numbered checkpoints for deploy-sim selection
             extra += " --keep-checkpoints"
         if ep_len:
