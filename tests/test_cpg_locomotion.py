@@ -90,6 +90,13 @@ class TrotCpgPriorTests(unittest.TestCase):
             off = MorphPolicy(fd, seed=0); off.cpg = CPG_DEFAULT           # phase_obs left False -> meta[9]=0.0
             p2 = os.path.join(d, "off.npz"); off.to_npz(p2, 0.0, normalizer=None)
             self.assertFalse(MorphPolicy.from_npz(p2).phase_obs, "a non-clock policy must reload with phase_obs OFF")
+            # WS8/P6: the velocity-command flag (meta[10]) must ALSO round-trip so a conditioned policy deploys
+            # tracking (recipe_rollout_morph reads policy.command_conditioned). Independent of phase_obs (meta[9]).
+            self.assertFalse(MorphPolicy(fd, seed=0).command_conditioned, "command_conditioned defaults OFF")
+            self.assertFalse(MorphPolicy.from_npz(p2).command_conditioned, "an unconditioned policy reloads OFF")
+            cc = MorphPolicy(fd, seed=0); cc.cpg = CPG_DEFAULT; cc.command_conditioned = True
+            p3 = os.path.join(d, "cc.npz"); cc.to_npz(p3, 0.0, normalizer=None)
+            self.assertTrue(MorphPolicy.from_npz(p3).command_conditioned, "a command-conditioned policy reloads ON")
 
     def test_phase_obs_deploy_feeds_the_gait_clock(self):
         # P1 deploy parity: when phase_obs is ON, recipe_rollout_morph must FEED the [sin,cos] gait clock through

@@ -52,6 +52,8 @@ class MorphPolicy:
         self.sphere_feet = False                              # sphere feet + feet-only collision (plan v2 T1.4); off = untouched
         self.phase_obs = False                                # P1 phase-clock obs (meta[9]): deploy feeds the gait clock
         #   [sin,cos] via the percept token (slots 8-9) so a clocked policy TIMES its steps; off = perception-blind
+        self.command_conditioned = False                      # WS8/P6 (meta[10]): deploy feeds a [vx,wz] velocity
+        #   command via the percept token (slots 8-9) so the policy TRACKS a commanded speed (L6); off = unconditioned
         rng = np.random.default_rng(seed)
         s = 0.3
         # NOTE: Wrange/brange are appended LAST so the rng draw order for We/Wq/Wk/Wv/Wo/Wh is unchanged
@@ -181,6 +183,7 @@ class MorphPolicy:
         p.action_lpf = float(meta[7]) if len(meta) > 7 else 0.0   # meta[7]: action EMA low-pass (T1.2); deploy==train
         p.sphere_feet = bool(float(meta[8]) > 0.5) if len(meta) > 8 else False  # meta[8]: sphere feet (T1.4); deploy==train
         p.phase_obs = bool(float(meta[9]) > 0.5) if len(meta) > 9 else False  # meta[9]: P1 phase-clock obs; deploy==train
+        p.command_conditioned = bool(float(meta[10]) > 0.5) if len(meta) > 10 else False  # meta[10]: WS8/P6 vel-command
         return p
 
     def to_npz(self, path, score: float = 0.0, *, normalizer=None):
@@ -204,7 +207,8 @@ class MorphPolicy:
                                   float(getattr(self, "decimation", 1) or 1),      # meta[6]: control decimation
                                   float(getattr(self, "action_lpf", 0.0) or 0.0),     # meta[7]: action LPF
                                   1.0 if getattr(self, "sphere_feet", False) else 0.0,   # meta[8]: sphere feet (T1.4)
-                                  1.0 if getattr(self, "phase_obs", False) else 0.0]))  # meta[9]: P1 phase-clock obs
+                                  1.0 if getattr(self, "phase_obs", False) else 0.0,    # meta[9]: P1 phase-clock obs
+                                  1.0 if getattr(self, "command_conditioned", False) else 0.0]))  # meta[10]: WS8/P6 cmd
         return str(path)
 
 
