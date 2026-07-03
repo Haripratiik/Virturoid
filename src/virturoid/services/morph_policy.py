@@ -50,6 +50,8 @@ class MorphPolicy:
         self.decimation = 1                                   # control decimation (plan v2 T1.1): deploy hold-D-steps
         self.action_lpf = 0.0                                 # action EMA low-pass (plan v2 T1.2); 0 = off
         self.sphere_feet = False                              # sphere feet + feet-only collision (plan v2 T1.4); off = untouched
+        self.phase_obs = False                                # P1 phase-clock obs (meta[9]): deploy feeds the gait clock
+        #   [sin,cos] via the percept token (slots 8-9) so a clocked policy TIMES its steps; off = perception-blind
         rng = np.random.default_rng(seed)
         s = 0.3
         # NOTE: Wrange/brange are appended LAST so the rng draw order for We/Wq/Wk/Wv/Wo/Wh is unchanged
@@ -178,6 +180,7 @@ class MorphPolicy:
         p.decimation = int(float(meta[6])) if len(meta) > 6 else 1
         p.action_lpf = float(meta[7]) if len(meta) > 7 else 0.0   # meta[7]: action EMA low-pass (T1.2); deploy==train
         p.sphere_feet = bool(float(meta[8]) > 0.5) if len(meta) > 8 else False  # meta[8]: sphere feet (T1.4); deploy==train
+        p.phase_obs = bool(float(meta[9]) > 0.5) if len(meta) > 9 else False  # meta[9]: P1 phase-clock obs; deploy==train
         return p
 
     def to_npz(self, path, score: float = 0.0, *, normalizer=None):
@@ -200,7 +203,8 @@ class MorphPolicy:
                                   1.0 if getattr(self, "cpg", None) else 0.0,
                                   float(getattr(self, "decimation", 1) or 1),      # meta[6]: control decimation
                                   float(getattr(self, "action_lpf", 0.0) or 0.0),     # meta[7]: action LPF
-                                  1.0 if getattr(self, "sphere_feet", False) else 0.0]))  # meta[8]: sphere feet (T1.4)
+                                  1.0 if getattr(self, "sphere_feet", False) else 0.0,   # meta[8]: sphere feet (T1.4)
+                                  1.0 if getattr(self, "phase_obs", False) else 0.0]))  # meta[9]: P1 phase-clock obs
         return str(path)
 
 
@@ -698,6 +702,7 @@ def recipe_rollout_morph(gene, policy: MorphPolicy | None = None, *, steps: int 
     # reverse -> high error -> low track_score. L6_command_track is scored on tracking, so a constant gait FAILS.
     cmd_seq = None; terr = 0.0; tsteps = 0
     cmd_conditioned = bool(getattr(policy, "command_conditioned", False)) if policy is not None else False
+    phase_obs_deploy = bool(getattr(policy, "phase_obs", False)) if policy is not None else False   # P1 clock (meta[9])
     _zero_rng = None
     if command_schedule:
         cmd_seq = []
@@ -713,7 +718,11 @@ def recipe_rollout_morph(gene, policy: MorphPolicy | None = None, *, steps: int 
             obs = graph.observe(model, data)
             if mean is not None:
                 obs = (obs - mean) / std
-            if cmd_conditioned and cmd_seq is not None:      # feed the current command to a conditioned policy (WS8)
+            if phase_obs_deploy and cpg_on:                  # P1 phase-clock: feed the global gait clock [sin,cos] via
+                _mp = _two_pi * cpg_freq * t * dt            #   the percept token (slots 8-9) — the SAME master phase
+                a_raw = policy.act(obs, ranges=np.zeros(8),  #   the CPG uses, so deploy==train (trainer feeds the same)
+                                   cmd=[float(np.sin(_mp)), float(np.cos(_mp))], hop=hop)
+            elif cmd_conditioned and cmd_seq is not None:    # feed the current command to a conditioned policy (WS8)
                 _vc = cmd_seq[min(t, len(cmd_seq) - 1)]
                 a_raw = policy.act(obs, ranges=_zero_rng, cmd=[_vc, 0.0], hop=hop)
             else:
