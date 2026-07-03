@@ -65,13 +65,20 @@ def compounding_series(snapshots: list) -> dict:
                        "cumulative_banked": cum, "coverage": cov, "annecs_v": int(s.get("annecs_v", 0) or 0),
                        "qd_score": float(s.get("qd_score", 0.0) or 0.0)})
     n = len(series)
-    grew = n >= 2 and series[-1]["cumulative_banked"] > series[0]["cumulative_banked"]
-    compounding = bool(grew and not cov_regressed)
+    # COMPOUNDING = CAPABILITIES ACCUMULATE (cumulative banked strictly grows) -- the always-valid signal (the
+    # banks persist in shared flywheel memory regardless). Coverage growth is a SECONDARY signal that ALSO
+    # requires a SHARED QD archive passed across nights (else each night's coverage is per-night, not cumulative,
+    # and oscillates -- reported honestly as coverage_compounds=False, not conflated with the banked verdict).
+    banked_compounds = bool(n >= 2 and series[-1]["cumulative_banked"] > series[0]["cumulative_banked"])
+    coverage_compounds = bool(n >= 2 and not cov_regressed and series[-1]["coverage"] > series[0]["coverage"])
+    compounding = banked_compounds
     headline = (f"banked {series[0]['cumulative_banked']}->{series[-1]['cumulative_banked']} cumulative over "
-                f"{n} nights; coverage {series[0]['coverage']:.2f}->{series[-1]['coverage']:.2f}; "
-                f"{'COMPOUNDING' if compounding else 'not yet compounding (need >=2 growing nights)'}"
+                f"{n} nights; coverage {series[0]['coverage']:.3f}->{series[-1]['coverage']:.3f} "
+                f"({'grows' if coverage_compounds else 'per-night (share the QD archive to accumulate)'}); "
+                f"{'COMPOUNDING' if compounding else 'not yet compounding (need >=2 banking nights)'}"
                 ) if series else "no nights recorded yet"
     return {"series": series, "n_nights": n, "cumulative_banked": series[-1]["cumulative_banked"] if series else 0,
+            "banked_compounds": banked_compounds, "coverage_compounds": coverage_compounds,
             "coverage_regressed": cov_regressed, "compounding": compounding, "headline": headline}
 
 
