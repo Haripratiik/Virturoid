@@ -89,6 +89,11 @@ def main(argv=None) -> int:
                     "penalize normalized PD torque (ctrl/clamp)^2 so the policy can't crank destabilizing targets "
                     "for free — gives the reward something shaping the APPROACH to a step, not just the fall cliff")
     ap.add_argument("--air-target", type=float, default=0.5, help="feet_air_time target swing duration (s)")
+    ap.add_argument("--periodic-w", type=float, default=0.0,
+                    help="PERIODIC gait-contact reward (plan v4 P1, Siekmann-style duty): penalize each foot for "
+                         "staying in STANCE longer than half a gait cycle -- forces every foot to LIFT on the CPG "
+                         "rhythm, so the learned residual can't suppress the CPG foot-lift into a forward SLIDE "
+                         "(the measured hexapod failure). 0 = off (byte-identical).")
     ap.add_argument("--upright-hi", type=float, default=0.7, help="upright-ramp SATURATION height (fraction of "
                     "standing z where the continuous upright reward hits 1.0). Default 0.7 (byte-identical; the "
                     "quad walks). RAISE toward ~0.9 for bodies that FARM the reward by CROUCHING: at 0.7 a "
@@ -257,6 +262,7 @@ def main(argv=None) -> int:
     ACTION_LPF = float(args.action_lpf)                       # T1.2: EMA low-pass on the action offset (0 = off)
     AIR_W, AIR_TGT, VZ_W, WXY_W = args.air_w, args.air_target, args.vz_w, args.wxy_w   # legged_gym reward terms
     TORQUE_W = args.torque_w                              # actuator-effort penalty (anti-crank stabilizer)
+    PERIODIC_W = float(args.periodic_w)                   # P1 (plan v4): periodic gait-contact reward weight (0 = off)
     UPRIGHT_HI = max(0.55, float(args.upright_hi))        # upright-ramp saturation height (anti-crouch; default 0.7)
     # TROT-CPG PRIOR (opt-in --cpg): per-token feed-forward amplitude/phase from the SAME logic as the CPU recipe
     # (morph_policy._trot_cpg_tokens + CPG_DEFAULT), so a GPU-trained policy transfers to / replays on the CPU path.
@@ -279,6 +285,10 @@ def main(argv=None) -> int:
                   f"active={int((_amp != 0).sum())} tokens", flush=True)
         else:
             print("--cpg requested but body is not a recognized legged body; using scalar recipe", flush=True)
+    # P1 periodic gait-contact reward: the expected MAX stance duration = half a gait cycle (Siekmann duty 0.5).
+    # A foot grounded longer than this is "stuck" (a slide); the reward penalizes the excess, forcing every foot
+    # to LIFT on the CPG rhythm so the learned residual can't cancel the CPG foot-lift into a forward slide.
+    MAX_STANCE = (0.5 / CPG_FREQ) if (CPG_ON and CPG_FREQ > 0.0) else 0.35
     # SIM2REAL DR knobs (static -> every DR op below is guarded by DR_ON, so --dr off is byte-identical).
     DR_ON = bool(args.dr); DR_GAIN = float(args.dr_gain); DR_PD = float(args.dr_pd)
     CONTACT_DR = bool(args.contact_dr)                        # T1.5: per-env MODEL-param DR (vmapped mjx.Model)
@@ -420,8 +430,9 @@ def main(argv=None) -> int:
         gain_s, kp_s, kd_s = dr                          # per-env sim2real scales (all ones when --dr off)
 
         def body(carry, key):
-            # alive (N,): 1.0 until this env first falls; air_time/last_contact (N, n_feet): feet_air_time state
-            data, alive, a_prev, air_time, last_contact = carry
+            # alive (N,): 1.0 until this env first falls; air_time/last_contact (N, n_feet): feet_air_time state;
+            # stance_time (N, n_feet): per-foot GROUNDED duration (P1 periodic reward; symmetric to air_time).
+            data, alive, a_prev, air_time, last_contact, stance_time = carry
             obs = jax.vmap(obs_tokens)(data)              # (N, NT, F)
             pkey = key
             if DR_ON:                                     # sim2real: noisy obs + (below) randomized dynamics + pushes
@@ -473,6 +484,7 @@ def main(argv=None) -> int:
                 rew = rew_raw - 0.01 * jp.mean(a_clip ** 2, axis=-1)
                 alive2 = alive                                          # no termination in legacy mode
                 air_time2, last_contact2 = air_time, last_contact       # feet_air_time unused in legacy A/B path
+                stance_time2 = stance_time                              # P1 stance-time unused in legacy path
             else:
                 quat = data2.qpos[:, base_qadr + 3:base_qadr + 7]
                 upr = 1.0 - 2.0 * (quat[:, 1] ** 2 + quat[:, 2] ** 2)   # world-up . body-up
@@ -512,6 +524,12 @@ def main(argv=None) -> int:
                 air_reward = jp.sum((air_acc - AIR_TGT) * first_contact, axis=-1)   # (N,) summed over feet landing now
                 air_time2 = air_acc * (1.0 - contact_filt)                     # reset feet now in contact
                 last_contact2 = contact
+                # P1 PERIODIC gait-contact reward (plan v4): accumulate per-foot GROUNDED time (reset the step a
+                # foot lifts), and penalize the EXCESS over half a gait cycle -- so every foot MUST lift on the CPG
+                # rhythm and the learned residual can't cancel the CPG foot-lift into a forward slide (the measured
+                # hexapod failure). PERIODIC_W=0 -> periodic_pen=0 -> training byte-identical.
+                stance_time2 = (stance_time + DT) * contact_filt               # grounded duration; 0 on liftoff
+                periodic_pen = PERIODIC_W * jp.sum(jp.maximum(stance_time2 - MAX_STANCE, 0.0), axis=-1)
                 # lin_vel_z / ang_vel_xy stabilizers (legged_gym): keep the gait forward + the trunk level
                 vz = jp.nan_to_num(data2.qvel[:, base_vadr + 2])
                 wxy = jp.nan_to_num(data2.qvel[:, base_vadr + 3:base_vadr + 5])
@@ -532,7 +550,7 @@ def main(argv=None) -> int:
                 step_r = jp.maximum(0.0, PROG_W * progress * up + 0.2 * up + 0.15 * jp.maximum(0.0, upr)
                                     + (CLEAR_W * clearance + SWING_W * swing + ALT_W * swing_phase
                                        + AIR_W * air_reward) * up * gate_mult
-                                    - SLIP_W * slip - SMOOTH_W * sm - stab - TORQUE_W * effort)
+                                    - SLIP_W * slip - SMOOTH_W * sm - stab - TORQUE_W * effort - periodic_pen)
                 # G4 PARITY FIX: an explicit cost for BACKWARD base-x, applied OUTSIDE the max(0) so the stepping
                 # rewards can't fund a reversed gait. Scales with how backward it goes -> backward is driven to 0
                 # reward (never a basin) while a forward gait pays nothing. Kills the MJX backward-convergence.
@@ -540,7 +558,7 @@ def main(argv=None) -> int:
                 rew = alive2 * jp.maximum(0.0, step_r - back_pen)       # non-negative; zero after a fall or if reversing
             # carry the action basis used for smoothness next step (applied offset for recipe; clipped for legacy)
             a_next = a_clip if LEGACY else off
-            return (data2, alive2, a_next, air_time2, last_contact2), (obs, act, logp, rew, val, fwd, alive2)
+            return (data2, alive2, a_next, air_time2, last_contact2, stance_time2), (obs, act, logp, rew, val, fwd, alive2)
 
         return jax.lax.scan(body, carry, keys)
 
@@ -572,7 +590,8 @@ def main(argv=None) -> int:
             gain_s = kp_s = kd_s = jp.ones(N)
         dr = (gain_s, kp_s, kd_s)
         # (data, alive-mask, prev-action, feet_air_time, last-contact) threaded across chunks; feet start grounded
-        carry = (data, jp.ones(N), jp.zeros((N, nu)), jp.zeros((N, n_feet)), jp.ones((N, n_feet)))
+        carry = (data, jp.ones(N), jp.zeros((N, nu)), jp.zeros((N, n_feet)), jp.ones((N, n_feet)),
+                 jp.zeros((N, n_feet)))                          # + stance_time (P1 periodic reward; feet start grounded)
         chunks = []
         for _ in range(L // CHUNK):
             key, ck = jax.random.split(key)

@@ -134,7 +134,8 @@ def _launch_ok(launch_cmd: str, proc_name: str) -> bool:
 
 # reward-shaping flags the MJX trainer accepts (gait_critic's bounded design space -> trainer CLI flags).
 _REWARD_FLAGS = ("prog_w", "clear_w", "swing_w", "slip_w", "alt_w", "smooth_w", "air_w", "vz_w", "wxy_w",
-                 "torque_w", "back_w", "fwd_gate_w")   # back_w = backward penalty; fwd_gate_w = G4 forward-gate fix
+                 "torque_w", "back_w", "fwd_gate_w", "periodic_w")   # back_w = backward penalty; fwd_gate_w = G4
+#   forward-gate fix; periodic_w = P1 periodic gait-contact reward (plan v4)
 
 
 def train_gene_on_gpu(gene, *, out_path: str, iters: int = 80, envs: int = 1024, progress=None,
