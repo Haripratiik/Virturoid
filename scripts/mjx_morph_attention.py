@@ -88,6 +88,11 @@ def main(argv=None) -> int:
     ap.add_argument("--torque-w", type=float, default=0.02, help="actuator-EFFORT penalty (legged_gym torque term): "
                     "penalize normalized PD torque (ctrl/clamp)^2 so the policy can't crank destabilizing targets "
                     "for free — gives the reward something shaping the APPROACH to a step, not just the fall cliff")
+    ap.add_argument("--wtw-w", type=float, default=0.0,
+                    help="SLIDE-PROOF contact-slip penalty (Walk-These-Ways/Siekmann family; physical-AI research): "
+                    "penalize a foot's HORIZONTAL SPEED while GROUNDED. A properly-planted foot is a stationary "
+                    "pivot (~0), a lifted foot has no contact (0), but a dragging/sliding foot moves while grounded "
+                    "(penalized) — kills the forward-slide the reward-only policy exploits. 0 = off (byte-identical).")
     ap.add_argument("--air-target", type=float, default=0.5, help="feet_air_time target swing duration (s)")
     ap.add_argument("--periodic-w", type=float, default=0.0,
                     help="PERIODIC gait-contact reward (plan v4 P1, Siekmann-style duty): penalize each foot for "
@@ -269,6 +274,7 @@ def main(argv=None) -> int:
     AIR_W, AIR_TGT, VZ_W, WXY_W = args.air_w, args.air_target, args.vz_w, args.wxy_w   # legged_gym reward terms
     TORQUE_W = args.torque_w                              # actuator-effort penalty (anti-crank stabilizer)
     PERIODIC_W = float(args.periodic_w)                   # P1 (plan v4): periodic gait-contact reward weight (0 = off)
+    WTW_W = float(args.wtw_w)                              # physical-AI: slide-proof grounded-foot-speed penalty (0=off)
     UPRIGHT_HI = max(0.55, float(args.upright_hi))        # upright-ramp saturation height (anti-crouch; default 0.7)
     # TROT-CPG PRIOR (opt-in --cpg): per-token feed-forward amplitude/phase from the SAME logic as the CPU recipe
     # (morph_policy._trot_cpg_tokens + CPG_DEFAULT), so a GPU-trained policy transfers to / replays on the CPU path.
@@ -539,6 +545,13 @@ def main(argv=None) -> int:
                 # (all feet down) NOR bounding/leaping (all feet airborne) — the round-3 failure was a bound+dive.
                 swing_phase = ((n_stance > 0.5) & (n_stance < fz.shape[-1] - 0.5)).astype(jp.float32)
                 slip = both_planted * jp.abs(fwd)                              # forward motion while fully planted
+                # SLIDE-PROOF (WTW/Siekmann family): per-foot HORIZONTAL SPEED while GROUNDED. A properly-planted
+                # foot pivots (~0); a lifted foot has no contact (0); a DRAGGING/sliding foot moves while grounded
+                # -> penalized. This is the exact signal the reward-only forward-slide CANNOT fake (unlike foot-
+                # height/air-time/stance-time, which it games). WTW_W=0 -> contact_slip unused -> byte-identical.
+                foot_dxy = data2.geom_xpos[:, foot_idx, :2] - data.geom_xpos[:, foot_idx, :2]   # (N, n_feet, 2)
+                foot_speed = jp.sqrt(jp.sum(foot_dxy ** 2, axis=-1) + 1e-12) / DT               # (N, n_feet) m/s
+                contact_slip = jp.sum(stance * foot_speed, axis=-1)                             # grounded feet that MOVE
                 # feet_air_time (legged_gym, the canonical anti-slide term): reward the swing TIME of each foot,
                 # paid only on TOUCHDOWN (first contact after being airborne), targeting AIR_TGT seconds. A held
                 # stance accumulates no air time; a foot-dragging slide never lifts a foot, so neither earns it —
@@ -576,7 +589,8 @@ def main(argv=None) -> int:
                 step_r = jp.maximum(0.0, PROG_W * progress * up + 0.2 * up + 0.15 * jp.maximum(0.0, upr)
                                     + (CLEAR_W * clearance + SWING_W * swing + ALT_W * swing_phase
                                        + AIR_W * air_reward) * up * gate_mult
-                                    - SLIP_W * slip - SMOOTH_W * sm - stab - TORQUE_W * effort - periodic_pen)
+                                    - SLIP_W * slip - SMOOTH_W * sm - stab - TORQUE_W * effort - periodic_pen
+                                    - WTW_W * contact_slip)   # slide-proof: grounded feet must not drag
                 # G4 PARITY FIX: an explicit cost for BACKWARD base-x, applied OUTSIDE the max(0) so the stepping
                 # rewards can't fund a reversed gait. Scales with how backward it goes -> backward is driven to 0
                 # reward (never a basin) while a forward gait pays nothing. Kills the MJX backward-convergence.
