@@ -30,6 +30,18 @@ class HumanoidDispatchTests(unittest.TestCase):
         for p in ("a bipedal robot", "an android", "a human-like robot"):
             self.assertEqual("humanoid.anthropometric", compose_robot(p).species, p)
 
+    def test_balance_dof_variant_adds_hip_roll_and_ankle(self):
+        # plan v4 P2: opt-in balance DOF (hip-ROLL + ankle-PITCH) -> 12 DOF for the walk ladder; default stays 8
+        # so H1 + every existing humanoid path is byte-identical.
+        from virturoid.services.humanoid_anatomy import build_anthropometric_humanoid
+        base = build_anthropometric_humanoid()
+        wide = build_anthropometric_humanoid(balance_dof=True)
+        self.assertEqual(8, len(base.actuated_joints()))            # default unchanged
+        self.assertEqual(12, len(wide.actuated_joints()))          # +2 hip-roll +2 ankle-pitch
+        names = {s.name for s in wide.segments}
+        self.assertTrue({"l_hip", "r_hip"} <= names)               # the hip-roll blocks exist
+        self.assertEqual([], wide.validate())                      # still a valid gene
+
 
 @unittest.skipUnless(_BD, "needs build123d")
 class LoftDslTests(unittest.TestCase):

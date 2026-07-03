@@ -64,10 +64,17 @@ def _torso_module(z0, z1, hx, hy, *, chamfer, fillet_frac=0.16, vents=0):
     return geo
 
 
-def build_anthropometric_humanoid(H: float = 0.205, *, dims: dict | None = None) -> RobotGene:
+def build_anthropometric_humanoid(H: float = 0.205, *, dims: dict | None = None,
+                                  balance_dof: bool = False) -> RobotGene:
     """Generate an original humanoid from head-canon proportions. ``H`` = head height (m); total stature
-    ~7.7 H. 8 actuated DOF (hips+knees, shoulders+elbows); welded head/hands/feet add anatomy, not DOF.
+    ~7.7 H. Default 8 actuated DOF (hips+knees, shoulders+elbows); welded head/hands/feet add anatomy, not DOF.
     Default rest pose (all joints 0) stands with arms hanging to mid-thigh and feet flat — a real stance.
+
+    ``balance_dof`` (plan v4 P2) adds a hip-ROLL block + an actuated ANKLE-PITCH per leg (8 -> 12 DOF) — the
+    lateral + sagittal balance authority the Rung-0 kill criterion prescribed (the 8-DOF body stood on nominal
+    dynamics but survived 0/6 under DR pushes; those DOF, held at 0 by the PD, leave the nominal stand unchanged
+    but let a TRAINED walk policy catch a tip). Default False so H1 + every existing humanoid path is unchanged;
+    the walk ladder (P2 rung 2) builds with ``balance_dof=True``.
 
     ``dims`` (optional, metres) NUDGES individual segment LENGTHS away from the head-canon default so the LLM
     intent can ask for unusual proportions (a long-reach arm, a compact torso) WITHOUT touching radii/axes/
@@ -143,11 +150,23 @@ def build_anthropometric_humanoid(H: float = 0.205, *, dims: dict | None = None)
     thigh_len = float(d.get("thigh_mm") or 1.9 * H)
     shin_len = float(d.get("shin_mm") or 1.75 * H)
     thigh_r, shin_r, ankle_r = 0.40 * H, 0.30 * H, 0.21 * H
+    hip_len = 0.25 * H                                          # a short HIP-ROLL block between torso and thigh
     for side, sy in (("l", 1.0), ("r", -1.0)):
-        seg.append(GeneSegment(name=f"{side}_thigh", parent="torso", shape="capsule", length_m=thigh_len,
+        thigh_parent, thigh_mount, thigh_euler = "torso", (0.0, sy * hip_y * 0.74, -torso_len), _DOWN
+        if balance_dof:
+            # HIP-ROLL (plan v4 P2): a roll DOF about the forward (+x) axis = hip abduction/adduction, the lateral
+            # weight-shift authority a biped needs to balance (the Rung-0 kill fired on 0/6 DR stands with no
+            # hip-roll/ankle). A short link carries the roll joint; the thigh (pitch) hangs off its end.
+            seg.append(GeneSegment(name=f"{side}_hip", parent="torso", shape="capsule", length_m=hip_len,
+                                   radius_m=0.55 * thigh_r, mass_kg=1.0, joint_type="revolute", joint_axis=(1, 0, 0),
+                                   joint_lower=-0.6, joint_upper=0.6, actuator_torque_nm=38.0,
+                                   mount_offset=(0.0, sy * hip_y * 0.74, -torso_len), mount_euler=_DOWN,
+                                   geometry=_mech_link(hip_len, 0.55 * thigh_r)))
+            thigh_parent, thigh_mount, thigh_euler = f"{side}_hip", (0.0, 0.0, hip_len), (0.0, 0.0, 0.0)
+        seg.append(GeneSegment(name=f"{side}_thigh", parent=thigh_parent, shape="capsule", length_m=thigh_len,
                                radius_m=thigh_r, mass_kg=4.5, joint_type="revolute", joint_axis=(0, 1, 0),
                                joint_lower=-2.2, joint_upper=2.2, actuator_torque_nm=42.0,
-                               mount_offset=(0.0, sy * hip_y * 0.74, -torso_len), mount_euler=_DOWN,
+                               mount_offset=thigh_mount, mount_euler=thigh_euler,
                                geometry=_mech_link(thigh_len, thigh_r, vented=True)))
         seg.append(GeneSegment(name=f"{side}_shin", parent=f"{side}_thigh", shape="capsule", length_m=shin_len,
                                radius_m=shin_r, mass_kg=2.6, joint_type="revolute", joint_axis=(0, 1, 0),
@@ -155,14 +174,14 @@ def build_anthropometric_humanoid(H: float = 0.205, *, dims: dict | None = None)
                                geometry=_mech_link(shin_len, shin_r)))
         foot_len, foot_w, foot_h = 1.0 * H, 0.34 * H, 0.16 * H
         # The shin frame hangs down (+z = world -z); R_x(pi) makes the foot's sole lie FLAT — its forward (+x)
-        # = world forward and its up (+z) = world up — instead of the old (0,-pi/2,0) that tipped the toe
-        # downward and rendered the foot vertical.
-        # push the foot DOWN past the shin's fat capsule hemisphere (which extends shin_r below the ankle) so the
-        # FOOT — not the invisible shin collider — is the lowest contact; otherwise grounding lands on the shin
-        # and the visible feet float ~shin_r above the floor.
+        # = world forward and its up (+z) = world up. With ``balance_dof`` the foot is an actuated ANKLE-PITCH
+        # (plan v4 P2): plantar/dorsiflexion, the primary "ankle strategy" balance DOF -- held at 0 by the PD so
+        # the nominal stand is unchanged, but available for a walk policy to catch a forward/back tip. Default =
+        # welded (the original 8-DOF humanoid; H1 stand + existing behavior byte-identical).
         seg.append(GeneSegment(name=f"{side}_foot", parent=f"{side}_shin", shape="box", length_m=foot_h,
-                               radius_m=foot_w, mass_kg=0.6, joint_type=None, mount_euler=(math.pi, 0.0, 0.0),
-                               mount_offset=(0.0, 0.0, shin_r),
+                               radius_m=foot_w, mass_kg=0.6, joint_type=("revolute" if balance_dof else None),
+                               joint_axis=(0, 1, 0), joint_lower=-0.7, joint_upper=0.7, actuator_torque_nm=24.0,
+                               mount_euler=(math.pi, 0.0, 0.0), mount_offset=(0.0, 0.0, shin_r),
                                geometry={"family": "sole", "length": foot_len, "width": foot_w,
                                          "height": foot_h, "heel": 0.30 * H}))
 
