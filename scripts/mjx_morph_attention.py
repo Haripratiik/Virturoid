@@ -88,6 +88,10 @@ def main(argv=None) -> int:
     ap.add_argument("--torque-w", type=float, default=0.02, help="actuator-EFFORT penalty (legged_gym torque term): "
                     "penalize normalized PD torque (ctrl/clamp)^2 so the policy can't crank destabilizing targets "
                     "for free — gives the reward something shaping the APPROACH to a step, not just the fall cliff")
+    ap.add_argument("--real-actuator", action="store_true", help="B1: replace the constant torque clip with the "
+                    "real 4-quadrant TORQUE-SPEED clamp (peak torque tapers to 0 at the servo no-load speed when "
+                    "DRIVING; full torque BRAKING). Trains a policy that is executable on the BOM's real motors "
+                    "(the sim2real actuator gap). Same clamp the CPU rollout + BOM certificate use.")
     ap.add_argument("--wtw-w", type=float, default=0.0,
                     help="SLIDE-PROOF contact-slip penalty (Walk-These-Ways/Siekmann family; physical-AI research): "
                     "penalize a foot's HORIZONTAL SPEED while GROUNDED. A properly-planted foot is a stationary "
@@ -242,6 +246,14 @@ def main(argv=None) -> int:
     qadr = jp.asarray(graph.qadr); vadr = jp.asarray(graph.vadr)
     static = jp.asarray(graph.static)
     clamps = jp.asarray(graph.clamps)
+    REAL_ACT = bool(getattr(args, "real_actuator", False))    # B1: 4-quadrant torque-speed clamp (real servos)
+    if REAL_ACT:                                              # size each token's servo from its torque capacity ->
+        from virturoid.services.actuator_model import clamp_torque as _clamp_tau, knee_speed   # per-token no-load
+        from virturoid.services.component_catalog import select_actuator   # speed + knee (numpy, static; the SAME
+        _cl = np.asarray(graph.clamps, float)                #   sizing the CPU rollout + BOM certificate use)
+        _qdm = np.array([select_actuator(float(c), margin=1.0).max_speed_radps for c in _cl])
+        QD_MAX = jp.asarray(_qdm); QD_KNEE = jp.asarray([knee_speed(v) for v in _qdm])
+        print(f"real_actuator ON: torque-speed clamp, no-load speed [{_qdm.min():.1f}..{_qdm.max():.1f}] rad/s", flush=True)
     # Phase-5 tokenizer upgrades (opt-in, mirror the CPU MorphPolicy so trained weights transfer back).
     FILM, TOPO_BIAS, TOPO_BUCKETS = bool(args.film), bool(args.topo_bias), 8
     if TOPO_BIAS:                                          # static per-morphology hop-distance matrix (NT, NT)
@@ -493,9 +505,14 @@ def main(argv=None) -> int:
                 KPe = KP * kp_s[:, None] if DR_ON else KP   # sim2real: per-env PD stiffness (proxy joint friction/damping)
                 KDe = KD * kd_s[:, None] if DR_ON else KD
                 tau = KPe * (tgt - d.qpos[:, qadr]) - KDe * d.qvel[:, vadr]
-                ct = jp.clip(tau, -clamps, clamps)                     # (N, NT)
-                if DR_ON:
-                    ct = jp.clip(ct * gain_s[:, None], -clamps, clamps)   # per-env actuator-gain scale
+                if REAL_ACT:                                          # B1: real 4-quadrant torque-speed envelope
+                    if DR_ON:
+                        tau = tau * gain_s[:, None]                    # per-env actuator-gain scale (before the limit)
+                    ct = _clamp_tau(tau, d.qvel[:, vadr], clamps, QD_KNEE[None, :], QD_MAX[None, :], xp=jp)
+                else:
+                    ct = jp.clip(tau, -clamps, clamps)                # (N, NT) constant clip (default; byte-identical)
+                    if DR_ON:
+                        ct = jp.clip(ct * gain_s[:, None], -clamps, clamps)   # per-env actuator-gain scale
                 return jp.zeros((N, nu)).at[:, act_u].set(ct), ct         # scatter token -> actuator index
             ctrl, ctrl_tok = _ctrl_of(data)                              # first substep from the INPUT state
             data2 = step_v(mx_v, data.replace(ctrl=ctrl))

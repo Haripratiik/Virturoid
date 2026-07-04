@@ -53,7 +53,8 @@ def _link_volume_m3(shape: str, length_m: float, radius_m: float) -> float:
     return math.pi * r * r * L + (4.0 / 3.0) * math.pi * r ** 3   # capsule
 
 
-def _pick_actuator(required_nm: float) -> tuple[str, float, float]:
+def _pick_actuator(required_nm: float):
+    """Legacy (torque-only, stall-sized) view kept for callers that want the (name, mass, stall) tuple."""
     for name, mass, stall in ACTUATORS:
         if stall >= required_nm:
             return name, mass, stall
@@ -61,9 +62,13 @@ def _pick_actuator(required_nm: float) -> tuple[str, float, float]:
 
 
 def ground_gene(gene, *, material: str = "aluminum", fill: float = 0.3, margin: float = 1.3) -> dict:
-    """Mutate ``gene`` in place: set each link's mass from material+geometry (+ its actuator's mass) and
-    each actuated joint's torque to a real actuator's stall torque. Returns ``{material, bom, total_mass_kg,
-    actuator_count}`` — ``bom`` is the real parts list."""
+    """Mutate ``gene`` in place: set each link's mass from material+geometry (+ its actuator's mass) and each
+    actuated joint's torque limit to a real actuator's PEAK. The actuator is sized so its CONTINUOUS (rated)
+    torque covers the sustained requirement with ``margin`` -- real thermal practice; never size a joint at its
+    stall, which cannot be held continuously (the failure the BOM certificate's G2 gate catches). Returns
+    ``{material, bom, total_mass_kg, actuator_count}`` -- ``bom`` is the real parts list (now with rated torque and
+    no-load speed so the executable-on-BOM certificate can grade the exact shipped part)."""
+    from virturoid.services.component_catalog import select_actuator
     density = MATERIALS.get(material, MATERIALS["aluminum"])
     bom: list[dict] = []
     total = 0.0
@@ -71,11 +76,15 @@ def ground_gene(gene, *, material: str = "aluminum", fill: float = 0.3, margin: 
         struct = _link_volume_m3(s.shape, s.length_m, s.radius_m) * density * fill
         act_mass = 0.0
         if s.joint_type in ("revolute", "prismatic"):
-            required = abs(s.actuator_torque_nm or 8.0) * margin
-            name, act_mass, stall = _pick_actuator(required)
-            s.actuator_torque_nm = stall                       # real stall torque drives the joint
-            bom.append({"role": s.name, "part": name, "mass_kg": act_mass, "stall_nm": stall,
-                        "required_nm": round(required, 2)})
+            required = abs(s.actuator_torque_nm or 8.0)
+            # rated torque must cover the sustained requirement (with margin) -> thermal headroom; peak then has
+            # a real transient reserve above it. This is what makes a grounded body BOTH walk and certify.
+            act = select_actuator(required, margin=margin, continuous_torque_nm=required * margin)
+            act_mass = act.mass_kg
+            s.actuator_torque_nm = act.peak_torque_nm          # joint limit = peak (transients); duty rides on rated
+            bom.append({"role": s.name, "part": act.name, "mass_kg": act.mass_kg,
+                        "stall_nm": act.peak_torque_nm, "rated_nm": act.rated_torque_nm,
+                        "max_speed_radps": act.max_speed_radps, "required_nm": round(required, 2)})
         s.mass_kg = round(max(0.02, struct + act_mass), 3)     # grounded mass = structure + actuator
         total += s.mass_kg
     return {"material": material, "bom": bom, "total_mass_kg": round(total, 3),

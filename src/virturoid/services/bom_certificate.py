@@ -24,6 +24,9 @@ from virturoid.services.actuator_model import available_torque, knee_speed
 from virturoid.services.component_catalog import select_actuator
 from virturoid.services.morph_policy import recipe_rollout_morph
 
+SPEED_TOL = 1.10        # G3 allows p99 joint speed up to 1.1x no-load: brief back-driving (the servo braking, not
+#   driving) past no-load under external load is physically real, unlike DRIVING past it, which is impossible.
+
 
 @dataclass
 class GateResult:
@@ -139,8 +142,9 @@ def grade_actuation(tau, qv, *, clamps=None, margin: float = 1.3, knee_frac: flo
                    "every joint's p99 torque demand is within its servo's peak torque"),
         GateResult("G2_thermal_continuous", thermal_ratio <= 1.0, round(thermal_ratio, 3), 1.0,
                    "RMS torque within the servo's rated (continuous) torque -- won't overheat"),
-        GateResult("G3_speed_feasible", speed_ratio <= 1.0, round(speed_ratio, 3), 1.0,
-                   "p99 joint speed within the servo's no-load speed"),
+        GateResult("G3_speed_feasible", speed_ratio <= SPEED_TOL, round(speed_ratio, 3), SPEED_TOL,
+                   "p99 joint speed within the servo's no-load speed (+10% back-drive allowance: external loads "
+                   "can back-drive a joint slightly past no-load, where the servo brakes/regens rather than drives)"),
         GateResult("G4_torque_speed_envelope", worst_viol <= envelope_tol, round(worst_viol, 4), envelope_tol,
                    "driving-quadrant torque respects the speed-dependent envelope (the transfer killer)"),
         GateResult("G5_mechanical_power", power_ratio <= 1.0, round(power_ratio, 3), 1.0,

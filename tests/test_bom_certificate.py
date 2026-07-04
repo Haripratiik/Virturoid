@@ -78,6 +78,28 @@ class BomCertificateTests(unittest.TestCase):
         speed_needed = select_actuator(2.0, required_speed_radps=torque_only.max_speed_radps + 5.0)
         self.assertGreater(speed_needed.max_speed_radps, torque_only.max_speed_radps)
 
+    def test_real_actuator_clamp_makes_a_grounded_body_certify(self):
+        # end-to-end wedge #2: a grounded quad's naive (constant-torque) CPG motion demands torque/speed its real
+        # servos cannot deliver -> NOT certified; applying the real_actuator clamp (the same one the MJX trainer
+        # uses) forces the motion into the servo envelope -> certified, while the body still survives.
+        from virturoid.services.steerable_body import steerable_quadruped
+        from virturoid.services.grounded_physics import ground_gene
+        from virturoid.services.morph_policy import CPG_DEFAULT
+        from virturoid.services.bom_certificate import certify_policy_on_bom
+
+        cpg = {**CPG_DEFAULT, "calf_phase": 0.0}
+
+        def cert_of(real_actuator):
+            g = steerable_quadruped(n_legs=4); ground_gene(g, material="carbon_fiber", fill=0.25)
+            return certify_policy_on_bom(g, None, steps=300, n_seeds=2, cpg=cpg, real_actuator=real_actuator)
+
+        naive = cert_of(False)
+        clamped = cert_of(True)
+        self.assertFalse(naive["pass"])                        # constant-torque motion is not BOM-executable
+        self.assertGreater(clamped["n_gates_pass"], naive["n_gates_pass"])   # the clamp strictly improves it...
+        self.assertTrue(clamped["pass"], clamped["summary"])   # ...to fully certified
+        self.assertTrue(clamped["survived_all"])               # ...without knocking the body over
+
     def test_empty_trace_is_uncertifiable(self):
         from virturoid.services.bom_certificate import certify_policy_on_bom
 
