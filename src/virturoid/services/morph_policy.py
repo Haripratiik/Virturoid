@@ -604,7 +604,7 @@ def recipe_rollout_morph(gene, policy: MorphPolicy | None = None, *, steps: int 
                          adaptive: bool = False, cpg: dict | None = None, model_perturb=None,
                          seed: int = 0, record_frames: bool = False, frame_every: int = 5,
                          decimation: int = 1, action_lpf: float = 0.0, sphere_feet: bool = False,
-                         command_schedule: list | None = None) -> dict:
+                         command_schedule: list | None = None, record_actuation: bool = False) -> dict:
     """Drive ``gene`` with the anti-collapse RECIPE: position-PD to the default standing pose + learned offset,
     obs normalization (``normalizer=(mean,std)``), terminate-on-fall, clipped-non-negative velocity-tracking
     reward. Returns ``gait`` (recipe reward meaned over the horizon — the training fitness), ``forward`` travel,
@@ -682,6 +682,8 @@ def recipe_rollout_morph(gene, policy: MorphPolicy | None = None, *, steps: int 
     x0 = float(data.qpos[bq]); px = x0; R = 0.0; a_prev = None; alive = steps; hr = 1.0
     dt = float(model.opt.timestep)
     frames = [] if record_frames else None
+    tau_trace = [] if record_actuation else None    # B1 BOM cert: per-step APPLIED torque + joint speed per token
+    qv_trace = [] if record_actuation else None     #   (post-clip torque that produced the motion; must be real-servo feasible)
     capture = None
     if record_frames:
         from virturoid.services.pick_place_controller import _capture_geom_frame
@@ -734,11 +736,19 @@ def recipe_rollout_morph(gene, policy: MorphPolicy | None = None, *, steps: int 
             a_filt = a_raw if a_filt is None else lpf * a_filt + (1.0 - lpf) * a_raw   # control rate (Playground ~5Hz
             a = a_filt                                       #   filter); lpf=0 -> a=a_raw -> unchanged.
         cphase = _two_pi * cpg_freq * t * dt if cpg_on else 0.0
+        if record_actuation:
+            _tau_row = np.empty(graph.n_tokens); _qv_row = np.empty(graph.n_tokens)
         for k in range(graph.n_tokens):
             cpg_off = float(cpg_amp[k] * np.sin(cphase + cpg_phase[k])) if cpg_on else 0.0
             tgt = q_def[k] + cpg_off + res_scale * as_v[k] * float(np.tanh(a[k]))
-            tau = kp_v[k] * (tgt - float(data.qpos[qadr[k]])) - kd_v[k] * float(data.qvel[vadr[k]])
-            data.ctrl[act_u[k]] = float(np.clip(tau, -clamps[k], clamps[k]))
+            qv_k = float(data.qvel[vadr[k]])
+            tau = kp_v[k] * (tgt - float(data.qpos[qadr[k]])) - kd_v[k] * qv_k
+            tau_applied = float(np.clip(tau, -clamps[k], clamps[k]))
+            data.ctrl[act_u[k]] = tau_applied
+            if record_actuation:
+                _tau_row[k] = tau_applied; _qv_row[k] = qv_k    # APPLIED torque (what produced the motion) + joint speed
+        if record_actuation:
+            tau_trace.append(_tau_row); qv_trace.append(_qv_row)
         mujoco.mj_step(model, data)
         if not np.all(np.isfinite(data.qpos)):
             alive = t; break
@@ -783,6 +793,9 @@ def recipe_rollout_morph(gene, policy: MorphPolicy | None = None, *, steps: int 
         track_err = (terr / max(1, tsteps)) ** 0.5              #   exp(-err^2/sigma^2) score (higher = better; a
         out["track_err"] = round(track_err, 4)                 #   constant gait mistracks a varied command -> low)
         out["track_score"] = round(float(np.exp(-(track_err ** 2) / 0.05)), 4)
+    if record_actuation and tau_trace:                           # B1: (T, n_tokens) commanded-torque + joint-speed
+        out["tau_cmd"] = np.asarray(tau_trace)                  #   traces for the executable-on-BOM certificate
+        out["qvel"] = np.asarray(qv_trace)                      #   (token order == graph.act_u == BOM joint order)
     return out
 
 
