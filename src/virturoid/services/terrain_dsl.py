@@ -181,3 +181,43 @@ class RudinCurriculum:
         return {"mean_level": float(self.levels.mean()), "max_level": int(self.levels.max()),
                 "promoted": int(promote.sum()), "demoted": int(demote.sum()),
                 "mean_difficulty": float(self.difficulty().mean())}
+
+
+# Task -> which terrain tiles matter (the Curriculum Author's heuristic prior; an LLM may override the tile mix).
+_TASK_TILES: dict[str, tuple[str, ...]] = {
+    "walk": ("flat", "slope", "rough", "waves"),
+    "stairs": ("flat", "stairs", "slope"),
+    "rough": ("flat", "rough", "stones", "waves"),
+    "slippery": ("flat", "friction", "slope"),
+    "parkour": ("flat", "stairs", "stones", "waves", "slope"),
+}
+
+
+def author_curriculum(task: str = "walk", *, n_envs: int = 1024, n_levels: int = 10, llm=None) -> dict:
+    """Curriculum Author (B3) over the B2 terrain DSL: pick the tile mix for a task and hand back a fresh
+    RudinCurriculum + a level->difficulty->tiles resolver. With ``llm`` the model may propose a tile list (subset
+    of TILE_TYPES); it is validated against the known tiles with the heuristic prior as fallback. Returns
+    ``{"tiles", "curriculum", "tile_for"}`` where ``tile_for(level, seed)`` builds the terrain course for an env
+    at that difficulty level."""
+    tiles = None
+    if llm is not None:
+        try:
+            proposed = [t.strip() for t in llm.complete(
+                f"Pick terrain tiles for task '{task}' from {TILE_TYPES}. Comma-separated, no prose."
+            ).replace("\n", ",").split(",")]
+            tiles = [t for t in proposed if t in TILE_TYPES]
+        except Exception:  # noqa: BLE001
+            tiles = None
+    if not tiles:
+        key = next((k for k in _TASK_TILES if k in task.lower()), "walk")
+        tiles = list(_TASK_TILES[key])
+    cur = RudinCurriculum(n_envs=n_envs, n_levels=n_levels)
+
+    def tile_for(level: int, seed: int = 0) -> Terrain:
+        d = float(level) / max(1, n_levels - 1)
+        # a course = flat lead-in + the task's characteristic tile at this difficulty (deterministic per seed)
+        pick = tiles[seed % len(tiles)] if tiles else "flat"
+        return compose_row([make_tile("flat", n=48, difficulty=0.0, seed=seed),
+                            make_tile(pick, n=48, difficulty=d, seed=seed)])
+
+    return {"tiles": tiles, "curriculum": cur, "tile_for": tile_for}

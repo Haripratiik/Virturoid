@@ -86,5 +86,16 @@ class RudinCurriculumTests(unittest.TestCase):
         self.assertGreater(cur.difficulty().mean(), 0.8)
 
 
+class CurriculumAuthorTests(unittest.TestCase):
+    def test_authors_task_curriculum(self):
+        from virturoid.services.terrain_dsl import author_curriculum
+        cur = author_curriculum("climb stairs", n_envs=16, n_levels=8)
+        self.assertIn("stairs", cur["tiles"])                    # stairs task selects the stairs tile
+        self.assertEqual(cur["curriculum"].n_envs, 16)
+        easy = cur["tile_for"](0, seed=0)                        # level 0 course is (near) flat
+        hard = cur["tile_for"](7, seed=1)                        # top level is rougher
+        self.assertGreaterEqual(float(np.std(hard.heights)), float(np.std(easy.heights)))
+
+
 if __name__ == "__main__":
     unittest.main()
