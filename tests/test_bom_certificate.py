@@ -15,11 +15,13 @@ from virturoid.services.actuator_model import knee_speed
 
 class BomCertificateTests(unittest.TestCase):
     def test_feasible_trajectory_certifies(self):
-        # a small servo (peak ~1.9 Nm), operated well within its envelope: modest torque, well below knee speed
+        # a small servo (peak ~1.9 Nm), operated well within its envelope: modest torque, well below knee speed.
+        # pass clamps so the grader is pinned to THIS shipped servo (the real path certify() uses)
         servo = select_actuator(1.0)
+        clamps = np.full(3, servo.peak_torque_nm)
         tau = np.full((200, 3), 0.4 * servo.peak_torque_nm)             # 40% peak, constant, all joints
         qv = np.full((200, 3), 0.2 * servo.max_speed_radps)            # 20% no-load, below the knee -> full torque
-        cert = grade_actuation(tau, qv, margin=1.3)
+        cert = grade_actuation(tau, qv, clamps=clamps)
         self.assertTrue(cert["pass"], cert["summary"])
         self.assertEqual(cert["n_gates_pass"], 6)
         # G4 envelope violation is exactly zero when everything is below the knee
@@ -27,15 +29,17 @@ class BomCertificateTests(unittest.TestCase):
         self.assertEqual(g4["measured"], 0.0)
 
     def test_peak_torque_at_high_speed_fails_envelope(self):
-        # command near-peak torque WHILE spinning past the knee toward no-load speed: impossible on real hardware
+        # command near-peak torque WHILE spinning past the knee toward no-load speed: impossible on real hardware.
+        # clamps pins the SHIPPED servo (else speed-aware demand sizing would just buy a faster motor)
         servo = select_actuator(1.0)
         pk, qd = servo.peak_torque_nm, servo.max_speed_radps
         knee = knee_speed(qd)
+        clamps = np.full(2, pk)
         # DRIVING quadrant (torque & speed same sign), speed at 90% no-load where the envelope has collapsed to ~10%
         tau = np.full((200, 2), 0.9 * pk)
         qv = np.full((200, 2), 0.9 * qd)
         self.assertGreater(0.9 * qd, knee)                             # we really are past the knee
-        cert = grade_actuation(tau, qv, margin=1.3, envelope_tol=0.02)
+        cert = grade_actuation(tau, qv, clamps=clamps, envelope_tol=0.02)
         g4 = next(g for g in cert["gates"] if g["name"] == "G4_torque_speed_envelope")
         self.assertFalse(g4["passed"])
         self.assertGreater(g4["measured"], 0.5)                        # a large fraction of samples are infeasible
@@ -45,9 +49,10 @@ class BomCertificateTests(unittest.TestCase):
         # same high speed + high torque, but BRAKING (opposite signs): a motor can always resist -> G4 must pass
         servo = select_actuator(1.0)
         pk, qd = servo.peak_torque_nm, servo.max_speed_radps
+        clamps = np.full(2, pk)
         tau = np.full((200, 2), -0.9 * pk)                            # torque opposes...
         qv = np.full((200, 2), 0.9 * qd)                             # ...the motion
-        cert = grade_actuation(tau, qv, margin=1.3)
+        cert = grade_actuation(tau, qv, clamps=clamps)
         g4 = next(g for g in cert["gates"] if g["name"] == "G4_torque_speed_envelope")
         self.assertEqual(g4["measured"], 0.0)
 
@@ -64,6 +69,14 @@ class BomCertificateTests(unittest.TestCase):
         for b in cert["bom"]:
             self.assertGreater(b["price_usd"], 0.0)
             self.assertTrue(b["vendor"])
+
+    def test_speed_aware_selection_picks_a_faster_motor(self):
+        # a real servo cannot be sized on torque alone: a fast joint needs a higher no-load speed even at equal
+        # torque. Requiring a high speed must select a motor with a strictly higher max_speed than the torque-only
+        # pick (or fall back to the highest-capability motor).
+        torque_only = select_actuator(2.0)
+        speed_needed = select_actuator(2.0, required_speed_radps=torque_only.max_speed_radps + 5.0)
+        self.assertGreater(speed_needed.max_speed_radps, torque_only.max_speed_radps)
 
     def test_empty_trace_is_uncertifiable(self):
         from virturoid.services.bom_certificate import certify_policy_on_bom

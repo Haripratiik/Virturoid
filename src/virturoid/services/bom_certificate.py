@@ -47,7 +47,7 @@ def certify_policy_on_bom(gene, policy=None, *, steps: int = 900, n_seeds: int =
     Returns a JSON-able dict: ``{"pass": bool, "gates": [...], "joints": [...], "bom": [...], "summary": str}``.
     ``envelope_tol`` is the allowed fraction of driving samples that may exceed the torque-speed envelope (G4).
     """
-    taus, qvs, survived_all = [], [], True
+    taus, qvs, survived_all, clamps = [], [], True, None
     for s in range(max(1, n_seeds)):
         r = recipe_rollout_morph(gene, policy, steps=steps, seed=s, cpg=cpg,
                                  record_actuation=True, **rollout_kw)
@@ -56,6 +56,7 @@ def certify_policy_on_bom(gene, policy=None, *, steps: int = 900, n_seeds: int =
             continue
         taus.append(np.asarray(r["tau_cmd"], dtype=float))     # (T_s, n_joints)
         qvs.append(np.asarray(r["qvel"], dtype=float))
+        clamps = np.asarray(r["clamps"], dtype=float)          # per-joint torque capacity -> the SHIPPED servo
         survived_all = survived_all and bool(r.get("survived", False))
 
     if not taus:                                               # the policy never produced a controllable step
@@ -67,18 +68,25 @@ def certify_policy_on_bom(gene, policy=None, *, steps: int = 900, n_seeds: int =
 
     tau = np.concatenate(taus, axis=0)                         # (sum_T, n_joints) APPLIED torque
     qv = np.concatenate(qvs, axis=0)
-    cert = grade_actuation(tau, qv, margin=margin, knee_frac=knee_frac, envelope_tol=envelope_tol,
+    cert = grade_actuation(tau, qv, clamps=clamps, margin=margin, knee_frac=knee_frac, envelope_tol=envelope_tol,
                            survived_all=survived_all, steps=steps, n_seeds=len(taus))
     if out_path:
         _write(out_path, cert)
     return cert
 
 
-def grade_actuation(tau, qv, *, margin: float = 1.3, knee_frac: float = 0.5, envelope_tol: float = 0.02,
-                    survived_all: bool = True, steps: int = 0, n_seeds: int = 1) -> dict:
+def grade_actuation(tau, qv, *, clamps=None, margin: float = 1.3, knee_frac: float = 0.5,
+                    envelope_tol: float = 0.02, survived_all: bool = True, steps: int = 0, n_seeds: int = 1) -> dict:
     """Pure grader (no physics): given APPLIED per-joint torque ``tau`` and joint speed ``qv``, both ``(T, n)``,
-    size a real servo per joint and grade the 6 datasheet gates. Split out so it is deterministically testable on
-    synthetic traces and reused by any rollout source (CPU eval, MJX replay, hardware log)."""
+    grade the trained motion against the SHIPPED servo per joint on 6 datasheet gates. Split out so it is
+    deterministically testable on synthetic traces and reused by any rollout source (CPU eval, MJX replay,
+    hardware log).
+
+    ``clamps`` = per-joint torque CAPACITY (the compiled joint's torque limit = the grounding-selected actuator's
+    peak). We size the servo that covers it -- the SAME part the control-side ``real_actuator`` clamp enforces, so
+    the certificate grades exactly the motor the robot ships, and a policy trained under that clamp respects the
+    torque-speed envelope (G4) by construction. When ``clamps`` is None we fall back to sizing from the joint's
+    peak DEMAND with the safety margin (synthetic tests + un-grounded bodies)."""
     tau = np.asarray(tau, dtype=float); qv = np.asarray(qv, dtype=float)
     n_joints = tau.shape[1]
 
@@ -90,7 +98,11 @@ def grade_actuation(tau, qv, *, margin: float = 1.3, knee_frac: float = 0.5, env
         demand_peak = _pct(tj, 99.0)                           # p99 to shrug off single-step spikes
         demand_rms = float(np.sqrt(np.mean(tau[:, j] ** 2)))
         speed_peak = _pct(wj, 99.0)
-        servo = select_actuator(demand_peak, margin=margin)    # the real part we would order for THIS joint
+        # grade against the SHIPPED servo (covers the joint's torque capacity) so the cert matches the clamp; else
+        # size the real part from the measured duty (peak w/ margin, continuous, AND speed) for un-grounded bodies
+        servo = (select_actuator(float(clamps[j]), margin=1.0) if clamps is not None
+                 else select_actuator(demand_peak, margin=margin,
+                                      required_speed_radps=speed_peak, continuous_torque_nm=demand_rms))
         tau_pk, tau_rated, qd_max = servo.peak_torque_nm, servo.rated_torque_nm, servo.max_speed_radps
         qd_knee = knee_speed(qd_max, frac=knee_frac)
 

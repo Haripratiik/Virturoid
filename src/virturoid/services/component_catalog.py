@@ -179,12 +179,19 @@ def material(name: str) -> Material | None:
     return next((m for m in MATERIALS if m.name == name), None)
 
 
-def select_actuator(required_torque_nm: float, *, margin: float = 1.3) -> Actuator:
-    """Smallest actuator whose PEAK torque clears ``required_torque_nm * margin`` (a real engineering safety
-    factor). Falls back to the strongest in the catalog if the requirement exceeds everything we list."""
-    need = max(0.05, float(required_torque_nm)) * margin
-    ladder = sorted(ACTUATORS, key=lambda a: a.peak_torque_nm)
+def select_actuator(required_torque_nm: float, *, margin: float = 1.3,
+                    required_speed_radps: float = 0.0, continuous_torque_nm: float = 0.0) -> Actuator:
+    """Smallest actuator that meets the joint's real operating point. Always clears PEAK torque
+    ``required_torque_nm * margin`` (a real engineering safety factor). When a required joint SPEED and/or a
+    sustained (continuous) torque are given, it also requires ``max_speed_radps`` and ``rated_torque_nm`` to
+    cover them -- because a real servo cannot be sized on peak torque alone: a high-torque QDD motor is often too
+    SLOW for a fast gait, and running near stall continuously overheats. Falls back to the strongest actuator (by
+    a torque*speed capability score) if nothing in the catalog meets every constraint."""
+    need_pk = max(0.05, float(required_torque_nm)) * margin
+    need_spd = max(0.0, float(required_speed_radps))
+    need_cont = max(0.0, float(continuous_torque_nm))
+    ladder = sorted(ACTUATORS, key=lambda a: (a.peak_torque_nm, a.max_speed_radps))
     for a in ladder:
-        if a.peak_torque_nm >= need:
+        if a.peak_torque_nm >= need_pk and a.max_speed_radps >= need_spd and a.rated_torque_nm >= need_cont:
             return a
-    return ladder[-1]
+    return max(ladder, key=lambda a: a.peak_torque_nm * a.max_speed_radps)   # best capability we can offer

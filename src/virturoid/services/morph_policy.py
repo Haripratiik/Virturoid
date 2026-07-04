@@ -604,7 +604,8 @@ def recipe_rollout_morph(gene, policy: MorphPolicy | None = None, *, steps: int 
                          adaptive: bool = False, cpg: dict | None = None, model_perturb=None,
                          seed: int = 0, record_frames: bool = False, frame_every: int = 5,
                          decimation: int = 1, action_lpf: float = 0.0, sphere_feet: bool = False,
-                         command_schedule: list | None = None, record_actuation: bool = False) -> dict:
+                         command_schedule: list | None = None, record_actuation: bool = False,
+                         real_actuator: bool = False) -> dict:
     """Drive ``gene`` with the anti-collapse RECIPE: position-PD to the default standing pose + learned offset,
     obs normalization (``normalizer=(mean,std)``), terminate-on-fall, clipped-non-negative velocity-tracking
     reward. Returns ``gait`` (recipe reward meaned over the horizon — the training fitness), ``forward`` travel,
@@ -659,6 +660,14 @@ def recipe_rollout_morph(gene, policy: MorphPolicy | None = None, *, steps: int 
     qadr = np.asarray(graph.qadr, dtype=int); vadr = np.asarray(graph.vadr, dtype=int)
     act_u = np.asarray(graph.act_u, dtype=int); clamps = np.asarray(graph.clamps, dtype=float)
     q_def = np.array([float(data.qpos[a]) for a in qadr])    # the DEFAULT standing pose (the PD attractor)
+    act_knee = act_qdmax = None
+    if real_actuator:                                        # B1: replace the constant torque clip with the REAL
+        from virturoid.services.actuator_model import clamp_torque as _clamp_torque, knee_speed   # 4-quadrant
+        from virturoid.services.component_catalog import select_actuator   # torque-speed envelope so the motion is
+        act_knee = np.empty(graph.n_tokens); act_qdmax = np.empty(graph.n_tokens)   # construction (same clamp the
+        for _k in range(graph.n_tokens):                    #   MJX trainer applies -> deploy==train on real motors)
+            _sv = select_actuator(float(clamps[_k]), margin=1.0)   # smallest servo covering this joint's torque
+            act_qdmax[_k] = _sv.max_speed_radps; act_knee[_k] = knee_speed(_sv.max_speed_radps)
     # PER-JOINT GAINS: adaptive (inertia-scaled, the "any robot" path) when requested OR when the banked policy
     # was trained adaptive; otherwise broadcast the scalar recipe gains. Scalars stay byte-identical (np.full of a
     # constant), so default callers + test_recipe_forward_score_matches_rollout are unchanged.
@@ -743,7 +752,10 @@ def recipe_rollout_morph(gene, policy: MorphPolicy | None = None, *, steps: int 
             tgt = q_def[k] + cpg_off + res_scale * as_v[k] * float(np.tanh(a[k]))
             qv_k = float(data.qvel[vadr[k]])
             tau = kp_v[k] * (tgt - float(data.qpos[qadr[k]])) - kd_v[k] * qv_k
-            tau_applied = float(np.clip(tau, -clamps[k], clamps[k]))
+            if real_actuator:                               # B1: the SAME four-quadrant clamp the MJX trainer uses
+                tau_applied = float(_clamp_torque(tau, qv_k, clamps[k], act_knee[k], act_qdmax[k], xp=np))
+            else:
+                tau_applied = float(np.clip(tau, -clamps[k], clamps[k]))
             data.ctrl[act_u[k]] = tau_applied
             if record_actuation:
                 _tau_row[k] = tau_applied; _qv_row[k] = qv_k    # APPLIED torque (what produced the motion) + joint speed
@@ -793,9 +805,10 @@ def recipe_rollout_morph(gene, policy: MorphPolicy | None = None, *, steps: int 
         track_err = (terr / max(1, tsteps)) ** 0.5              #   exp(-err^2/sigma^2) score (higher = better; a
         out["track_err"] = round(track_err, 4)                 #   constant gait mistracks a varied command -> low)
         out["track_score"] = round(float(np.exp(-(track_err ** 2) / 0.05)), 4)
-    if record_actuation and tau_trace:                           # B1: (T, n_tokens) commanded-torque + joint-speed
+    if record_actuation and tau_trace:                           # B1: (T, n_tokens) applied-torque + joint-speed
         out["tau_cmd"] = np.asarray(tau_trace)                  #   traces for the executable-on-BOM certificate
         out["qvel"] = np.asarray(qv_trace)                      #   (token order == graph.act_u == BOM joint order)
+        out["clamps"] = np.asarray(clamps)                     #   per-joint torque CAPACITY -> sizes the real servo
     return out
 
 
