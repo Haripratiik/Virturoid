@@ -368,7 +368,7 @@ def main(argv=None) -> int:
                 att[_k] = jp.asarray(_d[_k])
         params = {"att": att, "vf": vf, "logstd": jp.zeros(1) - 0.5}
         print(f"warm-started policy weights from {args.init_npz}", flush=True)
-    opt = optax.chain(optax.clip_by_global_norm(1.0), optax.adam(LR))
+    opt = optax.chain(optax.clip_by_global_norm(1.0), optax.scale_by_adam())   # B0.3: LR applied manually below (KL-adaptive)
     opt_state = opt.init(params)
 
     def obs_tokens(d):
@@ -615,12 +615,18 @@ def main(argv=None) -> int:
         _, last_val = act_and_value(params, jax.vmap(obs_tokens)(data_last), last_pcpt)
 
         def gae(carry, x):
-            nextval, adv = carry
+            nextval, next_alive, adv = carry
             rew_t, val_t, alive_t = x
-            delta = rew_t + GAMMA * nextval - val_t
-            adv = (delta + GAMMA * LAM * adv) * alive_t       # fallen steps contribute no gradient / no bootstrap
-            return (val_t, adv), adv
-        _, advs = jax.lax.scan(gae, (last_val, jp.zeros(N)), (rew, val, alive), reverse=True)
+            # TIME-LIMIT / TERMINATION FIX (breakthrough v5 B0.1): bootstrap V(s_{t+1}) ONLY when s_{t+1} is a real
+            # continuation. next_alive=1 at the horizon => the episode is TRUNCATED (not failed) => bootstrap
+            # last_val (correct, unchanged). next_alive=0 for the step that transitions INTO a fallen state => true
+            # TERMINATION => no bootstrap. The old code always added GAMMA*nextval, so the last UPRIGHT step before
+            # a fall got a spurious +GAMMA*V(fallen) advantage (and the critic never learns V(fallen)=0 since fallen
+            # steps have ret=val). Byte-identical whenever nothing falls in the window (next_alive stays 1).
+            delta = rew_t + GAMMA * nextval * next_alive - val_t
+            adv = (delta + GAMMA * LAM * next_alive * adv) * alive_t
+            return (val_t, alive_t, adv), adv
+        _, advs = jax.lax.scan(gae, (last_val, jp.ones(N), jp.zeros(N)), (rew, val, alive), reverse=True)
         return obs, act, logp, advs, advs + val, rew.sum(0).mean(), fwd.mean(0).mean(), pcpt
 
     def rollout(params, key):
@@ -659,7 +665,7 @@ def main(argv=None) -> int:
         return pg + VF * ((val - ret) ** 2).mean() - ENT * ent
 
     @jax.jit
-    def update(params, opt_state, obs, act, logp, adv, ret, key, percept=None):
+    def update(params, opt_state, obs, act, logp, adv, ret, key, lr, percept=None):
         B = obs.shape[0]; mb = B // args.minibatches
 
         def epoch(carry, _):
@@ -672,12 +678,20 @@ def main(argv=None) -> int:
                 idx = jax.lax.dynamic_slice_in_dim(perm, i * mb, mb)
                 pc = percept[idx] if percept is not None else None       # P1: the gait clock for this minibatch
                 g = jax.grad(loss_fn)(params, obs[idx], act[idx], logp[idx], adv[idx], ret[idx], pc)
-                upd, opt_state = opt.update(g, opt_state, params)
-                return (optax.apply_updates(params, upd), opt_state), None
+                upd, opt_state = opt.update(g, opt_state, params)        # adam DIRECTION; LR applied here (B0.3)
+                params = optax.apply_updates(params, jax.tree_util.tree_map(lambda u: -lr * u, upd))
+                return (params, opt_state), None
             (params, opt_state), _ = jax.lax.scan(mbstep, (params, opt_state), jp.arange(args.minibatches))
             return (params, opt_state, key), None
         (params, opt_state, _), _ = jax.lax.scan(epoch, (params, opt_state, key), jp.arange(args.epochs))
-        return params, opt_state
+        # B0.3 KL-adaptive-LR signal: k3 KL estimator (Schulman) on one minibatch, using only old_logp (>= 0).
+        std = jp.exp(params["logstd"])[0]
+        pc0 = percept[:mb] if percept is not None else None
+        means_k, _ = act_and_value(params, obs[:mb], pc0)
+        lp_k = (-0.5 * (((act[:mb] - means_k) / std) ** 2 + 2 * jp.log(std) + jp.log(2 * jp.pi))).sum(-1)
+        r_k = lp_k - logp[:mb]
+        approx_kl = jp.mean(jp.exp(r_k) - 1.0 - r_k)
+        return params, opt_state, approx_kl
 
     def _save(p, fwd, path=None):
         dst = path or args.save
@@ -747,18 +761,25 @@ def main(argv=None) -> int:
     print(f"ATTENTION robot={args.robot} tokens={NT} F={F} H={H} nu={nu} envs={N}", flush=True)
     t0 = time.time()
     ep_fwd = 0.0
+    lr = LR; DESIRED_KL = 0.01                            # B0.3: KL-adaptive learning rate (rsl_rl's most-copied trick)
     for it in range(args.iters):
         key, rk, uk = jax.random.split(key, 3)
         obs, act, logp, adv, ret, ep_rew, ep_fwd, pcpt = rollout(params, rk)   # pcpt = gait clock (None w/o phase-obs)
         flat = lambda a: a.reshape((-1,) + a.shape[2:])
+        _lr = jp.asarray(lr, jp.float32)                     # pass as a TRACED scalar so a changing lr never re-jits
         if PHASE_OBS:                                        # P1: flatten + pass the clock so PPO minibatches carry it
-            params, opt_state = update(params, opt_state, flat(obs), flat(act), flat(logp), flat(adv), flat(ret),
-                                       uk, flat(pcpt))
+            params, opt_state, kl = update(params, opt_state, flat(obs), flat(act), flat(logp), flat(adv), flat(ret),
+                                           uk, _lr, flat(pcpt))
         else:
-            params, opt_state = update(params, opt_state, flat(obs), flat(act), flat(logp), flat(adv), flat(ret), uk)
+            params, opt_state, kl = update(params, opt_state, flat(obs), flat(act), flat(logp), flat(adv), flat(ret), uk, _lr)
+        kl = float(kl)                                       # adapt LR toward DESIRED_KL: shrink on too-big steps, grow on tiny
+        if kl > 2.0 * DESIRED_KL:
+            lr = max(lr / 1.5, 1e-5)
+        elif kl < 0.5 * DESIRED_KL:
+            lr = min(lr * 1.5, 1e-2)
         if it % 10 == 0 or it == args.iters - 1:
             print(f"  iter {it:>4}  ep_reward={float(ep_rew):8.2f}  fwd_vel={float(ep_fwd):+.3f}  "
-                  f"({(time.time()-t0):.0f}s)", flush=True)
+                  f"lr={lr:.1e} kl={kl:.4f}  ({(time.time()-t0):.0f}s)", flush=True)
         # CHECKPOINT often — the WSL2 GPU watchdog (TDR) kills long kernels mid-run (observed: a hang ~iter 20),
         # and every-30 lost everything before the first checkpoint. Every 10 keeps a fetchable policy (CPG-primed,
         # so it still walks) even when the box is killed early -- the difference between a usable run and a None.
