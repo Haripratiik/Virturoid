@@ -227,6 +227,16 @@ def _scene_objects_xml(objects: list[SceneObject]) -> list[str]:
     return [_scene_object_xml(item, floor=floor) for item in objects]
 
 
+def _half_xyz(item: SceneObject, fx: float, fy: float, fz: float) -> tuple[float, float, float]:
+    """Half-extents (hx, hy, hz) for a box geom. When ``item.size_xyz`` (full extents along local x/y/z) is set it
+    OVERRIDES the legacy scale-derived fallback ``(fx, fy, fz)`` — this is the single point that lets a scene carry
+    real dimensions. size_xyz absent -> returns the fallback unchanged, so existing scenes are byte-identical."""
+    if item.size_xyz is not None:
+        ex, ey, ez = item.size_xyz
+        return round(ex / 2.0, 4), round(ey / 2.0, 4), round(ez / 2.0, 4)
+    return fx, fy, fz
+
+
 def _scene_object_xml(item: SceneObject, floor: bool = False) -> str:
     x, y, _, _, _, yaw = item.pose_xyz_rpy
     name = escape(item.name)
@@ -234,13 +244,14 @@ def _scene_object_xml(item: SceneObject, floor: bool = False) -> str:
 
     # ---- floor-scene structure: ground arena + maze/boundary walls ----
     if item.object_type == "floor":
-        hx = round(max(0.2, s), 3)                        # scale = ground X half-extent in metres
-        hy = round(hx * (item.friction or 0.8), 3)        # friction carries the Y/X aspect so the floor matches the course shape
-        return (f'    <geom name="{name}" type="box" size="{hx} {hy} 0.02" pos="{x} {y} -0.02" '
+        _fx = round(max(0.2, s), 3)                        # scale = ground X half-extent in metres
+        hx, hy, hz = _half_xyz(item, _fx, round(_fx * (item.friction or 0.8), 3), 0.02)
+        # friction carries the Y/X aspect so the legacy floor matches the course shape (size_xyz overrides it)
+        return (f'    <geom name="{name}" type="box" size="{hx} {hy} {hz}" pos="{x} {y} {round(-hz, 4)}" '
                 f'rgba="0.82 0.82 0.85 1"/>')
     if item.object_type == "wall":
-        half_len = round(0.5 * s, 4)
-        return (f'    <geom name="{name}" type="box" size="{half_len} 0.03 0.16" pos="{x} {y} 0.16" '
+        hx, hy, hz = _half_xyz(item, round(0.5 * s, 4), 0.03, 0.16)   # size_xyz = (length, thickness, HEIGHT)
+        return (f'    <geom name="{name}" type="box" size="{hx} {hy} {hz}" pos="{x} {y} {round(hz, 4)}" '
                 f'euler="0 0 {round(yaw, 4)}" rgba="{_rgba_for(item, "gray")}"/>')
 
     # ---- tabletop open-top bin (sorting / box handling) ----
@@ -251,26 +262,26 @@ def _scene_object_xml(item: SceneObject, floor: bool = False) -> str:
 
     # ---- elevated shelf / platform to lift a box onto (a low steel pedestal on the tabletop) ----
     if item.object_type == "platform":
-        hx, hy = round(0.13 * s, 4), round(0.11 * s, 4)
-        h = round(0.05 * s, 4)
+        hx, hy, h = _half_xyz(item, round(0.13 * s, 4), round(0.11 * s, 4), round(0.05 * s, 4))
         return (f'    <geom name="{name}" type="box" size="{hx} {hy} {h}" '
                 f'pos="{x} {y} {round(TABLE_TOP_Z + h, 4)}" rgba="0.30 0.42 0.55 1"/>')
 
     # ---- target pad: a flat coloured marker (go here / place here / stack here) ----
     if item.object_type == "zone":
-        half = round((0.16 if floor else 0.06) * s, 4)
+        _fh = round((0.16 if floor else 0.06) * s, 4)
+        hx, hy, hz = _half_xyz(item, _fh, _fh, 0.006)
         base_z = 0.0 if floor else TABLE_TOP_Z
-        return (f'    <geom name="{name}" type="box" size="{half} {half} 0.006" '
-                f'pos="{x} {y} {round(base_z + 0.006, 4)}" rgba="{_rgba_for(item, "green")}"/>')
+        return (f'    <geom name="{name}" type="box" size="{hx} {hy} {hz}" '
+                f'pos="{x} {y} {round(base_z + hz, 4)}" rgba="{_rgba_for(item, "green")}"/>')
 
     # ---- floor obstacle / pillar to steer around (navigation / maze) ----
     if floor and item.object_type == "obstacle":
         h = round(0.12 * s, 4)
-        # footprint stays sized to the robot (course stays navigable), but keep the obstacle SHORTER than the
+        # footprint stays sized to the robot (course stays navigable), but keep the LEGACY obstacle SHORTER than the
         # mobile base's ~0.18 m roofline. A full cube here towered ~0.7 m and hid the low rover behind it; a
         # low crate steers the same and leaves the robot the tallest, clearly-visible thing in the scene.
-        hz = round(min(h, 0.07), 4)
-        return (f'    <geom name="{name}" type="box" size="{h} {h} {hz}" pos="{x} {y} {round(hz, 4)}" '
+        hx, hy, hz = _half_xyz(item, h, h, round(min(h, 0.07), 4))
+        return (f'    <geom name="{name}" type="box" size="{hx} {hy} {hz}" pos="{x} {y} {round(hz, 4)}" '
                 f'euler="0 0 {round(yaw, 4)}" rgba="0.5 0.5 0.55 1"/>')
 
     # ---- tabletop static furniture (conveyor / surface) ----
@@ -304,14 +315,15 @@ def _scene_object_xml(item: SceneObject, floor: bool = False) -> str:
         if "blue" in mm:
             material = "mat_blue"
         color_attr = f' material="{material}"'
-    half = round(_CUBE_HALF * s, 4)
-    z = round(TABLE_TOP_Z + half + 0.001, 4)
+    _h = round(_CUBE_HALF * s, 4)
+    hx, hy, hz = _half_xyz(item, _h, _h, _h)             # size_xyz -> a real box (e.g. a YCB cracker box), else a cube
+    z = round(TABLE_TOP_Z + hz + 0.001, 4)               # rest on the table at its OWN half-height
     mass = item.mass_kg if item.mass_kg else 0.05
     friction_attr = f' friction="{item.friction} 0.1 0.01"' if item.friction else ""
     return (
         f'    <body name="obj_{name}" pos="{x} {y} {z}" euler="0 0 {round(yaw, 4)}">\n'
         f'      <freejoint name="free_{name}" />\n'
-        f'      <geom name="{name}" type="box" size="{half} {half} {half}" '
+        f'      <geom name="{name}" type="box" size="{hx} {hy} {hz}" '
         f'mass="{round(mass, 4)}"{friction_attr}{color_attr} />\n'
         "    </body>"
     )

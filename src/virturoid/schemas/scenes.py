@@ -14,6 +14,13 @@ class SceneObject:
     material: str | None = None
     friction: float | None = None
     scale: float | None = None
+    # FULL extents (metres) along the object's local x/y/z axes. When set, this OVERRIDES the legacy scalar
+    # ``scale``-derived sizing in the exporter, so a scene can express real dimensions a single multiplier cannot
+    # (a 0.9 m-wide, 2.4 m-tall corridor wall; a 0.74 m-tall table). ``scale`` is kept for back-compat: objects
+    # that leave ``size_xyz`` None render byte-identically to before. The value is category-snapped to realistic
+    # priors upstream (see services/dimension_priors.py); the schema only stores it.
+    size_xyz: tuple[float, float, float] | None = None
+    category: str | None = None          # semantic dimension category (e.g. "corridor", "table", "ycb.mug")
 
 
 @dataclass
@@ -24,6 +31,9 @@ class SceneGraph(VersionedEntity):
     objects: list[SceneObject] = field(default_factory=list)
     variation_parameters: dict[str, str | float | int | bool] = field(default_factory=dict)
     requirement_trace: list[str] = field(default_factory=list)
+    # world extent (metres) the scene occupies: ((xmin,ymin,zmin),(xmax,ymax,zmax)). Optional; used by the
+    # validity gates (in-bounds / navigability) and the unit-sanity check (robot:scene ratio).
+    bounds: tuple[tuple[float, float, float], tuple[float, float, float]] | None = None
 
     def validate(self) -> ValidationResult:
         result = super().validate()
@@ -33,6 +43,9 @@ class SceneGraph(VersionedEntity):
         for index, item in enumerate(self.objects):
             if item.mass_kg is not None and item.mass_kg < 0:
                 result.add("invalid_object_mass", "Object mass cannot be negative.", f"objects[{index}].mass_kg")
+            if item.size_xyz is not None and (len(item.size_xyz) != 3 or any(e <= 0 for e in item.size_xyz)):
+                result.add("invalid_object_size", "size_xyz must be three positive extents (metres).",
+                           f"objects[{index}].size_xyz")
         return result
 
 
