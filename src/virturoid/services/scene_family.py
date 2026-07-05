@@ -54,8 +54,9 @@ class SceneFamily:
 _YCB_POOL = ["ycb.mug", "ycb.soup_can", "ycb.cracker_box", "ycb.sugar_box", "ycb.mustard",
              "ycb.foam_brick", "ycb.wood_block", "ycb.can_355"]
 _MANIP_LAYOUTS = ["row", "cluster", "two_groups", "scattered", "arc"]
-_NAV_TOPOLOGIES = ["straight", "L", "T", "serpentine", "room_obstacles"]
-_NAV_OBSTACLE_LAYOUTS = ["sparse", "clustered", "gauntlet"]
+# real floor-plan archetypes (connected walls + doorways + a floor), not disconnected panels
+_NAV_TOPOLOGIES = ["open_room", "two_rooms", "l_corridor", "three_rooms", "cluttered"]
+_NAV_OBSTACLE_LAYOUTS = ["sparse", "perimeter", "dense"]
 
 
 def _rng(seed: int):
@@ -80,8 +81,8 @@ def _nav_structures(task_type: str, rng, difficulty: int) -> list[StructureKey]:
     structs = []
     for topo in _NAV_TOPOLOGIES:
         for obs_layout in _NAV_OBSTACLE_LAYOUTS:
-            n_obs = int(rng.integers(0, 2 + difficulty))
-            structs.append(StructureKey(task_type, topo, n_obs, ("obstacle",), obs_layout))
+            n_furn = int(rng.integers(2, 5 + difficulty))          # real furniture count in the room
+            structs.append(StructureKey(task_type, topo, n_furn, ("furniture",), obs_layout))
     return structs
 
 
@@ -170,66 +171,106 @@ def _realize_manip(struct: StructureKey, rng) -> SceneGraph:
                                             "layout": struct.layout, "object_set": ",".join(struct.object_set)})
 
 
-def _corridor_walls(topology: str, width: float, rng) -> list[SceneObject]:
-    """Build a corridor of the given TOPOLOGY from real-dimension wall segments (2.4 m tall, from the 'corridor'
-    prior on the z/width axis + 'wall' prior on height). Returns the wall SceneObjects; the goal is placed at the
-    corridor end by the caller."""
-    h = snap_to_prior("wall", (1.0, 0.12, 2.4)).size_xyz[2]         # real 2.4 m wall HEIGHT (z), not 0.32 m
-    thick = 0.10
-    seg = 2.0                                                        # nominal corridor segment length
-    walls: list[SceneObject] = []
+WALL_H = 2.44                                       # real interior wall / ceiling height (IRC R305.1)
+THICK = 0.12                                         # real interior partition thickness
+DOOR_W = 0.95                                        # doorway clear width (>= ADA 0.915 m)
+_FURNITURE = ["table", "shelf", "box", "chair", "desk"]
 
-    def wall(name, cx, cy, length, along_x, height=h):
-        # size_xyz = (length-or-thickness on x, thickness-or-length on y, HEIGHT on z) -> exporter rests it upright
-        sx = (length, thick, height) if along_x else (thick, length, height)
-        return SceneObject(name=name, object_type="wall", category="wall", size_xyz=sx,
-                           pose_xyz_rpy=(round(cx, 3), round(cy, 3), 0.0, 0, 0, 0.0))
-    half = width / 2.0
-    if topology == "straight":
-        walls += [wall("wL", seg / 2, +half + thick / 2, seg, True), wall("wR", seg / 2, -half - thick / 2, seg, True)]
-    elif topology == "L":
-        walls += [wall("wL", seg / 2, +half + thick / 2, seg, True), wall("wR", seg / 2, -half - thick / 2, seg, True),
-                  wall("wU", seg + half + thick / 2, seg / 2, seg, False), wall("wD", seg - half - thick / 2, seg / 2, seg, False)]
-    elif topology == "T":
-        walls += [wall("wL", 0, +half + thick / 2, 2 * seg, True), wall("wR", 0, -half - thick / 2, 2 * seg, True),
-                  wall("wU", 0, seg / 2 + half, seg, False)]
-    elif topology == "serpentine":
-        for i in range(3):
-            y = i * (width + thick)
-            walls += [wall(f"s{i}L", seg / 2, y + half + thick / 2, seg, True),
-                      wall(f"s{i}R", seg / 2, y - half - thick / 2, seg, True)]
-    else:  # room_obstacles: a bounded room LARGER than the goal distance (goal sits at x=2.0), obstacles by caller
-        R = 2.4
-        walls += [wall("n", 0, R, 2 * R, True), wall("s", 0, -R, 2 * R, True),
-                  wall("e", R, 0, 2 * R, False), wall("w", -R, 0, 2 * R, False)]
-    return walls
+
+def _wall_span(name, along_x, a, b, fixed, h=WALL_H, thick=THICK):
+    """A single wall segment spanning [a, b] along its axis at the perpendicular coord ``fixed`` (metres)."""
+    length = max(0.02, b - a); c = (a + b) / 2.0
+    cx, cy = (c, fixed) if along_x else (fixed, c)
+    sx = (length, thick, h) if along_x else (thick, length, h)
+    return SceneObject(name=name, object_type="wall", category="wall", size_xyz=(round(sx[0], 3), sx[1], sx[2]),
+                       pose_xyz_rpy=(round(cx, 3), round(cy, 3), 0.0, 0, 0, 0.0))
+
+
+def _wall_with_door(prefix, along_x, a, b, fixed, door_at, door_w=DOOR_W, h=WALL_H):
+    """A wall from a to b with a DOORWAY gap of width ``door_w`` centred at ``door_at`` — i.e. two segments with a
+    real opening between them, so adjacent rooms actually CONNECT (the thing the old floating panels lacked)."""
+    segs = []
+    lo_end = door_at - door_w / 2.0
+    hi_end = door_at + door_w / 2.0
+    if lo_end - a > 0.06:
+        segs.append(_wall_span(f"{prefix}_l", along_x, a, lo_end, fixed, h))
+    if b - hi_end > 0.06:
+        segs.append(_wall_span(f"{prefix}_r", along_x, hi_end, b, fixed, h))
+    return segs
+
+
+def _place_furniture(W, H, k, rng, keepout, forbid_x):
+    """Place ``k`` real-sized furniture items (table 1.2x0.75x0.74, shelf, boxes, chairs) inside the room, clear of
+    the spawn/goal keepout points, the doorway x-corridors ``forbid_x``, and each other. Rejection sampling."""
+    import numpy as np
+    placed = []
+    tries = 0
+    while len(placed) < k and tries < 400:
+        tries += 1
+        cat = _FURNITURE[rng.integers(0, len(_FURNITURE))]
+        sx, sy, sz = default_size(cat)
+        rot = bool(rng.integers(0, 2))
+        if rot:
+            sx, sy = sy, sx
+        x = rng.uniform(0.5 + sx / 2, W - 0.5 - sx / 2)
+        y = rng.uniform(0.7 + sy / 2, H - 0.5 - sy / 2)
+        rad = max(sx, sy) / 2 + 0.35
+        if any((x - kx) ** 2 + (y - ky) ** 2 < rad ** 2 for kx, ky in keepout):
+            continue
+        if any(abs(x - fx) < sx / 2 + 0.55 for fx in forbid_x):     # keep doorway corridors clear
+            continue
+        if any((x - px) ** 2 + (y - py) ** 2 < (rad + pr) ** 2 for px, py, pr in placed):
+            continue
+        placed.append((x, y, max(sx, sy) / 2))
+        yield SceneObject(name=f"furn{len(placed)}_{cat}", object_type="obstacle", category=cat,
+                          size_xyz=(round(sx, 3), round(sy, 3), round(sz, 3)),
+                          pose_xyz_rpy=(round(x, 3), round(y, 3), 0.0, 0, 0, 0.0))
 
 
 def _realize_nav(struct: StructureKey, rng) -> SceneGraph:
-    import numpy as np
-    width = float(snap_to_prior("corridor", (rng.uniform(0.95, 1.4), 3.0, 2.44)).size_xyz[0])   # real >=0.915 m width (x)
-    objs = _corridor_walls(struct.topology, width, rng)
-    floor = SceneObject(name="floor", object_type="floor", size_xyz=(8.0, 0.04, 8.0),
-                        pose_xyz_rpy=(1.0, 0.5, 0.0, 0, 0, 0))
-    objs.append(floor)
-    # obstacles: count + layout are structural
-    for i in range(struct.n_objects):
-        if struct.layout == "gauntlet":
-            x, y = 0.4 + i * 0.6, (0.15 if i % 2 else -0.15)
-        elif struct.layout == "clustered":
-            x, y = 1.0 + rng.uniform(-0.2, 0.2), rng.uniform(-0.2, 0.2)
-        else:  # sparse
-            x, y = rng.uniform(0.4, 1.6), rng.uniform(-width / 3, width / 3)
-        objs.append(SceneObject(name=f"obs{i}", object_type="obstacle", category="obstacle",
-                                size_xyz=(0.2, 0.4, 0.2), pose_xyz_rpy=(round(x, 3), round(y, 3), 0.0, 0, 0, 0)))
-    objs.append(SceneObject(name="goal", object_type="zone", material="matte_green", size_xyz=(0.4, 0.006, 0.4),
-                            pose_xyz_rpy=(2.0, 0.0, 0.0, 0, 0, 0)))
-    return SceneGraph(id=f"nav_{struct.topology}_{struct.layout}_{struct.n_objects}_{abs(hash(struct.key())) % 10000}",
-                      name=f"{struct.task_type}:{struct.topology}:{struct.layout}", backend_targets=["mujoco"],
-                      robot_spawn_xyz_rpy=(0.0, 0.0, 0.0, 0, 0, 0), objects=objs,
-                      bounds=((-3.5, -3.5, 0.0), (3.5, 3.5, 2.6)),   # roomy enough for serpentine courses
-                      variation_parameters={"structure": str(struct.key()), "topology": struct.topology,
-                                            "corridor_width_m": round(width, 3), "obstacle_layout": struct.layout})
+    """A coherent room floor plan: a bounded room with a real floor, connected perimeter walls (2.44 m tall) with a
+    south entrance, interior dividing walls that leave real DOORWAYS per topology, and real furniture. Spawn just
+    inside the entrance; goal in a different room reached THROUGH the doorways (A*-navigable, gated by S4)."""
+    W = round(float(rng.uniform(5.0, 8.0)), 2); H = round(float(rng.uniform(4.0, 6.5)), 2)
+    t = THICK
+    objs: list[SceneObject] = [
+        SceneObject("floor", "floor", size_xyz=(W + 0.6, H + 0.6, 0.08), pose_xyz_rpy=(W / 2, H / 2, 0, 0, 0, 0))]
+    # perimeter: closed rectangle with a front entrance in the south wall
+    objs.append(_wall_span("perim_n", True, -t, W + t, H))
+    objs += _wall_with_door("perim_s", True, -t, W + t, 0.0, door_at=W * 0.5, door_w=1.2)
+    objs.append(_wall_span("perim_w", False, 0, H, 0.0))
+    objs.append(_wall_span("perim_e", False, 0, H, W))
+    spawn = (round(W * 0.5, 2), 0.7)
+    forbid_x: list[float] = []
+    topo = struct.topology
+    if topo == "two_rooms":
+        dx = round(W * 0.55, 2); dy = round(H * float(rng.uniform(0.3, 0.7)), 2)
+        objs += _wall_with_door("div", False, 0, H, dx, door_at=dy)
+        forbid_x.append(dx); goal = (round(dx + (W - dx) * 0.5, 2), round(H * 0.7, 2))
+    elif topo == "three_rooms":
+        d1, d2 = round(W * 0.36, 2), round(W * 0.68, 2)
+        objs += _wall_with_door("div1", False, 0, H, d1, door_at=round(H * 0.25, 2))   # offset doors -> a serpentine path
+        objs += _wall_with_door("div2", False, 0, H, d2, door_at=round(H * 0.75, 2))
+        forbid_x += [d1, d2]; goal = (round(W * 0.85, 2), round(H * 0.5, 2))
+    elif topo == "l_corridor":
+        # a SOLID vertical barrier attached to the south wall, leaving the top open -> the robot must go up the
+        # left, over the top of the barrier, and down to the goal: a real L-shaped route.
+        bx = round(W * 0.45, 2); btop = round(H * 0.62, 2)
+        objs.append(_wall_span("l_bar", False, 0, btop, bx))
+        forbid_x.append(bx); spawn = (round(W * 0.2, 2), 0.7); goal = (round(W * 0.75, 2), round(H * 0.85, 2))
+    else:  # open_room / cluttered
+        goal = (round(W * 0.82, 2), round(H * 0.8, 2))
+    n_furn = struct.n_objects + (3 if topo == "cluttered" else 0)
+    objs += list(_place_furniture(W, H, n_furn, rng, keepout=[spawn, goal], forbid_x=forbid_x))
+    objs.append(SceneObject("goal", "zone", material="matte_green", size_xyz=(0.5, 0.5, 0.006),
+                            pose_xyz_rpy=(goal[0], goal[1], 0.0, 0, 0, 0)))
+    return SceneGraph(id=f"nav_{topo}_{struct.layout}_{struct.n_objects}_{abs(hash(struct.key())) % 10000}",
+                      name=f"{struct.task_type}:{topo}:{struct.layout}", backend_targets=["mujoco"],
+                      robot_spawn_xyz_rpy=(spawn[0], spawn[1], 0.0, 0, 0, 0), objects=objs,
+                      bounds=((-1.0, -1.0, 0.0), (W + 1.0, H + 1.0, 2.7)),
+                      variation_parameters={"structure": str(struct.key()), "topology": topo,
+                                            "room_w_m": W, "room_h_m": H, "n_furniture": n_furn,
+                                            "layout": struct.layout})
 
 
 _NAV_TASKS = {"navigation", "nav", "maze", "locomotion"}

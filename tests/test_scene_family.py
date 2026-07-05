@@ -36,12 +36,25 @@ class SceneFamilyTests(unittest.TestCase):
         self.assertEqual(len(fam.held_out), 3)
 
     def test_nav_family_varies_topology(self):
-        fam = generate_family("navigation", n_train=6, n_held_out=2, seed=3)
+        fam = generate_family("navigation", n_train=8, n_held_out=2, seed=3)
         topos = {s.variation_parameters["topology"] for s in fam.train}
-        self.assertGreaterEqual(len(topos), 2, "nav family should span multiple corridor topologies")
-        # corridor width is realistic (>= ADA 0.915 m), not the old 0.52 m
+        self.assertGreaterEqual(len(topos), 2, "nav family should span multiple floor-plan topologies")
         for s in fam.train:
-            self.assertGreaterEqual(s.variation_parameters["corridor_width_m"], 0.9)
+            # real room dimensions (metres), not a 0.5 m sim abstraction
+            self.assertGreaterEqual(s.variation_parameters["room_w_m"], 4.0)
+            self.assertGreaterEqual(s.variation_parameters["room_h_m"], 4.0)
+            # a coherent room has a floor + several connected wall segments (perimeter + interior), not 2 panels
+            walls = [o for o in s.objects if o.object_type == "wall"]
+            self.assertGreaterEqual(len(walls), 4, "a room needs at least a 4-wall perimeter")
+            self.assertTrue(any(o.object_type == "floor" for o in s.objects))
+
+    def test_nav_scenes_are_navigable(self):
+        # the rebuilt floor plans must be A*-navigable through their doorways (the old floating panels weren't a
+        # coherent connected space); the validity gate is the judge, and most scenes should pass
+        from virturoid.services.scene_validity import validate_scene_physical
+        fam = generate_family("navigation", n_train=8, n_held_out=2, seed=5)
+        ok = sum(validate_scene_physical(s, robot_radius=0.22, run_settle=False)["ok"] for s in fam.train)
+        self.assertGreaterEqual(ok, 6, "most floor plans should be navigable spawn->goal through doorways")
 
     def test_scenes_have_real_dimensions(self):
         fam = generate_family("navigation", n_train=3, n_held_out=1, seed=4)
