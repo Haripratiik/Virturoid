@@ -656,6 +656,16 @@ def _maybe_gene_build(prompt, output_dir, target, memory_dir, emit, *, train: bo
     from virturoid.services.morphology_selector import _explicit_class
 
     requested_class = _explicit_class((prompt or "").lower())
+    # G4: the composite detector lives in the intent planner (mobile word + grasp verb = mobile_manipulator);
+    # _explicit_class predates it and returns a single class, which silently dropped the mobile half of
+    # 'a mobile robot that picks boxes and carries them'. Prefer the planner's class when it says composite.
+    try:
+        from virturoid.services.intent_planner import plan_build
+        _plan_cls = plan_build(prompt, llm=None).robot_class
+        if _plan_cls == "mobile_manipulator":
+            requested_class = "mobile_manipulator"
+    except Exception:  # noqa: BLE001
+        pass
     # The tuned legacy arm pipeline only SCORES the colour-sort task -- stack / place-on-shelf / push read 0% there.
     # Route those (with the gene-only walking classes) through the general gene path so they actually run + evaluate.
     nonsort_manip = _prompt_task_type(prompt) in _NONSORT_MANIP_TASKS
@@ -668,7 +678,13 @@ def _maybe_gene_build(prompt, output_dir, target, memory_dir, emit, *, train: bo
     from virturoid.services.morphology_composer import compose_robot
 
     try:
-        gene = compose_robot(prompt)
+        if requested_class == "mobile_manipulator":
+            # force the composite body plan: the live LLM's classifier tends to answer the TASK class
+            # ('manipulator') and silently drops the requested mobile platform; the composite is explicit intent.
+            from virturoid.services.intent_planner import plan_build as _pb
+            gene = compose_robot(prompt, plan=_pb(prompt, llm=None))
+        else:
+            gene = compose_robot(prompt)
     except Exception:  # noqa: BLE001 - any design failure -> fixture gene, then legacy path
         gene = None
     if gene is None:

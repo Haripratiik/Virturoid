@@ -643,7 +643,9 @@ def _compose_robot_impl(prompt: str, *, llm="auto", reach_m: float | None = None
         except Exception:  # noqa: BLE001
             pass
 
-    if llm is not None:
+    if llm is not None and (plan.robot_class or "").lower() != "mobile_manipulator":
+        # (the composite goes straight to its deterministic chassis+wheels+arm spec below: the live LLM designer
+        # answers the TASK class and drops the mobile platform — G4's exact regression)
         try:
             from virturoid.services.intent_morphology import build_from_intent, propose_intent
             gene = build_from_intent(propose_intent(prompt, plan, req, llm), prompt, req)
