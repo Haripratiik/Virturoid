@@ -31,42 +31,64 @@ _JOINT_KIND = {"revolute": "hinge", "prismatic": "slide"}
 # housings, soft studio lighting — entirely through visual-only geoms/materials that never touch dynamics.
 _VISUAL_XML = (
     '  <visual>\n'
-    '    <headlight ambient="0.45 0.45 0.48" diffuse="0.65 0.65 0.68" specular="0.22 0.22 0.22"/>\n'
-    '    <quality shadowsize="4096"/>\n'
+    # Softer, dimmer headlight so the positioned 3-light rig does the modeling (a strong flat headlight is the
+    # #1 "debug viewport" tell). Kept lit enough that a no-rig render is never pitch-black.
+    '    <headlight ambient="0.33 0.33 0.36" diffuse="0.42 0.42 0.45" specular="0.12 0.12 0.12"/>\n'
+    '    <quality shadowsize="8192" offsamples="8"/>\n'
     '    <map znear="0.01" zfar="60"/>\n'
+    '    <global offwidth="1920" offheight="1080"/>\n'
     '  </visual>\n'
 )
 # Robot surface materials (always emitted so body geoms can reference them even with the floor disabled).
 _ROBOT_MATERIALS = (
     '    <material name="mat_body" rgba="0.84 0.86 0.89 1" specular="0.35" shininess="0.45" reflectance="0.05"/>\n'
-    '    <material name="mat_joint" rgba="0.15 0.16 0.20 1" specular="0.6" shininess="0.7" reflectance="0.1"/>\n'
+    # mat_joint = actuator housing. Lifted from near-black (0.15) so a dark-carbon limb still reads its motor
+    # bulges as distinct machined housings instead of one black smear (the "black blob crowd" render defect).
+    '    <material name="mat_joint" rgba="0.21 0.22 0.25 1" specular="0.55" shininess="0.6" reflectance="0.08"/>\n'
     '    <material name="mat_accent" rgba="0.92 0.47 0.13 1" specular="0.45" shininess="0.55"/>\n'
     '    <material name="mat_ee" rgba="0.22 0.24 0.29 1" specular="0.5" shininess="0.6"/>\n'
     # per-MATERIAL finishes so the viewport shows real material variety (set by GeneSegment.material):
-    '    <material name="mat_alu" rgba="0.78 0.80 0.84 1" specular="0.55" shininess="0.5" reflectance="0.12"/>\n'
+    # mat_alu = the refined limb metal (BOM upgrades 'skeleton'->'aluminum'). Darkened from near-white (0.78) to
+    # brushed gunmetal: a stark-white limb stick with near-black motor cans is the Tinkertoy read; anodized
+    # gunmetal limbs with charcoal housings read as one cohesive machined limb (and dark anodized aluminum is
+    # exactly what premium robot limbs actually use — physically honest, not just prettier).
+    '    <material name="mat_alu" rgba="0.50 0.52 0.56 1" specular="0.6" shininess="0.55" reflectance="0.14"/>\n'
     '    <material name="mat_steel" rgba="0.34 0.36 0.40 1" specular="0.7" shininess="0.7" reflectance="0.18"/>\n'
-    '    <material name="mat_cf" rgba="0.11 0.12 0.14 1" specular="0.45" shininess="0.4" reflectance="0.06"/>\n'
+    # mat_cf = the default structural-limb finish (skeleton/frame map here). Lifted from 0.11 so segment/joint
+    # contrast reads; a limb in this + mat_joint housings gives the unified dark-limb look real quadrupeds use.
+    '    <material name="mat_cf" rgba="0.155 0.165 0.185 1" specular="0.45" shininess="0.4" reflectance="0.06"/>\n'
     '    <material name="mat_ti" rgba="0.60 0.60 0.65 1" specular="0.5" shininess="0.55" reflectance="0.1"/>\n'
     '    <material name="mat_shell" rgba="0.20 0.42 0.72 1" specular="0.4" shininess="0.5" reflectance="0.05"/>\n'
     '    <material name="mat_metal" rgba="0.47 0.49 0.53 1" specular="0.78" shininess="0.78" reflectance="0.22"/>\n'
     '    <material name="mat_rubber" rgba="0.13 0.13 0.15 1" specular="0.15" shininess="0.15"/>\n'
 )
-# GeneSegment.material key -> the MJCF material above. 'skeleton'/'frame' default to aluminium until the BOM's
-# task refinement upgrades them (steel for heavy, carbon_fiber for flight, titanium for premium).
+# GeneSegment.material key -> the MJCF material above. 'skeleton'/'frame' (the generic structural default) map
+# to dark CARBON so a limb reads as one unified dark structure with its motor housings — the design language of
+# real quadrupeds/arms (Unitree/Spot black legs) — instead of a stark-white limb alternating with dark cans (the
+# "Tinkertoy" render defect the fidelity battery flagged). 'aluminum' stays LIGHT as an explicit opt-in the BOM's
+# task refinement can select; steel/carbon_fiber/titanium are honored as-is.
 _MATERIAL_KEY_TO_MJCF = {
-    "skeleton": "mat_alu", "frame": "mat_alu", "aluminum": "mat_alu", "steel": "mat_steel",
+    "skeleton": "mat_cf", "frame": "mat_cf", "aluminum": "mat_alu", "steel": "mat_steel",
     "carbon_fiber": "mat_cf", "titanium": "mat_ti", "shell": "mat_shell", "metal": "mat_metal",
     "rubber": "mat_rubber",
 }
-# Scene dressing (skybox + grid floor) for the no-scene render/viewport path.
+# Scene dressing for the no-scene render/viewport path. A studio-gradient skybox (mid, not a near-black void)
+# and a near-uniform CONCRETE floor (fine checker only for scale reference, mild reflectance) — the checkerboard
+# tile floor is a classic sim-demo tell; concrete reads as a real workshop/lab. Floor material stays named
+# "grid" (referenced by the floor geom + terrain scenes) so only its appearance changes, not any wiring.
 _SCENE_ASSETS = (
-    '    <texture name="skybox" type="skybox" builtin="gradient" rgb1="0.16 0.18 0.23" rgb2="0.03 0.04 0.06" width="512" height="512"/>\n'
-    '    <texture name="grid" type="2d" builtin="checker" rgb1="0.21 0.24 0.29" rgb2="0.26 0.30 0.35" width="300" height="300"/>\n'
-    '    <material name="grid" texture="grid" texrepeat="6 6" specular="0.1" shininess="0.1" reflectance="0.02"/>\n'
+    '    <texture name="skybox" type="skybox" builtin="gradient" rgb1="0.52 0.56 0.62" rgb2="0.15 0.17 0.21" width="512" height="512"/>\n'
+    # Near-uniform matte concrete: barely-there checker for scale depth only (no edge grid lines), low
+    # reflectance so the robot is not mirrored (a strong floor reflection is a sim tell). texrepeat kept modest.
+    '    <texture name="grid" type="2d" builtin="checker" rgb1="0.415 0.420 0.428" rgb2="0.435 0.440 0.448" width="512" height="512"/>\n'
+    '    <material name="grid" texture="grid" texrepeat="10 10" specular="0.15" shininess="0.2" reflectance="0.03"/>\n'
 )
-_TWO_LIGHTS = (
-    '    <light name="key" pos="1.6 -1.1 3.0" dir="-0.45 0.32 -1" diffuse="0.55 0.55 0.58" specular="0.25 0.25 0.25"/>\n'
-    '    <light name="fill" pos="-2.0 1.6 2.2" dir="0.5 -0.42 -1" diffuse="0.22 0.22 0.26"/>\n'
+# 3-point studio rig: a shadow-casting key, a soft fill to open the shadows, and a rim/back light to separate the
+# robot from the backdrop. Physics-neutral (lights never touch dynamics). <= 8 lights + headlight (MuJoCo cap).
+_THREE_LIGHTS = (
+    '    <light name="key" pos="2.2 -1.6 3.0" dir="-0.50 0.36 -1" diffuse="0.62 0.61 0.58" specular="0.30 0.30 0.28" castshadow="true"/>\n'
+    '    <light name="fill" pos="-2.4 1.8 2.2" dir="0.50 -0.40 -1" diffuse="0.24 0.25 0.28" castshadow="false"/>\n'
+    '    <light name="rim" pos="-1.4 -2.4 1.8" dir="0.35 0.62 -0.7" diffuse="0.20 0.20 0.23" specular="0.35 0.35 0.40" castshadow="false"/>\n'
 )
 
 
@@ -111,7 +133,7 @@ def compile_gene_to_mjcf(gene: RobotGene, *, include_floor: bool = True, spawn_z
         '    <geom name="floor" type="plane" size="3 3 0.1" material="grid"/>\n'
         if include_floor else ""
     )
-    lights = _TWO_LIGHTS if include_floor else ""  # measurement passes (no floor) don't need scene lights
+    lights = _THREE_LIGHTS if include_floor else ""  # measurement passes (no floor) don't need scene lights
     return (
         f'<mujoco model="{escape(gene.id)}">\n'
         '  <compiler angle="radian" autolimits="true"/>\n'
@@ -286,7 +308,7 @@ def compile_gene_with_scene(gene: RobotGene, scene_objects, *, table: bool = Tru
         _ROBOT_MATERIALS.rstrip("\n"),
         '  </asset>',
         '  <worldbody>',
-        _TWO_LIGHTS.rstrip("\n"),
+        _THREE_LIGHTS.rstrip("\n"),
         table_xml + _body_xml(gene, root, pos=(0.0, 0.0, base_z), indent=4,
                               physics_only=physics_only).rstrip("\n"),
         *_scene_objects_xml(list(scene_objects)),
@@ -325,10 +347,13 @@ def _body_xml(gene: RobotGene, seg, pos: tuple[float, float, float], indent: int
         )
 
     # Per-part MATERIAL drives the colour/finish: a coloured shell body, metal feet/hands, dark carbon limbs,
-    # etc. (GeneSegment.material, set per role + refined per task). Falls back to the legacy white body / dark
-    # finger when a segment carries no material hint.
+    # etc. (GeneSegment.material, set per role + refined per task). A structural link with NO material hint now
+    # defaults to dark CARBON (not the legacy light mat_body): every render showed the Tinkertoy defect where
+    # some limb segments carried "skeleton" (dark) and their siblings fell through to light mat_body, so a single
+    # limb alternated light/dark bead-on-a-string. Shell/body/head parts carry an explicit "shell" material and
+    # stay the bright accent; only unhinted structural links are affected, and they should read as one dark limb.
     material = _MATERIAL_KEY_TO_MJCF.get(seg.material or "") or (
-        "mat_joint" if seg.joint_type == "prismatic" else "mat_body")
+        "mat_joint" if seg.joint_type == "prismatic" else "mat_cf")
     meshed = bool(meshes) and seg.name in meshes and not physics_only
     lines.append(_geom_xml(seg, pad + "  ", material=material, meshed=meshed, physics_only=physics_only))
     # physics_only strips ALL visual-only decoration (cylinder motor cans, collars, housings, sensor pucks)

@@ -129,6 +129,26 @@ class CompileTests(unittest.TestCase):
             # The end-effector site exists for controllers/graspers.
             self.assertGreaterEqual(mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "ee_site"), 0)
 
+    @unittest.skipUnless(_MUJOCO, "MuJoCo not installed.")
+    def test_styling_pass_present_and_physics_neutral(self):
+        # R1 realism styling pass: a 3-point studio light rig, an HD offscreen buffer, a concrete floor, and the
+        # unified material palette must all be present — AND must be physics-neutral (visual-only geoms/lights add
+        # no bodies, joints, or actuators, so grasp/locomotion dynamics stay byte-identical).
+        import mujoco
+
+        gene = tabletop_arm_gene()
+        xml = compile_gene_to_mjcf(gene, include_floor=True)
+        for tok in ('name="key"', 'name="fill"', 'name="rim"', 'offwidth="1920"',
+                    'castshadow="true"', 'mat_cf', 'mat_shell'):
+            self.assertIn(tok, xml, f"styling token {tok!r} missing from the compiled MJCF")
+        self.assertEqual(3, xml.count("<light "), "expected exactly the 3-point rig on the floored render")
+        model = mujoco.MjModel.from_xml_string(xml)
+        self.assertEqual(model.nlight, 3, "the 3 rig lights are the only lights (physics-neutral additions)")
+        self.assertEqual(model.nu, len(gene.actuated_joints()), "styling must not add actuators")
+        self.assertEqual(model.nbody, len(gene.segments) + 1, "styling must not add bodies (world + segments)")
+        # A measurement pass (no floor) omits scene lights so it never fights a wrapping scene's own rig.
+        self.assertEqual(0, compile_gene_to_mjcf(gene, include_floor=False).count("<light "))
+
 
 if __name__ == "__main__":
     unittest.main()
