@@ -547,6 +547,24 @@ def compose_robot(prompt: str, *, llm="auto", reach_m: float | None = None,
         finalize_for_task(gene, prompt)
     except Exception:  # noqa: BLE001 - finalization is value-add; never block a compose
         pass
+    try:
+        # G6/G7 FINAL-STAGE slenderness clamp (walking legs only): whatever the source — an LLM graph's own
+        # girth/thickness, the heavy-task thickener, a redesign — a leg segment that ships must respect the
+        # morphology-prior band (length/diameter >= 2.2). 1:1 sausage legs were the e2e test's core visual +
+        # functional defect; realism bands outrank per-part knobs for the load-bearing walking chain.
+        if (gene.robot_class or "").lower() in ("quadruped", "legged"):
+            from virturoid.services.bom_builder import _scale_geo
+            for s_ in gene.segments:
+                n_ = (s_.name or "").lower()
+                if "leg" in n_ and (s_.joint_type or "").lower() == "revolute" and s_.length_m > 0:
+                    cap = s_.length_m / 4.4
+                    if s_.radius_m > cap:
+                        f_ = cap / s_.radius_m
+                        s_.radius_m = round(cap, 5)
+                        s_.mass_kg = round(max(0.01, s_.mass_kg * f_ * f_), 5)
+                        _scale_geo(s_.geometry, f_)
+    except Exception:  # noqa: BLE001
+        pass
     return gene
 
 
@@ -594,8 +612,14 @@ def _compose_robot_impl(prompt: str, *, llm="auto", reach_m: float | None = None
             from virturoid.services.anatomy_designer import propose_anatomy
             gene = build_from_anatomy(propose_anatomy(prompt, plan, req, llm))
             if gene is not None and not gene.validate() and not _intent_validation_issues(gene, req):
-                gene.design_source = "anatomy"
-                return gene
+                # G6: the LLM's anatomy must ALSO clear the morphology-prior gate (3 actuated joints/leg,
+                # slender segments). A non-conformant graph falls through to the archetype/generic builders,
+                # which are prior-conformant by construction — so a blob never ships just because the LLM
+                # drew one this run.
+                from virturoid.services.morphology_priors import validate_morphology
+                if validate_morphology(gene).ok:
+                    gene.design_source = "anatomy"
+                    return gene
         except Exception:  # noqa: BLE001 - any LLM/build/validate failure -> archetype/intent below
             pass
         # The LLM anatomy path can fail (rate-limited / weak model / bad graph). Distinctive exotic SHAPES the

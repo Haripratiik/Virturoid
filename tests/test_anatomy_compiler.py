@@ -148,7 +148,15 @@ class AnatomyCompilerTests(unittest.TestCase):
         self.assertIn("cutouts", main)
         self.assertIn("chamfer", main)                                     # vented detail reached the shell
         leg = next(s for s in g.segments if s.name == "leg_l_0")
-        self.assertGreater(leg.radius_m, 0.05 * 1.5)                        # thickness 1.8 thickened the limb
+        # G6 fidelity band: thickness still thickens the limb, but only WITHIN the slenderness band — a walking
+        # leg may never return to the 1:1 sausage stubs the e2e fidelity review rejected.
+        g0 = build_from_anatomy({"robot_class": "quadruped", "parts": [
+            {"name": "body", "role": "body", "size": 0.5, "girth": 0.16},
+            {"name": "leg", "role": "leg", "parent": "body", "attach": "front_bottom", "aim": "down",
+             "size": 0.3, "girth": 0.012, "segments": 3, "symmetry": "left_right", "joint": "revolute"}]})
+        leg0 = next(s for s in g0.segments if s.name == "leg_l_0")
+        self.assertGreater(leg.radius_m, leg0.radius_m)                     # the knob still has effect...
+        self.assertLessEqual(leg.radius_m, 0.055 * 0.3 * 1.01)              # ...but capped at the band
         self.assertIn("chamfer", leg.geometry)                             # rugged -> machined bevels
 
     @unittest.skipUnless(importlib.util.find_spec("build123d"), "needs build123d")

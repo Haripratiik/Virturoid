@@ -121,9 +121,17 @@ def refine_skeleton_for_task(gene: RobotGene, task: str = "") -> RobotGene:
     for s in gene.segments:
         if s.material != "skeleton":
             continue
-        s.radius_m = round(max(0.006, s.radius_m * f), 5)
-        s.mass_kg = round(max(0.01, s.mass_kg * f * f), 5)
-        _scale_geo(s.geometry, f)
+        r_new = max(0.006, s.radius_m * f)
+        if f > 1.0 and "leg" in (s.name or "").lower() and s.length_m > 0:
+            # G6/G7: a 'heavy-duty' thicken must NOT turn walking legs back into 1:1 sausages — cap the leg
+            # radius at the slenderness band (length/diameter >= 2.2, the morphology-prior minimum).
+            r_new = min(r_new, s.length_m / 4.4)
+            f_eff = r_new / max(1e-9, s.radius_m)
+        else:
+            f_eff = f
+        s.radius_m = round(r_new, 5)
+        s.mass_kg = round(max(0.01, s.mass_kg * f_eff * f_eff), 5)
+        _scale_geo(s.geometry, f_eff)
     return gene
 
 

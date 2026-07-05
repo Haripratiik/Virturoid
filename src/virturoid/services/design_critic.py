@@ -266,8 +266,17 @@ def lighten_links(gene: RobotGene, *, factor: float = 0.8, new_id=None, species=
 
 
 def thicken_links(gene: RobotGene, *, factor: float = 1.3, new_id=None, species=None) -> RobotGene:
-    """Increase link cross-section so it survives bending load (the structural fix)."""
-    return _amend(gene, _scale_overrides(gene, "radius_m", factor), new_id, species, "thicken_links")
+    """Increase link cross-section so it survives bending load (the structural fix). G6 fidelity band: walking
+    LEG segments of a legged body are capped at slenderness length/diameter >= 2.2 — a structural repair may
+    beef the trunk/arms freely but must not turn the legs back into the 1:1 sausage stubs."""
+    ov = _scale_overrides(gene, "radius_m", factor)
+    if (gene.robot_class or "").lower() in ("quadruped", "legged"):
+        by_name = {s.name: s for s in gene.segments}
+        for name, o in ov.items():
+            s_ = by_name.get(name)
+            if s_ is not None and "leg" in name.lower() and float(s_.length_m) > 0 and "radius_m" in o:
+                o["radius_m"] = round(min(float(o["radius_m"]), float(s_.length_m) / 4.4), 5)
+    return _amend(gene, ov, new_id, species, "thicken_links")
 
 
 def _amend(gene, overrides, new_id, species, op):

@@ -250,6 +250,34 @@ def build_gene_package(gene: RobotGene, prompt: str, output_dir: Path, scene_cou
     composed gene (no genome->gene reconstruction), so the gate scores exactly the robot that was built.
     """
     output_dir = Path(output_dir)
+    # G3 (fidelity gap-closure): GROUND the body BEFORE anything compiles/evaluates. The e2e test proved the
+    # product shipped the fantasy body (dog 4.54 kg vs its Go2-class ~15 kg; arm 3.04 kg vs UR5e-class 20.6 kg):
+    # ground_gene sizes real actuators on RATED torque and sets link mass = structure + motor, so sim, eval,
+    # spec sheet and BOM all describe the SAME buildable robot. carbon_fiber/0.25 is the validated-trainable
+    # config from the B0 GPU runs. Fail-open: a grounding error is reported, never silently skipped.
+    try:
+        from virturoid.services.grounded_physics import ground_gene
+        _ground_report = ground_gene(gene, material="carbon_fiber", fill=0.25)
+    except Exception as _ge:  # noqa: BLE001
+        _ground_report = {"error": f"{type(_ge).__name__}: {_ge}"}
+    try:                                                   # persist grounding + the executable-on-BOM certificate
+        import json as _json
+        _rep_dir = output_dir / "reports"
+        _rep_dir.mkdir(parents=True, exist_ok=True)
+        (_rep_dir / "grounding_report.json").write_text(_json.dumps(_ground_report, indent=2), encoding="utf-8")
+        from virturoid.services.bom_certificate import certify_policy_on_bom
+        certify_policy_on_bom(gene, None, steps=250, n_seeds=1,
+                              out_path=str(_rep_dir / "bom_certificate.json"))
+    except Exception:  # noqa: BLE001 - the certificate is a report, never a build blocker
+        pass
+    try:                                                   # G6: design-time morphology gate (report, ledger-visible)
+        import json as _json
+        from dataclasses import asdict as _asdict
+        from virturoid.services.morphology_priors import validate_morphology
+        (output_dir / "reports" / "morphology_report.json").write_text(
+            _json.dumps(_asdict(validate_morphology(gene)), indent=2), encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        pass
     # A legged body is scored on LOCOMOTION (forward walking distance), not pick-place — a quadruped has
     # no gripper and no reachable object workspace. Dispatch by structure so any free-base legged morphology
     # the composer/LLM produces is evaluated on the task it actually implies (see task_matched_eval).

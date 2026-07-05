@@ -395,6 +395,16 @@ def build_from_anatomy(graph: dict) -> RobotGene:
         girth = float(part.get("girth") or 0) or 0.18 * size
         girth *= max(0.3, min(3.0, float(part.get("thickness") or 1.0)))   # per-part THICKNESS knob (load-bearing)
         n = max(1, min(8, int(part.get("segments") or 1)))
+        if role == "leg" and (graph.get("robot_class") or "").lower() in ("quadruped", "legged"):
+            # G6/G7 morphology-prior NORMALIZATION at the compiler choke point (applies to LLM graphs AND the
+            # generic fallback alike): a walking leg needs >=3 ACTUATED joints (Go2 = 3/leg) — with the terminal
+            # segment welded as the foot that means >=4 segments — and SLENDER segments (aspect >=~2.5, not the
+            # 1:1 sausage stubs the e2e fidelity test shipped). The LLM chooses the leg's overall size; code owns
+            # the structural minima, exactly like dimension_priors for scenes.
+            n = max(4, n)
+            # The slenderness BAND is the invariant (length/diameter >= ~2.2); the per-part thickness knob
+            # varies girth WITHIN it. An explicit thickness may not push a walking leg back into 1:1 stubs.
+            girth = min(girth, 0.055 * size)
         explicit_joint = str(part.get("joint") or "").lower()
         is_limb = role in ("leg", "arm", "leg_upper", "arm_upper")
         detail = str(part.get("detail") or "")            # mechanical DETAIL: smooth | paneled | vented | rugged
@@ -510,7 +520,7 @@ def build_from_anatomy(graph: dict) -> RobotGene:
 # "wyvern" all yield the same generic legged body offline, and the LLM anatomy designer (the PRIMARY path)
 # supplies the species-specific anatomy when present. Hard-coding a graph per animal is the overfitting we
 # reject — the software must generalize to creatures nobody enumerated.
-def _generic_legged_graph(*, n_pairs: int, body=0.55, girth=0.16, leg=0.27, tail=0.14) -> dict:
+def _generic_legged_graph(*, n_pairs: int, body=0.58, girth=0.13, leg=0.42, tail=0.14) -> dict:
     """A generic legged skeleton: torso + neck + head + tail + ``n_pairs`` of 3-segment walking legs, spread
     across the longitudinal anchors and fanned outward. Class-general — 2 pairs = quadruped, 3 = hexapod,
     4 = octopod. No species shape baked in; just a credible standing N-legged body."""
@@ -532,8 +542,11 @@ def _generic_legged_graph(*, n_pairs: int, body=0.55, girth=0.16, leg=0.27, tail
             ("rear_mid_bottom", "down_out"), ("rear_bottom", "back_down_out")],
     }[n]
     for i, (anchor, aim) in enumerate(layouts):
+        # G7 (gap-closure): Go2-band legs — 4 segments = 3 ACTUATED joints + a welded foot (the old 3-segment
+        # legs had only 2 actuated joints; every real quadruped has 3/leg), total length 0.42 m (~thigh+shank
+        # 0.2+0.2 like the Go2/Mini-Cheetah class), and a SLENDER girth (aspect >=3:1) instead of 1:1 stubs.
         parts.append({"name": f"leg{i + 1}", "role": "leg", "parent": "torso", "attach": anchor, "aim": aim,
-                      "size": leg, "girth": 0.19 * leg, "segments": 3, "symmetry": "left_right",
+                      "size": leg, "girth": 0.045 * leg, "segments": 4, "symmetry": "left_right",
                       "joint": "revolute"})
     return {"robot_class": ("biped" if n == 1 else "quadruped"), "name": "creature", "parts": parts}
 

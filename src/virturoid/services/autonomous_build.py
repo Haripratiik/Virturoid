@@ -726,6 +726,16 @@ def _maybe_gene_build(prompt, output_dir, target, memory_dir, emit, *, train: bo
     meter = RealComputeMeter()
     with meter:
         summary = build_gene_package(gene, prompt, output_dir)
+    try:
+        # G6: re-run the morphology gate on the gene AS SHIPPED — build_gene_package's redesign/refine steps can
+        # thicken links after the pre-build report, so the persisted verdict must describe the final body.
+        import json as _json
+        from dataclasses import asdict as _asdict
+        from virturoid.services.morphology_priors import validate_morphology
+        (Path(output_dir) / "reports" / "morphology_report.json").write_text(
+            _json.dumps(_asdict(validate_morphology(gene)), indent=2), encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        pass
     final = float(summary["success_rate"])
     task_type = summary.get("task_type", "pick_place_sort")
     emit("evaluate_done", f"Gene-built {gene.species} ran real '{task_type}': {final:.0%} task success.",
