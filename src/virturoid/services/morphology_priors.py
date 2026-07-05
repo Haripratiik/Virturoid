@@ -46,16 +46,23 @@ def _seg_by(gene, pred):
     return [s for s in gene.segments if pred(s)]
 
 
+# trailing segment-role words a leg name may end in (besides a numeric index) — stripped to find the chain key.
+_LEG_SEG_WORDS = {"femur", "tibia", "coxa", "shank", "thigh", "shin", "calf", "foot", "upper", "lower", "hip", "knee"}
+
+
 def _leg_chains(gene):
     """Group leg segments by their prefix (leg1_l, leg2_r, ...) -> list of chains (each a list of segments)."""
     chains: dict[str, list] = {}
     for s in gene.segments:
         n = s.name.lower()
         if "leg" in n and "_geom" not in n:
-            # chain key = the name minus its trailing segment index ("front_leg_l_0" -> "front_leg_l"), so a
-            # left and a right leg are DISTINCT chains regardless of naming style (leg1_l_* / front_leg_l_*).
+            # chain key = the name minus its trailing segment marker — a numeric index ("front_leg_l_0" ->
+            # "front_leg_l") OR a role word ("leg_l0_femur"/"leg_l0_tibia" -> "leg_l0"). Word suffixes were the
+            # bug: a spider's femur/tibia hashed to DISTINCT keys, so its 2-DOF legs read as sixteen 1-joint
+            # chains and false-failed the >=3-DOF band. Both left/right stay distinct chains either way.
             parts = n.rsplit("_", 1)
-            key = parts[0] if len(parts) == 2 and parts[1].isdigit() else n
+            suffix = parts[1] if len(parts) == 2 else ""
+            key = parts[0] if (suffix.isdigit() or suffix in _LEG_SEG_WORDS) else n
             chains.setdefault(key, []).append(s)
     return list(chains.values())
 
