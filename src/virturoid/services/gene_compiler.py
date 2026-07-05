@@ -483,9 +483,15 @@ def _detail_geoms_xml(seg, pad: str, *, suppress_motor: bool = False) -> str:
         tail = name_l.rsplit("_", 1)
         idx = int(tail[1]) if len(tail) == 2 and tail[1].isdigit() else 0
         if welded and 0.02 < L:                        # terminal welded segment == foot -> rubber boot pad
+            # Center the boot UP the foot so its distal extent (pos + boot_r) aligns with the foot capsule's own
+            # distal cap (L + R) — a boot at the tip with a bigger radius hangs below the collision contact and
+            # reads as a spawn penetration (the standing-spawn test measures EVERY geom's oriented AABB). Aligned,
+            # the visible pad wraps the foot without ever protruding past the surface the robot actually stands on.
+            boot_r = R * 1.35
+            boot_z = L + R - boot_r
             parts.append(
-                f'{pad}<geom name="{escape(seg.name)}_boot" type="sphere" pos="0 0 {L:.5f}" '
-                f'size="{R * 1.5:.5f}" material="mat_rubber"{vis}/>')
+                f'{pad}<geom name="{escape(seg.name)}_boot" type="sphere" pos="0 0 {boot_z:.5f}" '
+                f'size="{boot_r:.5f}" material="mat_rubber"{vis}/>')
         elif seg.shape in ("capsule", "cylinder") and L > 0.05 and idx == 0:   # top of limb -> shell fairing
             # Only the TOP (hip/thigh) segment gets the accent bodywork, so the segments below stay bare dark and
             # the limb reads two-tone (accent over structure) regardless of how many segments the leg has —

@@ -11,8 +11,8 @@ position — so it drives any composed quadruped, not a hard-coded one.
 from __future__ import annotations
 
 
-def run_locomotion_episode(model, horizon: int = 2400, settle: int = 400, freq: float = 0.05,
-                           hip_amp: float = 0.4, knee_lift: float = 0.3, stance=(0.2, -0.4),
+def run_locomotion_episode(model, horizon: int = 2400, settle: int = 400, freq: float = 0.06,
+                           hip_amp: float = 0.5, knee_lift: float = 0.3, stance=(0.35, -0.5),
                            kp: float = 50.0, kd: float = 5.0, on_step=None) -> dict:
     """Trot a legged robot forward; return ``{distance_m, forward_m, upright, status}``. Needs MuJoCo.
     ``on_step(model, data, step)`` is called each gait step (e.g. to render a walking filmstrip)."""
@@ -81,9 +81,15 @@ def run_locomotion_episode(model, horizon: int = 2400, settle: int = 400, freq: 
             elif not gait:
                 tgt = stance_hip if r == HIP else stance_knee
             elif r == HIP:
-                tgt = stance_hip + hip_amp * math.sin(step * freq + hip_phase.get(k, 0.0))
+                # PROPULSIVE trot: cos sweeps the hip MONOTONICALLY from +amp (forward) to -amp (back) over the
+                # stance half (ph 0->pi), so a PLANTED foot drives the body forward. The old sin() form planted
+                # the foot during a symmetric back-then-forward dip = zero net thrust (a shuffle-in-place, the
+                # deep-analysis dog: forward -0.045 m). Diagonal legs are pi out of phase (hip_phase).
+                tgt = stance_hip + hip_amp * math.cos(step * freq + hip_phase.get(k, 0.0))
             else:                                         # KNEE
-                tgt = stance_knee - knee_lift * max(0.0, math.sin(step * freq + leg_phase_for(jnt)))
+                # Lift the foot during SWING only (sin<0, ph in (pi,2pi)) so it clears the ground on the forward
+                # return and stays PLANTED through the whole backward propulsion sweep (sin>=0, ph in (0,pi)).
+                tgt = stance_knee - knee_lift * max(0.0, -math.sin(step * freq + leg_phase_for(jnt)))
             data.ctrl[k] = float(np.clip(data.qfrc_bias[va] + kp * (tgt - data.qpos[qa]) - kd * data.qvel[va],
                                          -clamps[k], clamps[k]))
         mujoco.mj_step(model, data)
@@ -100,5 +106,10 @@ def run_locomotion_episode(model, horizon: int = 2400, settle: int = 400, freq: 
     p1 = np.array(data.qpos[qadr:qadr + 2])
     torso_z = float(data.qpos[qadr + 2])
     dist = float(np.linalg.norm(p1 - p0))
+    upright = bool(torso_z > 0.12)
+    # Honest status: an upright body that simply didn't travel far is STALLED (weak/mistuned gait), not fallen.
+    # Conflating the two (the old label) hid the real failure mode the deep-analysis dog showed — upright but
+    # shuffling in place — behind a 'fell' that implies a balance loss it never had.
+    status = "walked" if (dist > 0.1 and upright) else ("stalled" if upright else "fell")
     return {"distance_m": round(dist, 3), "forward_m": round(float(p1[0] - p0[0]), 3),
-            "upright": bool(torso_z > 0.12), "status": "walked" if dist > 0.1 and torso_z > 0.12 else "fell"}
+            "upright": upright, "status": status}
