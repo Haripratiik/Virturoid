@@ -127,12 +127,17 @@ def validate_morphology(gene) -> MorphReport:
         # caps = len + 2r) to the torso length; a ratio > ~1 is the "second body" render defect. torso length =
         # the base box core (base.length_m), which is the trunk's long axis even for compound-geometry trunks.
         heads = _seg_by(gene, lambda s: any(k in s.name.lower() for k in ("head", "skull", "snout", "muzzle")))
-        if heads and base is not None and float(base.length_m) > 1e-6:
+        # Reference the torso's LARGEST dimension (length_m OR the 2*radius_m footprint), not length_m alone: a
+        # composed/loft trunk stores its long front-back axis in the loft geometry while its box collider length_m
+        # is the THIN (thickness) axis — measuring the head against that thin axis false-flagged a fine hexapod
+        # head at 1.55x. max() picks the real trunk scale for both a long box (anatomy dog) and a flat slab.
+        torso_ref = max(float(base.length_m), 2.0 * float(base.radius_m)) if base is not None else 0.0
+        if heads and torso_ref > 1e-6:
             ext = max(float(h.length_m) + 2.0 * float(h.radius_m) for h in heads)
-            ratio = ext / float(base.length_m)
+            ratio = ext / torso_ref
             measured["head_torso_ext"] = round(ratio, 2)
             if ratio > QUAD_BANDS["head_torso_ext"][1]:
-                issues.append(f"head extent {ratio:.2f}x the torso length (a head rivaling the trunk reads as a "
+                issues.append(f"head extent {ratio:.2f}x the torso size (a head rivaling the trunk reads as a "
                               f"second body, not a sensor head)")
     elif cls in ("manipulator", "arm"):
         act = actuated(gene.segments)
