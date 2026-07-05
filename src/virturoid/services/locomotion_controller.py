@@ -11,8 +11,8 @@ position — so it drives any composed quadruped, not a hard-coded one.
 from __future__ import annotations
 
 
-def run_locomotion_episode(model, horizon: int = 2400, settle: int = 400, freq: float = 0.06,
-                           hip_amp: float = 0.5, knee_lift: float = 0.3, stance=(0.35, -0.5),
+def run_locomotion_episode(model, horizon: int = 2400, settle: int = 400, freq: float = 0.05,
+                           hip_amp: float = 0.4, knee_lift: float = 0.3, stance=(0.2, -0.4),
                            kp: float = 50.0, kd: float = 5.0, on_step=None) -> dict:
     """Trot a legged robot forward; return ``{distance_m, forward_m, upright, status}``. Needs MuJoCo.
     ``on_step(model, data, step)`` is called each gait step (e.g. to render a walking filmstrip)."""
