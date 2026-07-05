@@ -15,8 +15,11 @@ class NovelDispatchTests(unittest.TestCase):
         self.assertIsNotNone(spider)
         self.assertEqual("arachnid.proc", spider.species)
         self.assertEqual([], spider.validate())
-        # 8 legs x (femur+tibia) = 16 leg segments + cephalothorax/abdomen/head
-        self.assertEqual(16, sum(1 for s in spider.segments if s.name.startswith("leg_")))
+        # 8 legs x (coxa+femur+tibia) = 24 leg segments + cephalothorax/abdomen/head. 3-DOF insect legs
+        # (abduction + hip + knee) so the gate's >=3-joint band passes and the leg can actually step, not paddle.
+        self.assertEqual(24, sum(1 for s in spider.segments if s.name.startswith("leg_")))
+        legs = {s.name.rsplit("_", 1)[0] for s in spider.segments if s.name.startswith("leg_")}
+        self.assertEqual(8, len(legs), "8 distinct leg chains")
         self.assertIn("rest_pose", spider.metadata)
         self.assertEqual("serpent.proc", novel_archetype_gene("a snake").species)
         self.assertEqual("amphibian.proc", novel_archetype_gene("a frog robot").species)

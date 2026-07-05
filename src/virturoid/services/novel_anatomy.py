@@ -97,18 +97,28 @@ def build_spider(n_legs: int = 8):
     f_r, t_r = 0.014, 0.010
     femur_el = 0.18
     fan = [(0.95 - 1.9 * i / max(1, per_side - 1)) for i in range(per_side)]
+    coxa_len = 0.07     # long enough to clear the leg-slenderness band (aspect = 0.07/2r ~ 2.5 >= 2.2)
     for side, sy in (("l", 1.0), ("r", -1.0)):
         for i, f in enumerate(fan):
             phi = sy * (PI / 2) - f
             mx, my = ceph_r * 0.9 * math.cos(phi), ceph_r * 0.9 * math.sin(phi)
+            coxa_name = f"leg_{side}{i}_coxa"
             femur_name, tibia_name = f"leg_{side}{i}_femur", f"leg_{side}{i}_tibia"
             dir_out = (math.cos(phi) * math.cos(femur_el), math.sin(phi) * math.cos(femur_el),
                        math.sin(femur_el))
+            # 3-DOF insect leg (coxa YAW + femur PITCH + tibia KNEE) — a 2-DOF leg (the old build) can't lift a
+            # foot to swing AND sweep it for propulsion, so the trot gait only paddled. The coxa yaws the leg
+            # around vertical (abduction) and aims the chain outward; femur+tibia pitch in that plane to step.
             segs.append(GeneSegment(
-                name=femur_name, parent="cephalothorax", shape="capsule", length_m=femur, radius_m=f_r,
-                mass_kg=0.05, joint_type="revolute", joint_axis=(0.0, 0.0, 1.0),
+                name=coxa_name, parent="cephalothorax", shape="capsule", length_m=coxa_len, radius_m=f_r,
+                mass_kg=0.03, joint_type="revolute", joint_axis=(0.0, 0.0, 1.0),
                 joint_lower=-0.6, joint_upper=0.6, mount_offset=(mx, my, 0.45 * ceph_h),
                 mount_euler=_aim_euler(dir_out), actuator_torque_nm=4.0,
+                geometry=_tapered(coxa_len, f_r * 1.4, f_r)))
+            segs.append(GeneSegment(
+                name=femur_name, parent=coxa_name, shape="capsule", length_m=femur, radius_m=f_r,
+                mass_kg=0.05, joint_type="revolute", joint_axis=(0.0, 1.0, 0.0),
+                joint_lower=-0.9, joint_upper=0.9, actuator_torque_nm=4.0,
                 geometry=_tapered(femur, f_r * 1.5, f_r)))
             segs.append(GeneSegment(
                 name=tibia_name, parent=femur_name, shape="capsule", length_m=tibia, radius_m=t_r,
@@ -116,8 +126,9 @@ def build_spider(n_legs: int = 8):
                 joint_lower=-0.2, joint_upper=2.6, actuator_torque_nm=3.0,
                 is_end_effector=(side == "l" and i == 0),
                 geometry=_tapered(tibia, t_r * 1.3, t_r * 0.7)))
-            pose[f"{femur_name}_joint"] = 0.0
-            pose[f"{tibia_name}_joint"] = 1.6
+            pose[f"{coxa_name}_joint"] = 0.0
+            pose[f"{femur_name}_joint"] = 0.6    # hip pitched down so the knee reaches toward the ground
+            pose[f"{tibia_name}_joint"] = 1.4
     gene = RobotGene(id="proc_spider", species="arachnid.proc", robot_class="legged",
                      segments=segs, base_mount="free", end_effector_type="none",
                      metadata={"rest_pose": pose})
