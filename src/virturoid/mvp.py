@@ -378,6 +378,13 @@ def write_mvp_robot_arm_project(output_dir: Path, requirements: RequirementsReco
     write_validation_report(written_dir)
     write_mvp_summary_report(project, written_dir)
     write_mvp_html_report(project, written_dir)
+    try:
+        # G1 (fidelity gap-closure): EVERY MVP package carries a real bill of materials, derived from the
+        # genome's own joint effort limits — the readiness ledger's bom_present stage fail-closes without it.
+        from virturoid.services.bom_builder import emit_genome_bom
+        emit_genome_bom(written_dir, task=getattr(requirements, "prompt", "") or "")
+    except Exception:  # noqa: BLE001 - the ledger will honestly report a missing BOM
+        pass
     return written_dir
 
 
