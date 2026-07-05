@@ -34,7 +34,7 @@ class DimPrior:
 # (length, thickness, HEIGHT); a table is (width, depth, HEIGHT); a corridor prior is (WIDTH, length, height). ---
 _ARCH = [
     DimPrior("corridor", (1.0, 3.0, 2.44), ((0.915, 3.0), (0.6, 30.0), (2.03, 3.5)), source="ADA 403.5.1 / IRC R311.6 (x=width)"),
-    DimPrior("wall", (3.0, 0.12, 2.44), ((0.1, 40.0), (0.05, 0.4), (0.9, 4.0)), density=1900.0, source="IRC R305.1 (z=ceiling height)"),
+    DimPrior("wall", (3.0, 0.12, 2.44), ((0.05, 40.0), (0.05, 40.0), (0.9, 4.0)), density=1900.0, source="IRC R305.1 (z=ceiling height; either horizontal axis may be the length)"),
     DimPrior("door", (0.915, 0.045, 2.03), ((0.815, 1.2), (0.035, 0.06), (2.03, 2.44)), density=600.0, source="ADA 404.2"),
     DimPrior("table", (1.2, 0.75, 0.74), ((0.4, 2.4), (0.4, 1.2), (0.71, 0.865)), density=650.0, source="ADA 902.3 / dining-table std"),
     DimPrior("countertop", (1.2, 0.61, 0.914), ((0.4, 3.0), (0.5, 0.7), (0.86, 0.95)), density=700.0, source="kitchen std"),

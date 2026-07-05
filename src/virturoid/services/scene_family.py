@@ -167,8 +167,8 @@ def _corridor_walls(topology: str, width: float, rng) -> list[SceneObject]:
             y = i * (width + thick)
             walls += [wall(f"s{i}L", seg / 2, y + half + thick / 2, seg, True),
                       wall(f"s{i}R", seg / 2, y - half - thick / 2, seg, True)]
-    else:  # room_obstacles: a bounded room, obstacles added by caller
-        R = 2.0
+    else:  # room_obstacles: a bounded room LARGER than the goal distance (goal sits at x=2.0), obstacles by caller
+        R = 2.4
         walls += [wall("n", 0, R, 2 * R, True), wall("s", 0, -R, 2 * R, True),
                   wall("e", R, 0, 2 * R, False), wall("w", -R, 0, 2 * R, False)]
     return walls
