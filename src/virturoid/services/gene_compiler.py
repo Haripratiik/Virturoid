@@ -23,6 +23,8 @@ from virturoid.schemas.gene import RobotGene
 TABLE_TOP_Z = 0.025  # shared with the scene exporter
 _MOUNT_Z = {"table": TABLE_TOP_Z, "floor": 0.0, "torso": 0.0, "free": 0.1}  # "free" spawns above the floor
 _JOINT_KIND = {"revolute": "hinge", "prismatic": "slide"}
+# segment-name hints for a WALKING-limb structural link (drives the R2 visual-only fairing/boot pass).
+_LIMB_HINT = ("leg", "thigh", "shank", "femur", "tibia", "shin", "calf")
 
 # ---- shared appearance -----------------------------------------------------------------------------
 # Generated bodies used to render as flat-grey primitives because this compiler emitted geoms with no
@@ -470,6 +472,28 @@ def _detail_geoms_xml(seg, pad: str, *, suppress_motor: bool = False) -> str:
             f'{pad}<geom name="{escape(seg.name)}_collar" type="cylinder" '
             f'fromto="0 0 {L - t:.5f} 0 0 {L + t:.5f}" size="{R * 1.22:.5f}" material="mat_joint"{vis}/>'
         )
+    # R2 FAIRING + BOOT (visual-only): give a walking limb bodywork so it reads as a DESIGNED limb, not a bare
+    # capsule chain (the render's remaining toy tell after styling + proportions). The PROXIMAL segments get a
+    # shell-accent fairing sleeve over the mid-span (clear of the joint cans); the welded terminal segment (the
+    # foot) gets a rubber boot at its contact tip. Distal structural segments stay bare dark, so the limb reads
+    # two-tone — accent bodywork over dark structure, the Go2/Spot design language validated in the A/B/C study.
+    name_l = (seg.name or "").lower()
+    if any(k in name_l for k in _LIMB_HINT):
+        welded = (seg.joint_type or "") not in ("revolute", "prismatic")
+        tail = name_l.rsplit("_", 1)
+        idx = int(tail[1]) if len(tail) == 2 and tail[1].isdigit() else 0
+        if welded and 0.02 < L:                        # terminal welded segment == foot -> rubber boot pad
+            parts.append(
+                f'{pad}<geom name="{escape(seg.name)}_boot" type="sphere" pos="0 0 {L:.5f}" '
+                f'size="{R * 1.5:.5f}" material="mat_rubber"{vis}/>')
+        elif seg.shape in ("capsule", "cylinder") and L > 0.05 and idx == 0:   # top of limb -> shell fairing
+            # Only the TOP (hip/thigh) segment gets the accent bodywork, so the segments below stay bare dark and
+            # the limb reads two-tone (accent over structure) regardless of how many segments the leg has —
+            # fairing every proximal segment turned a 3-segment leg all-accent, losing the structure read.
+            p0, p1 = 0.18 * L, 0.78 * L
+            parts.append(
+                f'{pad}<geom name="{escape(seg.name)}_fairing" type="capsule" '
+                f'fromto="0 0 {p0:.5f} 0 0 {p1:.5f}" size="{R * 1.4:.5f}" material="mat_shell"{vis}/>')
     return "\n".join(parts)
 
 

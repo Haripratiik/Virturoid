@@ -149,6 +149,26 @@ class CompileTests(unittest.TestCase):
         # A measurement pass (no floor) omits scene lights so it never fights a wrapping scene's own rig.
         self.assertEqual(0, compile_gene_to_mjcf(gene, include_floor=False).count("<light "))
 
+    @unittest.skipUnless(_MUJOCO, "MuJoCo not installed.")
+    def test_r2_fairings_and_boots_are_visual_only(self):
+        # R2: a walking limb gets accent bodywork (a fairing on its top segment) + a rubber boot at the foot, so
+        # it reads as a designed limb, not a bare capsule chain. All visual-only (mass 0, contype 0) -> physics
+        # byte-identical: a legged body compiles to the SAME nbody/nu with and without the decoration.
+        import mujoco
+
+        from virturoid.services.anatomy_compiler import generic_creature_gene
+        gene = generic_creature_gene("a quadruped robot dog", "quadruped")
+        xml = compile_gene_to_mjcf(gene, include_floor=True)
+        self.assertIn("_fairing", xml, "a quadruped's legs should get shell fairings")
+        self.assertIn("_boot", xml, "a quadruped's feet should get rubber boots")
+        # every fairing/boot geom is non-colliding and massless (visual-only).
+        for line in xml.splitlines():
+            if "_fairing" in line or "_boot" in line:
+                self.assertIn('contype="0"', line)
+                self.assertIn('mass="0"', line)
+        model = mujoco.MjModel.from_xml_string(xml)          # still a valid, loadable model
+        self.assertEqual(model.nbody, len(gene.segments) + 1)  # decoration adds geoms, never bodies
+
 
 if __name__ == "__main__":
     unittest.main()
