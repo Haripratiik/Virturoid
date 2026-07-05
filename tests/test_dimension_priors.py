@@ -11,21 +11,21 @@ from virturoid.services.dimension_priors import (
 
 class DimensionPriorsTests(unittest.TestCase):
     def test_defaults_are_realistic(self):
-        # a corridor is ~1 m wide and ceiling-tall, not 0.5 m wide and knee-high
-        w, h, d = default_size("corridor")
-        self.assertGreaterEqual(d, 0.915)                    # ADA min corridor width on the z(width) axis
-        self.assertGreaterEqual(h, 2.03)                     # at least door-height tall
-        self.assertGreaterEqual(default_size("table")[1], 0.71)   # real table height, not a 2.5cm slab
-        self.assertEqual(default_size("ycb.mug"), (0.080, 0.082, 0.080))
+        # convention: size_xyz = (x, y, z) with Z = height. A corridor is >=0.915 m WIDE (x) and ceiling-tall (z)
+        w, d, h = default_size("corridor")
+        self.assertGreaterEqual(w, 0.915)                    # ADA min corridor width on the x axis
+        self.assertGreaterEqual(h, 2.03)                     # at least door-height tall (z)
+        self.assertGreaterEqual(default_size("table")[2], 0.71)   # real table HEIGHT (z), not a 2.5cm slab
+        self.assertEqual(default_size("ycb.mug"), (0.080, 0.080, 0.082))
 
     def test_snap_clamps_absurd_and_logs(self):
-        # LLM asks for a 0.1 m-tall "wall" and a 40 m one -> both clamped into [0.9, 4.0], logged
-        r = snap_to_prior("wall", (3.0, 0.1, 0.12))
+        # LLM asks for a 0.1 m-tall "wall" (height is the z axis) -> clamped up into [0.9, 4.0], logged
+        r = snap_to_prior("wall", (3.0, 0.12, 0.1))
         self.assertTrue(r.clamped)
-        self.assertGreaterEqual(r.size_xyz[1], 0.9)
+        self.assertGreaterEqual(r.size_xyz[2], 0.9)          # height clamped up
         self.assertTrue(any("out of band" in e for e in r.events))
         # a plausible wall is left alone
-        self.assertFalse(snap_to_prior("wall", (3.0, 2.4, 0.12)).clamped)
+        self.assertFalse(snap_to_prior("wall", (3.0, 0.12, 2.4)).clamped)
 
     def test_snap_default_when_no_proposal(self):
         r = snap_to_prior("table")
@@ -49,9 +49,9 @@ class DimensionPriorsTests(unittest.TestCase):
         sig = rescale_signature("wall", (3000.0, 2440.0, 120.0))
         self.assertIsNotNone(sig)
         self.assertIn("x1000", sig)
-        # a plausible wall passes and has no rescale suggestion
-        self.assertTrue(check_dimensions("wall", (3.0, 2.44, 0.12))["ok"])
-        self.assertIsNone(rescale_signature("wall", (3.0, 2.44, 0.12)))
+        # a plausible wall (length, thickness, HEIGHT) passes and has no rescale suggestion
+        self.assertTrue(check_dimensions("wall", (3.0, 0.12, 2.44))["ok"])
+        self.assertIsNone(rescale_signature("wall", (3.0, 0.12, 2.44)))
 
     def test_robot_scene_ratio_guard(self):
         self.assertTrue(robot_scene_ratio_ok(0.3, 8.0)["ok"])          # 0.3 m robot in an 8 m scene

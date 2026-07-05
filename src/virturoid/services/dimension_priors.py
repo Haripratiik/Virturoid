@@ -29,43 +29,45 @@ class DimPrior:
     source: str = ""
 
 
-# --- Architecture / circulation (ADA / IRC / IBC / NKBA). z = vertical. For open-ended axes (a wall's length,
-# a floor's extent) the band is wide; the CRITICAL axis (corridor width, wall/ceiling height) is tight. ---
+# --- Architecture / circulation (ADA / IRC / IBC / NKBA). CONVENTION: size_xyz = (x, y, z) full extents with
+# Z ALWAYS THE VERTICAL/HEIGHT AXIS (matches the exporter, which rests objects at z=height/2). So a wall is
+# (length, thickness, HEIGHT); a table is (width, depth, HEIGHT); a corridor prior is (WIDTH, length, height). ---
 _ARCH = [
-    DimPrior("corridor", (3.0, 2.44, 1.0), ((0.6, 30.0), (2.03, 3.5), (0.915, 3.0)), source="ADA 403.5.1 / IRC R311.6"),
-    DimPrior("wall", (3.0, 2.44, 0.12), ((0.1, 40.0), (0.9, 4.0), (0.05, 0.4)), density=1900.0, source="IRC R305.1 (ceiling height)"),
-    DimPrior("door", (0.915, 2.03, 0.045), ((0.815, 1.2), (2.03, 2.44), (0.035, 0.06)), density=600.0, source="ADA 404.2"),
-    DimPrior("table", (1.2, 0.74, 0.75), ((0.4, 2.4), (0.71, 0.865), (0.4, 1.2)), density=650.0, source="ADA 902.3 / dining-table std"),
-    DimPrior("countertop", (1.2, 0.914, 0.61), ((0.4, 3.0), (0.86, 0.95), (0.5, 0.7)), density=700.0, source="kitchen std"),
-    DimPrior("desk", (1.2, 0.74, 0.6), ((0.6, 2.0), (0.71, 0.76), (0.4, 0.9)), density=650.0, source="desk std"),
-    DimPrior("chair", (0.45, 0.45, 0.45), ((0.35, 0.6), (0.43, 0.485), (0.35, 0.6)), density=500.0, source="ADA 903.5 seat height"),
-    DimPrior("shelf", (0.9, 0.03, 0.305), ((0.3, 2.0), (0.02, 0.05), (0.25, 0.6)), density=650.0, source="wall-cabinet depth std (shelf board)"),
-    DimPrior("step", (1.0, 0.178, 0.279), ((0.3, 1.6), (0.10, 0.196), (0.254, 0.35)), density=1200.0, source="IRC R311.7.5 riser/tread"),
-    DimPrior("pallet", (1.219, 0.144, 1.016), ((1.0, 1.3), (0.12, 0.16), (0.8, 1.1)), density=500.0, mass_kg=(20.0, 30.0), source="GMA/EPAL pallet"),
-    DimPrior("floor", (8.0, 0.04, 8.0), ((0.5, 100.0), (0.01, 0.1), (0.5, 100.0)), density=1000.0, source="arena ground"),
+    DimPrior("corridor", (1.0, 3.0, 2.44), ((0.915, 3.0), (0.6, 30.0), (2.03, 3.5)), source="ADA 403.5.1 / IRC R311.6 (x=width)"),
+    DimPrior("wall", (3.0, 0.12, 2.44), ((0.1, 40.0), (0.05, 0.4), (0.9, 4.0)), density=1900.0, source="IRC R305.1 (z=ceiling height)"),
+    DimPrior("door", (0.915, 0.045, 2.03), ((0.815, 1.2), (0.035, 0.06), (2.03, 2.44)), density=600.0, source="ADA 404.2"),
+    DimPrior("table", (1.2, 0.75, 0.74), ((0.4, 2.4), (0.4, 1.2), (0.71, 0.865)), density=650.0, source="ADA 902.3 / dining-table std"),
+    DimPrior("countertop", (1.2, 0.61, 0.914), ((0.4, 3.0), (0.5, 0.7), (0.86, 0.95)), density=700.0, source="kitchen std"),
+    DimPrior("desk", (1.2, 0.6, 0.74), ((0.6, 2.0), (0.4, 0.9), (0.71, 0.76)), density=650.0, source="desk std"),
+    DimPrior("chair", (0.45, 0.45, 0.45), ((0.35, 0.6), (0.35, 0.6), (0.43, 0.485)), density=500.0, source="ADA 903.5 seat height"),
+    DimPrior("shelf", (0.9, 0.305, 0.03), ((0.3, 2.0), (0.25, 0.6), (0.02, 0.05)), density=650.0, source="wall-cabinet depth std (shelf board)"),
+    DimPrior("step", (1.0, 0.279, 0.178), ((0.3, 1.6), (0.254, 0.35), (0.10, 0.196)), density=1200.0, source="IRC R311.7.5 (z=riser)"),
+    DimPrior("pallet", (1.219, 1.016, 0.144), ((1.0, 1.3), (0.8, 1.1), (0.12, 0.16)), density=500.0, mass_kg=(20.0, 30.0), source="GMA/EPAL pallet"),
+    DimPrior("floor", (8.0, 8.0, 0.04), ((0.5, 100.0), (0.5, 100.0), (0.01, 0.1)), density=1000.0, source="arena ground"),
 ]
 
-# --- Manipulable objects (YCB caliper dims + mass, Calli et al. 2015). ``ycb.`` namespace. ---
+# --- Manipulable objects (YCB caliper dims + mass, Calli et al. 2015). (x, y, z) = (footprint_x, footprint_y,
+# HEIGHT). ``ycb.`` namespace. ---
 _YCB = [
-    DimPrior("ycb.mug", (0.080, 0.082, 0.080), ((0.06, 0.11), (0.06, 0.12), (0.06, 0.11)), density=900.0, mass_kg=(0.09, 0.16), source="YCB 025_mug"),
-    DimPrior("ycb.soup_can", (0.066, 0.101, 0.066), ((0.05, 0.09), (0.08, 0.13), (0.05, 0.09)), mass_kg=(0.30, 0.40), source="YCB 005_tomato_soup_can"),
-    DimPrior("ycb.cracker_box", (0.060, 0.210, 0.158), ((0.05, 0.08), (0.18, 0.24), (0.13, 0.18)), density=350.0, mass_kg=(0.35, 0.45), source="YCB 003_cracker_box"),
-    DimPrior("ycb.sugar_box", (0.038, 0.175, 0.089), ((0.03, 0.05), (0.15, 0.20), (0.07, 0.11)), density=900.0, mass_kg=(0.45, 0.55), source="YCB 004_sugar_box"),
-    DimPrior("ycb.mustard", (0.058, 0.190, 0.095), ((0.04, 0.08), (0.16, 0.22), (0.07, 0.12)), density=1000.0, mass_kg=(0.55, 0.65), source="YCB 006_mustard_bottle"),
-    DimPrior("ycb.foam_brick", (0.050, 0.050, 0.075), ((0.04, 0.06), (0.04, 0.06), (0.06, 0.09)), density=150.0, mass_kg=(0.02, 0.04), source="YCB 061_foam_brick"),
-    DimPrior("ycb.wood_block", (0.085, 0.200, 0.085), ((0.07, 0.10), (0.18, 0.22), (0.07, 0.10)), density=700.0, mass_kg=(0.65, 0.80), source="YCB 036_wood_block"),
+    DimPrior("ycb.mug", (0.080, 0.080, 0.082), ((0.06, 0.11), (0.06, 0.11), (0.06, 0.12)), density=900.0, mass_kg=(0.09, 0.16), source="YCB 025_mug"),
+    DimPrior("ycb.soup_can", (0.066, 0.066, 0.101), ((0.05, 0.09), (0.05, 0.09), (0.08, 0.13)), mass_kg=(0.30, 0.40), source="YCB 005_tomato_soup_can"),
+    DimPrior("ycb.cracker_box", (0.060, 0.158, 0.210), ((0.05, 0.08), (0.13, 0.18), (0.18, 0.24)), density=350.0, mass_kg=(0.35, 0.45), source="YCB 003_cracker_box"),
+    DimPrior("ycb.sugar_box", (0.038, 0.089, 0.175), ((0.03, 0.05), (0.07, 0.11), (0.15, 0.20)), density=900.0, mass_kg=(0.45, 0.55), source="YCB 004_sugar_box"),
+    DimPrior("ycb.mustard", (0.058, 0.095, 0.190), ((0.04, 0.08), (0.07, 0.12), (0.16, 0.22)), density=1000.0, mass_kg=(0.55, 0.65), source="YCB 006_mustard_bottle"),
+    DimPrior("ycb.foam_brick", (0.050, 0.075, 0.050), ((0.04, 0.06), (0.06, 0.09), (0.04, 0.06)), density=150.0, mass_kg=(0.02, 0.04), source="YCB 061_foam_brick"),
+    DimPrior("ycb.wood_block", (0.085, 0.085, 0.200), ((0.07, 0.10), (0.07, 0.10), (0.18, 0.22)), density=700.0, mass_kg=(0.65, 0.80), source="YCB 036_wood_block"),
     DimPrior("ycb.drill", (0.184, 0.184, 0.046), ((0.15, 0.22), (0.15, 0.22), (0.03, 0.06)), density=1200.0, mass_kg=(0.80, 0.95), source="YCB 035_power_drill"),
-    DimPrior("ycb.bottle_2l", (0.110, 0.315, 0.110), ((0.09, 0.13), (0.28, 0.34), (0.09, 0.13)), density=1000.0, mass_kg=(1.8, 2.1), source="2L PET bottle"),
-    DimPrior("ycb.can_355", (0.066, 0.122, 0.066), ((0.05, 0.08), (0.10, 0.14), (0.05, 0.08)), mass_kg=(0.35, 0.42), source="355 ml can"),
+    DimPrior("ycb.bottle_2l", (0.110, 0.110, 0.315), ((0.09, 0.13), (0.09, 0.13), (0.28, 0.34)), density=1000.0, mass_kg=(1.8, 2.1), source="2L PET bottle"),
+    DimPrior("ycb.can_355", (0.066, 0.066, 0.122), ((0.05, 0.08), (0.05, 0.08), (0.10, 0.14)), mass_kg=(0.35, 0.42), source="355 ml can"),
 ]
 
-# --- Generic task props (the categories scene_generator uses today), sized realistically. ---
+# --- Generic task props (the categories scene_generator uses today), sized realistically. z = HEIGHT. ---
 _GENERIC = [
     DimPrior("block", (0.05, 0.05, 0.05), ((0.02, 0.10), (0.02, 0.10), (0.02, 0.10)), density=600.0, mass_kg=(0.02, 0.20), source="graspable block (YCB-scale)"),
     DimPrior("box", (0.20, 0.15, 0.15), ((0.08, 0.6), (0.06, 0.5), (0.06, 0.5)), density=250.0, mass_kg=(0.1, 5.0), source="cardboard shipping box"),
-    DimPrior("bin", (0.40, 0.20, 0.30), ((0.15, 0.8), (0.08, 0.5), (0.15, 0.8)), density=600.0, source="tote/bin"),
-    DimPrior("obstacle", (0.30, 0.60, 0.30), ((0.05, 1.5), (0.05, 2.0), (0.05, 1.5)), density=400.0, source="generic obstacle/pillar"),
-    DimPrior("zone", (0.30, 0.01, 0.30), ((0.05, 2.0), (0.005, 0.02), (0.05, 2.0)), density=100.0, source="target pad (marker)"),
+    DimPrior("bin", (0.40, 0.30, 0.20), ((0.15, 0.8), (0.15, 0.8), (0.08, 0.5)), density=600.0, source="tote/bin"),
+    DimPrior("obstacle", (0.30, 0.30, 0.60), ((0.05, 1.5), (0.05, 1.5), (0.05, 2.0)), density=400.0, source="generic obstacle/pillar"),
+    DimPrior("zone", (0.30, 0.30, 0.01), ((0.05, 2.0), (0.05, 2.0), (0.005, 0.02)), density=100.0, source="target pad (marker)"),
 ]
 
 PRIORS: dict[str, DimPrior] = {p.category: p for p in (_ARCH + _YCB + _GENERIC)}
