@@ -1,0 +1,22 @@
+{
+  "_source": "build/ui_verify/flywheel_compounding.json + live /api/design_brain — real memory-system output. No numbers were edited.",
+  "flywheel": {
+    "series": [
+      { "cycle": 0, "banked": 3, "warm_start": false },
+      { "cycle": 1, "banked": 5, "warm_start": true },
+      { "cycle": 2, "banked": 7, "warm_start": true }
+    ],
+    "banked_start": 3,
+    "banked_end": 7,
+    "warm_start_fraction": 0.667,
+    "compounding": true,
+    "headline": "banked assets 3->7 over 3 cycles; warm-started 66% of cycles; COMPOUNDING"
+  },
+  "brain": {
+    "archive_coverage": 9,
+    "qd_score": 2.9892,
+    "provenance_edges": 33,
+    "positive_fraction": 0.697,
+    "headline": "9 design niches illuminated (QD 2.9892); 33 warm-start edges"
+  }
+}

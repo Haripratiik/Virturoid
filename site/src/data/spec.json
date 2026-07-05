@@ -1,0 +1,17 @@
+{
+  "_source": "build/ui_verify/arm_sort/reports/spec_sheet.json — real output, trimmed for the site. No numbers were edited.",
+  "name": "Autonomous reference tabletop arm",
+  "species": "fixed_arm.three_dof.tabletop",
+  "robot_class": "manipulator",
+  "dof": 6,
+  "mass_kg": 5.9,
+  "actuators": 6,
+  "est_power_draw_w": 495.0,
+  "est_parts_cost_usd": 8257.54,
+  "peak_joint_torque_nm": 23.7,
+  "actuator_types": ["Dynamixel XM540-W270-T", "T-Motor AK80-9", "Unitree GO-M8010-6"],
+  "sensing": ["Bosch BNO055", "Luxonis OAK-D Pro"],
+  "compute": ["NVIDIA Jetson Orin Nano 8GB"],
+  "task": "pick_place_sort",
+  "success_rate": 1.0
+}

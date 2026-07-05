@@ -1,0 +1,12 @@
+{
+  "_source": "build/ui_verify/arm_sort/reports/honesty_scorecard.json — real output, trimmed for the site. No numbers were edited.",
+  "n_claims": 7,
+  "n_honest": 5,
+  "n_flagged": 2,
+  "headline": "5/7 claims pass the honest gate; 2 flagged openly (the product working, not broken)",
+  "flag_example": {
+    "claim": "bom_sim_fidelity",
+    "verdict": "sim ~1.97x lighter than real parts (disclosed)",
+    "detail": "sim body is ~1.97x LIGHTER than its BOM-grounded mass (2.3 kg sim vs 4.6 kg real parts) — the sim is OPTIMISTIC. Grounding closes this but ~doubles mass, so learned policies need re-validation."
+  }
+}

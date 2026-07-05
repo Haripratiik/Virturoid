@@ -1,0 +1,186 @@
+---
+// SIM FEED — the landing page's live link into the simulator. A pre-rendered
+// orbit of the REAL MuJoCo workcell scrubs with scroll (Apple image-sequence
+// technique). While you read the loop stations, the feed docks to the corner
+// and keeps tracking — the robot travels the page with you.
+// Frames: public/seq/frame_000..NNN.webp — captured from the actual engine by
+// frontend/scripts/capture_seq.mjs, or replaced by Blender renders (ASSETS.md).
+const FRAMES = 44;
+---
+
+<div id="simfeed" class="feed" data-frames={FRAMES}>
+  <div class="hud mono" aria-hidden="true">
+    <span class="rec"><i></i>SIM FEED</span>
+    <span class="src">mujoco · baseline_000</span>
+    <span class="ctr"><span id="sf-frame">000</span>/{String(FRAMES - 1).padStart(3, "0")}</span>
+  </div>
+  <canvas id="sf-canvas" width="1500" height="1000" role="img" aria-label="Orbiting view of the real physics test scene: the arm at its table with red and blue blocks and bins"></canvas>
+  <div class="corners" aria-hidden="true"></div>
+  <div class="load mono" id="sf-load">LINKING SIM…</div>
+</div>
+<div id="sf-sentinel" aria-hidden="true"></div>
+
+<script>
+  const feed = document.getElementById("simfeed")!;
+  const canvas = document.getElementById("sf-canvas") as HTMLCanvasElement;
+  const ctx = canvas.getContext("2d")!;
+  const loadEl = document.getElementById("sf-load")!;
+  const frameEl = document.getElementById("sf-frame")!;
+  const N = parseInt(feed.dataset.frames ?? "44", 10);
+  const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  const imgs: HTMLImageElement[] = [];
+  let ready = 0;
+  let current = -1;
+
+  function draw(i: number) {
+    const img = imgs[i];
+    if (!img?.complete || !img.naturalWidth) return;
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    frameEl.textContent = String(i).padStart(3, "0");
+    current = i;
+  }
+
+  for (let i = 0; i < N; i++) {
+    const img = new Image();
+    img.src = `seq/frame_${String(i).padStart(3, "0")}.webp`;
+    img.onload = () => {
+      ready++;
+      if (ready === 1) {
+        loadEl.style.display = "none";
+        draw(reduced ? Math.floor(N / 3) : 0);
+      }
+    };
+    imgs.push(img);
+  }
+
+  if (!reduced) {
+    let raf = 0;
+    const onScroll = () => {
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() => {
+        const run = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--run") || "0");
+        const idx = Math.min(N - 1, Math.floor(run * N));
+        if (idx !== current) draw(idx);
+      });
+    };
+    window.addEventListener("scroll", onScroll, { passive: true });
+
+    // Dock to the corner once the hero scrolls away; the feed rides along.
+    const sentinel = document.getElementById("sf-sentinel")!;
+    new IntersectionObserver(
+      ([e]) => feed.classList.toggle("docked", !e.isIntersecting && e.boundingClientRect.top < 0),
+      { threshold: 0 },
+    ).observe(sentinel);
+  }
+</script>
+
+<style>
+  .feed {
+    position: relative;
+    border: 1px solid var(--rule-strong);
+    background: oklch(0.12 0.004 250);
+    overflow: hidden;
+  }
+  canvas {
+    display: block;
+    width: 100%;
+    height: auto;
+  }
+  .hud {
+    position: absolute;
+    inset: 0 0 auto 0;
+    z-index: 2;
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 9px 12px;
+    font-size: 9.5px;
+    letter-spacing: 0.16em;
+    color: var(--ink-3);
+    background: linear-gradient(oklch(0.12 0.004 250 / 0.85), transparent);
+  }
+  .rec {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    color: var(--ink-2);
+  }
+  .rec i {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--fail);
+    animation: blink-rec 1.6s steps(1) infinite;
+  }
+  @keyframes blink-rec {
+    50% { opacity: 0.25; }
+  }
+  .ctr {
+    color: var(--ember);
+    font-variant-numeric: tabular-nums;
+  }
+  /* Viewfinder corner brackets */
+  .corners::before,
+  .corners::after {
+    content: "";
+    position: absolute;
+    width: 16px;
+    height: 16px;
+    border: 1.5px solid var(--ember);
+    opacity: 0.85;
+  }
+  .corners::before {
+    left: 8px;
+    bottom: 8px;
+    border-top: none;
+    border-right: none;
+  }
+  .corners::after {
+    right: 8px;
+    bottom: 8px;
+    border-top: none;
+    border-left: none;
+  }
+  .load {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 11px;
+    letter-spacing: 0.3em;
+    color: var(--ember);
+  }
+
+  /* Docked: the feed rides the corner while you walk the stations. */
+  .feed.docked {
+    position: fixed;
+    right: 18px;
+    bottom: 18px;
+    width: 272px;
+    z-index: 45;
+    box-shadow: 0 18px 50px oklch(0 0 0 / 0.55);
+    animation: dock-in 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  @keyframes dock-in {
+    from {
+      transform: translateY(14px);
+      opacity: 0;
+    }
+  }
+  .feed.docked .hud {
+    font-size: 8px;
+    padding: 6px 8px;
+  }
+  @media (max-width: 900px) {
+    .feed.docked {
+      display: none;
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .rec i {
+      animation: none;
+    }
+  }
+</style>

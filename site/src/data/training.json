@@ -1,0 +1,23 @@
+{
+  "_source": "build/research_loop_training_proof — policy_training_metrics.json + training_acceptance_report.json + training_feedback.json. Real training run, no numbers edited.",
+  "method": "cross_entropy_method",
+  "iterations": 14,
+  "candidates_per_iteration": 24,
+  "training_scene_count": 10,
+  "initial_reward": -0.7789,
+  "best_reward": -0.0978,
+  "reward_history": [-0.333, -0.1694, -0.21, -0.1155, -0.1117, -0.1023, -0.1045, -0.0993, -0.0989, -0.0983, -0.0984, -0.0982, -0.0978],
+  "eval": {
+    "eval_scene_count": 3,
+    "success_rate": 0.667,
+    "stable_rate": 1.0,
+    "mean_reach_distance_m": 0.0855,
+    "success_threshold_m": 0.12
+  },
+  "accepted": true,
+  "honest_note": "This reach controller is a first training proof, not a full pick/place/grasp policy.",
+  "feedback": [
+    "Lower the lift height and slow transport so grasped objects aren't dropped.",
+    "Regression group success 0.62 is below the 0.70 threshold — route failed episodes into regression scenes before the next run."
+  ]
+}

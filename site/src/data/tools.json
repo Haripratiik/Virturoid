@@ -1,0 +1,14 @@
+{
+  "_source": "live /api/tools — the real agentic tool surface, descriptions as the backend states them. Trimmed, not embellished.",
+  "tools": [
+    { "name": "describe_robot", "what": "Serialize a robot into LLM-readable tokens + a grounded description" },
+    { "name": "diagnose_body", "what": "Physics-free structural read: DOF, reach, end effector, limb count" },
+    { "name": "nearest_bodies", "what": "Prior bodies most morphologically similar to the prompt's body" },
+    { "name": "recall_knowledge", "what": "Prior tips, lessons and reusable skills, keyed by morphology" },
+    { "name": "search_memory", "what": "Most similar prior designs/runs from the design flywheel memory" },
+    { "name": "evaluate_robot", "what": "Compose a robot and score it on its task — real MuJoCo" },
+    { "name": "design_search", "what": "Bounded, physics-verified search over a body's parameters" },
+    { "name": "build_robot", "what": "Compose + physics-build a buildable robot, warm-started from memory" },
+    { "name": "design_brain", "what": "The moat, measured: niche coverage, QD-score, provenance compounding" }
+  ]
+}

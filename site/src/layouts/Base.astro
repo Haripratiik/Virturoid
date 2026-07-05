@@ -1,0 +1,129 @@
+---
+import "@fontsource-variable/inter";
+import "@fontsource-variable/jetbrains-mono";
+import "@fontsource/chakra-petch/600.css";
+import "@fontsource/chakra-petch/700.css";
+import "@fontsource/chakra-petch/600-italic.css";
+import "@fontsource/chakra-petch/700-italic.css";
+import "../styles/global.css";
+
+interface Props {
+  title: string;
+  description: string;
+}
+const { title, description } = Astro.props;
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <title>{title}</title>
+    <meta name="description" content={description} />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:type" content="website" />
+    <meta property="og:image" content={new URL(import.meta.env.BASE_URL + "og.png", Astro.site).href} />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23e8853b' stroke-width='2'%3E%3Cpath d='M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z'/%3E%3C/svg%3E"
+    />
+  </head>
+  <body>
+    <!-- The factory, working, in the background: an ambient stream of REAL
+         build/train/gate events drifting up behind the page. Decorative layer,
+         grounded content — agentic robotics development as the atmosphere. -->
+    <div class="workstream" aria-hidden="true">
+      {
+        [0, 1, 2].map((col) => (
+          <div class={`ws-col ws-${col}`}>
+            {[0, 1].map(() => (
+              <div class="ws-run mono">
+                <p>[agent] build_robot(prompt="a tabletop arm that sorts blocks")</p>
+                <p>[memory] nearest proven body: fixed_arm.three_dof · warm-start</p>
+                <p>[genome] 3 links · 6 actuators · peak 23.7 Nm</p>
+                <p>[cad] 14/14 STEP files — real B-rep</p>
+                <p>[scene] baseline_000 … stress_002 · 24 compiled</p>
+                <p>[eval] smoke 100% · baseline 100% · randomized 100%</p>
+                <p>[eval] stress 0% — logged, kept visible</p>
+                <p>[train] cem iter 01 · reward -0.333</p>
+                <p>[train] cem iter 07 · reward -0.1045</p>
+                <p>[train] cem iter 14 · reward -0.0978 ✓</p>
+                <p>[policy] held-out: 67% success · 100% stable · ACCEPTED</p>
+                <p>[feedback] dropped during transport → lower lift height</p>
+                <p>[gate] schema_valid ATTAINED</p>
+                <p>[gate] physics_evaluated ATTAINED</p>
+                <p>[gate] rendered_cv_data PLACEHOLDER — disclosed</p>
+                <p>[export] bom $8,257.54 · 5.9 kg · 11 line items</p>
+                <p>[memory] banked assets 3 → 7 · COMPOUNDING</p>
+              </div>
+            ))}
+          </div>
+        ))
+      }
+    </div>
+    <slot />
+    <script>
+      // Scroll reveal + stat count-ups — tiny, honest, reduced-motion-safe.
+      const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+      const counters = document.querySelectorAll<HTMLElement>("[data-count]");
+      function runCounter(el: HTMLElement) {
+        const target = parseFloat(el.dataset.count ?? "0");
+        const decimals = parseInt(el.dataset.decimals ?? "0", 10);
+        const dur = 1100;
+        const t0 = performance.now();
+        const tick = (t: number) => {
+          const p = Math.min((t - t0) / dur, 1);
+          const eased = 1 - Math.pow(1 - p, 3);
+          el.textContent = (target * eased).toFixed(decimals);
+          if (p < 1) requestAnimationFrame(tick);
+        };
+        requestAnimationFrame(tick);
+      }
+
+      const targets = document.querySelectorAll(".reveal");
+      if (reduced) {
+        targets.forEach((el) => el.classList.add("in"));
+        counters.forEach((el) => (el.textContent = parseFloat(el.dataset.count ?? "0").toFixed(parseInt(el.dataset.decimals ?? "0", 10))));
+      } else {
+        const io = new IntersectionObserver(
+          (entries) => {
+            for (const e of entries) {
+              if (e.isIntersecting) {
+                e.target.classList.add("in");
+                e.target.querySelectorAll<HTMLElement>("[data-count]").forEach(runCounter);
+                io.unobserve(e.target);
+              }
+            }
+          },
+          { threshold: 0.12 },
+        );
+        targets.forEach((el) => io.observe(el));
+        // Scroll progress drives the run rail (0..1 across the whole page).
+        const setRun = () => {
+          const max = document.documentElement.scrollHeight - window.innerHeight;
+          document.documentElement.style.setProperty("--run", String(Math.min(window.scrollY / Math.max(max, 1), 1)));
+        };
+        setRun();
+        window.addEventListener("scroll", setRun, { passive: true });
+        // counters outside .reveal containers
+        const io2 = new IntersectionObserver(
+          (entries) => {
+            for (const e of entries) {
+              if (e.isIntersecting && !e.target.closest(".reveal")) {
+                runCounter(e.target as HTMLElement);
+                io2.unobserve(e.target);
+              }
+            }
+          },
+          { threshold: 0.4 },
+        );
+        counters.forEach((el) => io2.observe(el));
+      }
+    </script>
+  </body>
+</html>

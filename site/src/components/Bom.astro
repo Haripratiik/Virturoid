@@ -1,0 +1,137 @@
+---
+import bom from "../data/bom.json";
+import spec from "../data/spec.json";
+
+// The output is hardware: a priced, ordered parts ledger — not a render.
+const money = (v: number) => v.toLocaleString("en-US", { style: "currency", currency: "USD" });
+---
+
+<section id="export" class="bom">
+  <div class="wrap grid">
+    <div class="text reveal">
+      <p class="kicker"><span class="idx">STATION 05</span> EXPORT</p>
+      <h2>It ends as <em>a shopping list</em>,<br />not a showreel.</h2>
+      <p class="sub">
+        Export is a package a machine shop can act on: real B-rep STEP files, compiled scenes,
+        firmware targets and a bill of materials with parts you can order today —
+        <code class="hl">{spec.actuator_types[2]}</code>, <code class="hl">{spec.compute[0]}</code>,
+        <code class="hl">{spec.sensing[1]}</code>.
+      </p>
+    </div>
+    <div class="ledger reveal">
+      <div class="l-head mono">BILL OF MATERIALS · {bom.totals.line_items} LINE ITEMS</div>
+      <table>
+        <thead>
+          <tr><th>part</th><th>qty</th><th>mass</th><th>price</th></tr>
+        </thead>
+        <tbody>
+          {
+            bom.lines.map((l) => (
+              <tr>
+                <td>
+                  <span class="p">{l.part}</span>
+                  <span class="d mono">{l.detail}</span>
+                </td>
+                <td class="mono">{l.qty}</td>
+                <td class="mono">{l.mass_kg} kg</td>
+                <td class="mono">{money(l.price_usd)}</td>
+              </tr>
+            ))
+          }
+        </tbody>
+        <tfoot>
+          <tr>
+            <td class="mono">Σ {bom.totals.actuators} actuators · {bom.totals.est_power_w} W est.</td>
+            <td></td>
+            <td class="mono">{bom.totals.mass_kg} kg</td>
+            <td class="mono total">{money(bom.totals.price_usd)}</td>
+          </tr>
+        </tfoot>
+      </table>
+    </div>
+  </div>
+</section>
+
+<style>
+  .bom {
+    padding: 110px 0;
+  }
+  .grid {
+    display: grid;
+    grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
+    gap: clamp(32px, 5vw, 72px);
+    align-items: center;
+  }
+  h2 {
+    font-size: clamp(32px, 4.2vw, 50px);
+    margin-top: 18px;
+  }
+  .sub {
+    margin-top: 18px;
+    font-size: 15.5px;
+  }
+  .hl {
+    color: var(--ink-1);
+    font-size: 13px;
+    border-bottom: 1px dotted var(--ember);
+  }
+  .ledger {
+    border: 1px solid var(--rule-strong);
+    background: var(--paper-2);
+    box-shadow: -18px 18px 0 oklch(0.74 0.16 55 / 0.05);
+  }
+  .l-head {
+    padding: 13px 16px;
+    font-size: 11px;
+    letter-spacing: 0.16em;
+    color: var(--ink-3);
+    border-bottom: 1px double var(--rule-strong);
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+  }
+  th {
+    text-align: left;
+    font-family: var(--mono);
+    font-weight: 500;
+    font-size: 10px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+    padding: 9px 16px 7px;
+    border-bottom: 1px solid var(--rule);
+  }
+  td {
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--rule);
+    color: var(--ink-2);
+    vertical-align: top;
+  }
+  .p {
+    display: block;
+    color: var(--ink-1);
+    font-weight: 550;
+  }
+  .d {
+    display: block;
+    font-size: 10.5px;
+    color: var(--ink-3);
+    margin-top: 2px;
+  }
+  tfoot td {
+    border-bottom: none;
+    border-top: 1px double var(--rule-strong);
+    color: var(--ink-1);
+  }
+  .total {
+    color: var(--ember);
+    font-weight: 700;
+  }
+  @media (max-width: 860px) {
+    .grid {
+      grid-template-columns: 1fr;
+    }
+  }
+</style>

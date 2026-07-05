@@ -1,0 +1,22 @@
+{
+  "name": "virturoid-site",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Virturoid marketing landing page (Astro, static output). Never imported by the app.",
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview"
+  },
+  "dependencies": {
+    "@fontsource-variable/inter": "^5.2.5",
+    "@fontsource-variable/jetbrains-mono": "^5.2.5",
+    "@fontsource/chakra-petch": "^5.2.7",
+    "@fontsource/instrument-serif": "^5.2.5",
+    "astro": "^5.7.0"
+  },
+  "devDependencies": {
+    "puppeteer-core": "^25.3.0"
+  }
+}

@@ -1,0 +1,342 @@
+---
+import spec from "../data/spec.json";
+import ledger from "../data/ledger.json";
+import SimFeed from "./SimFeed.astro";
+
+// Asymmetric hero: serif manifesto left, a LIVE build terminal right that
+// replays the reference build with real numbers. Below: full-bleed marquee
+// of the actual parts the machine chose.
+const PROMPT = "a tabletop robot arm that sorts red and blue blocks";
+const tiers = (ledger.stages.find((s) => s.tier_success)?.tier_success ?? {}) as Record<string, number>;
+const TERM_LINES = [
+  { tag: "build", text: `${spec.species} · 24 scenes · warm-started from memory`, cls: "" },
+  { tag: "evaluate", text: `baseline ${tiers.baseline * 100}% · randomized ${tiers.randomized * 100}% · stress ${tiers.stress * 100}%`, cls: "" },
+  { tag: "train", text: "policy: CEM · reward -0.78 → -0.098 · ACCEPTED", cls: "" },
+  { tag: "report", text: `valid · ${spec.mass_kg} kg · $${spec.est_parts_cost_usd.toLocaleString("en-US")} · ${Math.round(spec.success_rate * 100)}% task success`, cls: "ok" },
+];
+const MARQUEE = [
+  ...spec.actuator_types,
+  spec.compute[0],
+  ...spec.sensing,
+  "Aluminum 6061-T6",
+  "24 MuJoCo scenes",
+  "14/14 real B-rep STEP",
+  spec.species,
+];
+---
+
+<header id="top" class="hero">
+  <div class="blueprint" aria-hidden="true"></div>
+
+  <div class="grid">
+    <div class="left">
+      <p class="kicker"><span class="idx">DOC A-00</span> AGENTIC ROBOTICS · LOCAL-FIRST</p>
+      <h1>
+        A working robot,<br />
+        from <em>a sentence.</em>
+      </h1>
+      <p class="sub">
+        Tell the agent what you need. It designs the body, proves it in real physics, trains the
+        controller, and hands you files a machine shop can build — every claim gated by evidence,
+        all on your machine.
+      </p>
+      <div class="ctas">
+        <a href="#access" class="primary mono">JOIN THE WAITLIST</a>
+        <a href="#design" class="ghost mono">RUN THE BUILD ↓</a>
+      </div>
+      <p class="foot mono">No cloud. No mockups. Every number on this page is a committed build artifact.</p>
+      <p class="scroll-cue mono" aria-hidden="true">SCROLL — the page runs this build, stage by stage <span class="arrow">↓</span></p>
+    </div>
+
+    <div class="right">
+      <SimFeed />
+      <div class="term" role="img" aria-label={`A build run: "${PROMPT}" becomes a verified ${spec.dof}-DOF manipulator`}>
+        <div class="term-head mono">
+          <span class="dot" aria-hidden="true"></span>
+          virturoid — build run
+          <span class="live mono" id="term-live">● LIVE REPLAY</span>
+        </div>
+        <div class="term-body mono">
+          <div class="line prompt-line">
+            <span class="ps">you&gt;</span>
+            <span id="hero-prompt"></span><span class="caret" aria-hidden="true"></span>
+          </div>
+          <div id="term-lines">
+            {
+              TERM_LINES.map((l) => (
+                <div class={`line stage-line ${l.cls}`} data-line>
+                  <span class="tag">[{l.tag}]</span>
+                  <span class="txt">{l.text}</span>
+                </div>
+              ))
+            }
+          </div>
+          <div class="line done-line" data-line>
+            <span class="stamp ok-stamp">EXPORT UNLOCKED</span>
+          </div>
+        </div>
+      </div>
+      <p class="term-note mono">↳ replay of reference build <a href="#proof">arm_sort</a>, verbatim numbers</p>
+    </div>
+  </div>
+
+  <!-- Full-bleed marquee: the actual shopping list, moving like a parts belt. -->
+  <div class="belt" aria-hidden="true">
+    <div class="belt-track mono">
+      {[...MARQUEE, ...MARQUEE].map((m) => <span>{m}<i>·</i></span>)}
+    </div>
+  </div>
+</header>
+
+<script define:vars={{ PROMPT }}>
+  const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const promptEl = document.getElementById("hero-prompt");
+  const lines = [...document.querySelectorAll("[data-line]")];
+
+  if (reduced) {
+    promptEl.textContent = PROMPT;
+    lines.forEach((l) => l.classList.add("show"));
+  } else {
+    let i = 0;
+    const type = () => {
+      if (i <= PROMPT.length) {
+        promptEl.textContent = PROMPT.slice(0, i++);
+        setTimeout(type, 26);
+      } else {
+        lines.forEach((l, idx) => setTimeout(() => l.classList.add("show"), 350 + idx * 480));
+      }
+    };
+    setTimeout(type, 400);
+  }
+</script>
+
+<style>
+  .hero {
+    position: relative;
+    padding-top: 120px;
+    overflow: hidden;
+  }
+  /* Blueprint field: fine drafting grid only — no glow, no gradient wash. */
+  .blueprint {
+    position: absolute;
+    inset: 0;
+    background-image:
+      linear-gradient(var(--rule) 1px, transparent 1px),
+      linear-gradient(90deg, var(--rule) 1px, transparent 1px);
+    background-size: 56px 56px;
+    opacity: 0.4;
+    mask-image: linear-gradient(black 55%, transparent 95%);
+    pointer-events: none;
+  }
+  .grid {
+    position: relative;
+    display: grid;
+    grid-template-columns: minmax(0, 6fr) minmax(0, 5fr);
+    gap: clamp(28px, 4vw, 64px);
+    align-items: center;
+    padding: 40px var(--gutter) 56px;
+    max-width: 1280px;
+    margin: 0 auto;
+  }
+  h1 {
+    font-size: clamp(38px, 5.4vw, 68px);
+    margin-top: 22px;
+  }
+  .sub {
+    max-width: 520px;
+    margin: 22px 0 0;
+    font-size: 16.5px;
+    color: var(--ink-2);
+  }
+  .ctas {
+    display: flex;
+    gap: 14px;
+    margin-top: 30px;
+    flex-wrap: wrap;
+  }
+  .primary {
+    background: var(--ember);
+    color: var(--paper);
+    font-size: 12.5px;
+    font-weight: 700;
+    letter-spacing: 0.14em;
+    padding: 14px 26px;
+    transition: filter 0.15s, transform 0.15s;
+  }
+  .primary:hover {
+    filter: brightness(1.12);
+    transform: translateY(-1px);
+  }
+  .ghost {
+    font-size: 12.5px;
+    letter-spacing: 0.14em;
+    color: var(--ink-2);
+    padding: 14px 20px;
+    border: 1px solid var(--rule-strong);
+    transition: color 0.15s, border-color 0.15s;
+  }
+  .ghost:hover {
+    color: var(--ink-1);
+    border-color: var(--ink-2);
+  }
+  .foot {
+    margin-top: 26px;
+    font-size: 11px;
+    letter-spacing: 0.06em;
+    color: var(--ink-3);
+  }
+  .scroll-cue {
+    margin-top: 34px;
+    font-size: 10px;
+    letter-spacing: 0.2em;
+    color: var(--ember);
+  }
+  .arrow {
+    display: inline-block;
+    animation: nudge 1.8s ease-in-out infinite;
+  }
+  @keyframes nudge {
+    50% { transform: translateY(4px); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .arrow { animation: none; }
+  }
+
+  /* Terminal — compact strip under the mechanism plate */
+  .term {
+    margin-top: 14px;
+    border: 1px solid var(--rule-strong);
+    background: oklch(0.115 0.004 250 / 0.92);
+  }
+  .term-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 14px;
+    font-size: 11px;
+    letter-spacing: 0.1em;
+    color: var(--ink-3);
+    border-bottom: 1px solid var(--rule);
+  }
+  .dot {
+    width: 8px;
+    height: 8px;
+    background: var(--ember);
+  }
+  .live {
+    margin-left: auto;
+    color: var(--agent);
+    font-size: 10px;
+    letter-spacing: 0.14em;
+    animation: pulse 2s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    50% { opacity: 0.45; }
+  }
+  .term-body {
+    padding: 12px 14px 14px;
+    font-size: 11.5px;
+    line-height: 1.8;
+  }
+  .line {
+    display: flex;
+    gap: 10px;
+    align-items: baseline;
+  }
+  .ps {
+    color: var(--ember);
+    font-weight: 700;
+  }
+  .caret {
+    width: 7px;
+    height: 14px;
+    background: var(--ember);
+    align-self: center;
+    animation: blink 1.1s steps(1) infinite;
+  }
+  @keyframes blink {
+    50% { opacity: 0; }
+  }
+  .stage-line,
+  .done-line {
+    opacity: 0;
+    transform: translateY(4px);
+    transition: opacity 0.35s, transform 0.35s;
+  }
+  .stage-line.show,
+  .done-line.show {
+    opacity: 1;
+    transform: none;
+  }
+  .tag {
+    color: var(--agent);
+    flex-shrink: 0;
+  }
+  .txt {
+    color: var(--ink-2);
+  }
+  .stage-line.ok .txt {
+    color: var(--ok);
+  }
+  .done-line {
+    margin-top: 10px;
+  }
+  .ok-stamp {
+    color: var(--ok);
+  }
+  .term-note {
+    margin: 12px 0 0;
+    font-size: 10.5px;
+    letter-spacing: 0.08em;
+    color: var(--ink-3);
+  }
+  .term-note a {
+    color: var(--ember);
+    border-bottom: 1px dotted var(--ember);
+  }
+
+  /* Parts belt */
+  .belt {
+    position: relative;
+    border-block: 1px solid var(--rule);
+    padding: 12px 0;
+    overflow: hidden;
+    background: var(--paper-2);
+  }
+  .belt-track {
+    display: flex;
+    gap: 34px;
+    width: max-content;
+    font-size: 11.5px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+    animation: belt 36s linear infinite;
+  }
+  .belt-track span {
+    display: flex;
+    gap: 34px;
+    white-space: nowrap;
+  }
+  .belt-track i {
+    color: var(--ember);
+    font-style: normal;
+  }
+  @keyframes belt {
+    to { transform: translateX(-50%); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .belt-track {
+      animation: none;
+    }
+    .live {
+      animation: none;
+    }
+  }
+  @media (max-width: 900px) {
+    .grid {
+      grid-template-columns: 1fr;
+      padding-top: 24px;
+    }
+  }
+</style>

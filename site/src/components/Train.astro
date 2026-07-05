@@ -1,0 +1,220 @@
+---
+import training from "../data/training.json";
+
+// STATION 03 — TRAIN. The part everyone forgets to mention: the CONTROLLER is
+// trained too. Real reward curve from policy_training_metrics.json, drawn as
+// an instrument trace; acceptance verdict from the real report.
+const H = 180;
+const W = 560;
+const PAD = 10;
+const rewards = training.reward_history;
+const min = Math.min(...rewards);
+const max = Math.max(...rewards);
+const pts = rewards
+  .map((r, i) => {
+    const x = PAD + (i / (rewards.length - 1)) * (W - PAD * 2);
+    const y = PAD + (1 - (r - min) / (max - min)) * (H - PAD * 2);
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  })
+  .join(" ");
+---
+
+<section id="train" class="train">
+  <div class="wrap">
+    <div class="grid">
+      <div class="text reveal">
+        <p class="kicker"><span class="idx">STATION 03</span> TRAIN</p>
+        <h2>The body is half the robot.<br />We train <em>the will</em> too.</h2>
+        <p class="sub">
+          A robot that can't act is a sculpture. Virturoid trains the control policy in the same
+          physics it was born in — {training.candidates_per_iteration} candidate policies per
+          iteration, scored across {training.training_scene_count} scenes, then judged on
+          <strong> held-out</strong> scenes it never saw in training.
+        </p>
+        <div class="verdicts mono">
+          <span class="v-item"><b class="count" data-count={Math.round(training.eval.success_rate * 100)}>0</b>% held-out success</span>
+          <span class="v-item"><b class="count" data-count={training.eval.stable_rate * 100}>0</b>% stable</span>
+          <span class="v-item"><b>{training.eval.mean_reach_distance_m * 100} cm</b> mean reach err</span>
+          <span class={`stamp ${training.accepted ? "s-ok" : "s-fail"}`}>{training.accepted ? "POLICY ACCEPTED" : "REJECTED"}</span>
+        </div>
+        <blockquote class="feedback mono">
+          <span class="f-label">THE LOOP TALKS BACK — REAL FEEDBACK RECORDS:</span>
+          {training.feedback.map((f) => <p>“{f}”</p>)}
+        </blockquote>
+        <p class="honest mono">Disclosed: “{training.honest_note}”</p>
+      </div>
+
+      <figure class="scope reveal" aria-label={`Reward curve: ${training.iterations} iterations of ${training.method}, reward ${training.initial_reward} to ${training.best_reward}`}>
+        <figcaption class="mono">
+          policy_training_metrics.json · {training.method}
+        </figcaption>
+        <svg viewBox={`0 0 ${W} ${H}`} class="curve" role="img">
+          <line x1={PAD} y1={H - PAD} x2={W - PAD} y2={H - PAD} class="axis" />
+          <line x1={PAD} y1={PAD} x2={PAD} y2={H - PAD} class="axis" />
+          <polyline points={pts} class="trace" pathLength="100" />
+          {
+            rewards.map((r, i) => {
+              const x = PAD + (i / (rewards.length - 1)) * (W - PAD * 2);
+              const y = PAD + (1 - (r - min) / (max - min)) * (H - PAD * 2);
+              return <rect x={x - 2} y={y - 2} width="4" height="4" class="pt" style={`animation-delay:${0.2 + i * 0.12}s`} />;
+            })
+          }
+        </svg>
+        <div class="scope-read mono">
+          <span>iter 01 · reward {rewards[0]}</span>
+          <span class="up">iter {String(training.iterations).padStart(2, "0")} · reward {training.best_reward} ▲</span>
+        </div>
+      </figure>
+    </div>
+  </div>
+</section>
+
+<style>
+  .train {
+    padding: 120px 0 60px;
+  }
+  .grid {
+    display: grid;
+    grid-template-columns: minmax(0, 6fr) minmax(0, 5fr);
+    gap: clamp(32px, 5vw, 72px);
+    align-items: center;
+  }
+  h2 {
+    font-size: clamp(34px, 4.6vw, 56px);
+    margin-top: 18px;
+  }
+  .sub {
+    margin-top: 18px;
+    font-size: 15.5px;
+    max-width: 540px;
+  }
+  .sub strong {
+    color: var(--ink-1);
+  }
+  .verdicts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: center;
+    margin-top: 24px;
+  }
+  .v-item {
+    font-size: 11.5px;
+    letter-spacing: 0.04em;
+    color: var(--ink-2);
+    border: 1px solid var(--rule-strong);
+    padding: 6px 10px;
+  }
+  .v-item b {
+    color: var(--ember);
+    font-size: 14px;
+  }
+  .s-ok {
+    color: var(--ok);
+  }
+  .s-fail {
+    color: var(--fail);
+  }
+  .feedback {
+    margin: 26px 0 0;
+    padding: 14px 16px;
+    border-left: 2px solid var(--agent);
+    background: var(--agent-dim);
+  }
+  .f-label {
+    display: block;
+    font-size: 9.5px;
+    letter-spacing: 0.2em;
+    color: var(--agent);
+    margin-bottom: 8px;
+  }
+  .feedback p {
+    margin: 6px 0 0;
+    font-size: 12px;
+    line-height: 1.65;
+    color: var(--ink-2);
+    font-style: italic;
+  }
+  .honest {
+    margin-top: 16px;
+    font-size: 10.5px;
+    letter-spacing: 0.04em;
+    color: var(--ink-3);
+  }
+
+  /* Reward scope */
+  .scope {
+    margin: 0;
+    border: 1px solid var(--rule-strong);
+    background: var(--paper-2);
+    padding: 16px 18px;
+    box-shadow: -18px 18px 0 oklch(0.74 0.16 55 / 0.05);
+  }
+  figcaption {
+    font-size: 10.5px;
+    letter-spacing: 0.1em;
+    color: var(--ink-3);
+  }
+  .curve {
+    display: block;
+    width: 100%;
+    height: auto;
+    margin-top: 12px;
+  }
+  .axis {
+    stroke: var(--rule-strong);
+    stroke-width: 1;
+  }
+  .trace {
+    fill: none;
+    stroke: var(--ember);
+    stroke-width: 2;
+    stroke-dasharray: 100;
+    stroke-dashoffset: 100;
+  }
+  .reveal.in .trace {
+    animation: draw 1.6s cubic-bezier(0.4, 0, 0.2, 1) 0.2s forwards;
+  }
+  @keyframes draw {
+    to { stroke-dashoffset: 0; }
+  }
+  .pt {
+    fill: var(--paper);
+    stroke: var(--ember);
+    stroke-width: 1.5;
+    opacity: 0;
+  }
+  .reveal.in .pt {
+    animation: pop 0.3s ease-out forwards;
+  }
+  @keyframes pop {
+    to { opacity: 1; }
+  }
+  .scope-read {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    margin-top: 10px;
+    font-size: 10.5px;
+    letter-spacing: 0.06em;
+    color: var(--ink-3);
+  }
+  .up {
+    color: var(--ok);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .trace {
+      stroke-dashoffset: 0;
+      animation: none;
+    }
+    .pt {
+      opacity: 1;
+      animation: none;
+    }
+  }
+  @media (max-width: 860px) {
+    .grid {
+      grid-template-columns: 1fr;
+    }
+  }
+</style>

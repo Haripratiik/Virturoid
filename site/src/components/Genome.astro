@@ -1,0 +1,180 @@
+---
+import spec from "../data/spec.json";
+import tools from "../data/tools.json";
+
+// STATION 01 — DESIGN. The agent writes a GENOME (the robot's gene card),
+// working through its real tool surface. Specimen-plate register: the robot
+// as a documented organism, not a product render.
+---
+
+<section id="design" class="design">
+  <div class="wrap">
+    <div class="head reveal">
+      <p class="kicker"><span class="idx">STATION 01</span> DESIGN</p>
+      <h2>The agent writes <em>a genome</em>,<br />not a sketch.</h2>
+      <p class="sub">
+        Your sentence becomes a heritable design record — species, links, joints, actuators,
+        sensors — that compiles to URDF, MuJoCo and real B-rep CAD in one pass. This is the
+        reference specimen's actual gene card:
+      </p>
+    </div>
+
+    <div class="cols">
+      <figure class="plate reveal">
+        <figcaption class="mono">SPECIMEN · robot_genome.json</figcaption>
+        <dl class="mono">
+          <div><dt>species</dt><dd>{spec.species}</dd></div>
+          <div><dt>class</dt><dd>{spec.robot_class}</dd></div>
+          <div><dt>dof</dt><dd>{spec.dof}</dd></div>
+          <div><dt>mass</dt><dd>{spec.mass_kg} kg</dd></div>
+          <div><dt>actuation</dt><dd>{spec.actuator_types.join(" · ")}</dd></div>
+          <div><dt>peak torque</dt><dd>{spec.peak_joint_torque_nm} Nm</dd></div>
+          <div><dt>senses</dt><dd>{spec.sensing.join(" · ")}</dd></div>
+          <div><dt>compute</dt><dd>{spec.compute[0]}</dd></div>
+          <div><dt>task</dt><dd>{spec.task}</dd></div>
+        </dl>
+        <div class="plate-foot mono">HERITABLE · FORKABLE · WARM-STARTABLE</div>
+      </figure>
+
+      <div class="isa reveal">
+        <p class="isa-title mono">WRITTEN BY AN AGENT WITH HANDS — ITS REAL TOOL SURFACE:</p>
+        {
+          tools.tools.map((t) => (
+            <div class="op">
+              <code class="name">{t.name}()</code>
+              <span class="what">{t.what}</span>
+            </div>
+          ))
+        }
+        <div class="op redacted">
+          <code class="name">how_it_learns()</code>
+          <span class="what">That part's ours — <a href="#memory">its output is station 06.</a></span>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<style>
+  .design {
+    padding: 130px 0 50px;
+  }
+  h2 {
+    font-size: clamp(34px, 4.6vw, 56px);
+    margin-top: 18px;
+  }
+  .sub {
+    max-width: 620px;
+    margin-top: 18px;
+    font-size: 15.5px;
+  }
+  .cols {
+    display: grid;
+    grid-template-columns: minmax(0, 5fr) minmax(0, 6fr);
+    gap: clamp(28px, 4vw, 64px);
+    margin-top: 44px;
+    align-items: start;
+  }
+
+  /* Gene card — specimen plate */
+  .plate {
+    margin: 0;
+    border: 1px solid var(--rule-strong);
+    background: var(--paper-2);
+    box-shadow: 16px 16px 0 oklch(0.72 0.12 250 / 0.06);
+  }
+  figcaption {
+    padding: 12px 16px;
+    font-size: 10.5px;
+    letter-spacing: 0.18em;
+    color: var(--ink-3);
+    border-bottom: 1px double var(--rule-strong);
+  }
+  dl {
+    margin: 0;
+    padding: 6px 0;
+  }
+  dl > div {
+    display: grid;
+    grid-template-columns: 110px 1fr;
+    gap: 14px;
+    padding: 8px 16px;
+    border-bottom: 1px solid var(--rule);
+    font-size: 12px;
+  }
+  dl > div:last-child {
+    border-bottom: none;
+  }
+  dt {
+    color: var(--ink-3);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    font-size: 10px;
+    padding-top: 2px;
+  }
+  dd {
+    margin: 0;
+    color: var(--ink-1);
+  }
+  .plate-foot {
+    padding: 10px 16px;
+    font-size: 9.5px;
+    letter-spacing: 0.22em;
+    color: var(--ember);
+    border-top: 1px solid var(--rule);
+  }
+
+  /* Tool surface */
+  .isa-title {
+    margin: 0 0 10px;
+    font-size: 10px;
+    letter-spacing: 0.2em;
+    color: var(--ink-3);
+  }
+  .isa {
+    border-top: 1px solid var(--rule-strong);
+    padding-top: 14px;
+  }
+  .op {
+    display: grid;
+    grid-template-columns: 190px 1fr;
+    gap: 16px;
+    align-items: baseline;
+    padding: 9px 4px;
+    border-bottom: 1px solid var(--rule);
+    transition: background 0.15s, padding-left 0.2s;
+  }
+  .op:hover {
+    background: var(--ember-dim);
+    padding-left: 10px;
+  }
+  .name {
+    font-size: 12.5px;
+    color: var(--ember);
+  }
+  .what {
+    font-size: 12.5px;
+    color: var(--ink-2);
+  }
+  .redacted {
+    background: repeating-linear-gradient(-45deg, transparent 0 8px, oklch(0.74 0.16 55 / 0.04) 8px 16px);
+  }
+  .redacted .name {
+    color: var(--ink-3);
+    text-decoration: line-through;
+    text-decoration-color: var(--ember);
+  }
+  .redacted a {
+    color: var(--ember);
+    border-bottom: 1px dotted var(--ember);
+  }
+  @media (max-width: 860px) {
+    .cols {
+      grid-template-columns: 1fr;
+    }
+    .op {
+      grid-template-columns: 1fr;
+      gap: 2px;
+    }
+  }
+</style>

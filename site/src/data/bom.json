@@ -1,0 +1,12 @@
+{
+  "_source": "build/ui_verify/arm_sort/robot/bill_of_materials.json — real output, first lines + totals. No numbers were edited.",
+  "lines": [
+    { "part": "Unitree GO-M8010-6", "category": "actuator", "qty": 2, "detail": "qdd, peak 23.7 Nm @ 24 V, gear 6.33:1", "mass_kg": 0.68, "price_usd": 600.0 },
+    { "part": "T-Motor AK80-9", "category": "actuator", "qty": 2, "detail": "qdd, peak 18 Nm @ 48 V, gear 9:1", "mass_kg": 0.97, "price_usd": 640.0 },
+    { "part": "Dynamixel XM540-W270-T", "category": "actuator", "qty": 2, "detail": "servo, peak 10.6 Nm @ 12 V, gear 272.5:1", "mass_kg": 0.33, "price_usd": 860.0 },
+    { "part": "Aluminum 6061-T6", "category": "material", "qty": 4, "detail": "4 links (structural), CNC structural links", "mass_kg": 1.25, "price_usd": 15.0 },
+    { "part": "Polycarbonate shell", "category": "material", "qty": 1, "detail": "outer body panels", "mass_kg": 1.0, "price_usd": 14.0 },
+    { "part": "Hardened steel (gripper)", "category": "material", "qty": 2, "detail": "wear-resistant jaws", "mass_kg": 0.06, "price_usd": 0.54 }
+  ],
+  "totals": { "line_items": 11, "actuators": 6, "mass_kg": 5.9, "price_usd": 8257.54, "est_power_w": 495.0 }
+}

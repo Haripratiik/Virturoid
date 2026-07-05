@@ -1,0 +1,171 @@
+---
+import ledger from "../data/ledger.json";
+
+// USP 2 — agentic SIMULATION: the build is a traced experiment, not a render.
+// A vertical trace with real evidence at each node + real Studio captures
+// set off-grid so the page doesn't read as stacked-screenshot slop.
+const tiers = (ledger.stages.find((s) => s.tier_success)?.tier_success ?? {}) as Record<string, number>;
+const NODES = [
+  {
+    tag: "gauntlet",
+    title: "Then it runs the gauntlet.",
+    body: "24 compiled physics scenes across four tiers — baseline, variation, edge-case, stress. The robot has to earn its numbers where physics can veto it.",
+    evidence: [`smoke ${tiers.smoke * 100}%`, `baseline ${tiers.baseline * 100}%`, `randomized ${tiers.randomized * 100}%`, `stress ${tiers.stress * 100}% — kept visible`],
+    shot: { src: "shots/studio-simulate.png", alt: "Simulate workspace: the arm in a physics scene with tiered test cards", w: 2200, h: 1375 },
+  },
+  {
+    tag: "interrogate",
+    title: "Failures become instructions.",
+    body: "Every failed episode is replayed frame by frame, diagnosed, and fed back into a redesign. In the Studio you scrub the exact moment it dropped the block.",
+    evidence: ["frame-level replay", "failure → redesign loop"],
+    shot: { src: "shots/studio-hero.png", alt: "The Studio: viewport, inspector and agent panel around a live scene", w: 2200, h: 1375 },
+  },
+];
+---
+
+<section id="simulate" class="proof">
+  <div class="wrap">
+    <div class="head reveal">
+      <p class="kicker"><span class="idx">STATION 02</span> SIMULATE</p>
+      <h2>Every build is <em>an experiment</em>,<br />and you can read the lab notes.</h2>
+    </div>
+
+    <div class="trace">
+      {
+        NODES.map((n, i) => (
+          <article class={`node reveal ${i % 2 ? "flip" : ""}`}>
+            <div class="meta mono" aria-hidden="true">
+              <span class="tick" />
+              <span class="tag">{n.tag}</span>
+            </div>
+            <div class="content">
+              <h3>{n.title}</h3>
+              <p>{n.body}</p>
+              <div class="evidence mono">
+                {n.evidence.map((e) => (
+                  <span>{e}</span>
+                ))}
+              </div>
+            </div>
+            {n.shot && (
+              <figure class="shot">
+                <img src={n.shot.src} alt={n.shot.alt} loading="lazy" width={n.shot.w} height={n.shot.h} />
+                <figcaption class="mono">fig. {i}. real capture — not a mockup</figcaption>
+              </figure>
+            )}
+          </article>
+        ))
+      }
+    </div>
+  </div>
+</section>
+
+<style>
+  .proof {
+    padding: 120px 0 60px;
+  }
+  h2 {
+    font-size: clamp(34px, 4.6vw, 56px);
+    margin-top: 18px;
+  }
+  .trace {
+    margin-top: 30px;
+    border-left: 1px solid var(--rule-strong);
+  }
+  .node {
+    position: relative;
+    display: grid;
+    grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
+    gap: clamp(24px, 4vw, 56px);
+    padding: 54px 0 54px clamp(24px, 3vw, 48px);
+    align-items: center;
+  }
+  .node + .node {
+    border-top: 1px dashed var(--rule);
+  }
+  .node.flip .content {
+    order: 2;
+  }
+  .node.flip .shot {
+    order: 1;
+  }
+  .meta {
+    position: absolute;
+    left: 0;
+    top: 22px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    transform: translateX(-8px);
+  }
+  .tick {
+    width: 11px;
+    height: 11px;
+    background: var(--paper);
+    border: 2px solid var(--ember);
+    flex-shrink: 0;
+  }
+  .tag {
+    font-size: 10.5px;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    color: var(--ember);
+  }
+  h3 {
+    font-size: clamp(24px, 2.8vw, 34px);
+  }
+  .content p {
+    margin: 14px 0 0;
+    font-size: 15px;
+    color: var(--ink-2);
+    max-width: 460px;
+  }
+  .evidence {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 18px;
+  }
+  .evidence span {
+    font-size: 11px;
+    letter-spacing: 0.06em;
+    color: var(--ink-2);
+    border: 1px solid var(--rule-strong);
+    padding: 4px 9px;
+  }
+  .shot {
+    margin: 0;
+  }
+  .shot img {
+    display: block;
+    width: 100%;
+    height: auto;
+    border: 1px solid var(--rule-strong);
+    box-shadow: 18px 18px 0 oklch(0.72 0.12 250 / 0.06);
+  }
+  .node.flip .shot img {
+    box-shadow: -18px 18px 0 oklch(0.74 0.16 55 / 0.06);
+  }
+  figcaption {
+    margin-top: 8px;
+    font-size: 10.5px;
+    letter-spacing: 0.1em;
+    color: var(--ink-3);
+  }
+  .node:not(:has(.shot)) {
+    grid-template-columns: 1fr;
+  }
+  @media (max-width: 860px) {
+    .node,
+    .node.flip {
+      grid-template-columns: 1fr;
+      gap: 24px;
+    }
+    .node.flip .content {
+      order: 1;
+    }
+    .node.flip .shot {
+      order: 2;
+    }
+  }
+</style>

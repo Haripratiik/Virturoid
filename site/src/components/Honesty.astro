@@ -1,0 +1,150 @@
+---
+import ledger from "../data/ledger.json";
+import scorecard from "../data/scorecard.json";
+
+// USP 4 — honesty gates as a QA certificate. Rendered verbatim from the
+// committed ledger, INCLUDING the stages that aren't done. That's the brand.
+const STATUS: Record<string, { label: string; cls: string }> = {
+  attained: { label: "ATTAINED", cls: "ok" },
+  placeholder: { label: "PLACEHOLDER", cls: "warn" },
+  unmet: { label: "UNMET", cls: "fail" },
+  not_required: { label: "NOT REQUIRED", cls: "mute" },
+};
+---
+
+<section id="verify" class="gates">
+  <div class="wrap">
+    <div class="head reveal">
+      <p class="kicker"><span class="idx">STATION 04</span> VERIFY</p>
+      <h2>If it isn't proven,<br />it doesn't <em>export.</em></h2>
+      <p class="sub">
+        Most tools show you the demo that worked. Virturoid stamps every claim against a real
+        artifact on disk and blocks export until the required gates pass. This is the actual
+        ledger of the reference build — <strong>unedited, failures included:</strong>
+      </p>
+    </div>
+
+    <div class="cert reveal" role="table" aria-label="Product readiness ledger, arm_sort">
+      <div class="cert-head mono">
+        <span>PRODUCT READINESS LEDGER · {ledger.package} · {ledger.robot_class}</span>
+        <span class={`stamp ${ledger.safe_to_export ? "s-ok" : "s-fail"}`}>
+          {ledger.safe_to_export ? "SAFE TO EXPORT" : "EXPORT BLOCKED"}
+        </span>
+      </div>
+      {
+        ledger.stages.map((s) => {
+          const m = STATUS[s.status] ?? STATUS.not_required;
+          return (
+            <div class="row" role="row">
+              <code class="stage">{s.stage}</code>
+              <span class="detail">{s.detail}</span>
+              <span class={`verdict mono ${m.cls}`}>{m.label}</span>
+            </div>
+          );
+        })
+      }
+      <div class="flag mono">
+        <span class="fl">DISCLOSED FLAG</span>
+        “{scorecard.flag_example.detail}”
+      </div>
+      <div class="cert-foot mono">{ledger.disclaimer}</div>
+    </div>
+  </div>
+</section>
+
+<style>
+  .gates {
+    padding: 120px 0 50px;
+  }
+  h2 {
+    font-size: clamp(34px, 4.6vw, 56px);
+    margin-top: 18px;
+  }
+  .sub {
+    max-width: 620px;
+    margin-top: 18px;
+    font-size: 15.5px;
+  }
+  .sub strong {
+    color: var(--ink-1);
+  }
+  .cert {
+    margin-top: 40px;
+    border: 1px solid var(--rule-strong);
+    background: var(--paper-2);
+  }
+  .cert-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 14px;
+    flex-wrap: wrap;
+    padding: 14px 18px;
+    font-size: 11px;
+    letter-spacing: 0.14em;
+    color: var(--ink-2);
+    border-bottom: 1px double var(--rule-strong);
+  }
+  .s-ok {
+    color: var(--ok);
+  }
+  .s-fail {
+    color: var(--fail);
+  }
+  .row {
+    display: grid;
+    grid-template-columns: 220px 1fr auto;
+    gap: 18px;
+    align-items: baseline;
+    padding: 12px 18px;
+    border-bottom: 1px solid var(--rule);
+    font-size: 13px;
+  }
+  .stage {
+    font-size: 12.5px;
+    color: var(--ink-1);
+  }
+  .detail {
+    color: var(--ink-3);
+  }
+  .verdict {
+    font-size: 10.5px;
+    font-weight: 700;
+    letter-spacing: 0.14em;
+  }
+  .verdict.ok { color: var(--ok); }
+  .verdict.warn { color: var(--warn); }
+  .verdict.fail { color: var(--fail); }
+  .verdict.mute { color: var(--ink-3); }
+  .flag {
+    padding: 14px 18px;
+    font-size: 11.5px;
+    line-height: 1.7;
+    color: var(--warn);
+    border-bottom: 1px solid var(--rule);
+    background: oklch(0.79 0.12 85 / 0.05);
+  }
+  .fl {
+    display: inline-block;
+    margin-right: 10px;
+    font-weight: 700;
+    letter-spacing: 0.14em;
+    font-size: 9.5px;
+    border: 1px solid currentColor;
+    padding: 2px 6px;
+  }
+  .cert-foot {
+    padding: 12px 18px;
+    font-size: 10.5px;
+    color: var(--ink-3);
+    letter-spacing: 0.03em;
+  }
+  @media (max-width: 720px) {
+    .row {
+      grid-template-columns: 1fr auto;
+    }
+    .detail {
+      display: none;
+    }
+  }
+</style>

@@ -1,0 +1,41 @@
+{
+  "_source": "build/ui_verify/arm_sort/reports/product_readiness_ledger.json — real output of an autonomous build, trimmed for the site. No numbers were edited.",
+  "package": "arm_sort",
+  "robot_class": "manipulator",
+  "safe_to_export": true,
+  "highest_attained": "physics_evaluated",
+  "stages": [
+    {
+      "stage": "schema_valid",
+      "status": "attained",
+      "detail": "package_validation_report.ok"
+    },
+    {
+      "stage": "sim_compiled",
+      "status": "attained",
+      "detail": "24 compiled scenes"
+    },
+    {
+      "stage": "real_cad_exported",
+      "status": "attained",
+      "detail": "14/14 STEP files are real B-rep"
+    },
+    {
+      "stage": "rendered_cv_data",
+      "status": "placeholder",
+      "detail": "CV manifest/contract present but NO rendered pixel files on disk"
+    },
+    {
+      "stage": "physics_evaluated",
+      "status": "attained",
+      "detail": "real tiered evaluation cleared the §15.3 export gate",
+      "tier_success": { "smoke": 1.0, "baseline": 1.0, "randomized": 1.0, "stress": 0.0 }
+    },
+    {
+      "stage": "controller_exported",
+      "status": "not_required",
+      "detail": "no trained controller requested"
+    }
+  ],
+  "disclaimer": "Honest readiness screening: a stage is 'attained' only with a provably-real artifact (real B-rep CAD, rendered pixels, non-dry-run physics). NOT a guarantee of real-world transfer."
+}
