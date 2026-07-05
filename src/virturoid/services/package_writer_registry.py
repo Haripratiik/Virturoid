@@ -109,8 +109,13 @@ def _write_manipulator_package(
 
     written_dir = write_mvp_robot_arm_project(output_dir, requirements)
     package_valid = validate_mvp_export_package(written_dir).ok
+    # G1 (gap-closure): the template path shipped NO bill of materials. Every package must carry a real parts
+    # list — derived from the genome's own joint effort limits + the class/task sensor/compute/power suite.
+    from virturoid.services.bom_builder import emit_genome_bom
+    emit_genome_bom(written_dir, task=getattr(requirements, "prompt", "") or "")
     artifacts = {
         "project": "project.json",
+        "bom": "robot/bill_of_materials.json",
         "robot_genome": "robot/robot_genome.json",
         "robot_urdf": "robot/robot.urdf",
         "scene_set": "simulation/scene_set.json",
@@ -160,12 +165,15 @@ def _write_mobile_base_package(
 
     project = build_mobile_base_project(requirements.prompt, output_dir)
     written_dir = project["output_dir"]
+    from virturoid.services.bom_builder import emit_genome_bom   # G1: every package carries a real parts list
+    emit_genome_bom(written_dir, task=getattr(requirements, "prompt", "") or "")
     training = {"ran": False, "reason": "Learned controller export is currently implemented for the manipulator route only."} if train else None
     return PackageWriterResult(
         written_dir=written_dir,
         package_type="mobile_base_foundation_package",
         package_valid=_mobile_base_package_valid(written_dir),
         artifacts={
+            "bom": "robot/bill_of_materials.json",
             "robot_genome": "robot/robot_genome.json",
             "robot_urdf": "robot/robot.urdf",
             "mujoco_xml": "simulation/mujoco/mobile_base_scene.xml",

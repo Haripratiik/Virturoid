@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 
 # What the platform can actually compose + run end-to-end today (keep in sync with the composer +
 # task_matched_eval). Anything outside these is reported as a gap, not silently mis-built.
-SUPPORTED_CLASSES = ("manipulator", "mobile_base", "quadruped", "humanoid")
+SUPPORTED_CLASSES = ("manipulator", "mobile_base", "quadruped", "humanoid", "mobile_manipulator")
 SUPPORTED_TASKS = ("pick_place_sort", "place_to_target", "grasp_lift", "navigation",
                    "spray_coverage", "locomotion")
 _TASK_CLASS = {  # task family -> the robot class that performs it
@@ -101,7 +101,10 @@ _CLASS_WORDS = {
                   "panther", "puma", "lynx", "mule", "llama", "alpaca", "moose", "elk", "bison", "goose"),
     "mobile_base": ("wheel", "rover", "drive ", "drive to", "mobile", "navigate", "deliver", "patrol",
                     "maze", "waypoint", "destination", "go to", "head to", "roomba", "agv", "trolley",
-                    "vehicle", "car-like", "wheeled"),
+                    "vehicle", "car-like", "wheeled",
+                    # G4: floor-cleaning nouns — 'a robot vacuum' previously matched NOTHING and became a
+                    # tabletop sorting ARM (the worst e2e intent failure)
+                    "vacuum", "mop", "sweep", "sweeper", "floor-clean", "floor clean"),
     "humanoid": ("humanoid", "bimanual", "two arms", "two-arm", "android", "torso", "human-like"),
     "manipulator": ("arm", "grasp", "grip", "pick", "place", "sort", "manipulat", "assemble", "weld",
                     "spray", "paint", "lift", "stack", "insert"),
@@ -130,6 +133,10 @@ def _heuristic_plan(prompt: str) -> BuildPlan:
         if any(_kw(w, p) for w in _CLASS_WORDS[cls]):
             robot_class = cls
             break
+    # G4 composite: an explicitly MOBILE platform asked to grasp/carry is a mobile manipulator — never silently
+    # drop either half (the e2e test's 'mobile robot that picks boxes and carries them' built a FIXED arm).
+    if robot_class == "mobile_base" and any(_kw(w, p) for w in _CLASS_WORDS["manipulator"]):
+        robot_class = "mobile_manipulator"
     # task family: prefer the one consistent with the class, else first keyword match
     task = None
     for fam, words in _TASK_WORDS.items():
@@ -148,9 +155,11 @@ def _heuristic_plan(prompt: str) -> BuildPlan:
             robot_class = "quadruped"
     if task is None:
         task = {"manipulator": "place_to_target", "mobile_base": "navigation",
-                "quadruped": "locomotion", "humanoid": "place_to_target"}[robot_class]
+                "quadruped": "locomotion", "humanoid": "place_to_target",
+                "mobile_manipulator": "pick_place_sort"}[robot_class]
     morph = {"manipulator": "serial arm + gripper", "mobile_base": "wheeled rover",
-             "quadruped": "legged walker", "humanoid": "torso + two arms"}[robot_class]
+             "quadruped": "legged walker", "humanoid": "torso + two arms",
+             "mobile_manipulator": "wheeled chassis + grasp arm"}[robot_class]
     if "frog" in p or "hop" in p:
         morph = "legged hopper (frog-like) — nearest buildable: 4-legged walker"
     return BuildPlan(prompt=prompt, robot_class=robot_class, task_family=task, morphology=morph,

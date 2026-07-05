@@ -599,7 +599,10 @@ def _maybe_analyze_failures(failure_clusters, emit) -> dict | None:
 
 # Classes that build from a gene (real, distinct robots) rather than the tuned legacy
 # arm/mobile pipelines. manipulator/mobile_base stay on their higher-success legacy path.
-_GENE_ONLY_CLASSES = {"humanoid", "quadruped"}
+_GENE_ONLY_CLASSES = {"humanoid", "quadruped", "mobile_manipulator", "mobile_base"}
+# G4/G5 (gap-closure): mobile_manipulator (composite) and mobile_base route through the GENE path — the
+# composer builds them for real (chassis+wheels+arm) and the gene path emits BOM/CAD/ledger uniformly.
+# The template path is now legacy for tabletop-sort arms only.
 # Manipulation tasks the tuned legacy arm path can't score (it runs the colour-sort eval only) -> general gene path.
 _NONSORT_MANIP_TASKS = {"pick_place_box", "stack", "push", "generic_manipulation"}
 

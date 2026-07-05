@@ -474,3 +474,65 @@ def format_bom_markdown(bom: dict) -> str:
                     f"{ln['price_usd']} | {ln['detail']} |")
     rows.append(f"\n_{bom.get('note', '')}_")
     return "\n".join(rows)
+
+
+def build_bom_from_genome(genome: dict, *, task: str = "", capabilities=None) -> dict:
+    """G1 (fidelity gap-closure): a REAL parts list for a template-path RobotGenome package (the path that shipped
+    with NO BOM at all — the e2e fidelity test's worst correctness finding). Uses the genome's own joint effort
+    limits to size real actuators, one aluminium structure line for the links, and the SAME class/task-adaptive
+    sensor/compute/power selection as the gene path, so both paths emit the identical BOM schema."""
+    joints = [j for j in genome.get("joints", []) if (j.get("joint_type") or "").lower() in ("revolute", "prismatic")]
+    links = genome.get("links", [])
+    species = (genome.get("species") or "").lower()
+    robot_class = (genome.get("robot_class")
+                   or ("mobile_base" if "mobile" in species else "manipulator"))
+    lines: list[BomLine] = []
+    actuator_map: dict[str, str] = {}
+    chosen = []
+    for j in joints:
+        eff = float(((j.get("limit") or {}).get("effort")) or _DEFAULT_JOINT_TORQUE_NM)
+        a = select_actuator(eff)
+        actuator_map[j.get("name", f"joint{len(actuator_map)}")] = a.name
+        chosen.append(a)
+    for a, qty in Counter(chosen).items():
+        lines.append(BomLine(a.name, "actuator", qty, a.mass_kg, a.price_usd,
+                             f"{a.kind}, peak {a.peak_torque_nm:g} Nm @ {a.voltage_v:g} V, gear {a.gear_ratio:g}:1"))
+    bus_w = sum(a.rated_torque_nm * a.max_speed_radps * 0.3 for a in chosen)
+    if links:
+        m = _material_for_key("skeleton")
+        if m is not None:
+            est_mass = 0.35 * len(links)                    # structural estimate: template links carry no mass
+            lines.append(BomLine(m.name, "material", len(links), round(est_mass / len(links), 4),
+                                 round(est_mass * m.cost_per_kg_usd / len(links), 2),
+                                 f"{len(links)} links ({m.tier}) - template-path structural estimate"))
+    scale_kg = sum(ln.mass_kg * ln.qty for ln in lines)
+    for name, qty, mounting in (_sensor_suite(robot_class, capabilities, task, scale_kg)
+                                + _compute_and_power(robot_class, len(joints), task=task,
+                                                     capabilities=capabilities, bus_w=bus_w)):
+        c = component(name)
+        if c is None:
+            continue
+        lines.append(BomLine(c.name, c.category, qty, c.mass_kg, c.price_usd, f"{c.spec} - {mounting}"))
+    total_mass = round(sum(ln.mass_kg * ln.qty for ln in lines), 3)
+    total_price = round(sum(ln.price_usd * ln.qty for ln in lines), 2)
+    elec_w = sum(ln.qty * (component(ln.part).power_w if component(ln.part) else 0.0) for ln in lines)
+    return {"robot_class": robot_class, "dof": len(joints), "actuator_map": actuator_map,
+            "lines": [asdict(ln) for ln in lines],
+            "totals": {"line_items": len(lines), "actuators": len(joints), "mass_kg": total_mass,
+                       "price_usd": total_price, "est_power_w": round(elec_w + bus_w, 1)},
+            "note": ("Template-path BOM derived from the genome's joint effort limits + class suite. "
+                     "Structural masses are estimates; gene-path packages carry measured link masses.")}
+
+
+def emit_genome_bom(package_dir, *, task: str = "") -> dict | None:
+    """Write robot/bill_of_materials.json for a genome-based package (idempotent; returns the BOM or None if the
+    package has no genome). The fail-closed rule: a package without a genome gets NO fabricated BOM."""
+    import json as _json
+    from pathlib import Path as _P
+    pkg = _P(package_dir)
+    gp = pkg / "robot" / "robot_genome.json"
+    if not gp.exists():
+        return None
+    bom = build_bom_from_genome(_json.loads(gp.read_text(encoding="utf-8")), task=task)
+    (pkg / "robot" / "bill_of_materials.json").write_text(_json.dumps(bom, indent=2), encoding="utf-8")
+    return bom

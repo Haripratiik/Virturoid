@@ -130,10 +130,13 @@ def compose_from_spec(spec: dict) -> RobotGene:
         b.limb(limb["prefix"], [dict(li) for li in limb["links"]],
                parent=limb["parent"], mount_offset=tuple(limb.get("mount_offset", (0.0, 0.0, 0.0))),
                mount_euler=tuple(limb.get("mount_euler", (0.0, 0.0, 0.0))))
+    arm_tip = b._cursor if spec.get("links") else None   # composite (links+wheels): the ee belongs on the ARM tip
     for w in spec.get("wheels", []):
         b.wheel(w["name"], radius=float(w.get("radius", 0.06)), thickness=float(w.get("thickness", 0.04)),
                 parent=w["parent"], mount_offset=tuple(w.get("mount_offset", (0.0, 0.0, 0.0))),
                 torque=float(w.get("torque", 6.0)))
+    if arm_tip is not None and spec.get("wheels"):
+        b._cursor = arm_tip                                # wheels moved the cursor; restore so gripper() lands on the arm
     ee = spec.get("end_effector") or {}
     kind = ee.get("kind", "none")
     # Guard: if the design already builds articulated fingers as limbs, an extra hand/gripper end-effector is
@@ -196,7 +199,9 @@ def morphology_from_requirements(reach_m: float, payload_kg: float, *, prompt: s
             robot_class = "humanoid"
         elif any(w in p for w in _LEGGED_WORDS):
             robot_class = "quadruped"
-        elif any(w in p for w in _MOBILE_WORDS) and not any(w in p for w in _GRASP_WORDS):
+        elif any(w in p for w in _MOBILE_WORDS) and any(w in p for w in _GRASP_WORDS):
+            robot_class = "mobile_manipulator"            # G4: 'mobile ... picks/carries' = base + arm, not a fixed arm
+        elif any(w in p for w in _MOBILE_WORDS):
             robot_class = "mobile_base"
         else:
             robot_class = "manipulator"
@@ -316,6 +321,21 @@ def morphology_from_requirements(reach_m: float, payload_kg: float, *, prompt: s
                              [t_len,         torso_r * 0.60, torso_r * 1.05]]}},
                 "limbs": [head_limb] + leg_limbs,
                 "end_effector": {"kind": "none"}}
+    if robot_class == "mobile_manipulator":              # G4 composite: a wheeled chassis CARRYING a grasp arm.
+        # Chassis is wider/heavier than the plain rover (it must counterweight the arm); the 4-DOF grasp arm
+        # (yaw + 2 pitch + wrist) mounts at the chassis TOP (serial links chain from the base's distal tip),
+        # so the robot can drive to a box, pick it, and carry it — the request the e2e test showed we dropped.
+        reach_c = max(0.4, float(reach_m or 0.55))
+        t_c = round(max(10.0, (0.5 + 0.35 * 4) * 9.81 * reach_c * 1.6), 1)
+        return {"robot_class": "mobile_manipulator", "base_mount": "free",
+                "species": "mobile_manipulator.composed",
+                "base": {"name": "chassis", "shape": "box", "length": 0.10, "radius": 0.22, "mass": 8.0},
+                "links": _grasp_arm_links(reach_c, t_c),
+                "wheels": [{"name": f"wheel_{i}", "parent": "chassis", "radius": 0.07, "thickness": 0.05,
+                            "mount_offset": (sx, sy, -0.10), "torque": 10.0}
+                           for i, (sx, sy) in enumerate([(0.16, 0.19), (0.16, -0.19),
+                                                          (-0.16, 0.19), (-0.16, -0.19)])],
+                "end_effector": {"kind": "gripper", "span": 0.10}}
     if robot_class == "mobile_base":                      # a driven base: a FREE-floating 4-wheel rover
         # flat wide chassis (box geom = radius,radius,length/2 -> 0.36 sq x 0.08 tall); wheels at the
         # four bottom corners (mount_offset z = -length puts them at the chassis underside) are the
@@ -657,10 +677,14 @@ def _fallback_gene(prompt: str, heuristic_spec: dict, *, target_height_m: float 
     try:
         from virturoid.services.anatomy_compiler import generic_creature_gene
         from virturoid.services.intent_planner import plan_build
-        generic = generic_creature_gene(prompt, plan_build(prompt, llm=None).robot_class)
-        if generic is not None:
-            generic.design_source = "anatomy_generic"
-            return generic
+        _cls = plan_build(prompt, llm=None).robot_class
+        # G4 guard: the generic-creature fallback is for LEGGED bodies only. It used to run for ANY class and
+        # silently hijack e.g. a mobile_manipulator ('mobile robot that picks boxes') into a quadruped.
+        if (_cls or "").lower() in ("quadruped", "legged", "biped"):
+            generic = generic_creature_gene(prompt, _cls)
+            if generic is not None:
+                generic.design_source = "anatomy_generic"
+                return generic
     except Exception:  # noqa: BLE001
         pass
     g = compose_from_spec(heuristic_spec)

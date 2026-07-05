@@ -38,6 +38,12 @@ def main(argv=None) -> int:
     ap.add_argument("--epochs", type=int, default=4)
     ap.add_argument("--minibatches", type=int, default=8)
     ap.add_argument("--chunk", type=int, default=6)        # contacts heavy, but 60s TDR budget tolerates a 6-step fused kernel
+    # SCENE-COUNT SCALING ABLATION (scene-gen plan S5/S6): restrict training box-start layouts to a discrete pool
+    # of K points and evaluate on a DISJOINT held-out pool. K=0 -> continuous uniform (the original, infinite
+    # scenes). Small K overfits to those starts; larger K generalizes -> the ProcTHOR/CoinRun scaling law, on us.
+    ap.add_argument("--n-train-layouts", type=int, default=0, help="0=continuous; K>0 restricts box starts to K fixed points")
+    ap.add_argument("--eval-heldout-layouts", type=int, default=0, help="if >0, eval held-out box-start success after training")
+    ap.add_argument("--layout-seed", type=int, default=0)
     args = ap.parse_args(argv)
 
     import jax
@@ -80,6 +86,15 @@ def main(argv=None) -> int:
     SEP_FLOOR, SEP_START, SEP_CAP = 0.07, 0.10, 0.22   # >0.06 success ball, so no spawn-on-goal phantom success
     lo_b = lo + 0.05; hi_b = hi - 0.05   # spawn box in an INNER region so target stays in-bounds (no clip-onto-box bug)
 
+    # scene-count ablation pools: deterministic box-start layouts. TRAIN pool = K points; HELD-OUT pool = M points
+    # sampled from a different sub-seed so they never coincide with train (the honest structural split).
+    import numpy as _np
+    def _pool(n, seed):
+        r = _np.random.default_rng(seed)
+        return jp.asarray(_np.array(lo_b) + r.random((n, 2)) * (_np.array(hi_b) - _np.array(lo_b)), dtype=jp.float32)
+    TRAIN_POOL = _pool(args.n_train_layouts, 1000 + args.layout_seed) if args.n_train_layouts > 0 else None
+    HELD_POOL = _pool(args.eval_heldout_layouts, 9000 + args.layout_seed) if args.eval_heldout_layouts > 0 else None
+
     # default box rest height (let the scene decide z; we only randomize x,y).
     _d0 = mjx.forward(mx, mjx.make_data(mx, naconmax=NACON, njmax=NJMAX))
     box_z = float(_d0.qpos[bq + 2])
@@ -116,9 +131,13 @@ def main(argv=None) -> int:
 
     step_v = jax.vmap(mjx.step, in_axes=(None, 0))
 
-    def reset(key, sep_max):
+    def reset(key, sep_max, pool=None):
         k1, k2, k3 = jax.random.split(key, 3)
-        box_xy = jax.random.uniform(k1, (N, 2), minval=lo_b, maxval=hi_b)
+        if pool is not None:                                     # draw each env's box start from the K-point pool
+            idx = jax.random.randint(k1, (N,), 0, pool.shape[0])
+            box_xy = pool[idx]
+        else:                                                   # continuous uniform = infinite scenes (default)
+            box_xy = jax.random.uniform(k1, (N, 2), minval=lo_b, maxval=hi_b)
         # Target a curriculum distance AWAY from the box (random direction): the band [SEP_FLOOR, sep_max]
         # starts tight and widens as the policy improves, so success always demands a real (but currently
         # achievable) push — never the spawn-coincidence that pinned the old baseline.
@@ -188,9 +207,9 @@ def main(argv=None) -> int:
         placed = succ[-5:].mean(0)            # fraction of last 5 steps settled, per env
         return obs, act, logp, advs, advs + val, rew.sum(0).mean(), placed.mean()
 
-    def rollout(params, key, sep_max):
+    def rollout(params, key, sep_max, pool=None):
         rkey, key = jax.random.split(key)
-        data, targets, d0 = reset(rkey, sep_max)
+        data, targets, d0 = reset(rkey, sep_max, pool)
         carry = (data, d0)
         chunks = []
         for _ in range(L // CHUNK):
@@ -239,7 +258,7 @@ def main(argv=None) -> int:
     t0 = time.time()
     for it in range(args.iters):
         key, rk, uk = jax.random.split(key, 3)
-        obs, act, logp, adv, ret, ep_rew, ep_succ = rollout(params, rk, cur_sep)
+        obs, act, logp, adv, ret, ep_rew, ep_succ = rollout(params, rk, cur_sep, TRAIN_POOL)
         flat = lambda a: a.reshape((-1,) + a.shape[2:])
         params, opt_state = update(params, opt_state, flat(obs), flat(act), flat(logp), flat(adv), flat(ret), uk)
         # Expand the curriculum only once the policy is succeeding at the current difficulty.
@@ -249,6 +268,17 @@ def main(argv=None) -> int:
             print(f"  iter {it:>4}  ep_reward={float(ep_rew):8.2f}  placed={float(ep_succ):.0%}  "
                   f"sep={cur_sep:.2f}m  ({(time.time()-t0):.0f}s)", flush=True)
     print(f"done: push skill, {args.iters} iters, placed {float(ep_succ):.0%} at sep={cur_sep:.2f}m, {time.time()-t0:.0f}s")
+    # HELD-OUT EVAL (the scaling-ablation headline): success on box starts NEVER seen in training, at the full
+    # curriculum distance, averaged over a few eval batches. A K-overfit policy scores low here; a diverse one high.
+    if HELD_POOL is not None:
+        succs = []
+        for e in range(4):
+            key, ek = jax.random.split(key)
+            *_, held_succ = rollout(params, ek, SEP_CAP, HELD_POOL)
+            succs.append(float(held_succ))
+        held = sum(succs) / len(succs)
+        train_layouts = args.n_train_layouts if args.n_train_layouts > 0 else -1   # -1 = continuous
+        print(f"HELDOUT_SUCCESS n_train_layouts={train_layouts} placed={held:.4f}", flush=True)
     return 0
 
 

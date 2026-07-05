@@ -37,8 +37,10 @@ def build_product_readiness_ledger(package_dir, *, robot_class: str = "", gene=N
     pkg = Path(package_dir)
     if require is None:
         # Default required gates: a build is 'safe' only with real CAD + a real (non-dry-run) physics pass on
-        # top of schema validity + compiled sim. CV + controller are required only when present/requested.
-        require = ["schema_valid", "sim_compiled", "real_cad_exported", "physics_evaluated"]
+        # top of schema validity + compiled sim + a REAL BOM (G2, fidelity gap-closure: the e2e test caught
+        # packages with ZERO parts list marked safe_to_export=True — a robot with no parts cannot be built).
+        # CV + controller are required only when present/requested.
+        require = ["schema_valid", "sim_compiled", "real_cad_exported", "physics_evaluated", "bom_present"]
     stages = [
         _probe_schema_valid(pkg),
         _probe_sim_compiled(pkg),
@@ -46,6 +48,7 @@ def build_product_readiness_ledger(package_dir, *, robot_class: str = "", gene=N
         _probe_rendered_cv(pkg),
         _probe_physics(pkg, gene),
         _probe_controller(pkg),
+        _probe_bom(pkg),
     ]
     return ProductReadinessLedger(package_dir=str(pkg), robot_class=robot_class, stages=stages,
                                   required=list(require), enforce=enforce)
@@ -69,6 +72,27 @@ def write_product_readiness_ledger(package_dir, *, robot_class: str = "", gene=N
 
 
 # --------------------------------------------------------------------------- probes
+
+def _probe_bom(pkg: Path) -> StageRecord:
+    """G2 (fidelity gap-closure): a package is only buildable with a REAL bill of materials — present, parseable,
+    with at least one actuator line. Fail-closed: no BOM / empty lines / no actuators -> not attained."""
+    p = pkg / "robot" / "bill_of_materials.json"
+    if not p.is_file():
+        return StageRecord("bom_present", PLACEHOLDER, "no robot/bill_of_materials.json — a robot with no parts "
+                                                       "list cannot be built")
+    try:
+        bom = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return StageRecord("bom_present", PLACEHOLDER, "bill_of_materials.json does not parse")
+    lines = bom.get("lines") or bom.get("items") or []
+    n_act = sum(1 for ln in lines if (ln.get("category") or ln.get("kind")) == "actuator")
+    if not lines:
+        return StageRecord("bom_present", PLACEHOLDER, "BOM has zero line items")
+    if n_act == 0:
+        return StageRecord("bom_present", BELOW_GATE, f"{len(lines)} lines but NO actuator lines")
+    return StageRecord("bom_present", ATTAINED, f"{len(lines)} lines incl. {n_act} actuator line(s)",
+                       evidence={"line_items": len(lines), "actuator_lines": n_act})
+
 
 def _probe_schema_valid(pkg: Path) -> StageRecord:
     """Core artifacts exist + parse. Lenient across the MVP and gene package layouts."""
