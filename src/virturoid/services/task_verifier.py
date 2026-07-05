@@ -7,7 +7,7 @@ grasp a cup" is rejected with a specific reason instead of silently mis-running.
 from __future__ import annotations
 
 from virturoid.services.capability_registry import REGISTRY
-from virturoid.services.task_matched_eval import robot_kind
+from virturoid.services.task_matched_eval import robot_capabilities, robot_kind
 
 
 def verify_task(spec, gene) -> dict:
@@ -16,6 +16,7 @@ def verify_task(spec, gene) -> dict:
     issues.extend(spec.validate())                       # structural
 
     kind = robot_kind(gene)
+    caps = robot_capabilities(gene)                      # a composite satisfies MORE than its single primary kind
     established = set()                                  # facts available as we walk the steps in order
 
     for step in spec.steps:
@@ -24,10 +25,11 @@ def verify_task(spec, gene) -> dict:
         if sig is None:
             issues.append(f"step {step.step_id!r}: unknown skill {step.skill!r} (not in capability registry)")
             continue
-        # 2. morphology gate — the feasibility check no hard-coded handler gives
-        if sig.morphologies and kind not in sig.morphologies:
+        # 2. morphology gate — feasibility by CAPABILITY, not a single kind: a mobile_manipulator physically has
+        # both a base and a gripper arm, so it clears both 'mobile' (navigate) and 'manipulator' (pick_place).
+        if sig.morphologies and not (set(sig.morphologies) & caps):
             issues.append(f"step {step.step_id!r}: skill {step.skill!r} needs morphology "
-                          f"{list(sig.morphologies)}, but this robot is '{kind}'")
+                          f"{list(sig.morphologies)}, but this robot has {sorted(caps)}")
         # 3. causal chain — preconditions satisfied by a prior step's effects (most v1 skills need none)
         for need in sig.requires:
             if need not in established:

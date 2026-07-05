@@ -35,6 +35,27 @@ def robot_kind(gene: RobotGene) -> str:
     return "manipulator"
 
 
+def robot_capabilities(gene: RobotGene) -> set[str]:
+    """The SET of skill-morphologies a body can satisfy. ``robot_kind`` returns one PRIMARY kind for dispatch,
+    but a COMPOSITE has more than one: a mobile_manipulator (wheels + a gripper arm) is BOTH 'mobile' and
+    'manipulator', so the task verifier must let it run pick_place AND navigate — the deep-analysis carrybot
+    was wrongly rejected from its own pick task because kind()='mobile' hid the arm it physically carries."""
+    ee = gene.end_effector_type or "none"
+    segs = gene.segments
+    has_wheels = any(getattr(s, "shape", None) == "cylinder" and s.joint_type == "revolute" for s in segs)
+    n_revolute = sum(1 for s in segs if s.joint_type == "revolute")
+    caps: set[str] = set()
+    if has_wheels:
+        caps.add("mobile")
+    if ee in ("gripper", "hand"):
+        caps.add("manipulator")
+    if ee == "spray_nozzle":
+        caps.add("spray")
+    if gene.base_mount == "free" and n_revolute >= 2 and not has_wheels:
+        caps.add("legged")
+    return caps or {robot_kind(gene)}
+
+
 def evaluate_robot(gene: RobotGene, *, prompt: str = "", controller_params: dict | None = None,
                    scene_params: dict | None = None) -> dict:
     """Evaluate ``gene`` on its morphology-implied task (dispatched by STRUCTURE — see ``robot_kind`` — so
