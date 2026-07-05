@@ -605,7 +605,7 @@ def recipe_rollout_morph(gene, policy: MorphPolicy | None = None, *, steps: int 
                          seed: int = 0, record_frames: bool = False, frame_every: int = 5,
                          decimation: int = 1, action_lpf: float = 0.0, sphere_feet: bool = False,
                          command_schedule: list | None = None, record_actuation: bool = False,
-                         real_actuator: bool = False) -> dict:
+                         real_actuator: bool = False, record_qpos: bool = False) -> dict:
     """Drive ``gene`` with the anti-collapse RECIPE: position-PD to the default standing pose + learned offset,
     obs normalization (``normalizer=(mean,std)``), terminate-on-fall, clipped-non-negative velocity-tracking
     reward. Returns ``gait`` (recipe reward meaned over the horizon — the training fitness), ``forward`` travel,
@@ -691,6 +691,10 @@ def recipe_rollout_morph(gene, policy: MorphPolicy | None = None, *, steps: int 
     x0 = float(data.qpos[bq]); px = x0; R = 0.0; a_prev = None; alive = steps; hr = 1.0
     dt = float(model.opt.timestep)
     frames = [] if record_frames else None
+    # qpos snapshots (full generalized coords) for HONEST off-line replay: unlike the geom-pose frames (viewer
+    # JSON), qpos can be re-loaded into MjData to RENDER a real GIF, so any policy's true motion is inspectable
+    # (crouch vs upright, stepping vs slide) — the verification discipline that stops over-claiming from a few frames.
+    qpos_frames = [] if record_qpos else None
     tau_trace = [] if record_actuation else None    # B1 BOM cert: per-step APPLIED torque + joint speed per token
     qv_trace = [] if record_actuation else None     #   (post-clip torque that produced the motion; must be real-servo feasible)
     capture = None
@@ -766,6 +770,8 @@ def recipe_rollout_morph(gene, policy: MorphPolicy | None = None, *, steps: int 
             alive = t; break
         if record_frames and t % frame_every == 0:
             frames.append(capture(data, model))
+        if record_qpos and t % frame_every == 0:
+            qpos_frames.append(data.qpos.copy())
         q = data.qpos[bq + 3:bq + 7]
         upr = 1.0 - 2.0 * (float(q[1]) ** 2 + float(q[2]) ** 2)   # world-up . body-up (orientation)
         z = float(data.qpos[bq + 2]); hr = min(1.0, max(0.0, z / z0)); x = float(data.qpos[bq])
@@ -801,6 +807,10 @@ def recipe_rollout_morph(gene, policy: MorphPolicy | None = None, *, steps: int 
            "cadence": cadence, "upright_frac": upright_frac, "support_frac": support_frac,
            "upright_tau": round(tau_up, 3), "n_feet": int(len(feet_idx)),
            "n_tokens": graph.n_tokens, "feature_dim": graph.feature_dim}
+    if record_qpos:
+        out["qpos_frames"] = qpos_frames or []
+    if record_frames and z0:
+        out["z0"] = float(z0)                                    # nominal standing height, for the render camera
     if cmd_seq is not None:                                       # WS8: RMS speed-tracking error -> a legged_gym
         track_err = (terr / max(1, tsteps)) ** 0.5              #   exp(-err^2/sigma^2) score (higher = better; a
         out["track_err"] = round(track_err, 4)                 #   constant gait mistracks a varied command -> low)
