@@ -258,6 +258,30 @@ def build_gene_package(gene: RobotGene, prompt: str, output_dir: Path, scene_cou
     try:
         from virturoid.services.grounded_physics import ground_gene
         _ground_report = ground_gene(gene, material="carbon_fiber", fill=0.25)
+        # G3b: grounding adds the REAL actuator masses, and the heavier body can drop a link below the
+        # SF>=2.0 structural target the readiness ledger fail-closes on (physics_evaluated=collision).
+        # Repair the STRUCTURE for the grounded masses: thicken only the under-margined links (SF ~ r^3,
+        # +5% headroom) and re-ground so mass tracks the new geometry — the shipped gene is grounded AND
+        # structurally sound, re-checked after its last mutation. Walking legs stay strictly inside the
+        # slenderness band (length/diameter >= 2.25) so the structural fix never re-creates stub legs.
+        from virturoid.services.structural_validation import validate_structure
+        for _ in range(3):
+            _st = validate_structure(gene)
+            if _st.get("ok", False):
+                break
+            _by_name = {s.name: s for s in gene.segments}
+            for _link in _st.get("links", []):
+                _s = _by_name.get(str(_link.get("name")))
+                _sf = float(_link.get("safety_factor") or 0.0)
+                if _link.get("feasible") or _s is None or _sf <= 0.0 or float(_s.radius_m) <= 0.0:
+                    continue
+                _f = min(1.6, 1.05 * (2.0 / _sf) ** (1.0 / 3.0))
+                _r = float(_s.radius_m) * _f
+                if ("leg" in _s.name.lower() and (_s.joint_type or "").lower() == "revolute"
+                        and float(_s.length_m) > 0):
+                    _r = min(_r, float(_s.length_m) / 4.5)
+                _s.radius_m = round(max(float(_s.radius_m), _r), 5)
+            _ground_report = ground_gene(gene, material="carbon_fiber", fill=0.25)
     except Exception as _ge:  # noqa: BLE001
         _ground_report = {"error": f"{type(_ge).__name__}: {_ge}"}
     try:                                                   # persist grounding + the executable-on-BOM certificate
