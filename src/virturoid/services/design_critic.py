@@ -275,7 +275,7 @@ def thicken_links(gene: RobotGene, *, factor: float = 1.3, new_id=None, species=
         for name, o in ov.items():
             s_ = by_name.get(name)
             if s_ is not None and "leg" in name.lower() and float(s_.length_m) > 0 and "radius_m" in o:
-                o["radius_m"] = round(min(float(o["radius_m"]), float(s_.length_m) / 4.4), 5)
+                o["radius_m"] = round(min(float(o["radius_m"]), float(s_.length_m) / 4.5), 5)  # D3a: 2.25, gate-safe
     return _amend(gene, ov, new_id, species, "thicken_links")
 
 

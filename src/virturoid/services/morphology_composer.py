@@ -552,12 +552,15 @@ def compose_robot(prompt: str, *, llm="auto", reach_m: float | None = None,
         # girth/thickness, the heavy-task thickener, a redesign — a leg segment that ships must respect the
         # morphology-prior band (length/diameter >= 2.2). 1:1 sausage legs were the e2e test's core visual +
         # functional defect; realism bands outrank per-part knobs for the load-bearing walking chain.
+        # D3a: cap at /4.5 (aspect 2.25), NOT /4.4 (aspect exactly 2.2, which round(,5) nudges UP past the gate's
+        # strict `< 2.2` — the T4 seed3 experiment caught a clamped leg failing its own gate by 4e-4). /4.5 lands
+        # strictly INSIDE the band so a clamp output always passes the check that motivated it.
         if (gene.robot_class or "").lower() in ("quadruped", "legged"):
             from virturoid.services.bom_builder import _scale_geo
             for s_ in gene.segments:
                 n_ = (s_.name or "").lower()
                 if "leg" in n_ and (s_.joint_type or "").lower() == "revolute" and s_.length_m > 0:
-                    cap = s_.length_m / 4.4
+                    cap = s_.length_m / 4.5
                     if s_.radius_m > cap:
                         f_ = cap / s_.radius_m
                         s_.radius_m = round(cap, 5)

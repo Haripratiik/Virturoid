@@ -87,6 +87,19 @@ class AnatomyCompilerTests(unittest.TestCase):
         self.assertGreater(rep1.measured["head_torso_ext"], 1.05)
         self.assertTrue(any("head extent" in i for i in rep1.issues), rep1.issues)
 
+    def test_leg_clamp_stays_strictly_inside_the_gate_after_thicken(self):
+        # D3a: the leg-slenderness clamp must land aspect strictly >= 2.2 (the gate fails on `< 2.2`), not exactly
+        # at the 2.2 boundary where round() can nudge it under (the T4 seed3 experiment caught a clamped leg
+        # failing its OWN gate by 4e-4). Thicken a quadruped hard -> legs hit the cap -> the gate must still pass.
+        from virturoid.services.design_critic import thicken_links
+        from virturoid.services.morphology_priors import validate_morphology
+        g = generic_creature_gene("a quadruped robot dog", "quadruped")
+        fat = thicken_links(g, factor=3.0)                   # aggressive thicken drives legs onto the cap
+        rep = validate_morphology(fat)
+        self.assertGreaterEqual(rep.measured.get("min_leg_aspect", 9.9), 2.2,
+                                f"clamped legs must clear the >=2.2 gate, got {rep.measured}")
+        self.assertFalse(any("aspect" in i for i in rep.issues), rep.issues)
+
     def test_symmetric_child_attaches_to_correct_side_of_symmetric_parent(self):
         # The foot (symmetric) parents the leg (symmetric) — each side's foot must attach to THAT side's leg
         # leaf, not an un-split name. If the leaf registry is wrong, validate() reports an unknown parent.
