@@ -273,7 +273,20 @@ def _realize_nav(struct: StructureKey, rng) -> SceneGraph:
                                             "layout": struct.layout})
 
 
+
+
 _NAV_TASKS = {"navigation", "nav", "maze", "locomotion"}
+
+
+def _perturb_rooms(base, rng):
+    """Structurally vary a base room list per scene (drop a room, duplicate a room type) so a family spans
+    genuinely different buildings, not one plan re-seeded. Never returns empty."""
+    r = list(base)
+    if len(r) > 1 and rng.random() < 0.4:
+        r.pop(int(rng.integers(0, len(r))))
+    if base and rng.random() < 0.4:
+        r.append(base[int(rng.integers(0, len(base)))])
+    return r or list(base)
 
 
 def generate_family(task_type: str, *, n_train: int = 8, n_held_out: int = 3, difficulty: int = 1,
@@ -283,9 +296,39 @@ def generate_family(task_type: str, *, n_train: int = 8, n_held_out: int = 3, di
     NEXT ``n_held_out`` (never seen in train) to held-out — the honest generalization protocol. Each structure is
     realized to a dimensionally-real SceneGraph."""
     rng = _rng(seed)
-    is_nav = any(t in task_type.lower() for t in _NAV_TASKS)
-    structs = (_nav_structures(task_type, rng, difficulty) if is_nav
-               else _manip_structures(task_type, rng, difficulty))
+    tl = task_type.lower()
+    from virturoid.services.scene_layout import ENV_TEMPLATES, propose_room_graph, realize_scene_spec
+    from virturoid.services.scene_validity import validate_scene_physical
+    # ANY named environment (house / warehouse / office / clinic / store / ...) is realized by the ONE general
+    # scene_layout engine: prompt -> room graph -> BSP floor plan -> furnished, validated. Structural variation =
+    # a perturbed room set + a fresh floor-plan seed per scene; held-out uses a disjoint seed bucket -> genuinely
+    # different buildings, never seed-jitter of one plan. No per-environment code.
+    if any(kw in tl for kw in ENV_TEMPLATES):
+        base = propose_room_graph(task_type, rng=rng)
+        env = next((w for w in tl.split() if w in ENV_TEMPLATES), (base[0] if base else "scene"))
+
+        def _mk(bucket, i):
+            r = _rng(seed * bucket + i * 97 + 3)
+            rooms = _perturb_rooms(base, r)
+            s = realize_scene_spec(rooms, env=env, seed=int(r.integers(0, 1_000_000)))
+            for _ in range(13):                                # keep-if-valid (rejection sampling)
+                if validate_scene_physical(s, robot_radius=0.18, run_settle=False)["ok"]:
+                    break
+                s = realize_scene_spec(rooms, env=env, seed=int(r.integers(0, 1_000_000)))
+            return s
+        fam = SceneFamily(task_type=task_type)
+        for i in range(n_train):
+            s = _mk(1000, i); fam.train.append(s); fam.train_keys.append(s.id)
+        for i in range(n_held_out):
+            s = _mk(9000, i); fam.held_out.append(s); fam.held_out_keys.append(s.id)   # disjoint seed bucket
+        return fam
+    # non-environment tasks: generic navigation floor plans, or tabletop manipulation
+    if any(t in tl for t in _NAV_TASKS):
+        kind, realize = "nav", _realize_nav
+        structs = _nav_structures(task_type, rng, difficulty)
+    else:
+        kind, realize = "manip", _realize_manip
+        structs = _manip_structures(task_type, rng, difficulty)
     # dedupe by structure key, deterministically shuffle, split disjoint
     seen, uniq = set(), []
     for s in structs:
@@ -293,7 +336,6 @@ def generate_family(task_type: str, *, n_train: int = 8, n_held_out: int = 3, di
             seen.add(s.key()); uniq.append(s)
     order = rng.permutation(len(uniq))
     uniq = [uniq[i] for i in order]
-    realize = _realize_nav if is_nav else _realize_manip
     train_structs = uniq[:n_train]
     held_structs = uniq[n_train:n_train + n_held_out]
     fam = SceneFamily(task_type=task_type)

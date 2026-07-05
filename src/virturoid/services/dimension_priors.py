@@ -61,6 +61,29 @@ _YCB = [
     DimPrior("ycb.can_355", (0.066, 0.066, 0.122), ((0.05, 0.08), (0.05, 0.08), (0.10, 0.14)), mass_kg=(0.35, 0.42), source="355 ml can"),
 ]
 
+# --- Real household furniture + warehouse fixtures (x, y, z=HEIGHT), for house/warehouse environments. Boxes at
+# real dimensions is a faithful navigation-obstacle model; detailed meshes are a later fidelity item. ---
+_FURNITURE_PRIORS = [
+    DimPrior("sofa", (2.0, 0.9, 0.80), ((1.4, 2.6), (0.8, 1.0), (0.7, 0.9)), density=300.0, source="3-seat sofa"),
+    DimPrior("armchair", (0.85, 0.85, 0.90), ((0.7, 1.0), (0.7, 1.0), (0.8, 1.0)), density=300.0, source="armchair"),
+    DimPrior("coffee_table", (1.1, 0.6, 0.45), ((0.8, 1.4), (0.5, 0.7), (0.40, 0.50)), density=600.0, source="coffee table"),
+    DimPrior("tv_stand", (1.5, 0.4, 0.55), ((1.0, 1.9), (0.35, 0.5), (0.4, 0.6)), density=600.0, source="TV stand"),
+    DimPrior("dining_table", (1.6, 0.9, 0.75), ((1.0, 2.2), (0.8, 1.1), (0.71, 0.80)), density=650.0, source="dining table"),
+    DimPrior("bed", (2.0, 1.5, 0.55), ((1.9, 2.1), (0.9, 1.8), (0.4, 0.65)), density=250.0, source="queen bed"),
+    DimPrior("nightstand", (0.5, 0.4, 0.55), ((0.4, 0.6), (0.35, 0.5), (0.45, 0.65)), density=600.0, source="nightstand"),
+    DimPrior("wardrobe", (1.2, 0.6, 2.0), ((0.9, 1.8), (0.55, 0.7), (1.8, 2.2)), density=500.0, source="wardrobe"),
+    DimPrior("fridge", (0.7, 0.7, 1.80), ((0.6, 0.9), (0.6, 0.8), (1.6, 2.0)), density=350.0, source="refrigerator"),
+    DimPrior("counter", (2.0, 0.65, 0.90), ((0.8, 3.0), (0.6, 0.7), (0.86, 0.95)), density=700.0, source="kitchen counter run"),
+    DimPrior("toilet", (0.40, 0.66, 0.79), ((0.35, 0.45), (0.6, 0.72), (0.7, 0.85)), density=900.0, source="toilet"),
+    DimPrior("sink", (0.60, 0.45, 0.85), ((0.5, 0.8), (0.4, 0.55), (0.8, 0.9)), density=700.0, source="vanity sink"),
+    DimPrior("desk", (1.2, 0.6, 0.74), ((0.6, 2.0), (0.4, 0.9), (0.71, 0.76)), density=650.0, source="desk"),
+    # warehouse fixtures
+    DimPrior("rack", (2.7, 1.0, 2.5), ((1.8, 3.6), (0.8, 1.2), (2.0, 3.5)), density=400.0, source="pallet-rack bay (upright + beams)"),
+    DimPrior("crate", (0.5, 0.4, 0.4), ((0.3, 0.7), (0.3, 0.6), (0.25, 0.5)), density=200.0, mass_kg=(2.0, 25.0), source="warehouse crate"),
+    DimPrior("carton", (0.4, 0.3, 0.3), ((0.25, 0.6), (0.2, 0.45), (0.2, 0.45)), density=180.0, mass_kg=(0.5, 15.0), source="shipping carton"),
+    DimPrior("forklift_zone", (1.2, 1.2, 0.01), ((0.8, 2.0), (0.8, 2.0), (0.005, 0.02)), density=100.0, source="staging pad"),
+]
+
 # --- Generic task props (the categories scene_generator uses today), sized realistically. z = HEIGHT. ---
 _GENERIC = [
     DimPrior("block", (0.05, 0.05, 0.05), ((0.02, 0.10), (0.02, 0.10), (0.02, 0.10)), density=600.0, mass_kg=(0.02, 0.20), source="graspable block (YCB-scale)"),
@@ -70,7 +93,7 @@ _GENERIC = [
     DimPrior("zone", (0.30, 0.30, 0.01), ((0.05, 2.0), (0.05, 2.0), (0.005, 0.02)), density=100.0, source="target pad (marker)"),
 ]
 
-PRIORS: dict[str, DimPrior] = {p.category: p for p in (_ARCH + _YCB + _GENERIC)}
+PRIORS: dict[str, DimPrior] = {p.category: p for p in (_ARCH + _YCB + _FURNITURE_PRIORS + _GENERIC)}
 
 
 @dataclass
