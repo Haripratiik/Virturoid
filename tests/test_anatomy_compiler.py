@@ -44,6 +44,49 @@ class AnatomyCompilerTests(unittest.TestCase):
         self.assertGreaterEqual(len(g.actuated_joints()), 8)
         self.assertEqual(g.robot_class, "quadruped")
 
+    def test_oversized_head_is_capped_to_the_torso(self):
+        # R3 proportion band: an LLM graph proposing a head as big as the whole robot must be capped by the
+        # compiler so it reads as a sensor head, not a "second body" (the #1 toy tell the styling pass exposed).
+        graph = {
+            "robot_class": "quadruped", "name": "bighead",
+            "parts": [
+                {"name": "torso", "role": "body", "size": 0.6, "girth": 0.22},
+                {"name": "neck", "role": "neck", "parent": "torso", "attach": "front_top", "aim": "forward_up",
+                 "size": 0.12, "girth": 0.30},                  # neck girth absurdly torso-fat -> capped
+                {"name": "head", "role": "sensor_head", "parent": "neck", "attach": "tip", "aim": "forward",
+                 "size": 0.9, "girth": 0.4},                    # head as long as the whole robot -> capped
+                {"name": "front_leg", "role": "leg", "parent": "torso", "attach": "front_bottom", "aim": "down",
+                 "size": 0.3, "segments": 3, "symmetry": "left_right"},
+                {"name": "hind_leg", "role": "leg", "parent": "torso", "attach": "rear_bottom", "aim": "down",
+                 "size": 0.3, "segments": 3, "symmetry": "left_right"},
+            ],
+        }
+        g = build_from_anatomy(graph)
+        torso = next(s for s in g.segments if s.name == "torso")
+        head = next(s for s in g.segments if "head" in s.name)
+        neck = next(s for s in g.segments if "neck" in s.name)
+        ext = head.length_m + 2.0 * head.radius_m                # capsule visible extent
+        self.assertLessEqual(ext, 1.06 * torso.length_m,
+                             f"head extent {ext:.3f} must not rival torso length {torso.length_m:.3f}")
+        self.assertLess(neck.radius_m, torso.radius_m, "a torso-fat neck must be slimmed below the trunk")
+
+    def test_morphology_gate_flags_a_head_that_rivals_the_trunk(self):
+        # The gate MEASURES head/torso extent on every quadruped, and flags a head that rivals the trunk (the
+        # backstop for the compiler cap above; drives repair once the gate-last/repair loop lands).
+        from virturoid.services.morphology_priors import validate_morphology
+        g = build_from_anatomy(DOG)
+        rep0 = validate_morphology(g)
+        self.assertIn("head_torso_ext", rep0.measured)           # the band is measured on a normal dog
+        self.assertLessEqual(rep0.measured["head_torso_ext"], 1.05)
+        # Inflate the head past the trunk and re-check: the gate must catch it.
+        head = next(s for s in g.segments if "head" in s.name.lower())
+        torso = next(s for s in g.segments if s.parent is None)
+        head.length_m = 1.4 * float(torso.length_m)
+        head.radius_m = 0.5 * float(torso.length_m)
+        rep1 = validate_morphology(g)
+        self.assertGreater(rep1.measured["head_torso_ext"], 1.05)
+        self.assertTrue(any("head extent" in i for i in rep1.issues), rep1.issues)
+
     def test_symmetric_child_attaches_to_correct_side_of_symmetric_parent(self):
         # The foot (symmetric) parents the leg (symmetric) — each side's foot must attach to THAT side's leg
         # leaf, not an un-split name. If the leaf registry is wrong, validate() reports an unknown parent.

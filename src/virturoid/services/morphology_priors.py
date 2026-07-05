@@ -29,6 +29,7 @@ QUAD_BANDS = {
     "torso_LW": (1.2, 4.5),         # torso longer than wide (blob dog was 0.31: WIDER than long)
     "leg_len_frac": (0.35, 1.6),    # (thigh+shank)/torso_length
     "foot_limb_ratio": (0.0, 1.6),  # foot radius / shank radius (giant ball feet read as toys)
+    "head_torso_ext": (0.0, 1.05),  # head visible extent (len + 2r) / torso length: a head must not rival the trunk
 }
 ARM_BANDS = {
     "dof": (3, 8),                  # a graspable arm needs yaw+2 pitch+wrist; 6-7 = industrial class
@@ -122,6 +123,17 @@ def validate_morphology(gene) -> MorphReport:
             measured["foot_limb_ratio"] = round(fr, 2)
             if fr > QUAD_BANDS["foot_limb_ratio"][1]:
                 issues.append(f"foot radius {fr:.2f}x the shank radius (giant ball feet)")
+        # Head must not rival the trunk. Compare the head's visible extent (capsule length + both hemispherical
+        # caps = len + 2r) to the torso length; a ratio > ~1 is the "second body" render defect. torso length =
+        # the base box core (base.length_m), which is the trunk's long axis even for compound-geometry trunks.
+        heads = _seg_by(gene, lambda s: any(k in s.name.lower() for k in ("head", "skull", "snout", "muzzle")))
+        if heads and base is not None and float(base.length_m) > 1e-6:
+            ext = max(float(h.length_m) + 2.0 * float(h.radius_m) for h in heads)
+            ratio = ext / float(base.length_m)
+            measured["head_torso_ext"] = round(ratio, 2)
+            if ratio > QUAD_BANDS["head_torso_ext"][1]:
+                issues.append(f"head extent {ratio:.2f}x the torso length (a head rivaling the trunk reads as a "
+                              f"second body, not a sensor head)")
     elif cls in ("manipulator", "arm"):
         act = actuated(gene.segments)
         measured["dof"] = len(act)

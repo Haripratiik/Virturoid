@@ -395,6 +395,16 @@ def build_from_anatomy(graph: dict) -> RobotGene:
         girth = float(part.get("girth") or 0) or 0.18 * size
         girth *= max(0.3, min(3.0, float(part.get("thickness") or 1.0)))   # per-part THICKNESS knob (load-bearing)
         n = max(1, min(8, int(part.get("segments") or 1)))
+        # PROPORTION caps vs the REALIZED torso (blen = trunk length, brad = trunk half-width): the fidelity
+        # render — once the styling pass removed the palette noise — showed a head capsule rivaling the whole
+        # trunk (a "second body") and connective parts as fat as a limb. Those are the LLM's free sizing running
+        # past what reads as a real machine. Code owns these bands (like the leg-slenderness cap); the LLM sizes
+        # WITHIN them. Caps only ever shrink (min), so a well-proportioned part is untouched.
+        if role in ("head", "sensor_head", "snout", "muzzle", "skull", "face"):
+            size = min(size, 0.50 * blen)     # a head must be clearly shorter than the trunk
+            girth = min(girth, 0.55 * brad)   # ...and narrower — reads as a sensor head, not a second body
+        elif role in ("neck", "tail", "antenna", "ear", "mast", "horn"):
+            girth = min(girth, 0.45 * brad)   # slim connective appendages, never torso-fat
         if role == "leg" and (graph.get("robot_class") or "").lower() in ("quadruped", "legged"):
             # G6/G7 morphology-prior NORMALIZATION at the compiler choke point (applies to LLM graphs AND the
             # generic fallback alike): a walking leg needs >=3 ACTUATED joints (Go2 = 3/leg) — with the terminal
