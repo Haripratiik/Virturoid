@@ -94,33 +94,64 @@ def _place(name, cat, x, y, *, floor=False, material=None, mass=None, yaw=0.0):
                        pose_xyz_rpy=(round(float(x), 4), round(float(y), 4), round(z, 4), 0.0, 0.0, float(yaw)))
 
 
+_REACH_X = (0.28, 0.48)                             # kept within a 0.55 m arm reach even at the far corner
+_REACH_Y = (-0.18, 0.18)
+
+
+def _relax(xs, ys, radii, rng, *, margin=0.012, iters=60):
+    """Size-AWARE separation: push any pair whose centers are closer than ``r_i + r_j + margin`` apart (a few
+    passes) and clamp into the reachable annulus, so a layout keeps its STRUCTURE but no two footprints overlap —
+    even elongated objects like a cracker box. Applied AFTER the DR jitter so jitter can't re-overlap them."""
+    import numpy as np
+    xs = np.asarray(xs, float).copy(); ys = np.asarray(ys, float).copy(); r = np.asarray(radii, float)
+    n = len(xs)
+    for _ in range(iters):
+        moved = False
+        for i in range(n):
+            for j in range(i + 1, n):
+                need = r[i] + r[j] + margin
+                dx, dy = xs[i] - xs[j], ys[i] - ys[j]
+                d = (dx * dx + dy * dy) ** 0.5
+                if d < need:
+                    push = (need - d) / 2 + 1e-4
+                    ux, uy = (dx / d, dy / d) if d > 1e-6 else (rng.uniform(-1, 1), rng.uniform(-1, 1))
+                    xs[i] += ux * push; ys[i] += uy * push; xs[j] -= ux * push; ys[j] -= uy * push
+                    moved = True
+        xs = np.clip(xs, *_REACH_X); ys = np.clip(ys, *_REACH_Y)
+        if not moved:
+            break
+    return xs, ys
+
+
 def _layout_positions(layout: str, n: int, rng):
-    """Deterministic per-layout base positions in the reachable tabletop annulus (x in [0.32,0.46], y in
-    [-0.16,0.16]); the STRUCTURE (pattern), inner DR jitter added by the caller."""
+    """Deterministic per-layout base positions in the reachable tabletop annulus; the STRUCTURE (pattern). The
+    caller adds DR jitter then relaxes with size-aware separation, so no two objects interpenetrate."""
     import numpy as np
     if layout == "row":
-        xs = np.full(n, 0.40); ys = np.linspace(-0.14, 0.14, n)
+        xs = np.full(n, 0.40); ys = np.linspace(-0.20, 0.20, n)
     elif layout == "cluster":
-        xs = 0.39 + rng.normal(0, 0.015, n); ys = rng.normal(0, 0.03, n)
+        xs = 0.40 + rng.normal(0, 0.03, n); ys = rng.normal(0, 0.05, n)
     elif layout == "two_groups":
-        xs = np.where(np.arange(n) < n // 2, 0.36, 0.44); ys = np.where(np.arange(n) < n // 2, -0.10, 0.10)
+        xs = np.where(np.arange(n) < n // 2, 0.34, 0.46) + rng.normal(0, 0.02, n)
+        ys = np.where(np.arange(n) < n // 2, -0.14, 0.14) + rng.normal(0, 0.03, n)
     elif layout == "arc":
-        th = np.linspace(-0.7, 0.7, n); xs = 0.40 + 0.05 * np.cos(th); ys = 0.14 * np.sin(th)
+        th = np.linspace(-0.9, 0.9, n); xs = 0.40 + 0.07 * np.cos(th); ys = 0.20 * np.sin(th)
     else:  # scattered
-        xs = rng.uniform(0.34, 0.45, n); ys = rng.uniform(-0.15, 0.15, n)
+        xs = rng.uniform(*_REACH_X, n); ys = rng.uniform(*_REACH_Y, n)
     return xs, ys
 
 
 def _realize_manip(struct: StructureKey, rng) -> SceneGraph:
     import numpy as np
     objs: list[SceneObject] = []
-    # a REAL table surface (0.74 m tall) as context — the manipulation happens on the tabletop plane at TABLE_TOP_Z
+    cats = [list(struct.object_set)[i % len(struct.object_set)] for i in range(struct.n_objects)]
     xs, ys = _layout_positions(struct.layout, struct.n_objects, rng)
-    jit = rng.uniform(-0.02, 0.02, (struct.n_objects, 2))            # inner DR (the only per-seed variation)
-    cats = list(struct.object_set)
+    xs = np.asarray(xs, float) + rng.uniform(-0.02, 0.02, struct.n_objects)   # inner DR (per-seed variation)...
+    ys = np.asarray(ys, float) + rng.uniform(-0.02, 0.02, struct.n_objects)
+    radii = [max(default_size(c)[0], default_size(c)[1]) / 2 for c in cats]   # per-object footprint radius
+    xs, ys = _relax(xs, ys, radii, rng)                             # ...then relax so no two footprints overlap
     for i in range(struct.n_objects):
-        cat = cats[i % len(cats)]
-        objs.append(_place(f"obj{i}", cat, xs[i] + jit[i, 0], ys[i] + jit[i, 1],
+        objs.append(_place(f"obj{i}", cats[i], xs[i], ys[i],
                            material=["red", "blue", "green", "orange"][i % 4]))
     # sort/stack bins/zone: position varies with layout (front-back vs left-right) -> structural, not fixed
     if struct.task_type in ("pick_place_sort", "sort"):
@@ -196,7 +227,7 @@ def _realize_nav(struct: StructureKey, rng) -> SceneGraph:
     return SceneGraph(id=f"nav_{struct.topology}_{struct.layout}_{struct.n_objects}_{abs(hash(struct.key())) % 10000}",
                       name=f"{struct.task_type}:{struct.topology}:{struct.layout}", backend_targets=["mujoco"],
                       robot_spawn_xyz_rpy=(0.0, 0.0, 0.0, 0, 0, 0), objects=objs,
-                      bounds=((-2.5, -2.5, 0.0), (2.5, 2.5, 2.6)),
+                      bounds=((-3.5, -3.5, 0.0), (3.5, 3.5, 2.6)),   # roomy enough for serpentine courses
                       variation_parameters={"structure": str(struct.key()), "topology": struct.topology,
                                             "corridor_width_m": round(width, 3), "obstacle_layout": struct.layout})
 
