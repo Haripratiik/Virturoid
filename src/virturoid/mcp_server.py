@@ -44,9 +44,78 @@ def _tools_call(params: dict) -> dict:
     return {"content": content, "isError": not ok, "structuredContent": payload if isinstance(payload, dict) else {}}
 
 
+# G-E: workflow PROMPTS. A server teaches multi-step use through prompts; the reasoning runs on the CLIENT's
+# tokens (Claude Code slash-commands /mcp__virturoid__*, Cursor). Codex ignores prompts -> `instructions` (above)
+# carries the same contract for the floor client. Each returns a user message the client LLM then executes.
+_PROMPTS = {
+    "design_robot_workflow": {
+        "description": "The full design loop: author -> simulate -> read the HONEST verdict -> localized-edit -> "
+                       "repeat until a credible walk -> export. Use for any 'build me a robot that ...' goal.",
+        "arguments": [{"name": "goal", "description": "what the robot must be/do", "required": True}],
+        "text": (
+            "Goal: {goal}\n\nDrive the Virturoid substrate (you are the designer; it never spends its own LLM "
+            "tokens — check with llm_spend):\n"
+            "1. get_design_schema to learn the anatomy-graph language.\n"
+            "2. submit_design {{graph}} to author + hold the robot (or create_robot {{prompt}} for a quick start).\n"
+            "3. get_robot to read class + discovered appendages; render_view to SEE it.\n"
+            "4. verify_robot {{mode:'quick'}} while iterating — read survived + cadence + FORWARD DISPLACEMENT.\n"
+            "5. If not a credible walk, edit_robot with LOCALIZED ops (e.g. taller = scale_group legs length 1.2; "
+            "op:'list' for the catalog, op:'undo' to revert) — NEVER regenerate. Go to 4.\n"
+            "6. verify_robot {{mode:'full'}} for the definitive verdict + GIF, then export_held.\n"
+            "HONESTY: never claim a walk without verify_robot's traces (forward displacement, not abs-masked).")},
+    "diagnose_gait": {
+        "description": "Read a held robot's honest gait verdict and map the failure mode to the localized edit "
+                       "that fixes it (no regeneration).",
+        "arguments": [{"name": "robot_id", "description": "the held robot", "required": True}],
+        "text": (
+            "Diagnose robot_id={robot_id}:\n"
+            "1. verify_robot {{robot_id:'{robot_id}', mode:'full'}} — read verdict, survived, cadence, support_frac, "
+            "height_ratio, forward_m.\n"
+            "2. Map: falls over (upright low) -> widen stance (scale_group legs girth, or set stance out); no "
+            "propulsion (cadence low, forward~0) -> lengthen/strengthen legs (scale_group legs length); topples "
+            "forward (height_ratio drops) -> lower the body (set_height down).\n"
+            "3. Apply ONE edit_robot op, re-verify. Change one thing at a time; keep what improves forward_m.")},
+    "scene_workflow": {
+        "description": "Author or re-theme a task scene (e.g. 'house instead of warehouse') keeping the task/robot.",
+        "arguments": [{"name": "task", "description": "the task, e.g. navigation", "required": False},
+                      {"name": "theme", "description": "warehouse|house|kitchen|lab|yard", "required": False}],
+        "text": (
+            "Scene for task='{task}', theme='{theme}':\n"
+            "1. create_scene {{task:'{task}', theme:'{theme}'}} to build + hold it.\n"
+            "2. To re-theme later (keeping task/robot/layout): edit_scene {{ops:[{{op:'swap_theme', "
+            "args:{{theme:'house'}}}}]}}.\n"
+            "3. submit_scene_spec {{objects}} instead if you want to author exact object placements yourself.")},
+}
+
+
+def _prompts_list() -> dict:
+    return {"prompts": [{"name": n, "description": p["description"], "arguments": p["arguments"]}
+                        for n, p in _PROMPTS.items()]}
+
+
+def _prompts_get(params: dict) -> dict:
+    name = params.get("name")
+    p = _PROMPTS.get(name)
+    if p is None:
+        raise ValueError(f"no prompt '{name}'")
+    args = params.get("arguments") or {}
+    filled = {a["name"]: args.get(a["name"], f"<{a['name']}>") for a in p["arguments"]}
+    return {"description": p["description"],
+            "messages": [{"role": "user", "content": {"type": "text", "text": p["text"].format(**filled)}}]}
+
+
 def _resources_list() -> dict:
-    render_dir = Path("build/agent_renders")
     items = []
+    # G-E: live STATE resources — clients that auto-attach resources ground themselves in what the agent holds.
+    try:
+        from virturoid.services import session_state
+        for r in session_state.list_robots():
+            rid = r["robot_id"]
+            items.append({"uri": f"virturoid://robot/{rid}/summary", "name": f"{rid} summary",
+                          "description": f"{r.get('robot_class') or '?'} — {r.get('label')}", "mimeType": "application/json"})
+    except Exception:  # noqa: BLE001 - resources are progressive enhancement
+        pass
+    render_dir = Path("build/agent_renders")
     if render_dir.exists():
         for p in sorted(render_dir.glob("*"))[:100]:
             if p.suffix.lower() in (".png", ".gif"):
@@ -57,7 +126,13 @@ def _resources_list() -> dict:
 
 def _resources_read(params: dict) -> dict:
     import base64
-    uri = str(params.get("uri", "")); path = Path(uri.replace("file://", ""))
+    uri = str(params.get("uri", ""))
+    if uri.startswith("virturoid://robot/"):                    # live state: return the compact summary JSON
+        rid = uri[len("virturoid://robot/"):].split("/")[0]
+        from virturoid.services.agent_tools import call_tool
+        payload = call_tool("get_robot", {"robot_id": rid}).get("result", {})
+        return {"contents": [{"uri": uri, "mimeType": "application/json", "text": json.dumps(payload, default=str)}]}
+    path = Path(uri.replace("file://", ""))
     if not path.exists():
         raise FileNotFoundError(f"no resource {uri}")
     data = base64.b64encode(path.read_bytes()).decode("ascii")
@@ -68,7 +143,8 @@ def _resources_read(params: dict) -> dict:
 def _handle(method: str, params: dict):
     if method == "initialize":
         return {"protocolVersion": PROTOCOL_VERSION,
-                "capabilities": {"tools": {"listChanged": False}, "resources": {"listChanged": False}},
+                "capabilities": {"tools": {"listChanged": False}, "resources": {"listChanged": False},
+                                 "prompts": {"listChanged": False}},
                 "serverInfo": SERVER_INFO,
                 "instructions": (
                     "Virturoid is a grounded text-to-robot substrate: YOU (the connected agent) are the "
@@ -91,6 +167,10 @@ def _handle(method: str, params: dict):
         return _resources_list()
     if method == "resources/read":
         return _resources_read(params)
+    if method == "prompts/list":
+        return _prompts_list()
+    if method == "prompts/get":
+        return _prompts_get(params)
     if method in ("ping",):
         return {}
     raise ValueError(f"method not found: {method}")
