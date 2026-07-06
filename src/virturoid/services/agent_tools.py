@@ -264,6 +264,11 @@ try:
     TOOLS.update(AI_NATIVE_TOOLS)
 except Exception:  # noqa: BLE001 - the stateless tools stay available even if the AI-native module has an issue
     pass
+try:
+    from virturoid.services.agent_design_tools import AGENT_DESIGN_TOOLS
+    TOOLS.update(AGENT_DESIGN_TOOLS)                          # G-A/G-C: the external agent as the designer
+except Exception:  # noqa: BLE001
+    pass
 
 
 def tool_specs() -> list[dict]:

@@ -1,0 +1,245 @@
+"""Agent-first DESIGN + STATEFUL-CHAIN tools (docs/agent_first_plan.md P1: G-A + G-C). These are the tools
+that let an EXTERNAL frontier agent (Claude Code/Codex over MCP) be the whole brain against our substrate,
+with ZERO internal LLM spend: the agent AUTHORS the robot's anatomy graph itself (``submit_design``) instead
+of prompting our internal generator, then drives the full loop on THE gene it made (``evaluate_held`` /
+``train_held`` / ``export_held``) instead of recomposing from a prompt. Grounded by ``get_design_schema``
+(the anatomy-graph language + worked examples) so the agent knows what to submit. Every result is the compact
+verdict contract with teaching errors (SWE-agent ACI). Registered into ``agent_tools.TOOLS``.
+"""
+from __future__ import annotations
+
+from pathlib import Path
+
+# The REAL anatomy-graph vocabulary (extracted from anatomy_compiler.build_from_anatomy), so the schema we
+# teach the agent is accurate, not hallucinated. A part = one body/limb node; symmetry mirrors it to +-y.
+_ROLES = ["body", "neck", "head", "tail", "leg", "arm", "wing", "fin", "flipper", "foot", "hand", "claw",
+          "paw", "ear", "eye", "horn", "antenna", "shell", "beak", "snout"]
+_ATTACH = ["front_top", "front_bottom", "front_mid_bottom", "mid_bottom", "rear_mid_bottom", "rear_bottom",
+           "rear_top", "tip"]
+_AIM = ["forward", "back", "up", "down", "out", "forward_up", "forward_out", "forward_down_out",
+        "back_up", "back_out", "back_down_out", "down_out", "up_out"]
+
+_EXAMPLE_QUAD = {
+    "robot_class": "quadruped", "name": "agent_lynx",
+    "parts": [
+        {"name": "torso", "role": "body", "size": 0.55, "girth": 0.14},
+        {"name": "neck", "role": "neck", "parent": "torso", "attach": "front_top", "aim": "forward_up", "size": 0.12, "girth": 0.05},
+        {"name": "head", "role": "head", "parent": "neck", "attach": "tip", "aim": "forward", "size": 0.14, "girth": 0.055},
+        {"name": "tail", "role": "tail", "parent": "torso", "attach": "rear_top", "aim": "back_up", "size": 0.25, "girth": 0.03, "joint": "revolute"},
+        {"name": "leg1", "role": "leg", "parent": "torso", "attach": "front_bottom", "aim": "down_out", "size": 0.40, "girth": 0.018, "segments": 4, "symmetry": "left_right", "joint": "revolute"},
+        {"name": "leg2", "role": "leg", "parent": "torso", "attach": "rear_bottom", "aim": "down_out", "size": 0.40, "girth": 0.018, "segments": 4, "symmetry": "left_right", "joint": "revolute"},
+    ]}
+_EXAMPLE_HEX = {
+    "robot_class": "quadruped", "name": "agent_hexapod",
+    "parts": [{"name": "torso", "role": "body", "size": 0.5, "girth": 0.13}] + [
+        {"name": f"leg{i+1}", "role": "leg", "parent": "torso",
+         "attach": ["front_bottom", "mid_bottom", "rear_bottom"][i], "aim": "down_out",
+         "size": 0.34, "girth": 0.016, "segments": 4, "symmetry": "left_right", "joint": "revolute"} for i in range(3)]}
+
+
+def get_design_schema(_args: dict) -> dict:
+    """The anatomy-graph LANGUAGE the agent authors a robot in: part fields + the roles/attach/aim vocabularies
+    + two worked examples that compile. Call this before submit_design."""
+    return {"ok": True, "format": "anatomy_graph",
+            "top_level": {"robot_class": "quadruped|hexapod|humanoid|biped|legged", "name": "str", "parts": "[part...]"},
+            "part_fields": {
+                "name": "unique str (required)", "role": f"one of {_ROLES} (required)",
+                "parent": "another part's name; omit for the root body",
+                "attach": f"where on the parent it mounts: {_ATTACH}",
+                "aim": f"the direction it points: {_AIM}",
+                "size": "length in metres (the segment's long axis)", "girth": "radius in metres",
+                "segments": "int; a leg with 4 = 3 actuated joints + a welded foot (Go2-class)",
+                "symmetry": "'left_right' mirrors the part to a +y/-y PAIR (so one leg entry = two legs)",
+                "joint": "'revolute' to actuate it; omit for a welded/fixed part",
+                "curl": "float; a resting curl spread across a multi-segment part (a curved tail/neck)"},
+            "rules": ["exactly one root part with role 'body' and no parent",
+                      "a WALKING leg needs segments>=4 and joint='revolute' and aim 'down_out' for a stable stance",
+                      "symmetry:'left_right' counts as TWO legs — 2 leg parts = a quadruped, 3 = a hexapod",
+                      "the compiler + validity gates run on submit; a broken graph returns a teaching error"],
+            "examples": {"quadruped": _EXAMPLE_QUAD, "hexapod": _EXAMPLE_HEX}}
+
+
+def submit_design(args: dict) -> dict:
+    """The agent AUTHORS a robot: compile its anatomy graph, run the validity gates, and HOLD it under a
+    robot_id for the rest of the loop (simulate/edit/train/export). No prompt, no internal generator — the
+    external agent is the designer. Returns the id + summary + render, or a teaching error."""
+    from virturoid.services import session_state as S
+    from virturoid.services.anatomy_compiler import build_from_anatomy
+    graph = args.get("graph")
+    if not isinstance(graph, dict) or not graph.get("parts"):
+        return {"ok": False, "error": "provide graph:{robot_class, parts:[...]}; call get_design_schema for the language"}
+    roots = [p for p in graph["parts"] if (p.get("role") == "body") and not p.get("parent")]
+    if len(roots) != 1:
+        return {"ok": False, "error": f"a design needs EXACTLY ONE root part with role 'body' and no parent "
+                f"(found {len(roots)}); see get_design_schema examples"}
+    try:
+        gene = build_from_anatomy(graph)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": f"graph did not compile ({type(exc).__name__}: {exc}); check get_design_schema examples"}
+    if gene is None:
+        return {"ok": False, "error": "graph compiled to nothing; need one root 'body' part + at least one limb"}
+    issues = gene.validate()
+    if issues:
+        return {"ok": False, "error": f"design failed the validity gate: {'; '.join(issues[:3])}"}
+    try:
+        from virturoid.services.grounded_physics import ground_gene
+        ground_gene(gene, material=str(args.get("material") or "aluminum"), fill=0.25)
+    except Exception:  # noqa: BLE001 - grounding is value-add; a valid gene is still usable
+        pass
+    from virturoid.services.ai_native_tools import _render_gene, _summary
+    rid = S.put_robot(gene, prompt=f"[submitted:{graph.get('name', 'design')}]", label="submitted")
+    out = {"ok": True, **_summary(gene, rid), "name": graph.get("name")}
+    img = _render_gene(gene, rid)
+    if img:
+        out["artifacts"] = [img]
+    return out
+
+
+def submit_scene_spec(args: dict) -> dict:
+    """The agent AUTHORS a scene directly: a list of objects (name/category/size_xyz/pose/material) + a robot
+    spawn -> a validated SceneGraph held under a scene_id. Replaces the internal scene-author LLM role."""
+    from virturoid.schemas.scenes import SceneGraph, SceneObject
+    from virturoid.services import session_state as S
+    objs_in = args.get("objects")
+    if not isinstance(objs_in, list) or not objs_in:
+        return {"ok": False, "error": "provide objects:[{name, category, size_xyz:[x,y,z], pose_xyz_rpy:[6], material}]"}
+    try:
+        objs = [SceneObject(name=o["name"], object_type=o.get("object_type", "obstacle"),
+                            category=o.get("category"), material=o.get("material"),
+                            size_xyz=tuple(o["size_xyz"]) if o.get("size_xyz") else None,
+                            pose_xyz_rpy=tuple(o.get("pose_xyz_rpy") or (0, 0, 0, 0, 0, 0))) for o in objs_in]
+        spawn = tuple(args.get("robot_spawn_xyz_rpy") or (0.0, 0.0, 0.1, 0, 0, 0))
+        sg = SceneGraph(id=f"scene_agent_{len(objs)}", name=str(args.get("name") or "agent_scene"),
+                        backend_targets=["mujoco"], robot_spawn_xyz_rpy=spawn, objects=objs,
+                        variation_parameters={"task": args.get("task", "custom"), "theme": args.get("theme", "custom")})
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": f"scene did not build ({type(exc).__name__}: {exc}); each object needs name + size_xyz"}
+    issues = sg.validate()
+    ok = getattr(issues, "ok", True)
+    if not ok:
+        return {"ok": False, "error": f"scene failed validation: {[i.code for i in getattr(issues, 'issues', [])][:3]}"}
+    sid = S.put_scene(sg.to_dict(), task=args.get("task", "custom"), theme=args.get("theme", "custom"))
+    return {"ok": True, "scene_id": sid, "n_objects": len(objs), "valid": True}
+
+
+def evaluate_held(args: dict) -> dict:
+    """Score the HELD robot on its morphology-implied task (NOT a recompose from prompt) — real MuJoCo. The
+    agent evaluates the exact gene it designed/edited."""
+    from virturoid.services import session_state as S
+    from virturoid.services.task_matched_eval import evaluate_robot, robot_kind
+    gene = S.get_robot(args["robot_id"])
+    if gene is None:
+        return {"ok": False, "error": f"no robot '{args['robot_id']}'; submit_design or create_robot first"}
+    res = evaluate_robot(gene, prompt=(S.robot_meta(args["robot_id"]) or {}).get("prompt", ""))
+    return {"ok": True, "kind": robot_kind(gene), "task": res.get("task"), "metric": res.get("metric"),
+            "value": res.get("value"), "scored_gait": (res.get("detail") or {}).get("scored_gait")}
+
+
+def export_held(args: dict) -> dict:
+    """Export the HELD robot to real, usable files: MJCF (the sim model, always) + CAD meshes. Returns paths."""
+    from virturoid.services import session_state as S
+    gene = S.get_robot(args["robot_id"])
+    if gene is None:
+        return {"ok": False, "error": f"no robot '{args['robot_id']}'"}
+    fmts = args.get("formats") or ["mjcf"]
+    out_dir = Path(args.get("out_dir") or "build/agent_exports") / args["robot_id"]
+    out_dir.mkdir(parents=True, exist_ok=True)
+    artifacts = {}
+    if "mjcf" in fmts:
+        from virturoid.services.gene_compiler import compile_gene_to_mjcf, standing_spawn_z
+        p = out_dir / "robot.xml"
+        p.write_text(compile_gene_to_mjcf(gene, include_floor=True, spawn_z=standing_spawn_z(gene)), encoding="utf-8")
+        artifacts["mjcf"] = str(p)
+    if "cad" in fmts:
+        try:
+            from virturoid.services.cad_geometry import export_gene_cad
+            cad = export_gene_cad(gene, str(out_dir / "cad"))
+            artifacts["cad"] = cad if isinstance(cad, dict) else str(out_dir / "cad")
+        except Exception as exc:  # noqa: BLE001
+            artifacts["cad_error"] = f"{type(exc).__name__}: {exc}"
+    return {"ok": bool(artifacts), "artifacts": artifacts,
+            "note": "MJCF is the runnable sim model; a full URDF/ROS2 package comes from the build pipeline"}
+
+
+def train_held(args: dict) -> dict:
+    """Optimize/train a controller for the HELD robot and return a job_id (poll get_job). Default mode
+    'gait_search' = the bounded, VERIFIED CPG search (CPU, reliable) on THIS gene; 'gpu_rl' = MJX PPO on the
+    box when reachable. The long-job handle pattern (start now, poll later)."""
+    from virturoid.services import job_registry as J
+    from virturoid.services import session_state as S
+    rid = args.get("robot_id")
+    if not rid or S.get_robot(rid) is None:
+        return {"ok": False, "error": f"no robot '{rid}'; submit_design/create_robot first"}
+    job = J.create("train_gene", {"robot_id": rid, "mode": args.get("mode", "gait_search"),
+                                  "max_evals": int(args.get("max_evals", 8)), "iters": int(args.get("iters", 200))},
+                   Path(args.get("build_root") or "build/agent_builds"))
+    return {"ok": True, "job_id": job.get("id"), "status": job.get("status"),
+            "note": "poll get_job(job_id, since) for progress + the honest gait verdict"}
+
+
+def run_train_gene_job(args: dict, progress=None) -> dict:
+    """The train_gene job WORKER (called by job_registry). Reads the held gene, runs the search/train, and
+    returns the honest best verdict. In-process, so it reads session_state directly."""
+    from virturoid.services import session_state as S
+    def say(stage, msg):
+        if progress:
+            progress({"stage": stage, "message": msg})
+    gene = S.get_robot(args["robot_id"])
+    if gene is None:
+        raise RuntimeError(f"no robot '{args['robot_id']}' held")
+    mode = args.get("mode", "gait_search")
+    if mode == "gpu_rl":
+        from virturoid.services.gpu_trainer import gpu_available, train_gene_on_gpu
+        if gpu_available(timeout=20):
+            say("train", "GPU reachable — MJX PPO on the held gene")
+            out = Path("build/agent_builds") / args["robot_id"] / "policy.npz"
+            out.parent.mkdir(parents=True, exist_ok=True)
+            npz = train_gene_on_gpu(gene, out_path=str(out), iters=int(args.get("iters", 200)), envs=512,
+                                    cpg=True, dr=True, real_actuator=True, sphere_feet=True,
+                                    progress=lambda m: say("train", m))
+            return {"mode": "gpu_rl", "policy": npz, "trained": bool(npz)}
+        say("train", "GPU not reachable — falling back to the CPU gait search")
+    # gait_search: the bounded, honesty-gated CPG search on THIS gene (the verified multi-step search)
+    say("search", "sweeping CPG gait params, physics-evaluating each")
+    from virturoid.services.design_search import run_design_search
+    from virturoid.services.search_adapters import cpg_grid_proposer, make_cpg_evaluate
+    evaluate = make_cpg_evaluate(gene, steps=600)
+    gates = {"forward_m": 0.12, "cadence": 3.0, "upright": 0.5}
+    rep = run_design_search(propose=cpg_grid_proposer(), evaluate=evaluate, task_type="locomotion",
+                            max_evals=int(args.get("max_evals", 8)), gates=gates)
+    b = rep.best
+    say("done", f"searched {rep.n_evals} configs; solved={rep.solved}")
+    return {"mode": "gait_search", "solved": rep.solved, "n_evals": rep.n_evals,
+            "best": ({"params": b.spec.get("params"), "forward_m": round(float(b.result.get("forward", 0)), 3),
+                      "cadence": round(float(b.result.get("cadence", 0)), 1),
+                      "failure_mode": b.artifact.get("failure_mode")} if b else None)}
+
+
+AGENT_DESIGN_TOOLS: dict[str, dict] = {
+    "get_design_schema": {"description": "The anatomy-graph LANGUAGE to author a robot (part fields + roles/"
+                          "attach/aim vocab + 2 worked examples). Call before submit_design.", "heavy": False,
+                          "handler": get_design_schema, "parameters": {"type": "object", "properties": {}}},
+    "submit_design": {"description": "AUTHOR a robot: compile YOUR anatomy graph, gate it, hold it under a "
+                      "robot_id (no prompt, no internal generator — you are the designer). Returns id+summary+render "
+                      "or a teaching error.", "heavy": True, "handler": submit_design,
+                      "parameters": {"type": "object", "required": ["graph"], "properties": {
+                          "graph": {"type": "object", "description": "anatomy graph: {robot_class, name, parts:[...]}"},
+                          "material": {"type": "string"}}}},
+    "submit_scene_spec": {"description": "AUTHOR a scene: a list of objects + a robot spawn -> a validated held "
+                          "scene (you are the scene designer).", "heavy": False, "handler": submit_scene_spec,
+                          "parameters": {"type": "object", "required": ["objects"], "properties": {
+                              "objects": {"type": "array", "items": {"type": "object"}}, "task": {"type": "string"},
+                              "robot_spawn_xyz_rpy": {"type": "array"}}}},
+    "evaluate_held": {"description": "Score the HELD robot on its task (real MuJoCo) — the exact gene you "
+                      "designed/edited, not a recompose.", "heavy": True, "handler": evaluate_held,
+                      "parameters": {"type": "object", "required": ["robot_id"], "properties": {
+                          "robot_id": {"type": "string"}, "task": {"type": "string"}}}},
+    "export_held": {"description": "Export the HELD robot to real files: MJCF (runnable sim model) + optional CAD "
+                    "meshes. Returns paths.", "heavy": True, "handler": export_held,
+                    "parameters": {"type": "object", "required": ["robot_id"], "properties": {
+                        "robot_id": {"type": "string"}, "formats": {"type": "array", "items": {"type": "string"}}}}},
+    "train_held": {"description": "Optimize/train a controller for the HELD robot; returns a job_id (poll "
+                   "get_job). mode 'gait_search'(CPU, default) or 'gpu_rl'(MJX PPO when the box is up).", "heavy": False,
+                   "handler": train_held, "parameters": {"type": "object", "required": ["robot_id"], "properties": {
+                       "robot_id": {"type": "string"}, "mode": {"type": "string"}, "max_evals": {"type": "integer"}}}},
+}
