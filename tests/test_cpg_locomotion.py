@@ -118,6 +118,31 @@ class TrotCpgPriorTests(unittest.TestCase):
         self.assertNotEqual(on["forward"], off["forward"],
                             "the fed phase clock must change the deployed trajectory (and OFF must not feed it)")
 
+    def test_fanned_quad_walks_under_the_crawl_gait(self):
+        # BREAKTHROUGH (walking-breakthrough-abduction): a FANNED wide-stance quad walks UPRIGHT under the
+        # statically-stable CRAWL gait (one leg lifts at a time -> 3 always planted -> the CoM stays inside the
+        # support triangle -> it cannot roll). The diagonal TROT rolls this same tippy body over for want of
+        # active balance; the fan (wide stance) + crawl (static support) together give a real open-loop walk.
+        from virturoid.services.anatomy_compiler import _generic_legged_graph, build_from_anatomy
+        from virturoid.services.morph_policy import crawl_gait_rollout
+        wide = crawl_gait_rollout(build_from_anatomy(_generic_legged_graph(n_pairs=2, girth=0.22, fan=True)),
+                                  steps=1200)
+        self.assertTrue(wide["survived"], "the fanned quad must survive the whole horizon under the crawl")
+        self.assertGreater(wide["forward"], 0.3, "must WALK forward (not creep in place)")
+        self.assertGreater(wide["support_frac"], 0.5, "must genuinely STEP (partial support), not slide/stand")
+        self.assertGreater(wide["height_ratio"], 0.6, "must stay TALL/upright, not collapse or roll")
+
+    def test_fan_option_defaults_off_and_widens_when_on(self):
+        # The fan is OPT-IN: default OFF leaves the generic quad graph byte-identical (narrow 'down' legs); ON
+        # flips the quad leg aim to 'down_out' (wide roll-stable stance). Guards the byte-identical guarantee.
+        from virturoid.services.anatomy_compiler import _generic_legged_graph
+        a = _generic_legged_graph(n_pairs=2)
+        self.assertEqual(a, _generic_legged_graph(n_pairs=2, fan=False), "fan defaults OFF -> graph unchanged")
+        aims_off = [p["aim"] for p in a["parts"] if p["role"] == "leg"]
+        aims_on = [p["aim"] for p in _generic_legged_graph(n_pairs=2, fan=True)["parts"] if p["role"] == "leg"]
+        self.assertEqual(aims_off, ["down", "down"], "narrow quad legs aim straight down by default")
+        self.assertEqual(aims_on, ["down_out", "down_out"], "fan=True fans the quad legs OUT for a wide stance")
+
     def test_cpg_flag_round_trips_through_npz(self):
         # A CPG-trained residual is wrong without the CPG, so the flag MUST persist through bank/reload.
         from virturoid.services.morph_graph import encode_robot

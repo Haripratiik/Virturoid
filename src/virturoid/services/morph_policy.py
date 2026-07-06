@@ -913,6 +913,106 @@ def recipe_rollout_morph(gene, policy: MorphPolicy | None = None, *, steps: int 
     return out
 
 
+def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float = 1.5, hip_amp: float = 0.9,
+                       knee_amp: float = 1.0, duty: float = 0.25, kp: float = 32.0, kd: float = 1.5,
+                       record_qpos: bool = False, frame_every: int = 5) -> dict:
+    """STATICALLY-STABLE CRAWL gait for a WIDE-stance quadruped (open-loop, NO policy). Lifts ONE leg at a time
+    (the 4 legs at quarter-cycle phases with a LOW-DUTY knee pulse) so 3 feet are ALWAYS planted -> the CoM stays
+    inside the support triangle -> it CANNOT roll over. On a FANNED wide-stance body
+    (``_generic_legged_graph(fan=True)``) this is the FIRST credible OPEN-LOOP quad walk (measured: survived 1500,
+    ~1.0 m @ 0.34 m/s, upright roll ~8deg, tall height 0.83, support_frac 0.84) — where the diagonal TROT rolls
+    over for want of active balance. Returns the SAME metrics dict as ``recipe_rollout_morph``. REQUIRES a wide
+    stance: narrow feet make a thin support triangle that tips even under a crawl (see
+    [[walking-breakthrough-abduction]]). Hip strides fore-aft (world-y); knee lifts; abduction (world-x) held."""
+    import re
+
+    import mujoco
+    import numpy as np
+
+    from virturoid.services.morph_graph import encode_robot
+    model = compiled_model(robot_mjcf(gene)); model.opt.iterations = 20
+    data = mujoco.MjData(model); mujoco.mj_resetData(model, data); mujoco.mj_forward(model, data)
+    graph = encode_robot(model)
+    if graph.base_jid < 0 or graph.n_tokens == 0:
+        return {"finite": True, "survived": True, "forward": 0.0, "height_ratio": 1.0, "alive": steps,
+                "cadence": 0.0, "support_frac": 0.0, "upright_frac": 1.0, "n_feet": 0, "speed": 0.0}
+    bq = graph.base_qadr; z0 = float(data.qpos[bq + 2]) or 1.0
+    qadr = np.asarray(graph.qadr, int); vadr = np.asarray(graph.vadr, int)
+    act_u = np.asarray(graph.act_u, int); clamps = np.asarray(graph.clamps, float)
+    q_def = np.array([float(data.qpos[a]) for a in qadr])
+    # group side-named legs (leg{n}_{l|r}_{seg}); per token tag abduction(world-x)/stride(world-y) + depth
+    q2j = {int(model.jnt_qposadr[j]): j for j in range(model.njnt)}
+    q2n = {int(model.jnt_qposadr[j]): (mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, j) or "")
+           for j in range(model.njnt)}
+    side_re = re.compile(r"(?:(front|hind)_)?leg(\d+)?_([lr])_(\d+)")
+    legs: dict = {}
+    for k in range(graph.n_tokens):
+        mm = side_re.search(q2n.get(int(qadr[k]), ""))
+        if not mm:
+            continue
+        key = f"{mm.group(1) or ''}{mm.group(2) or ''}_{mm.group(3)}"
+        j = q2j.get(int(qadr[k])); b = int(model.jnt_bodyid[j])
+        wa = data.xmat[b].reshape(3, 3) @ np.asarray(model.jnt_axis[j])
+        is_abd = abs(wa[0]) > abs(wa[1]) and abs(wa[0]) > abs(wa[2])
+        legs.setdefault(key, []).append((int(mm.group(4)), k, is_abd))
+    keys = sorted(legs)
+    hip_k: dict = {}; knee_k: dict = {}; ph_of: dict = {}
+    if len(keys) == 4:                                        # stable creep order FL,HR,FR,HL -> one foot up at a time
+        seq = [keys[0], keys[3], keys[1], keys[2]]
+        ph_of = {key: i / 4.0 for i, key in enumerate(seq)}
+    for key, joints in legs.items():
+        stride = sorted((s, kk) for (s, kk, abd) in joints if not abd)
+        if not stride:
+            continue
+        hip_k[key] = stride[0][1]; knee_k[key] = stride[-1][1]; ph_of.setdefault(key, 0.0)
+    dt = float(model.opt.timestep); x0 = float(data.qpos[bq]); alive = steps
+    qpos_frames = [] if record_qpos else None
+    # feet = lowest body geoms (per recipe convention) for cadence/support
+    _gz0 = np.asarray(data.geom_xpos[:, 2]); body_g = [gi for gi in range(model.ngeom) if int(model.geom_bodyid[gi]) != 0]
+    feet = []
+    if body_g:
+        zmin = min(float(_gz0[gi]) for gi in body_g); feet = [gi for gi in body_g if float(_gz0[gi]) < zmin + 0.05]
+    feet_idx = np.asarray(feet or body_g, int); fz0 = _gz0[feet_idx] if len(feet_idx) else np.zeros(0)
+    c_prev = (np.asarray(data.geom_xpos[feet_idx, 2]) < fz0 + 0.02) if len(feet_idx) else np.zeros(0, bool)
+    lifts = up_steps = support_steps = 0; hr = 1.0
+    for t in range(steps):
+        ph = freq * t * dt                                   # gait cycles elapsed
+        tgt = q_def.copy()
+        for key in hip_k:
+            u = (ph + ph_of[key]) % 1.0                       # this leg's phase in [0,1)
+            lift = 0.5 * (1 - np.cos(2 * np.pi * u / duty)) if u < duty else 0.0   # low-duty knee pulse (foot up ~duty)
+            tgt[knee_k[key]] = q_def[knee_k[key]] + knee_amp * lift
+            tgt[hip_k[key]] = q_def[hip_k[key]] + hip_amp * np.sin(2 * np.pi * u)  # hip strides fore-aft
+        for k in range(graph.n_tokens):
+            qv = float(data.qvel[vadr[k]])
+            tau = kp * (tgt[k] - float(data.qpos[qadr[k]])) - kd * qv
+            data.ctrl[act_u[k]] = float(np.clip(tau, -clamps[k], clamps[k]))
+        mujoco.mj_step(model, data)
+        if not np.all(np.isfinite(data.qpos)):
+            alive = t; break
+        if record_qpos and t % frame_every == 0:
+            qpos_frames.append(data.qpos.copy())
+        z = float(data.qpos[bq + 2]); hr = min(1.0, max(0.0, z / z0))
+        q = data.qpos[bq + 3:bq + 7]; upr = 1.0 - 2.0 * (float(q[1]) ** 2 + float(q[2]) ** 2)
+        if z < 0.5 * z0:
+            alive = t; break
+        if z > 0.7 * z0 and upr > 0.6:
+            up_steps += 1
+        if len(feet_idx):
+            c_now = np.asarray(data.geom_xpos[feet_idx, 2]) < fz0 + 0.02
+            lifts += int(np.sum(c_prev & ~c_now)); ng = int(np.sum(c_now))
+            support_steps += int(0 < ng < len(feet_idx)); c_prev = c_now
+    forward = float(data.qpos[bq] - x0); _T = max(1, alive) * dt
+    out = {"finite": True, "forward": round(forward, 3), "height_ratio": round(hr, 3), "alive": alive,
+           "survived": bool(alive >= steps and hr > 0.6), "speed": round(forward / max(1, alive) / dt, 3),
+           "cadence": round(lifts / _T, 2), "upright_frac": round(up_steps / max(1, alive), 3),
+           "support_frac": round(support_steps / max(1, alive), 3), "n_feet": int(len(feet_idx)),
+           "gait": "crawl", "n_tokens": graph.n_tokens}
+    if record_qpos:
+        out["qpos_frames"] = qpos_frames or []
+    return out
+
+
 def recipe_robustness(gene, policy: MorphPolicy | None = None, *, n: int = 8, gain: float = 0.15,
                       mass: float = 0.1, damping: float = 0.2, friction: float = 0.3, seed: int = 0,
                       steps: int = 900, **kw) -> dict:

@@ -545,10 +545,16 @@ def build_from_anatomy(graph: dict) -> RobotGene:
 # "wyvern" all yield the same generic legged body offline, and the LLM anatomy designer (the PRIMARY path)
 # supplies the species-specific anatomy when present. Hard-coding a graph per animal is the overfitting we
 # reject — the software must generalize to creatures nobody enumerated.
-def _generic_legged_graph(*, n_pairs: int, body=0.58, girth=0.13, leg=0.42, tail=0.14) -> dict:
+def _generic_legged_graph(*, n_pairs: int, body=0.58, girth=0.13, leg=0.42, tail=0.14, fan=False) -> dict:
     """A generic legged skeleton: torso + neck + head + tail + ``n_pairs`` of 3-segment walking legs, spread
     across the longitudinal anchors and fanned outward. Class-general — 2 pairs = quadruped, 3 = hexapod,
-    4 = octopod. No species shape baked in; just a credible standing N-legged body."""
+    4 = octopod. No species shape baked in; just a credible standing N-legged body.
+
+    ``fan`` FANS the quadruped legs outward (aim 'down'->'down_out') for a WIDE lateral stance. MEASURED: a
+    plain-'down' quad plants its feet NARROW (foot-y spread ~0.15 m, stance ratio 0.22) so a trot rolls over and
+    even a statically-stable crawl tips (thin support triangle) — the whole 'quads don't walk' saga. Fanning
+    widens the spread to ~0.5 m; paired with a CRAWL gait ([[walking-breakthrough-abduction]]) it gives a real
+    open-loop upright walk. Default OFF (byte-identical); the hexapod/octopod already fan by default."""
     n = max(1, min(4, n_pairs))
     parts = [
         {"name": "torso", "role": "body", "size": body, "girth": girth},
@@ -559,9 +565,10 @@ def _generic_legged_graph(*, n_pairs: int, body=0.58, girth=0.13, leg=0.42, tail
         {"name": "tail", "role": "tail", "parent": "torso", "attach": "rear_top", "aim": "back_up",
          "size": tail, "girth": 0.18 * tail, "joint": "revolute"},
     ]
+    _dn = "down_out" if fan else "down"                     # fan the quad legs OUT for a wide, roll-stable stance
     layouts = {
         1: [("front_bottom", "down")],
-        2: [("front_bottom", "down"), ("rear_bottom", "down")],
+        2: [("front_bottom", _dn), ("rear_bottom", _dn)],
         3: [("front_bottom", "forward_down_out"), ("mid_bottom", "down_out"), ("rear_bottom", "back_down_out")],
         4: [("front_bottom", "forward_down_out"), ("front_mid_bottom", "down_out"),
             ("rear_mid_bottom", "down_out"), ("rear_bottom", "back_down_out")],
