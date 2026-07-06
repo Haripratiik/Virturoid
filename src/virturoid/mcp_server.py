@@ -107,9 +107,10 @@ def _prompts_get(params: dict) -> dict:
 def _resources_list() -> dict:
     items = []
     # G-E: live STATE resources — clients that auto-attach resources ground themselves in what the agent holds.
+    # Bounded (Claude Code caps responses ~25k tokens): the 40 most-recent robot sessions, not every one ever held.
     try:
         from virturoid.services import session_state
-        for r in session_state.list_robots():
+        for r in session_state.list_robots()[-40:]:
             rid = r["robot_id"]
             items.append({"uri": f"virturoid://robot/{rid}/summary", "name": f"{rid} summary",
                           "description": f"{r.get('robot_class') or '?'} — {r.get('label')}", "mimeType": "application/json"})
