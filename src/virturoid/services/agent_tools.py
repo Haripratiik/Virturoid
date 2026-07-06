@@ -257,6 +257,15 @@ TOOLS: dict[str, dict] = {
 }
 
 
+# AI-native stateful tools (session-held robot/scene, incremental edits, jobs) — the surface the MCP server +
+# in-app assistant drive. Merged here so ``tool_specs``/``call_tool`` expose everything through one registry.
+try:
+    from virturoid.services.ai_native_tools import AI_NATIVE_TOOLS
+    TOOLS.update(AI_NATIVE_TOOLS)
+except Exception:  # noqa: BLE001 - the stateless tools stay available even if the AI-native module has an issue
+    pass
+
+
 def tool_specs() -> list[dict]:
     """The agent/MCP-discoverable tool list: ``[{name, description, parameters, heavy}]``."""
     return [{"name": n, "description": t["description"], "parameters": t["parameters"],

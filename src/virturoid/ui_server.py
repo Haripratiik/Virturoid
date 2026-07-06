@@ -20,6 +20,10 @@ DEFAULT_PROMPT = "Build a tabletop robot arm that sorts red and blue blocks."
 # parents[0] = src/virturoid, parents[1] = src, parents[2] = repo root.
 WEBUI_DIR = Path(__file__).resolve().parents[2] / "webui"
 
+# Virturoid Studio (the new React UI) is served ADDITIVELY at /studio from the
+# Vite build output. The legacy UI at / is untouched; both share the same API.
+FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
+
 # --- Assistant (local-model) configuration -----------------------------------
 # The assistant is a thin, swappable layer in the frontend server. It defaults
 # to a local Ollama runtime but is structured so other providers can be added
@@ -95,15 +99,28 @@ def main() -> None:
         action="store_true",
         help="Serve in the browser instead of opening the native desktop window.",
     )
+    parser.add_argument(
+        "--ui",
+        choices=("legacy", "studio"),
+        default=os.environ.get("VIRTUROID_UI", "legacy"),
+        help="Which frontend the native desktop window opens: the legacy console (/) "
+             "or Virturoid Studio (/studio). Default legacy until Studio reaches parity.",
+    )
     args = parser.parse_args()
     build_root = _resolve_build_root(Path(args.build_root))
+
+    if args.ui == "studio" and not (FRONTEND_DIST / "index.html").exists():
+        print("Virturoid Studio is not built yet. Build it with:")
+        print("  cd frontend && npm install && npm run build")
+        print("Falling back to the legacy console.")
+        args.ui = "legacy"
 
     if args.web:
         _run_web(args.host, args.port, build_root)
         return
 
     try:
-        run_desktop(args.host, args.port, build_root)
+        run_desktop(args.host, args.port, build_root, ui=args.ui)
     except ImportError:
         print("pywebview is not installed; falling back to browser mode.")
         print("Install the desktop runtime with:  pip install pywebview")
@@ -117,11 +134,13 @@ def _run_web(host: str, port: int, build_root: Path) -> None:
     server.serve_forever()
 
 
-def run_desktop(host: str, port: int, build_root: Path) -> None:
-    """Open the console as a native desktop window backed by the local server.
+def run_desktop(host: str, port: int, build_root: Path, ui: str = "legacy") -> None:
+    """Open the console as a NATIVE desktop window (pywebview / WebView2) backed by
+    the local server \u2014 no browser, no tabs; the app owns its own window chrome.
 
     The HTTP server runs on a daemon thread; pywebview owns the main thread.
     Raises ImportError when pywebview is unavailable so callers can fall back.
+    ``ui`` picks the frontend the window opens: "legacy" (/) or "studio" (/studio).
     """
     import threading
 
@@ -130,15 +149,16 @@ def run_desktop(host: str, port: int, build_root: Path) -> None:
     server = create_server(host, port, build_root)
     threading.Thread(target=server.serve_forever, daemon=True).start()
 
+    studio = ui == "studio"
     api = _DesktopApi()
     window = webview.create_window(
-        "Virturoid \u00b7 Build Console",
-        f"http://{host}:{port}/",
+        "Virturoid \u00b7 Studio" if studio else "Virturoid \u00b7 Build Console",
+        f"http://{host}:{port}/studio" if studio else f"http://{host}:{port}/",
         js_api=api,
         width=1440,
         height=920,
         min_size=(1100, 720),
-        background_color="#0c0f12",
+        background_color="#1a1815" if studio else "#0c0f12",
         frameless=True,
         easy_drag=False,
     )
@@ -482,6 +502,18 @@ def run_assistant_turn(payload: dict, build_root: Path) -> dict:
             user_text = str(message.get("content") or "")
             break
 
+    # AI-native design-edit route (docs/ai_native_plan.md P3): when the client has a robot/scene OPEN
+    # (sends robot_id/scene_id), the assistant makes an INCREMENTAL localized edit instead of a full rebuild
+    # ("make it taller" lengthens legs on the held gene). Additive: absent those ids, the build flow is unchanged.
+    robot_id, scene_id = payload.get("robot_id"), payload.get("scene_id")
+    if robot_id or scene_id:
+        try:
+            from virturoid.services.assistant_core import handle_turn
+            turn = handle_turn(user_text, robot_id=robot_id, scene_id=scene_id)
+            return {"role": "assistant", "content": turn["reply"], "action": None, "turn": turn}
+        except Exception as exc:  # noqa: BLE001 - never crash the chat; fall through to the build assistant
+            return {"role": "assistant", "content": f"Could not edit: {type(exc).__name__}: {exc}", "action": None}
+
     status = assistant_status()
     model_messages = [{"role": "system", "content": _ASSISTANT_SYSTEM_PROMPT}, *(
         {"role": m.get("role", "user"), "content": str(m.get("content") or "")}
@@ -504,6 +536,17 @@ def run_assistant_turn(payload: dict, build_root: Path) -> dict:
             "reach_m": action.get("reach_m"),
             "train": bool(action.get("train")),
         }
+        if payload.get("no_build"):
+            # Additive, opt-in (the new Studio UI sends no_build=true): return the
+            # detected intent instead of blocking this request on a multi-minute
+            # build -- the client dispatches it as a cancellable /api/jobs job.
+            return {
+                "role": "assistant",
+                "content": "That's a build — dispatching it as a live job.",
+                "action": "build_intent",
+                "build_intent": build_payload,
+                "model_used": used_model,
+            }
         try:
             build = run_build_from_payload(build_payload, build_root)
         except Exception as exc:  # noqa: BLE001
@@ -563,6 +606,16 @@ class _Handler(BaseHTTPRequestHandler):
         if parsed.path == "/app" or parsed.path.startswith("/app/"):
             self._send_webui_file(parsed.path)
             return
+        if parsed.path == "/studio" or parsed.path.startswith("/studio/"):
+            self._send_studio_file(parsed.path)
+            return
+        if parsed.path == "/api/jobs":
+            from virturoid.services import job_registry
+            self._send_json({"jobs": job_registry.list_jobs()})
+            return
+        if parsed.path.startswith("/api/jobs/"):
+            self._send_job_events(parsed)
+            return
         if parsed.path == "/api/packages":
             self._send_json(self._list_packages())
             return
@@ -594,6 +647,17 @@ class _Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path == "/api/build":
             self._handle_json_post(lambda payload: run_build_from_payload(payload, self.root))
+            return
+        if parsed.path == "/api/jobs":
+            def _create_job(payload: dict) -> dict:
+                from virturoid.services import job_registry
+                return {"job": job_registry.create(str(payload.get("kind", "")), payload.get("args") or {}, self.root)}
+            self._handle_json_post(_create_job)
+            return
+        if parsed.path.startswith("/api/jobs/") and parsed.path.endswith("/cancel"):
+            from virturoid.services import job_registry
+            job_id = parsed.path[len("/api/jobs/"):-len("/cancel")].strip("/")
+            self._send_json({"ok": job_registry.request_cancel(job_id)})
             return
         if parsed.path == "/api/assistant/chat":
             self._handle_json_post(lambda payload: run_assistant_turn(payload, self.root))
@@ -675,6 +739,52 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json({"error": "Package file not found."}, status=HTTPStatus.NOT_FOUND)
             return
         self._send_bytes(target.read_bytes(), _content_type(target))
+
+    def _send_job_events(self, parsed) -> None:
+        """GET /api/jobs/<id>?since=N -> {job, events} (1 Hz polling transport; the
+        event shape is SSE-ready so a stream endpoint later is a transport swap)."""
+        from urllib.parse import parse_qs
+
+        from virturoid.services import job_registry
+
+        job_id = parsed.path[len("/api/jobs/"):].strip("/")
+        try:
+            since = int((parse_qs(parsed.query).get("since") or ["0"])[0])
+        except ValueError:
+            since = 0
+        found = job_registry.events_since(job_id, since)
+        if found is None:
+            self._send_json({"error": "Unknown job."}, status=HTTPStatus.NOT_FOUND)
+            return
+        job, events = found
+        self._send_json({"job": job, "events": events})
+
+    def _send_studio_file(self, path: str) -> None:
+        """Serve the built Virturoid Studio SPA from frontend/dist under /studio.
+        Hashed /studio/assets/* get immutable caching; everything else falls back
+        to index.html (SPA routing) served no-cache so new builds show instantly."""
+        if not FRONTEND_DIST.exists():
+            self._send_json(
+                {"error": "Virturoid Studio is not built. Run: cd frontend && npm install && npm run build"},
+                status=HTTPStatus.NOT_FOUND,
+            )
+            return
+        relative = unquote(path[len("/studio"):]).lstrip("/")
+        parts = [part for part in relative.split("/") if part and part != ".."]
+        target = (FRONTEND_DIST / Path(*parts)).resolve() if parts else (FRONTEND_DIST / "index.html").resolve()
+        root = FRONTEND_DIST.resolve()
+        if root not in [target, *target.parents] or not target.exists() or target.is_dir():
+            target = (FRONTEND_DIST / "index.html").resolve()  # SPA fallback
+        data = target.read_bytes()
+        self.send_response(HTTPStatus.OK.value)
+        self.send_header("Content-Type", _studio_content_type(target))
+        self.send_header("Content-Length", str(len(data)))
+        if "/assets/" in str(target).replace("\\", "/"):
+            self.send_header("Cache-Control", "public, max-age=31536000, immutable")
+        else:
+            self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        self.wfile.write(data)
 
     def _send_webui_file(self, path: str) -> None:
         relative = unquote(path[len("/app/"):]) if path.startswith("/app/") else ""
@@ -814,6 +924,28 @@ def _safe_output_name(value: str) -> str:
 
 def _slugify(value: str) -> str:
     return _safe_output_name(value.lower())[:48]
+
+
+def _studio_content_type(path: Path) -> str:
+    """MIME types for the Studio bundle (mimetypes + overrides the stdlib misses)."""
+    import mimetypes
+
+    overrides = {
+        ".js": "text/javascript; charset=utf-8",
+        ".mjs": "text/javascript; charset=utf-8",
+        ".css": "text/css; charset=utf-8",
+        ".json": "application/json; charset=utf-8",
+        ".woff2": "font/woff2",
+        ".woff": "font/woff",
+        ".svg": "image/svg+xml",
+        ".wasm": "application/wasm",
+        ".urdf": "application/xml; charset=utf-8",
+        ".md": "text/markdown; charset=utf-8",
+    }
+    if path.suffix in overrides:
+        return overrides[path.suffix]
+    guessed, _ = mimetypes.guess_type(str(path))
+    return guessed or "application/octet-stream"
 
 
 def _content_type(path: Path) -> str:
