@@ -747,6 +747,32 @@ def recipe_rollout_morph(gene, policy: MorphPolicy | None = None, *, steps: int 
             cpg_on = True; cpg_freq = float(cpg["freq"]); res_scale = float(cpg.get("residual_scale", 0.3))
     x0 = float(data.qpos[bq]); px = x0; R = 0.0; a_prev = None; alive = steps; hr = 1.0
     dt = float(model.opt.timestep)
+    # --- OPT-IN reactive lateral-balance controller (default OFF -> _bal_on False -> byte-identical) ---
+    # A pure scripted trot is OPEN-LOOP: once the trunk starts to tip there is no feedback to catch it, so the
+    # body rolls over monotonically (measured roll 0 -> -67deg -> fall @ ~step 450). Real quadrupeds hold lateral
+    # balance with active HIP-ABDUCTION control. When the caller passes balance_kp/kd or stance_splay in `cpg`, we
+    # (a) SPLAY the legs outward for a wider passive base and (b) add roll + roll-rate feedback on the abduction
+    # joints — a differential leg "length" (abduction shortens vertical reach): lengthen the dropping side, shorten
+    # the rising side, to right the trunk. World fore-aft-axis joints are abduction; side = joint-anchor world-y
+    # sign. Targets clamped to the abduction joint range. Off by default -> no test touches this path.
+    _bal_kp = float(cpg.get("balance_kp", 0.0)) if cpg else 0.0
+    _bal_kd = float(cpg.get("balance_kd", 0.0)) if cpg else 0.0
+    _splay = float(cpg.get("stance_splay", 0.0)) if cpg else 0.0
+    _bal_on = bool(_bal_kp or _bal_kd or _splay)
+    _bal_side = np.zeros(graph.n_tokens); _bal_lo = np.zeros(graph.n_tokens); _bal_hi = np.zeros(graph.n_tokens)
+    _bvj = int(model.jnt_dofadr[graph.base_jid])
+    if _bal_on:
+        _q2j = {int(model.jnt_qposadr[j]): j for j in range(model.njnt)}
+        for k in range(graph.n_tokens):
+            j = _q2j.get(int(qadr[k]))
+            if j is None:
+                continue
+            b = int(model.jnt_bodyid[j]); wa = data.xmat[b].reshape(3, 3) @ np.asarray(model.jnt_axis[j])
+            if abs(wa[0]) > abs(wa[1]) and abs(wa[0]) > abs(wa[2]):        # world fore-aft axis = hip abduction
+                _bal_side[k] = 1.0 if float(data.xanchor[j][1]) >= 0 else -1.0
+                _rng = model.jnt_range[j] if bool(model.jnt_limited[j]) else (-0.6, 0.6)
+                _bal_lo[k] = float(_rng[0]); _bal_hi[k] = float(_rng[1])
+    _roll_prev = 0.0                                             # finite-difference roll-rate state (frame-independent)
     frames = [] if record_frames else None
     # qpos snapshots (full generalized coords) for HONEST off-line replay: unlike the geom-pose frames (viewer
     # JSON), qpos can be re-loaded into MjData to RENDER a real GIF, so any policy's true motion is inspectable
@@ -806,11 +832,19 @@ def recipe_rollout_morph(gene, policy: MorphPolicy | None = None, *, steps: int 
             a_filt = a_raw if a_filt is None else lpf * a_filt + (1.0 - lpf) * a_raw   # control rate (Playground ~5Hz
             a = a_filt                                       #   filter); lpf=0 -> a=a_raw -> unchanged.
         cphase = _two_pi * cpg_freq * t * dt if cpg_on else 0.0
+        _bal = 0.0
+        if _bal_on:                                             # righting signal from CURRENT trunk roll + roll-rate
+            _bq = data.qpos[bq + 3:bq + 7]; _bw = float(_bq[0]); _bx = float(_bq[1]); _by = float(_bq[2]); _bz = float(_bq[3])
+            _roll = float(np.arctan2(2.0 * (_bw * _bx + _by * _bz), 1.0 - 2.0 * (_bx * _bx + _by * _by)))
+            _rrate = (_roll - _roll_prev) / dt; _roll_prev = _roll   # finite-diff rate: unambiguous sign for damping
+            _bal = _bal_kp * _roll + _bal_kd * _rrate
         if record_actuation:
             _tau_row = np.empty(graph.n_tokens); _qv_row = np.empty(graph.n_tokens)
         for k in range(graph.n_tokens):
             cpg_off = float(cpg_amp[k] * np.sin(cphase + cpg_phase[k])) if cpg_on else 0.0
             tgt = q_def[k] + cpg_off + res_scale * as_v[k] * float(np.tanh(a[k]))
+            if _bal_on and _bal_side[k] != 0.0:                 # splay outward + differential-length roll correction
+                tgt = min(_bal_hi[k], max(_bal_lo[k], tgt + _bal_side[k] * (_splay - _bal)))
             qv_k = float(data.qvel[vadr[k]])
             tau = kp_v[k] * (tgt - float(data.qpos[qadr[k]])) - kd_v[k] * qv_k
             if real_actuator:                               # B1: the SAME four-quadrant clamp the MJX trainer uses
