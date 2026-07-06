@@ -518,6 +518,34 @@ def _trot_cpg_tokens(model, graph, params: dict):
                 amp[k] = ca_a; phase[k] = leg_phase[tok_leg[k]] + ca_ph
         return amp, phase, True
 
+    # PATH 1b — SIDE-NAMED QUADRUPED: 'leg{n}_{l|r}_{seg}' (leg1_l_0..) or '(front|hind)_leg_{l|r}_{seg}'. This is
+    # what the general composer/anatomy compiler emits for the product's own dogs, and PATH 1's leg{i}_{j} regex
+    # missed the side infix -> the trot-CPG silently fell to the scalar recipe (the GPU dog trained a gait that then
+    # collapsed on CPU deploy for want of its prior). Classify by leg identity + segment DEPTH (shallowest actuated
+    # joint = hip swing, deepest = knee lift); diagonal trot over the 4 legs (base [0,pi,pi,0] on the sorted keys
+    # -> {FL,HR} vs {FR,HL} anti-phase, the proven quad pattern).
+    side_re = re.compile(r"(?:(front|hind)_)?leg(\d+)?_([lr])_(\d+)")
+    tok_key = [None] * n; tok_seg = [None] * n; leg_segs: dict = {}
+    for k in range(n):
+        mm = side_re.search(qadr2name.get(int(graph.qadr[k]), ""))
+        if mm:
+            key = f"{mm.group(1) or ''}{mm.group(2) or ''}_{mm.group(3)}"   # 'front_l' / '1_l' etc.
+            tok_key[k] = key; tok_seg[k] = int(mm.group(4))
+            leg_segs.setdefault(key, set()).add(int(mm.group(4)))
+    if len(leg_segs) == 4:
+        keys = sorted(leg_segs)
+        base = [0.0, np.pi, np.pi, 0.0] if not params.get("leg_flip") else [np.pi, 0.0, 0.0, np.pi]
+        leg_ph = {keys[i]: base[i] for i in range(4)}
+        for k in range(n):
+            if tok_key[k] is None:
+                continue
+            segs_here = sorted(leg_segs[tok_key[k]])
+            if tok_seg[k] == segs_here[0]:                    # shallowest actuated joint = hip swing
+                amp[k] = th_a; phase[k] = leg_ph[tok_key[k]]
+            elif tok_seg[k] == segs_here[-1]:                 # deepest actuated joint = knee lift
+                amp[k] = ca_a; phase[k] = leg_ph[tok_key[k]] + ca_ph
+        return amp, phase, True
+
     # PATH 2 — BIPED / HUMANOID by anatomical naming: left/right hip-PITCH (thigh) + knee/shin (calf), L/R
     # anti-phase. Side is matched by full word ("left"/"right") OR by the ``l_``/``r_`` prefix our generated
     # humanoid uses (``l_thigh_joint`` / ``r_shin_joint``), and the calf by knee/calf/shin — so OUR generated
