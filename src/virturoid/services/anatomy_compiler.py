@@ -476,10 +476,21 @@ def build_from_anatomy(graph: dict) -> RobotGene:
             else:                                    # serial continuation -> straight along the chain
                 mount_offset, mount_euler = (0.0, 0.0, 0.0), (0.0, 0.0, 0.0)
                 seg_world_R = prev_world_R
+            # HIP ABDUCTION on the first leg joint: rotate about the body FORE-AFT axis (world +x) so the leg can
+            # control LATERAL balance. A leg of only sagittal (pitch) joints cannot resist a sideways tip, so the
+            # body ROLLS OVER during a trot (MEASURED on the all-pitch anatomy dog: base roll -8deg -> -81deg, tips
+            # at ~0.7s — no controller can save it). seg 0 = abduction (roll, tight range), seg 1.. = hip pitch +
+            # knee. Only for a proper walking leg (role 'leg', >=3 actuated = n>=4 with the welded foot).
+            _ja, _jlo, _jhi = (0.0, 1.0, 0.0), -2.6, 2.6
+            if i == 0 and role == "leg" and joint_type == "revolute" and n >= 4:
+                _abd = seg_world_R.T @ np.array([1.0, 0.0, 0.0])       # world fore-aft -> this segment's local frame
+                _nrm = float(np.linalg.norm(_abd)) or 1.0
+                _ja = (float(_abd[0] / _nrm), float(_abd[1] / _nrm), float(_abd[2] / _nrm))
+                _jlo, _jhi = -0.6, 0.6                                  # abduction range (Go2-class ~+-0.5 rad)
             segs.append(GeneSegment(
                 name=seg_name, parent=prev, shape="capsule", length_m=length_m, radius_m=max(0.006, radius_m),
-                mass_kg=max(0.02, 1.2 * length_m * radius_m * 30), joint_type=joint_type, joint_axis=(0.0, 1.0, 0.0),
-                joint_lower=-2.6 if joint_type else None, joint_upper=2.6 if joint_type else None,
+                mass_kg=max(0.02, 1.2 * length_m * radius_m * 30), joint_type=joint_type, joint_axis=_ja,
+                joint_lower=_jlo if joint_type else None, joint_upper=_jhi if joint_type else None,
                 mount_offset=mount_offset, mount_euler=mount_euler,
                 actuator_torque_nm=14.0 if joint_type else None, geometry=geo,
                 material=_role_material(seg_role)))
