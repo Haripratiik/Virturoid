@@ -30,6 +30,7 @@ class Appendage:
     roles: list                     # per-token role, aligned with tokens: abduction|stride|lift|yaw|spin|other
     side: float = 0.0               # +1 left (world +y), -1 right, 0 center — from the root joint anchor
     tip_xy: tuple = (0.0, 0.0)      # world (x, y) of the deepest (foot/tip) body — for the support polygon
+    tip_body: int = 0               # body id of the foot/tip — for measuring per-joint foot effect (radial legs)
     grounded: bool = False
 
     @property
@@ -143,7 +144,7 @@ def build_appendage_map(model, *, ground_tol: float = 0.10, spine_min: int = 6) 
                 pb = int(model.body_parentid[pb]); depth += 1
             if found and depth > best_depth:
                 best_depth, best_b = depth, bb
-        return body_low(best_b), (float(data.xpos[best_b][0]), float(data.xpos[best_b][1]))
+        return body_low(best_b), (float(data.xpos[best_b][0]), float(data.xpos[best_b][1])), best_b
 
     # build each root's main path (root -> deepest leaf via single-child descent; branch = end-effector/gripper)
     chains = []
@@ -154,9 +155,9 @@ def build_appendage_map(model, *, ground_tol: float = 0.10, spine_min: int = 6) 
             if len(ch) != 1:                            # branch point (e.g. gripper fingers) -> stop the main path
                 break
             cur = ch[0]; path.append(cur)
-        tip_z, tip_xy = chain_tip(path)
+        tip_z, tip_xy, tip_b = chain_tip(path)
         grounded = (tip_z - zmin) < ground_tol
-        chains.append({"root": r, "path": path, "grounded": grounded, "tip_xy": tip_xy,
+        chains.append({"root": r, "path": path, "grounded": grounded, "tip_xy": tip_xy, "tip_body": tip_b,
                        "unlimited": any(not limited[t] for t in path)})
 
     grounded_chains = [c for c in chains if c["grounded"]]
@@ -166,7 +167,7 @@ def build_appendage_map(model, *, ground_tol: float = 0.10, spine_min: int = 6) 
         c = grounded_chains[0]
         amap.spine = Appendage(kind="spine", tokens=c["path"],
                                roles=[_world_axis_role(waxis[t]) for t in c["path"]],
-                               side=0.0, tip_xy=c["tip_xy"], grounded=True)
+                               side=0.0, tip_xy=c["tip_xy"], tip_body=c["tip_body"], grounded=True)
         return amap
 
     for c in chains:
@@ -177,7 +178,7 @@ def build_appendage_map(model, *, ground_tol: float = 0.10, spine_min: int = 6) 
         if len(yidx) >= 2:
             roles[yidx[-1]] = "lift"
         app = Appendage(kind="", tokens=toks, roles=roles, side=side[c["root"]], tip_xy=c["tip_xy"],
-                        grounded=c["grounded"])
+                        tip_body=c["tip_body"], grounded=c["grounded"])
         if c["grounded"] and c["unlimited"] and len(toks) <= 2:
             app.kind = "wheel"; app.roles = ["spin"] * len(toks); amap.wheels.append(app)
         elif c["grounded"] and len(grounded_chains) >= 2:

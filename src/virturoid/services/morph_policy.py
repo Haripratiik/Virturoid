@@ -965,17 +965,20 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float = 1.5, hip_amp: f
             continue
         seg = rank_of[round(lg.tip_xy[0], 2)]
         ph_of[i] = (seg * (1.0 - beta) + 0.5 * (1.0 if lg.side < 0 else 0.0)) % 1.0
-        hip_k[i] = stride[0]; knee_k[i] = stride[-1]
-        # PROPULSION SIGN (general, MEASURED): a +hip on some bodies swings the foot FORWARD (+x), on others
-        # BACK — opposite mounting conventions (hexapod +0.035 vs dog -0.026), which is why one fixed gait walks
-        # one body backward. Set the stride sign so the planted foot always pushes BACKWARD during stance ->
-        # forward propulsion for EVERY leg on ANY body. Perturb the hip, measure the leg-tip body's dx.
-        _tb = int(model.jnt_bodyid[int(model.actuator_trnid[act_u[stride[-1]], 0])])
+        hip_k[i] = stride[0]
+        # LIFT joint: the deepest STRIDE joint normally (a proper knee); but a RADIAL leg (spider/crab) may have
+        # only ONE stride joint -> hip==knee -> no foot lift -> it crouches. Fall back to the leg's DEEPEST token
+        # (which raises the foot) so every leg gets a distinct lift joint and can step.
+        knee_k[i] = stride[-1] if len(stride) >= 2 else (lg.tokens[-1] if lg.tokens[-1] != stride[0] else stride[-1])
+        # PROPULSION SIGN (general, MEASURED): +stride swings the foot FORWARD (+x) on some bodies, BACK on
+        # others (hexapod +0.035 vs dog -0.026). Perturb the hip, measure the foot's dx, set the sign so the
+        # planted foot pushes BACKWARD during stance -> forward propulsion for every leg on any body.
+        _tb = int(lg.tip_body) or int(model.jnt_bodyid[int(model.actuator_trnid[act_u[lg.tokens[-1]], 0])])
         _qa = int(qadr[stride[0]]); _x0 = float(data.xpos[_tb][0])
         data.qpos[_qa] += 0.3; mujoco.mj_forward(model, data)
         _dx = float(data.xpos[_tb][0]) - _x0
         data.qpos[_qa] -= 0.3; mujoco.mj_forward(model, data)
-        hip_sign[i] = 1.0 if _dx > 0 else -1.0          # sign of +hip that moves the foot FORWARD (+x)
+        hip_sign[i] = 1.0 if _dx > 0 else -1.0
     dt = float(model.opt.timestep)
     _gz0 = np.asarray(data.geom_xpos[:, 2]); body_g = [gi for gi in range(model.ngeom) if int(model.geom_bodyid[gi]) != 0]
     feet = []
