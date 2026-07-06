@@ -132,6 +132,17 @@ class TrotCpgPriorTests(unittest.TestCase):
         self.assertGreater(wide["support_frac"], 0.5, "must genuinely STEP (partial support), not slide/stand")
         self.assertGreater(wide["height_ratio"], 0.6, "must stay TALL/upright, not collapse or roll")
 
+    def test_locomotion_eval_scores_by_best_available_gait(self):
+        # Principle (hints-not-fixed): score a legged body by the BEST of its AVAILABLE gaits, not one fixed
+        # gait. A wide-stance quad rolls under the diagonal trot but WALKS under the statically-stable crawl ->
+        # evaluate_robot must find it, so per-request generation/co-design can DISCOVER the gait that works for
+        # THIS body (a hint the search reaches for) rather than a fixed gait forced on every legged robot.
+        from virturoid.services.anatomy_compiler import _generic_legged_graph, build_from_anatomy
+        from virturoid.services.task_matched_eval import evaluate_robot
+        wide = evaluate_robot(build_from_anatomy(_generic_legged_graph(n_pairs=2, girth=0.22, fan=True)))
+        self.assertEqual(wide["detail"].get("scored_gait"), "crawl", "a wide-stance quad is scored by the crawl")
+        self.assertGreater(wide["value"], 0.4, "and it scores as a real walk (not the trot's roll-over)")
+
     def test_fan_option_defaults_off_and_widens_when_on(self):
         # The fan is OPT-IN: default OFF leaves the generic quad graph byte-identical (narrow 'down' legs); ON
         # flips the quad leg aim to 'down_out' (wide roll-stable stance). Guards the byte-identical guarantee.

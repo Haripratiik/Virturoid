@@ -75,7 +75,22 @@ def evaluate_robot(gene: RobotGene, *, prompt: str = "", controller_params: dict
         from virturoid.services.locomotion_controller import run_locomotion_episode
         mj = mujoco.MjModel.from_xml_string(compile_gene_to_mjcf(gene))
         r = run_locomotion_episode(mj)
-        return {"task": "locomotion", "metric": "distance_m", "value": r["distance_m"], "detail": r}
+        dist = float(r["distance_m"]); detail = r; scored_gait = "trot"
+        # Score the body by the BEST of its AVAILABLE gaits, not one fixed gait: a wide-stance quad that ROLLS
+        # under the diagonal trot may WALK under the statically-stable CRAWL (one foot up at a time, 3 planted).
+        # Diagnosis-driven + cheap: only try the crawl when the trot UNDERPERFORMS (the tippy-quad failure), so a
+        # body that trots fine is untouched. This lets per-request generation/co-design DISCOVER the gait that
+        # works for THIS body (a hint the search reaches for) — never a fixed gait forced on every legged robot.
+        if dist < 0.5:
+            try:
+                from virturoid.services.morph_policy import crawl_gait_rollout
+                cr = crawl_gait_rollout(gene, steps=1200)
+                if bool(cr.get("survived")) and float(cr.get("forward", 0.0)) > dist:
+                    dist, detail, scored_gait = round(float(cr["forward"]), 3), cr, "crawl"
+            except Exception:  # noqa: BLE001 - the crawl is an OPTIONAL alternative gait; never break the eval
+                pass
+        return {"task": "locomotion", "metric": "distance_m", "value": dist,
+                "detail": {**detail, "scored_gait": scored_gait}}
 
     if kind == "mobile":
         from virturoid.services.navigation_controller import run_navigation_episode
