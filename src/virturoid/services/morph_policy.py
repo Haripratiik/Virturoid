@@ -536,13 +536,42 @@ def _trot_cpg_tokens(model, graph, params: dict):
         keys = sorted(leg_segs)
         base = [0.0, np.pi, np.pi, 0.0] if not params.get("leg_flip") else [np.pi, 0.0, 0.0, np.pi]
         leg_ph = {keys[i]: base[i] for i in range(4)}
+        # AXIS-AWARE: swing the SAGITTAL/stride joints (rotate the foot FORE-AFT, world-y axis), HOLD the hip
+        # ABDUCTION (world-x, lateral) neutral for balance. A correct quad leg is abduction(seg0)+hip(seg1)+
+        # knee(seg2); swinging the abduction instead of the hip paddles the foot sideways -> backward/unstable
+        # creep. World axis needs the forward kinematics, so mj_forward once here (rollout-setup cost only).
+        _d = mujoco.MjData(model); mujoco.mj_forward(model, _d)
+        qadr2jnt = {int(model.jnt_qposadr[j]): j for j in range(model.njnt)}
+        by_leg: dict = {}
+        for k in range(n):
+            if tok_key[k] is None:
+                continue
+            j = qadr2jnt.get(int(graph.qadr[k]))
+            if j is None:
+                continue
+            b = int(model.jnt_bodyid[j]); wa = _d.xmat[b].reshape(3, 3) @ np.asarray(model.jnt_axis[j])
+            is_abd = abs(wa[0]) > abs(wa[1]) and abs(wa[0]) > abs(wa[2])    # rotates about world fore-aft = abduction
+            by_leg.setdefault(tok_key[k], []).append((tok_seg[k], k, is_abd))
+        walked = False
+        for key, joints in by_leg.items():
+            stride = sorted((s, k) for (s, k, abd) in joints if not abd)    # fore-aft joints, shallow -> deep
+            if not stride:
+                continue
+            hip_k, knee_k = stride[0][1], stride[-1][1]
+            amp[hip_k] = th_a; phase[hip_k] = leg_ph[key]                   # shallowest stride joint = hip swing
+            if knee_k != hip_k:
+                amp[knee_k] = ca_a; phase[knee_k] = leg_ph[key] + ca_ph     # deepest stride joint = knee lift
+            walked = True
+        if walked:
+            return amp, phase, True
+        # FALLBACK (leg with no distinguishable fore-aft joint, e.g. legacy all-one-axis bodies): swing by depth.
         for k in range(n):
             if tok_key[k] is None:
                 continue
             segs_here = sorted(leg_segs[tok_key[k]])
-            if tok_seg[k] == segs_here[0]:                    # shallowest actuated joint = hip swing
+            if tok_seg[k] == segs_here[0]:
                 amp[k] = th_a; phase[k] = leg_ph[tok_key[k]]
-            elif tok_seg[k] == segs_here[-1]:                 # deepest actuated joint = knee lift
+            elif tok_seg[k] == segs_here[-1]:
                 amp[k] = ca_a; phase[k] = leg_ph[tok_key[k]] + ca_ph
         return amp, phase, True
 
