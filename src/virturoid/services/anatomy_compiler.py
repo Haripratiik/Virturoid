@@ -623,3 +623,51 @@ def generic_creature_gene(prompt: str, robot_class: str | None = None):
     except Exception:  # noqa: BLE001
         return None
     return None
+
+
+def ensure_walkable_quad(gene, prompt: str = ""):
+    """DIAGNOSIS-DRIVEN, per-request walkability fallback for a QUADRUPED — a HINT the build reaches for, never a
+    gait/body forced on every dog. If the body already walks under SOME gait (``evaluate_robot`` is gait-aware:
+    trot, else the statically-stable crawl), it is returned UNCHANGED (sleek-when-possible). Only if it ROLLS
+    OVER (the tippy-narrow-stance failure — distance stays low under any gait) do we reach for the FANNED
+    wide-stance hint. To respect design intent we DO NOT silently swap out a bespoke LLM anatomy: a generic/
+    heuristic quad is rebuilt fanned (its own narrow form doesn't walk anyway), while an LLM-designed creature is
+    kept and merely FLAGGED (metadata.walkability) so the caller/trainer knows to widen its stance. See
+    [[walking-breakthrough-abduction]]. Best-effort: any failure returns the gene untouched."""
+    try:
+        from virturoid.services.task_matched_eval import evaluate_robot, robot_kind
+    except Exception:  # noqa: BLE001
+        return gene
+    try:
+        import re
+        if robot_kind(gene) != "legged":
+            return gene
+        legs = {m.group(0) for s in gene.segments
+                if (m := re.search(r"(?:(?:front|hind)_)?leg\d*_[lr]", (s.name or "").lower()))}
+        if len(legs) != 4:                                   # the fan+crawl hint is a QUADRUPED recipe
+            return gene
+        base = float(evaluate_robot(gene).get("value", 0.0))
+        if base >= 0.5:                                      # already walks under some gait -> leave it sleek
+            return gene
+        src = (getattr(gene, "design_source", None) or "").lower()
+        if src not in ("", "anatomy_generic", "archetype", "heuristic", "generic"):
+            # a bespoke LLM creature: preserve the DESIGN, flag that it can't credibly walk as-is (a hint, not a swap)
+            md = dict(getattr(gene, "metadata", None) or {})
+            md["walkability"] = {"credible_walk": False, "distance_m": round(base, 3),
+                                 "hint": "widen the stance (fan the legs out) + use the crawl gait"}
+            gene.metadata = md
+            return gene
+        cand = build_from_anatomy(_generic_legged_graph(n_pairs=2, fan=True, girth=0.18))
+        if cand is None:
+            return gene
+        cval = float(evaluate_robot(cand).get("value", 0.0))
+        if cval > max(base, 0.4):                            # the fanned hint walks materially better -> adopt it
+            md = dict(getattr(cand, "metadata", None) or {})
+            md["walkability_fallback"] = {"applied": True, "from_distance_m": round(base, 3),
+                                          "to_distance_m": round(cval, 3), "hint": "fanned_stance+crawl_gait"}
+            cand.metadata = md
+            cand.design_source = src or "anatomy_generic"
+            return cand
+        return gene
+    except Exception:  # noqa: BLE001 - the fallback is best-effort; a rolling body beats a crash
+        return gene

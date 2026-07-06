@@ -537,10 +537,15 @@ def _intent_validation_issues(gene, req) -> list[str]:
 
 
 def compose_robot(prompt: str, *, llm="auto", reach_m: float | None = None,
-                  payload_kg: float | None = None, plan=None) -> RobotGene:
+                  payload_kg: float | None = None, plan=None, ensure_walkable: bool = False) -> RobotGene:
     """Compose a robot AND finalize it for the task. Every composition path funnels through here, so the single
     ``finalize_for_task`` step (task-adaptive materials + skeleton thickness) is applied to whatever body was
-    built — once, before sim/export — keeping the design, physics, and BOM in agreement."""
+    built — once, before sim/export — keeping the design, physics, and BOM in agreement.
+
+    ``ensure_walkable=True`` (opt-in — default OFF keeps every build byte-identical + free) runs the
+    diagnosis-driven quadruped walkability fallback: if the built quad ROLLS OVER, reach for the fanned
+    wide-stance + crawl-gait HINT (per-request, sleek-when-possible, LLM designs preserved). A caller preparing
+    a robot for a WALKING task opts in; a generic build pays no eval cost."""
     gene = _compose_robot_impl(prompt, llm=llm, reach_m=reach_m, payload_kg=payload_kg, plan=plan)
     try:
         from virturoid.services.bom_builder import finalize_for_task
@@ -568,6 +573,12 @@ def compose_robot(prompt: str, *, llm="auto", reach_m: float | None = None,
                         _scale_geo(s_.geometry, f_)
     except Exception:  # noqa: BLE001
         pass
+    if ensure_walkable:                                     # opt-in per-request walkability fallback (default OFF)
+        try:
+            from virturoid.services.anatomy_compiler import ensure_walkable_quad
+            gene = ensure_walkable_quad(gene, prompt)
+        except Exception:  # noqa: BLE001 - best-effort; never block a compose on the walkability check
+            pass
     return gene
 
 

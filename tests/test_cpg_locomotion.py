@@ -132,6 +132,20 @@ class TrotCpgPriorTests(unittest.TestCase):
         self.assertGreater(wide["support_frac"], 0.5, "must genuinely STEP (partial support), not slide/stand")
         self.assertGreater(wide["height_ratio"], 0.6, "must stay TALL/upright, not collapse or roll")
 
+    def test_ensure_walkable_quad_is_optin_and_diagnosis_driven(self):
+        # Per-request walkability HINT (never a fixed default): a generic quad that ROLLS under the trot is, with
+        # ensure_walkable=True, replaced by the fanned wide-stance + crawl hint that credibly WALKS -- while the
+        # DEFAULT (opt-in OFF) leaves the body untouched (byte-identical, no eval cost). Sleek-when-possible +
+        # per-request, matching the hints-not-fixed-solutions architecture the flywheel already enforces.
+        from virturoid.services.morphology_composer import compose_robot
+        from virturoid.services.task_matched_eval import evaluate_robot
+        off = compose_robot("a quadruped robot dog", llm=None)
+        self.assertIsNone((off.metadata or {}).get("walkability_fallback"), "default OFF -> no fallback applied")
+        on = compose_robot("a quadruped robot dog", llm=None, ensure_walkable=True)
+        fb = (on.metadata or {}).get("walkability_fallback")
+        self.assertTrue(fb and fb.get("applied"), "a rolling generic quad must get the fanned+crawl walkability hint")
+        self.assertGreater(evaluate_robot(on)["value"], 0.4, "and the returned body must credibly walk")
+
     def test_locomotion_eval_scores_by_best_available_gait(self):
         # Principle (hints-not-fixed): score a legged body by the BEST of its AVAILABLE gaits, not one fixed
         # gait. A wide-stance quad rolls under the diagonal trot but WALKS under the statically-stable crawl ->
