@@ -595,7 +595,15 @@ def _trot_cpg_tokens(model, graph, params: dict):
             amp[k] = ca_a; phase[k] = side_phase[side] + ca_ph; found[side] = True
     if found["left"] and found["right"]:
         return amp, phase, True
-    return amp, phase, False                                  # not a recognizable legged body -> scalar recipe
+    # GEN-2 GENERAL FALLBACK: the name-paths above missed (an LLM hexapod names legs front_leg_1_l_0, a spider
+    # / snake / novel body has no leg{n}_{l|r} at all). Instead of the scalar shuffle (0/20 tokens, the measured
+    # "hexapods don't work"), synthesize a wave gait from the STRUCTURE via the gait engine — any leg count, or
+    # a serpenoid spine. The quad/biped paths above stay byte-identical so banked policies are untouched.
+    try:
+        from virturoid.services.gait_engine import wave_gait
+        return wave_gait(model, graph, params)
+    except Exception:  # noqa: BLE001 - if discovery fails, fall back to the scalar recipe (never crash a rollout)
+        return amp, phase, False
 
 
 def extract_gait_params(gene) -> dict | None:
@@ -924,11 +932,11 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float = 1.5, hip_amp: f
     over for want of active balance. Returns the SAME metrics dict as ``recipe_rollout_morph``. REQUIRES a wide
     stance: narrow feet make a thin support triangle that tips even under a crawl (see
     [[walking-breakthrough-abduction]]). Hip strides fore-aft (world-y); knee lifts; abduction (world-x) held."""
-    import re
-
     import mujoco
     import numpy as np
 
+    from virturoid.services.appendage_map import build_appendage_map
+    from virturoid.services.gait_engine import select_duty
     from virturoid.services.morph_graph import encode_robot
     model = compiled_model(robot_mjcf(gene)); model.opt.iterations = 20
     data = mujoco.MjData(model); mujoco.mj_resetData(model, data); mujoco.mj_forward(model, data)
@@ -940,76 +948,97 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float = 1.5, hip_amp: f
     qadr = np.asarray(graph.qadr, int); vadr = np.asarray(graph.vadr, int)
     act_u = np.asarray(graph.act_u, int); clamps = np.asarray(graph.clamps, float)
     q_def = np.array([float(data.qpos[a]) for a in qadr])
-    # group side-named legs (leg{n}_{l|r}_{seg}); per token tag abduction(world-x)/stride(world-y) + depth
-    q2j = {int(model.jnt_qposadr[j]): j for j in range(model.njnt)}
-    q2n = {int(model.jnt_qposadr[j]): (mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, j) or "")
-           for j in range(model.njnt)}
-    side_re = re.compile(r"(?:(front|hind)_)?leg(\d+)?_([lr])_(\d+)")
-    legs: dict = {}
-    for k in range(graph.n_tokens):
-        mm = side_re.search(q2n.get(int(qadr[k]), ""))
-        if not mm:
-            continue
-        key = f"{mm.group(1) or ''}{mm.group(2) or ''}_{mm.group(3)}"
-        j = q2j.get(int(qadr[k])); b = int(model.jnt_bodyid[j])
-        wa = data.xmat[b].reshape(3, 3) @ np.asarray(model.jnt_axis[j])
-        is_abd = abs(wa[0]) > abs(wa[1]) and abs(wa[0]) > abs(wa[2])
-        legs.setdefault(key, []).append((int(mm.group(4)), k, is_abd))
-    keys = sorted(legs)
-    hip_k: dict = {}; knee_k: dict = {}; ph_of: dict = {}
-    if len(keys) == 4:                                        # stable creep order FL,HR,FR,HL -> one foot up at a time
-        seq = [keys[0], keys[3], keys[1], keys[2]]
-        ph_of = {key: i / 4.0 for i, key in enumerate(seq)}
-    for key, joints in legs.items():
-        stride = sorted((s, kk) for (s, kk, abd) in joints if not abd)
+    # GEN-2: STRUCTURAL leg discovery + wave-gait phases for ANY leg count (was a quad-only leg{n}_{l|r} regex +
+    # hardcoded 4-leg creep order). phi_leg = (rear->front rank * (1-beta) + 0.5*is_right) mod 1; beta from the
+    # static-stability margin (a quad keeps the proven 0.75 crawl; a hexapod gets 0.5 tripod). The foot-lift
+    # window (swing fraction) = 1-beta, so a crawl lifts one foot at a time and a tripod lifts half at a time.
+    amap = build_appendage_map(model)
+    legs_list = amap.legs
+    beta = 0.75 if amap.n_legs == 4 else select_duty(amap, model)
+    lift_duty = max(0.15, min(0.5, 1.0 - beta))
+    xs = sorted({round(lg.tip_xy[0], 2) for lg in legs_list})
+    rank_of = {x: i for i, x in enumerate(xs)}
+    hip_k: dict = {}; knee_k: dict = {}; ph_of: dict = {}; hip_sign: dict = {}
+    for i, lg in enumerate(legs_list):
+        stride = lg.stride_tokens
         if not stride:
             continue
-        hip_k[key] = stride[0][1]; knee_k[key] = stride[-1][1]; ph_of.setdefault(key, 0.0)
-    dt = float(model.opt.timestep); x0 = float(data.qpos[bq]); alive = steps
-    qpos_frames = [] if record_qpos else None
-    # feet = lowest body geoms (per recipe convention) for cadence/support
+        seg = rank_of[round(lg.tip_xy[0], 2)]
+        ph_of[i] = (seg * (1.0 - beta) + 0.5 * (1.0 if lg.side < 0 else 0.0)) % 1.0
+        hip_k[i] = stride[0]; knee_k[i] = stride[-1]
+        # PROPULSION SIGN (general, MEASURED): a +hip on some bodies swings the foot FORWARD (+x), on others
+        # BACK — opposite mounting conventions (hexapod +0.035 vs dog -0.026), which is why one fixed gait walks
+        # one body backward. Set the stride sign so the planted foot always pushes BACKWARD during stance ->
+        # forward propulsion for EVERY leg on ANY body. Perturb the hip, measure the leg-tip body's dx.
+        _tb = int(model.jnt_bodyid[int(model.actuator_trnid[act_u[stride[-1]], 0])])
+        _qa = int(qadr[stride[0]]); _x0 = float(data.xpos[_tb][0])
+        data.qpos[_qa] += 0.3; mujoco.mj_forward(model, data)
+        _dx = float(data.xpos[_tb][0]) - _x0
+        data.qpos[_qa] -= 0.3; mujoco.mj_forward(model, data)
+        hip_sign[i] = 1.0 if _dx > 0 else -1.0          # sign of +hip that moves the foot FORWARD (+x)
+    dt = float(model.opt.timestep)
     _gz0 = np.asarray(data.geom_xpos[:, 2]); body_g = [gi for gi in range(model.ngeom) if int(model.geom_bodyid[gi]) != 0]
     feet = []
     if body_g:
         zmin = min(float(_gz0[gi]) for gi in body_g); feet = [gi for gi in body_g if float(_gz0[gi]) < zmin + 0.05]
     feet_idx = np.asarray(feet or body_g, int); fz0 = _gz0[feet_idx] if len(feet_idx) else np.zeros(0)
-    c_prev = (np.asarray(data.geom_xpos[feet_idx, 2]) < fz0 + 0.02) if len(feet_idx) else np.zeros(0, bool)
-    lifts = up_steps = support_steps = 0; hr = 1.0
-    for t in range(steps):
-        ph = freq * t * dt                                   # gait cycles elapsed
-        tgt = q_def.copy()
-        for key in hip_k:
-            u = (ph + ph_of[key]) % 1.0                       # this leg's phase in [0,1)
-            lift = 0.5 * (1 - np.cos(2 * np.pi * u / duty)) if u < duty else 0.0   # low-duty knee pulse (foot up ~duty)
-            tgt[knee_k[key]] = q_def[knee_k[key]] + knee_amp * lift
-            tgt[hip_k[key]] = q_def[hip_k[key]] + hip_amp * np.sin(2 * np.pi * u)  # hip strides fore-aft
-        for k in range(graph.n_tokens):
-            qv = float(data.qvel[vadr[k]])
-            tau = kp * (tgt[k] - float(data.qpos[qadr[k]])) - kd * qv
-            data.ctrl[act_u[k]] = float(np.clip(tau, -clamps[k], clamps[k]))
-        mujoco.mj_step(model, data)
-        if not np.all(np.isfinite(data.qpos)):
-            alive = t; break
-        if record_qpos and t % frame_every == 0:
-            qpos_frames.append(data.qpos.copy())
-        z = float(data.qpos[bq + 2]); hr = min(1.0, max(0.0, z / z0))
-        q = data.qpos[bq + 3:bq + 7]; upr = 1.0 - 2.0 * (float(q[1]) ** 2 + float(q[2]) ** 2)
-        if z < 0.5 * z0:
-            alive = t; break
-        if z > 0.7 * z0 and upr > 0.6:
-            up_steps += 1
-        if len(feet_idx):
-            c_now = np.asarray(data.geom_xpos[feet_idx, 2]) < fz0 + 0.02
-            lifts += int(np.sum(c_prev & ~c_now)); ng = int(np.sum(c_now))
-            support_steps += int(0 < ng < len(feet_idx)); c_prev = c_now
-    forward = float(data.qpos[bq] - x0); _T = max(1, alive) * dt
-    out = {"finite": True, "forward": round(forward, 3), "height_ratio": round(hr, 3), "alive": alive,
-           "survived": bool(alive >= steps and hr > 0.6), "speed": round(forward / max(1, alive) / dt, 3),
-           "cadence": round(lifts / _T, 2), "upright_frac": round(up_steps / max(1, alive), 3),
-           "support_frac": round(support_steps / max(1, alive), 3), "n_feet": int(len(feet_idx)),
-           "gait": "crawl", "n_tokens": graph.n_tokens}
-    if record_qpos:
-        out["qpos_frames"] = qpos_frames or []
+
+    def _run(dir_sign: float, nsteps: int, record: bool):
+        d = mujoco.MjData(model); mujoco.mj_resetData(model, d); mujoco.mj_forward(model, d)
+        x0 = float(d.qpos[bq]); alive = nsteps; hr = 1.0
+        frames = [] if record else None
+        c_prev = (np.asarray(d.geom_xpos[feet_idx, 2]) < fz0 + 0.02) if len(feet_idx) else np.zeros(0, bool)
+        lifts = up_steps = support_steps = 0
+        for t in range(nsteps):
+            ph = freq * t * dt; tgt = q_def.copy()
+            for key in hip_k:
+                u = (ph + ph_of[key]) % 1.0                   # phase in [0,1): swing then stance
+                # EXPLICIT swing/stance step (physically-correct propulsion, ANY body): SWING lifts the foot +
+                # swings the hip forward (smooth cosine, no jerk); STANCE plants it + pushes the hip back ->
+                # the body advances. hip_sign aligns "forward" per leg; dir_sign flips the whole gait if the
+                # body's net drift is backward (measured by the probe below) -> guaranteed forward locomotion.
+                if u < lift_duty:
+                    lift = 0.5 * (1 - np.cos(2 * np.pi * u / lift_duty)); s = -np.cos(np.pi * u / lift_duty)
+                else:
+                    lift = 0.0; s = np.cos(np.pi * (u - lift_duty) / max(1e-3, 1.0 - lift_duty))
+                tgt[knee_k[key]] = q_def[knee_k[key]] + knee_amp * lift
+                tgt[hip_k[key]] = q_def[hip_k[key]] + hip_amp * hip_sign[key] * dir_sign * s
+            for k in range(graph.n_tokens):
+                qv = float(d.qvel[vadr[k]])
+                tau = kp * (tgt[k] - float(d.qpos[qadr[k]])) - kd * qv
+                d.ctrl[act_u[k]] = float(np.clip(tau, -clamps[k], clamps[k]))
+            mujoco.mj_step(model, d)
+            if not np.all(np.isfinite(d.qpos)):
+                alive = t; break
+            if record and t % frame_every == 0:
+                frames.append(d.qpos.copy())
+            z = float(d.qpos[bq + 2]); hr = min(1.0, max(0.0, z / z0))
+            q = d.qpos[bq + 3:bq + 7]; upr = 1.0 - 2.0 * (float(q[1]) ** 2 + float(q[2]) ** 2)
+            if z < 0.5 * z0:
+                alive = t; break
+            if z > 0.7 * z0 and upr > 0.6:
+                up_steps += 1
+            if len(feet_idx):
+                c_now = np.asarray(d.geom_xpos[feet_idx, 2]) < fz0 + 0.02
+                lifts += int(np.sum(c_prev & ~c_now)); ng = int(np.sum(c_now))
+                support_steps += int(0 < ng < len(feet_idx)); c_prev = c_now
+        forward = float(d.qpos[bq] - x0)                      # + = the walk direction the dir_sign probe selected
+        _T = max(1, alive) * dt
+        res = {"finite": True, "forward": round(forward, 3), "height_ratio": round(hr, 3), "alive": alive,
+               "survived": bool(alive >= nsteps and hr > 0.6), "speed": round(forward / max(1, alive) / dt, 3),
+               "cadence": round(lifts / _T, 2), "upright_frac": round(up_steps / max(1, alive), 3),
+               "support_frac": round(support_steps / max(1, alive), 3), "n_feet": int(len(feet_idx)),
+               "gait": "crawl", "n_tokens": graph.n_tokens}
+        if record:
+            res["qpos_frames"] = frames or []
+        return res
+
+    # DIRECTION probe: a short run; if the body drifts backward, flip the whole gait so the full run goes forward.
+    probe = _run(1.0, min(300, steps), False) if hip_k else None
+    dir_sign = -1.0 if (probe and probe["forward"] < -0.02) else 1.0
+    out = _run(dir_sign, steps, record_qpos)
+    if dir_sign < 0:                                          # forward measured toward the walk direction the body chose
+        out["forward"] = round(abs(out["forward"]), 3); out["speed"] = round(abs(out["speed"]), 3)
     return out
 
 
