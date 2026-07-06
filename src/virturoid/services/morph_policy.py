@@ -958,13 +958,13 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float = 1.5, hip_amp: f
     lift_duty = max(0.15, min(0.5, 1.0 - beta))
     xs = sorted({round(lg.tip_xy[0], 2) for lg in legs_list})
     rank_of = {x: i for i, x in enumerate(xs)}
-    hip_k: dict = {}; knee_k: dict = {}; ph_of: dict = {}; hip_sign: dict = {}
+    hip_k: dict = {}; knee_k: dict = {}; seg_of: dict = {}; is_right: dict = {}; hip_sign: dict = {}
+    max_seg = max((rank_of[round(lg.tip_xy[0], 2)] for lg in legs_list), default=0)
     for i, lg in enumerate(legs_list):
         stride = lg.stride_tokens
         if not stride:
             continue
-        seg = rank_of[round(lg.tip_xy[0], 2)]
-        ph_of[i] = (seg * (1.0 - beta) + 0.5 * (1.0 if lg.side < 0 else 0.0)) % 1.0
+        seg_of[i] = rank_of[round(lg.tip_xy[0], 2)]; is_right[i] = 1.0 if lg.side < 0 else 0.0
         hip_k[i] = stride[0]
         # LIFT joint: the deepest STRIDE joint normally (a proper knee); but a RADIAL leg (spider/crab) may have
         # only ONE stride joint -> hip==knee -> no foot lift -> it crouches. Fall back to the leg's DEEPEST token
@@ -979,6 +979,11 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float = 1.5, hip_amp: f
         _dx = float(data.xpos[_tb][0]) - _x0
         data.qpos[_qa] -= 0.3; mujoco.mj_forward(model, data)
         hip_sign[i] = 1.0 if _dx > 0 else -1.0
+    # two wave directions: the metachronal wave travels rear->front (ph_fwd) or front->rear (ph_rev). Reversing
+    # the leg-phase ORDER reverses the direction of travel (a reliable KINEMATIC reversal, unlike time-reversal
+    # which contact friction breaks). The probe picks whichever actually carries the body +x.
+    ph_fwd = {i: (seg_of[i] * (1.0 - beta) + 0.5 * is_right[i]) % 1.0 for i in hip_k}
+    ph_rev = {i: ((max_seg - seg_of[i]) * (1.0 - beta) + 0.5 * is_right[i]) % 1.0 for i in hip_k}
     dt = float(model.opt.timestep)
     _gz0 = np.asarray(data.geom_xpos[:, 2]); body_g = [gi for gi in range(model.ngeom) if int(model.geom_bodyid[gi]) != 0]
     feet = []
@@ -986,7 +991,7 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float = 1.5, hip_amp: f
         zmin = min(float(_gz0[gi]) for gi in body_g); feet = [gi for gi in body_g if float(_gz0[gi]) < zmin + 0.05]
     feet_idx = np.asarray(feet or body_g, int); fz0 = _gz0[feet_idx] if len(feet_idx) else np.zeros(0)
 
-    def _run(dir_sign: float, nsteps: int, record: bool):
+    def _run(ph_of: dict, nsteps: int, record: bool):
         d = mujoco.MjData(model); mujoco.mj_resetData(model, d); mujoco.mj_forward(model, d)
         x0 = float(d.qpos[bq]); alive = nsteps; hr = 1.0
         frames = [] if record else None
@@ -998,14 +1003,15 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float = 1.5, hip_amp: f
                 u = (ph + ph_of[key]) % 1.0                   # phase in [0,1): swing then stance
                 # EXPLICIT swing/stance step (physically-correct propulsion, ANY body): SWING lifts the foot +
                 # swings the hip forward (smooth cosine, no jerk); STANCE plants it + pushes the hip back ->
-                # the body advances. hip_sign aligns "forward" per leg; dir_sign flips the whole gait if the
-                # body's net drift is backward (measured by the probe below) -> guaranteed forward locomotion.
+                # the body advances. hip_sign aligns "forward" per leg. If the body still nets BACKWARD (its
+                # contact dynamics differ), the probe runs the whole CYCLE backward (dir_sign=-1) -> the clean
+                # time-reversal that reverses travel; we then REPORT the honest signed displacement (no abs).
                 if u < lift_duty:
                     lift = 0.5 * (1 - np.cos(2 * np.pi * u / lift_duty)); s = -np.cos(np.pi * u / lift_duty)
                 else:
                     lift = 0.0; s = np.cos(np.pi * (u - lift_duty) / max(1e-3, 1.0 - lift_duty))
                 tgt[knee_k[key]] = q_def[knee_k[key]] + knee_amp * lift
-                tgt[hip_k[key]] = q_def[hip_k[key]] + hip_amp * hip_sign[key] * dir_sign * s
+                tgt[hip_k[key]] = q_def[hip_k[key]] + hip_amp * hip_sign[key] * s
             for k in range(graph.n_tokens):
                 qv = float(d.qvel[vadr[k]])
                 tau = kp * (tgt[k] - float(d.qpos[qadr[k]])) - kd * qv
@@ -1036,13 +1042,14 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float = 1.5, hip_amp: f
             res["qpos_frames"] = frames or []
         return res
 
-    # DIRECTION probe: a short run; if the body drifts backward, flip the whole gait so the full run goes forward.
-    probe = _run(1.0, min(300, steps), False) if hip_k else None
-    dir_sign = -1.0 if (probe and probe["forward"] < -0.02) else 1.0
-    out = _run(dir_sign, steps, record_qpos)
-    if dir_sign < 0:                                          # forward measured toward the walk direction the body chose
-        out["forward"] = round(abs(out["forward"]), 3); out["speed"] = round(abs(out["speed"]), 3)
-    return out
+    # DIRECTION probe: a short run each way; walk in whichever wave direction carries the body furthest +x. The
+    # reported forward is the HONEST signed world-x displacement of the chosen run (a body that genuinely can't
+    # walk stays near 0 or negative -> never masked by an abs).
+    if not hip_k:
+        return _run(ph_fwd, steps, record_qpos)
+    pf = _run(ph_fwd, min(400, steps), False)["forward"]
+    pr = _run(ph_rev, min(400, steps), False)["forward"]
+    return _run(ph_fwd if pf >= pr else ph_rev, steps, record_qpos)
 
 
 def recipe_robustness(gene, policy: MorphPolicy | None = None, *, n: int = 8, gain: float = 0.15,
