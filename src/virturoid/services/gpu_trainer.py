@@ -134,7 +134,7 @@ def _launch_ok(launch_cmd: str, proc_name: str) -> bool:
 
 # reward-shaping flags the MJX trainer accepts (gait_critic's bounded design space -> trainer CLI flags).
 _REWARD_FLAGS = ("prog_w", "clear_w", "swing_w", "slip_w", "alt_w", "smooth_w", "air_w", "vz_w", "wxy_w",
-                 "torque_w", "back_w", "fwd_gate_w", "periodic_w", "wtw_w", "upright_hi")   # back_w = backward penalty;
+                 "torque_w", "back_w", "fwd_gate_w", "periodic_w", "wtw_w", "upright_hi", "upright_w")   # back_w = backward penalty;
 #   fwd_gate_w = G4; upright_hi = anti-CROUCH stance-height (raise toward 0.9 for bodies that farm air-time low)
 #   forward-gate fix; periodic_w = P1 periodic gait-contact reward (plan v4)
 

@@ -113,6 +113,11 @@ def main(argv=None) -> int:
                     "base bouncing so the gait is forward, not a pogo")
     ap.add_argument("--wxy-w", type=float, default=0.04, help="ang_vel_xy penalty (legged_gym): penalize base "
                     "roll/pitch rate so the trunk stays level while stepping")
+    ap.add_argument("--upright-w", type=float, default=0.15, help="orientation-ANGLE reward weight (world-up . "
+                    "body-up): pays for keeping the trunk LEVEL. wxy_w penalizes roll/pitch RATE, which barely "
+                    "bites a SLOW roll-over (a body that tips 54deg over 400 steps has a tiny rate); this term "
+                    "penalizes the roll/pitch ANGLE directly. RAISE (~0.6-1.0) for a body that steps well but "
+                    "slowly rolls over (the anti-roll lever). Default 0.15 keeps the baseline reward byte-identical.")
     ap.add_argument("--cpg", action="store_true", help="TROT-CPG PRIOR (residual RL): inject a feed-forward diagonal-"
                     "trot oscillation into the PD target (mirrors the CPU recipe's CPG_DEFAULT) and let PPO learn only "
                     "the propulsion/balance RESIDUAL. Empirically necessary on the quad: pure PPO from a standstill "
@@ -284,6 +289,7 @@ def main(argv=None) -> int:
     FGATE = args.fwd_gate_w                                    # G4 root-cause fix: gate gait-quality on forward speed
     ACTION_LPF = float(args.action_lpf)                       # T1.2: EMA low-pass on the action offset (0 = off)
     AIR_W, AIR_TGT, VZ_W, WXY_W = args.air_w, args.air_target, args.vz_w, args.wxy_w   # legged_gym reward terms
+    UPRIGHT_W = float(args.upright_w)                     # orientation-ANGLE reward (anti-slow-roll lever; default 0.15)
     TORQUE_W = args.torque_w                              # actuator-effort penalty (anti-crank stabilizer)
     PERIODIC_W = float(args.periodic_w)                   # P1 (plan v4): periodic gait-contact reward weight (0 = off)
     WTW_W = float(args.wtw_w)                              # physical-AI: slide-proof grounded-foot-speed penalty (0=off)
@@ -603,7 +609,7 @@ def main(argv=None) -> int:
                 # 1 = fully gated. alive(0.2*up)+upright(0.15) stay ungated (don't just fall); progress+back_pen stay directional.
                 fgate = jp.clip(fwd / (VTGT + 1e-6), 0.0, 1.0)         # 0 standing/backward -> 1 at target forward speed
                 gate_mult = (1.0 - FGATE) + FGATE * fgate              # FGATE=0 -> 1.0 (unchanged); FGATE=1 -> fgate
-                step_r = jp.maximum(0.0, PROG_W * progress * up + 0.2 * up + 0.15 * jp.maximum(0.0, upr)
+                step_r = jp.maximum(0.0, PROG_W * progress * up + 0.2 * up + UPRIGHT_W * jp.maximum(0.0, upr)
                                     + (CLEAR_W * clearance + SWING_W * swing + ALT_W * swing_phase
                                        + AIR_W * air_reward) * up * gate_mult
                                     - SLIP_W * slip - SMOOTH_W * sm - stab - TORQUE_W * effort - periodic_pen
