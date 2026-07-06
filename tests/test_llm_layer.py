@@ -2,7 +2,7 @@ import unittest
 from unittest import mock
 
 from virturoid.services.design_agent import DESIGN_SCHEMA, propose_arm_design
-from virturoid.services.llm_client import ClaudeLLM, LocalLLM, MockLLM, get_llm
+from virturoid.services.llm_client import ClaudeLLM, LocalLLM, MockLLM, get_llm, unwrap_llm
 from virturoid.services.requirements_builder import build_requirements_from_prompt
 from virturoid.services.task_builder import build_task_graph
 
@@ -22,14 +22,14 @@ class LLMRouterTests(unittest.TestCase):
 
     def test_env_selects_backend(self):
         with mock.patch.dict("os.environ", {"VIRTUROID_LLM_BACKEND": "mock"}):
-            self.assertIsInstance(get_llm("designer"), MockLLM)
+            self.assertIsInstance(unwrap_llm(get_llm("designer")), MockLLM)
         with mock.patch.dict("os.environ", {"VIRTUROID_LLM_BACKEND": "claude", "VIRTUROID_CLAUDE_MODEL": "claude-opus-4-8"}):
             llm = get_llm("designer")
-            self.assertIsInstance(llm, ClaudeLLM)
+            self.assertIsInstance(unwrap_llm(llm), ClaudeLLM)
             self.assertEqual("claude-opus-4-8", llm.model)
         with mock.patch.dict("os.environ", {"VIRTUROID_LLM_BACKEND": "local", "VIRTUROID_LOCAL_LLM_URL": "http://x/v1", "VIRTUROID_LOCAL_LLM_MODEL": "nvidia/nemotron"}):
             llm = get_llm("part_recommender")
-            self.assertIsInstance(llm, LocalLLM)
+            self.assertIsInstance(unwrap_llm(llm), LocalLLM)
             self.assertEqual("nvidia/nemotron", llm.model)
 
     def test_env_selects_openai_backend(self):
@@ -37,7 +37,7 @@ class LLMRouterTests(unittest.TestCase):
 
         with mock.patch.dict("os.environ", {"VIRTUROID_LLM_BACKEND": "openai"}):
             llm = get_llm("designer")
-            self.assertIsInstance(llm, OpenAILLM)
+            self.assertIsInstance(unwrap_llm(llm), OpenAILLM)
             self.assertEqual("gpt-4o-mini", llm.model)
         with mock.patch.dict("os.environ", {"VIRTUROID_LLM_BACKEND": "chatgpt", "VIRTUROID_OPENAI_MODEL": "gpt-4.1-mini"}):
             self.assertEqual("gpt-4.1-mini", get_llm("failure_analyst").model)
@@ -310,7 +310,7 @@ class LocalLLMOllamaTests(unittest.TestCase):
             "VIRTUROID_LOCAL_LLM_FORMAT": "json_schema",
         }):
             llm = get_llm("part_recommender")
-            self.assertIsInstance(llm, LocalLLM)
+            self.assertIsInstance(unwrap_llm(llm), LocalLLM)
             self.assertEqual("json_schema", llm.format_mode)
 
 

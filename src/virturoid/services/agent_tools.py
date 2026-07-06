@@ -271,8 +271,30 @@ except Exception:  # noqa: BLE001
     pass
 
 
-def tool_specs() -> list[dict]:
-    """The agent/MCP-discoverable tool list: ``[{name, description, parameters, heavy}]``."""
+# The CONSOLIDATED MCP surface (agent_first_plan.md G-G). Research: Cursor caps ~40 active tools ACROSS all
+# servers and SILENTLY drops the rest; Codex/weaker clients degrade with a big flat menu. So the MCP server
+# advertises this small, workflow-shaped view (<=15) instead of all ~30 registry tools. Every folded tool is
+# still callable by name (call_tool dispatches the full registry) — we just don't crowd the menu with it:
+#   describe_robot/diagnose_body -> get_robot ; simulate_gait -> verify_robot(mode) ; undo_robot+edit_ops ->
+#   edit_robot(op) ; search_memory/nearest_bodies -> recall_knowledge ; list_tools/capabilities/design_brain/
+#   build_robot/evaluate_robot/design_search/start_training/submit_scene_spec -> covered by the loop tools +
+#   the server `instructions`. Ordered by the canonical loop so the menu reads as a workflow.
+MCP_TOOL_VIEW: tuple[str, ...] = (
+    "get_design_schema", "submit_design", "create_robot",      # author / generate a robot
+    "get_robot", "edit_robot", "render_view",                  # inspect / localized-edit / see
+    "verify_robot", "evaluate_held",                           # honest verdict / task score
+    "create_scene", "edit_scene",                              # themed scene + re-theme
+    "train_held", "get_job", "export_held",                    # train (job) / poll / export
+    "recall_knowledge", "llm_spend",                           # memory recall / zero-token proof
+)
+
+
+def tool_specs(view: str | None = None) -> list[dict]:
+    """The agent/MCP-discoverable tool list: ``[{name, description, parameters, heavy}]``. ``view='mcp'`` returns
+    only the consolidated <=15-tool MCP surface (G-G), in workflow order; default returns the full registry."""
+    if view == "mcp":
+        return [{"name": n, "description": TOOLS[n]["description"], "parameters": TOOLS[n]["parameters"],
+                 "heavy": TOOLS[n].get("heavy", False)} for n in MCP_TOOL_VIEW if n in TOOLS]
     return [{"name": n, "description": t["description"], "parameters": t["parameters"],
              "heavy": t.get("heavy", False)} for n, t in TOOLS.items()]
 

@@ -122,16 +122,28 @@ def get_robot(args: dict) -> dict:
 
 def edit_robot(args: dict) -> dict:
     """Apply typed LOCALIZED edit ops to a held robot (e.g. taller = scale_group legs length 1.2). Lands as ONE
-    undo step; returns the DIFF + new summary. ``ops`` is a list of ``{op, args}`` (see edit_operators.op_specs)."""
+    undo step; returns the DIFF + new summary. ``ops`` is a list of ``{op, args}`` (discover them with the
+    ``op:"list"`` request). Special ops (no other args needed): ``{op:"undo"}`` reverts the last edit,
+    ``{op:"list"}`` returns the operator catalog."""
     from virturoid.services import edit_operators as EO
     from virturoid.services import session_state as S
-    rid = args["robot_id"]
+    rid = args.get("robot_id")
+    ops = args.get("ops")
+    # single-verb form: edit_robot {robot_id, op:"undo"|"list"} — folds undo_robot + edit_ops into one tool (G-G)
+    verb = args.get("op") or (ops[0].get("op") if ops and len(ops) == 1 and set(ops[0]) <= {"op"} else None)
+    if verb == "list":
+        return {"ok": True, "operators": EO.op_specs()}
+    if verb == "undo":
+        gene = S.undo_robot(rid)
+        if gene is None:
+            return {"ok": False, "error": "nothing to undo"}
+        return {"ok": True, "diffs": [{"op": "undo"}], "summary": _summary(gene, rid),
+                "structural": False, **S.robot_meta(rid)}
     gene = S.get_robot(rid)
     if gene is None:
         return {"ok": False, "error": f"no robot '{rid}'; call create_robot first"}
-    ops = args.get("ops")
     if not ops:
-        return {"ok": False, "error": "provide ops: [{op, args}]; discover with edit_ops"}
+        return {"ok": False, "error": "provide ops: [{op, args}]; discover them with {op:'list'}, undo with {op:'undo'}"}
     try:
         new_gene, diffs = EO.apply_ops(gene, ops)
     except EO.EditError as exc:
@@ -182,14 +194,18 @@ def simulate_gait(args: dict) -> dict:
 
 
 def verify_robot(args: dict) -> dict:
-    """The anti-hallucination gate as a tool: honest gait metrics + verdict + a GIF, so an agent NEVER claims a
-    walk without the traces. Same discipline as scripts/verify_gait."""
+    """The anti-hallucination gate as a tool: honest gait metrics + verdict, so an agent NEVER claims a walk
+    without the traces (same discipline as scripts/verify_gait). ``mode``: ``full`` (default; 1500 steps + a GIF,
+    for the definitive verdict) or ``quick`` (400 steps, no GIF — a fast iterate check). Folds simulate_gait (G-G)."""
     from virturoid.services import session_state as S
     gene = S.get_robot(args["robot_id"])
     if gene is None:
         return {"ok": False, "error": f"no robot '{args['robot_id']}'"}
-    res = _honest_gait(gene, steps=int(args.get("steps", 1500)), render=True, tag=f"{args['robot_id']}_verify")
+    quick = str(args.get("mode", "full")).lower() == "quick"
+    steps = int(args.get("steps", 400 if quick else 1500))
+    res = _honest_gait(gene, steps=steps, render=not quick, tag=f"{args['robot_id']}_verify")
     res["credible_walk"] = res["verdict"].startswith("CREDIBLE")
+    res["mode"] = "quick" if quick else "full"
     return {"ok": True, **res}
 
 
@@ -286,9 +302,12 @@ AI_NATIVE_TOOLS: dict[str, dict] = {
                  "set_leg_count) and their args.", "heavy": False, "handler": edit_ops,
                  "parameters": {"type": "object", "properties": {}}},
     "edit_robot": {"description": "Apply typed LOCALIZED edits to a held robot (e.g. taller = ops:[{op:'scale_group',"
-                   "args:{group:'legs',dims:'length',factor:1.2}}]). Lands as one undo step; returns the diff.",
-                   "heavy": True, "handler": edit_robot, "parameters": {"type": "object", "required": ["robot_id", "ops"],
-                   "properties": {"robot_id": {"type": "string"}, "ops": {"type": "array", "items": {"type": "object"}}}}},
+                   "args:{group:'legs',dims:'length',factor:1.2}}]) — never regenerates. Lands as one undo step; "
+                   "returns the diff. Also: op:'list' returns the operator catalog, op:'undo' reverts the last edit.",
+                   "heavy": True, "handler": edit_robot, "parameters": {"type": "object", "required": ["robot_id"],
+                   "properties": {"robot_id": {"type": "string"}, "ops": {"type": "array", "items": {"type": "object"},
+                   "description": "list of {op, args} localized edits"},
+                   "op": {"type": "string", "enum": ["undo", "list"], "description": "single-verb shortcut instead of ops"}}}},
     "undo_robot": {"description": "Undo the last edit on a held robot (one step).", "heavy": False,
                    "handler": undo_robot, "parameters": {"type": "object", "required": ["robot_id"],
                    "properties": {"robot_id": {"type": "string"}}}},

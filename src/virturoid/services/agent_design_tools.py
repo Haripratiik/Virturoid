@@ -215,7 +215,25 @@ def run_train_gene_job(args: dict, progress=None) -> dict:
                       "failure_mode": b.artifact.get("failure_mode")} if b else None)}
 
 
+def llm_spend(_args: dict) -> dict:
+    """The internal-LLM spend ledger (G-D). Proof of the zero-our-tokens pitch: after an agent-driven loop,
+    ``totals.internal_calls`` should be 0 (every role fell through to the deterministic substrate or the
+    connected agent). ``blocked`` counts roles the no-internal-LLM switch denied. Read this to VERIFY, don't
+    trust the claim."""
+    from virturoid.services.llm_client import spend_snapshot
+    snap = spend_snapshot()
+    zero = snap["totals"]["internal_calls"] == 0
+    return {"ok": True, "zero_internal_spend": zero, **snap,
+            "note": ("no internal LLM has fired this process — the connected agent + deterministic substrate did "
+                     "all the work" if zero else "internal LLM calls occurred; set VIRTUROID_NO_INTERNAL_LLM=1 "
+                     "to force the zero-spend, agent-only mode")}
+
+
 AGENT_DESIGN_TOOLS: dict[str, dict] = {
+    "llm_spend": {"description": "The internal-LLM SPEND LEDGER — verify the zero-our-tokens promise. Returns "
+                  "per-role calls/blocked/tokens + totals; internal_calls==0 after your loop = proof we spent "
+                  "nothing. No args.", "heavy": False, "handler": llm_spend,
+                  "parameters": {"type": "object", "properties": {}}},
     "get_design_schema": {"description": "The anatomy-graph LANGUAGE to author a robot (part fields + roles/"
                           "attach/aim vocab + 2 worked examples). Call before submit_design.", "heavy": False,
                           "handler": get_design_schema, "parameters": {"type": "object", "properties": {}}},

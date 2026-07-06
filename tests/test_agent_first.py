@@ -189,6 +189,106 @@ class SessionPersistenceTests(unittest.TestCase):
 
 
 @unittest.skipUnless(_MUJOCO, "needs MuJoCo")
+class ZeroTokenSwitchTests(unittest.TestCase):
+    """G-D: the provable zero-internal-token switch + spend ledger. The pitch is 'we spend no LLM tokens';
+    this MEASURES it rather than asserting it."""
+
+    def setUp(self):
+        from virturoid.services import session_state as S
+        from virturoid.services.llm_client import reset_spend_ledger
+        S.reset()
+        reset_spend_ledger()
+        self._prev = os.environ.get("VIRTUROID_NO_INTERNAL_LLM")
+        os.environ["VIRTUROID_NO_INTERNAL_LLM"] = "1"
+
+    def tearDown(self):
+        if self._prev is None:
+            os.environ.pop("VIRTUROID_NO_INTERNAL_LLM", None)
+        else:
+            os.environ["VIRTUROID_NO_INTERNAL_LLM"] = self._prev
+
+    def _call(self, name, args=None):
+        from virturoid.services.agent_tools import call_tool
+        return call_tool(name, args or {})["result"]
+
+    def test_switch_blocks_every_role_and_records_it(self):
+        from virturoid.services.llm_client import get_llm
+        for role in ("morphology", "scene", "planner", "assistant", "failure_analyst", "designer"):
+            self.assertIsNone(get_llm(role), f"{role} must get NO backend under the switch")
+        led = self._call("llm_spend")
+        self.assertTrue(led["no_internal_llm"])
+        self.assertEqual(led["totals"]["internal_calls"], 0)
+        self.assertGreaterEqual(led["totals"]["blocked"], 6)      # all six denials recorded
+
+    def test_full_loop_is_provably_zero_spend(self):
+        # design -> simulate -> evaluate -> edit -> export, then the ledger must read zero internal calls.
+        sch = self._call("get_design_schema")
+        rid = self._call("submit_design", {"graph": sch["examples"]["quadruped"]})["robot_id"]
+        self._call("simulate_gait", {"robot_id": rid, "steps": 300})
+        self._call("evaluate_held", {"robot_id": rid})
+        self._call("edit_robot", {"robot_id": rid,
+                                  "ops": [{"op": "scale_group", "args": {"group": "legs", "dims": "girth", "factor": 1.1}}]})
+        self._call("export_held", {"robot_id": rid, "formats": ["mjcf"]})
+        led = self._call("llm_spend")
+        self.assertTrue(led["zero_internal_spend"], f"loop must spend zero internal tokens; ledger={led['totals']}")
+        self.assertEqual(led["totals"]["internal_calls"], 0)
+
+
+class ToolConsolidationTests(unittest.TestCase):
+    """G-G: the MCP surface is a lean, workflow-shaped <=15-tool view; folded tools stay callable by name."""
+
+    def test_mcp_view_is_at_most_15_and_workflow_shaped(self):
+        from virturoid.services.agent_tools import tool_specs, TOOLS
+        view = tool_specs(view="mcp")
+        self.assertLessEqual(len(view), 15, "MCP menu must fit the cross-client budget")
+        names = [t["name"] for t in view]
+        for essential in ("submit_design", "get_robot", "edit_robot", "verify_robot", "export_held",
+                          "create_scene", "get_job", "llm_spend"):
+            self.assertIn(essential, names, f"{essential} must be in the MCP view")
+        for n in names:                                          # every advertised tool really dispatches
+            self.assertIn(n, TOOLS)
+        # the full registry stays larger — folded tools remain callable, just not advertised
+        self.assertGreater(len(tool_specs()), len(view))
+
+    def test_mcp_server_lists_the_consolidated_view(self):
+        from virturoid.mcp_server import _handle
+        listed = _handle("tools/list", {})["tools"]
+        self.assertLessEqual(len(listed), 15)
+        self.assertTrue(all("inputSchema" in t for t in listed))
+
+
+@unittest.skipUnless(_MUJOCO, "needs MuJoCo")
+class FoldedToolTests(unittest.TestCase):
+    """G-G: edit_robot folds undo + the op catalog; verify_robot folds simulate_gait via mode."""
+
+    def setUp(self):
+        from virturoid.services import session_state as S
+        S.reset()
+
+    def _call(self, name, args=None):
+        from virturoid.services.agent_tools import call_tool
+        return call_tool(name, args or {})["result"]
+
+    def test_edit_robot_lists_ops_and_undoes(self):
+        rid = self._call("submit_design", {"graph": self._call("get_design_schema")["examples"]["quadruped"]})["robot_id"]
+        cat = self._call("edit_robot", {"robot_id": rid, "op": "list"})
+        self.assertTrue(cat["ok"]); self.assertIn("operators", cat)
+        h0 = self._call("get_robot", {"robot_id": rid})["standing_height_m"]
+        self._call("edit_robot", {"robot_id": rid,
+                                  "ops": [{"op": "scale_group", "args": {"group": "legs", "dims": "length", "factor": 1.3}}]})
+        self.assertGreater(self._call("get_robot", {"robot_id": rid})["standing_height_m"], h0)
+        undo = self._call("edit_robot", {"robot_id": rid, "op": "undo"})   # folded undo_robot
+        self.assertTrue(undo["ok"])
+        self.assertAlmostEqual(self._call("get_robot", {"robot_id": rid})["standing_height_m"], h0, places=3)
+
+    def test_verify_robot_quick_mode(self):
+        rid = self._call("submit_design", {"graph": self._call("get_design_schema")["examples"]["quadruped"]})["robot_id"]
+        q = self._call("verify_robot", {"robot_id": rid, "mode": "quick"})
+        self.assertEqual(q["mode"], "quick")
+        self.assertIn("verdict", q)
+
+
+@unittest.skipUnless(_MUJOCO, "needs MuJoCo")
 class ViewerRoutesTests(unittest.TestCase):
     """G-B viewer: the running app exposes /api/sessions so its webapp live-follows the agent's held robot,
     served over REAL HTTP (the agent writes to the shared session dir; the app reads it back)."""

@@ -22,9 +22,11 @@ SERVER_INFO = {"name": "virturoid", "version": "0.1.0"}
 
 def _tools_list() -> dict:
     from virturoid.services.agent_tools import tool_specs
-    # MCP uses `inputSchema` (JSON Schema); our registry stores it under `parameters`.
+    # G-G: advertise the CONSOLIDATED <=15-tool workflow view (Cursor caps ~40 tools across servers and silently
+    # drops the rest; a lean menu keeps every client — incl. Codex/Cursor — working). Every other registry tool
+    # stays callable by name via tools/call. MCP uses `inputSchema`; our registry stores it under `parameters`.
     return {"tools": [{"name": t["name"], "description": t["description"], "inputSchema": t["parameters"]}
-                      for t in tool_specs()]}
+                      for t in tool_specs(view="mcp")]}
 
 
 def _tools_call(params: dict) -> dict:
@@ -68,10 +70,19 @@ def _handle(method: str, params: dict):
         return {"protocolVersion": PROTOCOL_VERSION,
                 "capabilities": {"tools": {"listChanged": False}, "resources": {"listChanged": False}},
                 "serverInfo": SERVER_INFO,
-                "instructions": "Virturoid text-to-robot platform. create_robot to start a session, edit_robot "
-                                "for localized edits (taller/thicker/material), simulate_gait/verify_robot for "
-                                "HONEST verdicts, create_scene/edit_scene for themed scenes, start_training + "
-                                "get_job for long runs. Never claim a walk without verify_robot's traces."}
+                "instructions": (
+                    "Virturoid is a grounded text-to-robot substrate: YOU (the connected agent) are the "
+                    "designer, engineer, and assistant; it compiles, simulates, gates, and tells the truth. "
+                    "It never spends its own LLM tokens — verify that any time with llm_spend.\n"
+                    "LOOP: create_robot (from a prompt) OR get_design_schema -> submit_design (author your own "
+                    "anatomy graph) to hold a robot_id. Then get_robot to inspect, edit_robot for LOCALIZED "
+                    "edits (op:'list' for the catalog, op:'undo' to revert; e.g. taller = scale_group legs "
+                    "length 1.2 — never regenerate), render_view to SEE it, verify_robot (mode:'quick' while "
+                    "iterating, 'full' for the definitive verdict+GIF) and evaluate_held for the task score. "
+                    "Scenes: create_scene + edit_scene (e.g. 'house instead of warehouse' keeps the task/robot). "
+                    "Long runs: train_held returns a job_id -> poll get_job. export_held writes real MJCF/CAD.\n"
+                    "HONESTY: never claim a walk without verify_robot's traces (survived + cadence + forward "
+                    "displacement). Every edit is localized to the held gene — you keep the robot across turns.")}
     if method == "tools/list":
         return _tools_list()
     if method == "tools/call":

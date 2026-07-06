@@ -92,7 +92,9 @@ class McpServerTests(unittest.TestCase):
         mcp_server.serve(io.StringIO("\n".join(json.dumps(m) for m in msgs) + "\n"), out)
         resp = {json.loads(l)["id"]: json.loads(l) for l in out.getvalue().strip().splitlines()}
         self.assertEqual(resp[1]["result"]["serverInfo"]["name"], "virturoid")
-        self.assertEqual(len(resp[2]["result"]["tools"]), len(tool_specs()), "MCP lists the whole registry")
+        # G-G: MCP advertises the CONSOLIDATED <=15-tool view, not the whole registry (Cursor's ~40-tool cap).
+        self.assertEqual(len(resp[2]["result"]["tools"]), len(tool_specs(view="mcp")), "MCP lists the consolidated view")
+        self.assertLessEqual(len(resp[2]["result"]["tools"]), 15)
         self.assertTrue(all("inputSchema" in t for t in resp[2]["result"]["tools"]))
         self.assertFalse(resp[3]["result"]["isError"])
         self.assertIn("robot_id", resp[3]["result"]["structuredContent"])

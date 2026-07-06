@@ -22,8 +22,89 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from pathlib import Path
 from typing import Protocol
+
+# ---------------------------------------------------------------------------
+# Internal-LLM spend ledger (agent_first_plan.md G-D). The product's pitch is
+# ZERO internal token spend -- a connected frontier agent is the brain. That
+# claim must be MEASURED, not asserted. This process-global ledger records, per
+# role: how many internal completions actually fired (``calls`` + est. tokens),
+# and how many were BLOCKED by the no-internal-LLM switch (proof the deterministic
+# fallback carried the load). ``VIRTUROID_NO_INTERNAL_LLM=1`` forces ``get_llm``
+# to return None for every role, so zero-spend becomes structural, and the ledger
+# shows blocked>0 / calls==0. Exposed to the agent via the ``llm_spend`` tool.
+_LEDGER_LOCK = threading.RLock()
+_SPEND_LEDGER: dict[str, dict] = {}
+
+
+def _ledger_entry(role: str) -> dict:
+    return _SPEND_LEDGER.setdefault(
+        role, {"calls": 0, "blocked": 0, "tokens_in": 0, "tokens_out": 0, "usd": 0.0})
+
+
+def record_blocked(role: str) -> None:
+    """A role asked for an internal LLM while the no-internal-LLM switch was on -> denied (fallback ran)."""
+    with _LEDGER_LOCK:
+        _ledger_entry(role)["blocked"] += 1
+
+
+def record_call(role: str, tokens_in: int = 0, tokens_out: int = 0, usd: float = 0.0) -> None:
+    """An internal completion actually fired for ``role`` -> our-token spend."""
+    with _LEDGER_LOCK:
+        e = _ledger_entry(role)
+        e["calls"] += 1
+        e["tokens_in"] += int(tokens_in)
+        e["tokens_out"] += int(tokens_out)
+        e["usd"] += float(usd)
+
+
+def spend_snapshot() -> dict:
+    """The ledger + rolled-up totals. ``internal_calls`` == 0 with the loop complete IS the zero-spend proof."""
+    with _LEDGER_LOCK:
+        roles = {r: dict(e) for r, e in _SPEND_LEDGER.items()}
+    totals = {"internal_calls": sum(e["calls"] for e in roles.values()),
+              "blocked": sum(e["blocked"] for e in roles.values()),
+              "tokens_in": sum(e["tokens_in"] for e in roles.values()),
+              "tokens_out": sum(e["tokens_out"] for e in roles.values()),
+              "usd": round(sum(e["usd"] for e in roles.values()), 4)}
+    return {"no_internal_llm": os.environ.get("VIRTUROID_NO_INTERNAL_LLM") == "1",
+            "backend": os.environ.get("VIRTUROID_LLM_BACKEND", "off").lower(),
+            "roles": roles, "totals": totals}
+
+
+def reset_spend_ledger() -> None:
+    with _LEDGER_LOCK:
+        _SPEND_LEDGER.clear()
+
+
+class _LedgerClient:
+    """Transparent wrapper that records every internal completion to the process ledger (G-D), then delegates.
+    Forwards ``name`` and any other attribute to the wrapped backend, so callers see no difference."""
+
+    def __init__(self, client, role: str) -> None:
+        self._client = client
+        self._role = role
+        self.name = getattr(client, "name", "?")
+
+    def complete_json(self, system: str, user: str, schema: dict, max_tokens: int = 2048,
+                      reasoning_effort: str | None = None) -> dict:
+        out = self._client.complete_json(system, user, schema, max_tokens=max_tokens,
+                                          reasoning_effort=reasoning_effort)
+        ti = max(1, (len(system or "") + len(user or "")) // 4)
+        to = max(1, len(json.dumps(out, default=str)) // 4)
+        record_call(self._role, ti, to)
+        return out
+
+    def __getattr__(self, item):
+        return getattr(self._client, item)
+
+
+def unwrap_llm(client):
+    """Return the concrete backend behind the G-D ledger wrapper (or the client unchanged). For callers that
+    need the real backend type (routing tests, backend-specific config)."""
+    return getattr(client, "_client", client)
 
 # Repo root = parents of src/virturoid/services/llm_client.py.
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -328,28 +409,34 @@ def get_llm(role: str = "designer") -> LLMClient | None:
     device environment — see ``_load_local_env``.
     """
     _load_local_env()
+    # G-D: the provable zero-internal-token switch. When set, NO role ever gets a backend -- the connected
+    # frontier agent (or the deterministic fallback) does everything -- and the ledger records the denial.
+    if os.environ.get("VIRTUROID_NO_INTERNAL_LLM") == "1":
+        record_blocked(role)
+        return None
     backend = os.environ.get("VIRTUROID_LLM_BACKEND", "off").lower()
     if backend in ("off", ""):
         return None
+    client: LLMClient | None
     if backend == "mock":
-        return MockLLM()
-    if backend == "claude":
-        model = os.environ.get("VIRTUROID_CLAUDE_MODEL", "claude-opus-4-8")
-        return ClaudeLLM(model=model)
-    if backend in ("openai", "chatgpt", "gpt"):
+        client = MockLLM()
+    elif backend == "claude":
+        client = ClaudeLLM(model=os.environ.get("VIRTUROID_CLAUDE_MODEL", "claude-opus-4-8"))
+    elif backend in ("openai", "chatgpt", "gpt"):
         model = _openai_model_for_role(role)
         # The strong build model (gpt-5.2) can have a low tier cap (e.g. 50 requests/day); fall back to the
         # cheap high-throughput model on a daily 429 so a busy product keeps LLM-designed bodies. No fallback
         # when the role already runs on the fast model (it would just be itself).
         fast = os.environ.get("VIRTUROID_OPENAI_FAST_MODEL", "gpt-4.1-mini")
-        fallback = fast if model != fast else None
-        return OpenAILLM(model=model, fallback_model=fallback)
-    if backend == "local":
+        client = OpenAILLM(model=model, fallback_model=(fast if model != fast else None))
+    elif backend == "local":
         url = os.environ.get("VIRTUROID_LOCAL_LLM_URL", "http://localhost:8000/v1")
         model = _local_model_for_role(role)                    # role-aware breadth/depth routing (M2/WS7b)
         fmt = os.environ.get("VIRTUROID_LOCAL_LLM_FORMAT", "json_object").lower()
-        return LocalLLM(base_url=url, model=model, format_mode=fmt)
-    return None
+        client = LocalLLM(base_url=url, model=model, format_mode=fmt)
+    else:
+        return None
+    return _LedgerClient(client, role)                         # G-D: count every real internal completion
 
 
 class SpendCapExceeded(RuntimeError):
