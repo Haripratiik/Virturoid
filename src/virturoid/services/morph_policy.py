@@ -991,14 +991,14 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float = 1.5, hip_amp: f
         zmin = min(float(_gz0[gi]) for gi in body_g); feet = [gi for gi in body_g if float(_gz0[gi]) < zmin + 0.05]
     feet_idx = np.asarray(feet or body_g, int); fz0 = _gz0[feet_idx] if len(feet_idx) else np.zeros(0)
 
-    def _run(ph_of: dict, nsteps: int, record: bool):
+    def _run(ph_of: dict, freq_: float, nsteps: int, record: bool):
         d = mujoco.MjData(model); mujoco.mj_resetData(model, d); mujoco.mj_forward(model, d)
         x0 = float(d.qpos[bq]); alive = nsteps; hr = 1.0
         frames = [] if record else None
         c_prev = (np.asarray(d.geom_xpos[feet_idx, 2]) < fz0 + 0.02) if len(feet_idx) else np.zeros(0, bool)
         lifts = up_steps = support_steps = 0
         for t in range(nsteps):
-            ph = freq * t * dt; tgt = q_def.copy()
+            ph = freq_ * t * dt; tgt = q_def.copy()
             for key in hip_k:
                 u = (ph + ph_of[key]) % 1.0                   # phase in [0,1): swing then stance
                 # EXPLICIT swing/stance step (physically-correct propulsion, ANY body): SWING lifts the foot +
@@ -1042,14 +1042,20 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float = 1.5, hip_amp: f
             res["qpos_frames"] = frames or []
         return res
 
-    # DIRECTION probe: a short run each way; walk in whichever wave direction carries the body furthest +x. The
-    # reported forward is the HONEST signed world-x displacement of the chosen run (a body that genuinely can't
-    # walk stays near 0 or negative -> never masked by an abs).
+    # AUTO-TUNE (general, MEASURED — no per-body hardcoded params): the gait's net travel is body-sensitive in
+    # BOTH wave direction and step frequency (a hexapod nets +0.47 at freq 2.5 but -0.15 at 1.5). Probe both
+    # wave directions x two frequencies on a short run, then walk with whichever carries the body furthest +x.
+    # The reported forward is the HONEST signed displacement of the chosen run (a body that can't walk stays
+    # near 0, never masked). This is the scripted PRIOR; the learned residual (GEN-8) refines it further.
     if not hip_k:
-        return _run(ph_fwd, steps, record_qpos)
-    pf = _run(ph_fwd, min(400, steps), False)["forward"]
-    pr = _run(ph_rev, min(400, steps), False)["forward"]
-    return _run(ph_fwd if pf >= pr else ph_rev, steps, record_qpos)
+        return _run(ph_fwd, freq, steps, record_qpos)
+    best_phd, best_fq, best_fwd = ph_fwd, freq, -1e9
+    for phd in (ph_fwd, ph_rev):
+        for fq in (freq, freq * 1.7):
+            f = _run(phd, fq, min(350, steps), False)["forward"]
+            if f > best_fwd:
+                best_fwd, best_phd, best_fq = f, phd, fq
+    return _run(best_phd, best_fq, steps, record_qpos)
 
 
 def recipe_robustness(gene, policy: MorphPolicy | None = None, *, n: int = 8, gain: float = 0.15,
