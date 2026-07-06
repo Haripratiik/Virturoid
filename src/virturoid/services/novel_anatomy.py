@@ -348,6 +348,15 @@ def novel_archetype_gene(prompt: str):
     import re
 
     p = (prompt or "").lower()
+    # GEN-10 (docs/generality_plan.md): a MANY-legged body ("centipede", "millipede", or an explicit "N legs"
+    # with N>=10) must not collapse to the 4-leg generic quad (measured: offline lizard==centipede==horse). Route
+    # it to the PARAMETRIC radial-leg builder at that leg count. This is a leg-COUNT parameter, not a per-species
+    # shape, so it stays consistent with the anti-overfitting rule (a dog/horse still goes to the general compiler).
+    mm = re.search(r"(\d+)[\s-]*(?:legs?|legged)\b", p)
+    n_many = int(mm.group(1)) if mm else (14 if re.search(r"\bcentipede\b", p) else
+                                          (16 if re.search(r"\bmillipede\b", p) else 0))
+    if n_many >= 10:
+        return build_spider(n_legs=min(n_many - (n_many % 2), 16))
     for words, builder in _ARCHETYPES:
         if any(re.search(rf"\b{re.escape(w)}\b", p) for w in words):
             return builder()
