@@ -119,5 +119,131 @@ class FullAgentLoopTests(unittest.TestCase):
         self.assertTrue(exp["ok"] and os.path.exists(exp["artifacts"]["mjcf"]))
 
 
+@unittest.skipUnless(_MUJOCO, "needs MuJoCo")
+class SessionPersistenceTests(unittest.TestCase):
+    """G-B: file-backed sessions so a stdio MCP client (its OWN process) and the app viewer share state.
+    T3 in the plan FAILED here before this layer existed."""
+
+    def setUp(self):
+        import tempfile
+        from virturoid.services import session_state as S
+        self._tmp = tempfile.mkdtemp(prefix="virt_sess_")
+        self._prev = os.environ.get("VIRTUROID_SESSIONS_DIR")
+        os.environ["VIRTUROID_SESSIONS_DIR"] = self._tmp
+        S.reset(wipe_disk=True)
+
+    def tearDown(self):
+        import shutil
+        from virturoid.services import session_state as S
+        S.reset(wipe_disk=True)
+        if self._prev is None:
+            os.environ.pop("VIRTUROID_SESSIONS_DIR", None)
+        else:
+            os.environ["VIRTUROID_SESSIONS_DIR"] = self._prev
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _call(self, name, args=None):
+        from virturoid.services.agent_tools import call_tool
+        return call_tool(name, args or {})["result"]
+
+    def test_reload_after_cache_drop_is_a_faithful_gene(self):
+        # a second process has NO in-memory cache -> get_robot must reload the exact gene from disk.
+        from virturoid.services import session_state as S
+        rid = self._call("submit_design", {"graph": self._call("get_design_schema")["examples"]["quadruped"]})["robot_id"]
+        before = S.get_robot(rid).to_dict()
+        S._ROBOTS.clear()                                          # simulate a fresh process (empty cache)
+        after = S.get_robot(rid)
+        self.assertIsNotNone(after, "a fresh process must see the robot via the shared session file")
+        import json                                                # normalize tuple-vs-list (JSON has no tuples)
+        norm = lambda d: json.loads(json.dumps(d, default=str))
+        self.assertEqual(norm(after.to_dict()), norm(before), "disk round-trip must preserve the gene exactly")
+        self.assertIn(rid, [r["robot_id"] for r in S.list_robots()])
+
+    def test_edit_in_one_context_visible_after_cache_drop(self):
+        from virturoid.services import session_state as S
+        rid = self._call("submit_design", {"graph": self._call("get_design_schema")["examples"]["quadruped"]})["robot_id"]
+        h0 = self._call("get_robot", {"robot_id": rid})["standing_height_m"]
+        self._call("edit_robot", {"robot_id": rid,
+                                  "ops": [{"op": "scale_group", "args": {"group": "legs", "dims": "length", "factor": 1.3}}]})
+        S._ROBOTS.clear()                                          # viewer polls from a cold cache
+        h1 = self._call("get_robot", {"robot_id": rid})["standing_height_m"]
+        self.assertGreater(h1, h0, "the app viewer must observe the agent's edit across the cache boundary")
+
+    def test_real_subprocess_writes_parent_reads(self):
+        # the actual T3 acceptance: a SEPARATE OS process authors a design; this process reads it back.
+        import subprocess, sys
+        child = (
+            "import os;"
+            "from virturoid.services.agent_tools import call_tool;"
+            "s=call_tool('get_design_schema',{})['result']['examples']['quadruped'];"
+            "r=call_tool('submit_design',{'graph':s})['result'];"
+            "print('RID:'+r['robot_id'])"
+        )
+        env = dict(os.environ, VIRTUROID_SESSIONS_DIR=self._tmp, VIRTUROID_NO_LOCAL_ENV="1",
+                   PYTHONPATH=os.pathsep.join(sys.path))
+        out = subprocess.run([sys.executable, "-c", child], capture_output=True, text=True, env=env, timeout=180)
+        self.assertEqual(out.returncode, 0, f"child failed: {out.stderr[-800:]}")
+        rid = next(l for l in out.stdout.splitlines() if l.startswith("RID:")).split("RID:")[1].strip()
+        from virturoid.services import session_state as S
+        self.assertIsNotNone(S.get_robot(rid), "parent process must see the child process's robot (T3 flipped green)")
+
+
+@unittest.skipUnless(_MUJOCO, "needs MuJoCo")
+class ViewerRoutesTests(unittest.TestCase):
+    """G-B viewer: the running app exposes /api/sessions so its webapp live-follows the agent's held robot,
+    served over REAL HTTP (the agent writes to the shared session dir; the app reads it back)."""
+
+    def setUp(self):
+        import tempfile, threading
+        from pathlib import Path
+        from virturoid.services import session_state as S
+        from virturoid.ui_server import create_server
+        self._tmp = tempfile.mkdtemp(prefix="virt_view_")
+        self._prev = os.environ.get("VIRTUROID_SESSIONS_DIR")
+        os.environ["VIRTUROID_SESSIONS_DIR"] = self._tmp
+        S.reset(wipe_disk=True)
+        self._srv = create_server("127.0.0.1", 0, Path(self._tmp))
+        self._port = self._srv.server_address[1]
+        self._th = threading.Thread(target=self._srv.serve_forever, daemon=True)
+        self._th.start()
+
+    def tearDown(self):
+        import shutil
+        from virturoid.services import session_state as S
+        self._srv.shutdown(); self._srv.server_close()
+        S.reset(wipe_disk=True)
+        if self._prev is None:
+            os.environ.pop("VIRTUROID_SESSIONS_DIR", None)
+        else:
+            os.environ["VIRTUROID_SESSIONS_DIR"] = self._prev
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _get(self, path):
+        import urllib.request
+        with urllib.request.urlopen(f"http://127.0.0.1:{self._port}{path}", timeout=30) as r:
+            return r.status, r.headers.get_content_type(), r.read()
+
+    def test_sessions_list_and_detail_and_render_over_http(self):
+        import json
+        from virturoid.services.agent_tools import call_tool
+        sch = call_tool("get_design_schema", {})["result"]
+        rid = call_tool("submit_design", {"graph": sch["examples"]["quadruped"]})["result"]["robot_id"]
+
+        st, _, body = self._get("/api/sessions")               # the app lists what the agent is holding
+        self.assertEqual(st, 200)
+        self.assertIn(rid, [r["robot_id"] for r in json.loads(body)["robots"]])
+
+        st, _, body = self._get(f"/api/sessions/{rid}")        # detail + a render URL
+        self.assertEqual(st, 200)
+        detail = json.loads(body)
+        self.assertEqual(detail["summary"]["robot_class"], "quadruped")
+        self.assertTrue(detail["render_url"], "detail must include a render URL for the viewer")
+
+        st, ctype, img = self._get(detail["render_url"])       # the render itself is served
+        self.assertEqual(st, 200)
+        self.assertEqual(ctype, "image/png")
+        self.assertGreater(len(img), 1000)
+
+
 if __name__ == "__main__":
     unittest.main()

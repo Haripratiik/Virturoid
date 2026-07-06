@@ -638,6 +638,16 @@ class _Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/assistant/status":
             self._send_json(assistant_status())
             return
+        if parsed.path == "/api/sessions":                     # G-B: the app is the VIEWER of external-agent work
+            from virturoid.services import session_state
+            self._send_json({"robots": session_state.list_robots()})
+            return
+        if parsed.path.startswith("/api/sessions/"):
+            self._send_session_detail(parsed.path[len("/api/sessions/"):].strip("/"))
+            return
+        if parsed.path.startswith("/api/agent_render/"):
+            self._send_agent_render(parsed.path[len("/api/agent_render/"):].strip("/"))
+            return
         if parsed.path.startswith("/package/"):
             self._send_package_file(parsed.path)
             return
@@ -725,6 +735,31 @@ class _Handler(BaseHTTPRequestHandler):
             if s.get("archive_coverage") or s.get("provenance_edges"):
                 return s
         return design_brain_summary(self.root / "memory")   # zeros + headline
+
+    def _send_session_detail(self, robot_id: str) -> None:
+        """GET /api/sessions/<id> -> the held robot's summary + a fresh render URL, so the webapp can
+        live-follow whatever the connected agent is currently building/editing (G-B viewer)."""
+        from virturoid.services import session_state
+        from virturoid.services.ai_native_tools import _render_gene
+        gene = session_state.get_robot(robot_id)
+        if gene is None:
+            self._send_json({"error": "Unknown robot_id."}, status=HTTPStatus.NOT_FOUND)
+            return
+        from virturoid.services.agent_tools import call_tool
+        summary = call_tool("get_robot", {"robot_id": robot_id}).get("result", {})
+        meta = session_state.robot_meta(robot_id)
+        png = _render_gene(gene, f"session_{robot_id}")        # build/agent_renders/session_<id>.png
+        render_url = f"/api/agent_render/{Path(png).name}" if png else None
+        self._send_json({"robot_id": robot_id, "summary": summary, "meta": meta, "render_url": render_url})
+
+    def _send_agent_render(self, name: str) -> None:
+        from virturoid.services.ai_native_tools import _RENDER_DIR
+        target = (_RENDER_DIR / _safe_output_name(name)).resolve()
+        root = _RENDER_DIR.resolve()
+        if root not in target.parents or not target.exists() or target.is_dir():
+            self._send_json({"error": "Render not found."}, status=HTTPStatus.NOT_FOUND)
+            return
+        self._send_bytes(target.read_bytes(), _content_type(target))
 
     def _send_package_file(self, path: str) -> None:
         parts = [part for part in path.split("/") if part]
@@ -961,6 +996,14 @@ def _content_type(path: Path) -> str:
         return "text/css; charset=utf-8"
     if path.suffix == ".svg":
         return "image/svg+xml"
+    if path.suffix == ".png":
+        return "image/png"
+    if path.suffix in {".jpg", ".jpeg"}:
+        return "image/jpeg"
+    if path.suffix == ".webp":
+        return "image/webp"
+    if path.suffix == ".gif":
+        return "image/gif"
     if path.suffix == ".md":
         return "text/markdown; charset=utf-8"
     if path.suffix == ".stl":

@@ -1,46 +1,105 @@
-"""AI-native session state (docs/ai_native_plan.md P0) — the stateful store both frontends (the MCP server
-and the in-app assistant) share so INCREMENTAL edits work: a robot/scene is created once, held under an id,
-and then EDITED in place ("make it taller") rather than regenerated. Each edit lands as ONE undo step.
+"""AI-native session state (docs/ai_native_plan.md P0 + agent_first_plan.md G-B) — the stateful store both
+frontends share so INCREMENTAL edits work AND the app can SEE an external agent's work.
 
-Design: purely additive, stdlib-only, thread-safe. Genes/scenes are snapshotted as plain dicts (``to_dict``)
-so a snapshot is an immutable deep copy — undo restores it exactly. A bounded ring (``_UNDO_MAX``) per id keeps
-memory flat. Mirrors the honest, in-process style of ``job_registry`` (a dict + a lock, no external deps).
+FILE-BACKED (G-B): a stdio MCP client (Claude Code/Codex) spawns our MCP server as its OWN process, so an
+in-memory store would be invisible to the running ``ui_server`` viewer (measured: cross-process get failed).
+Every ``put/commit/undo`` writes ``build/sessions/{robots,scenes}/<id>.json`` (atomic replace); ``get``
+reloads when the on-disk copy is newer than the cached one. So the agent's process and the app process share
+one source of truth — the app becomes the live viewer of the agent designing. In-memory dict stays a cache.
+Thread-safe, stdlib-only. Genes/scenes snapshot as ``to_dict`` so undo restores an exact deep copy.
 """
 from __future__ import annotations
 
+import json
+import os
 import threading
 import uuid
+from pathlib import Path
 
 _LOCK = threading.RLock()
-_ROBOTS: dict[str, dict] = {}      # id -> {"gene": RobotGene, "undo": [dict...], "label": str, "prompt": str}
-_SCENES: dict[str, dict] = {}      # id -> {"scene": dict, "undo": [dict...], "task": str, "theme": str}
+_ROBOTS: dict[str, dict] = {}      # id -> {"gene", "undo": [dict...], "label", "prompt", "_mtime"}
+_SCENES: dict[str, dict] = {}      # id -> {"scene": dict, "undo": [dict...], "task", "theme", "_mtime"}
 _UNDO_MAX = 20
+
+
+def _dir() -> Path:
+    return Path(os.environ.get("VIRTUROID_SESSIONS_DIR") or "build/sessions")
+
+
+def _robot_path(rid: str) -> Path:
+    return _dir() / "robots" / f"{rid}.json"
+
+
+def _scene_path(sid: str) -> Path:
+    return _dir() / "scenes" / f"{sid}.json"
 
 
 def _rid(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:8]}"
 
 
+def _atomic_write(path: Path, data: dict) -> float:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, default=str), encoding="utf-8")
+    os.replace(tmp, path)                                      # atomic on the same filesystem
+    return path.stat().st_mtime
+
+
 # ------------------------------------------------------------------ robots
+def _write_robot(rid: str, rec: dict) -> None:
+    try:
+        rec["_mtime"] = _atomic_write(_robot_path(rid),
+                                      {"gene": rec["gene"].to_dict(), "undo": rec["undo"],
+                                       "label": rec["label"], "prompt": rec["prompt"]})
+    except Exception:  # noqa: BLE001 - persistence is the cross-process bonus; the in-memory store still works
+        pass
+
+
+def _load_robot(rid: str) -> dict | None:
+    p = _robot_path(rid)
+    if not p.exists():
+        return None
+    try:
+        from virturoid.schemas.gene import RobotGene
+        d = json.loads(p.read_text(encoding="utf-8"))
+        return {"gene": RobotGene.from_dict(d["gene"]), "undo": d.get("undo", []),
+                "label": d.get("label", ""), "prompt": d.get("prompt", ""), "_mtime": p.stat().st_mtime}
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _fresh_robot(rid: str) -> dict | None:
+    """Cached record, reloaded from disk if another process wrote a newer copy."""
+    rec = _ROBOTS.get(rid)
+    p = _robot_path(rid)
+    disk = p.stat().st_mtime if p.exists() else None
+    if rec is None or (disk is not None and disk > rec.get("_mtime", 0.0)):
+        loaded = _load_robot(rid)
+        if loaded is not None:
+            _ROBOTS[rid] = loaded
+            rec = loaded
+    return rec
+
+
 def put_robot(gene, *, prompt: str = "", label: str = "created", robot_id: str | None = None) -> str:
-    """Register a NEW robot gene under a fresh id (or replace one wholesale). Returns the id."""
     rid = robot_id or _rid("robot")
     with _LOCK:
-        _ROBOTS[rid] = {"gene": gene, "undo": [], "label": label, "prompt": prompt}
+        rec = {"gene": gene, "undo": [], "label": label, "prompt": prompt, "_mtime": 0.0}
+        _ROBOTS[rid] = rec
+        _write_robot(rid, rec)
     return rid
 
 
 def get_robot(robot_id: str):
-    """The live RobotGene for an id, or None."""
     with _LOCK:
-        rec = _ROBOTS.get(robot_id)
+        rec = _fresh_robot(robot_id)
         return rec["gene"] if rec else None
 
 
 def commit_robot(robot_id: str, new_gene, *, label: str) -> bool:
-    """Apply an EDIT: push the current gene onto the undo ring, then set the new one. One undo step per edit."""
     with _LOCK:
-        rec = _ROBOTS.get(robot_id)
+        rec = _fresh_robot(robot_id)
         if rec is None:
             return False
         rec["undo"].append(rec["gene"].to_dict())
@@ -48,47 +107,90 @@ def commit_robot(robot_id: str, new_gene, *, label: str) -> bool:
             rec["undo"].pop(0)
         rec["gene"] = new_gene
         rec["label"] = label
+        _write_robot(robot_id, rec)
         return True
 
 
 def undo_robot(robot_id: str):
-    """Restore the previous gene (pop the undo ring). Returns the restored gene, or None if nothing to undo."""
     from virturoid.schemas.gene import RobotGene
     with _LOCK:
-        rec = _ROBOTS.get(robot_id)
+        rec = _fresh_robot(robot_id)
         if not rec or not rec["undo"]:
             return None
         rec["gene"] = RobotGene.from_dict(rec["undo"].pop())
         rec["label"] = "undo"
+        _write_robot(robot_id, rec)
         return rec["gene"]
 
 
 def robot_meta(robot_id: str) -> dict:
     with _LOCK:
-        rec = _ROBOTS.get(robot_id)
+        rec = _fresh_robot(robot_id)
         if rec is None:
             return {}
         return {"robot_id": robot_id, "prompt": rec["prompt"], "label": rec["label"],
                 "undo_depth": len(rec["undo"])}
 
 
+def list_robots() -> list[dict]:
+    """All robot sessions on disk (for the app viewer's /api/sessions) — id + label + prompt."""
+    out = []
+    d = _dir() / "robots"
+    if d.exists():
+        for p in sorted(d.glob("*.json")):
+            try:
+                j = json.loads(p.read_text(encoding="utf-8"))
+                out.append({"robot_id": p.stem, "label": j.get("label"), "prompt": j.get("prompt"),
+                            "robot_class": (j.get("gene") or {}).get("robot_class")})
+            except Exception:  # noqa: BLE001
+                pass
+    return out
+
+
 # ------------------------------------------------------------------ scenes
+def _write_scene(sid: str, rec: dict) -> None:
+    try:
+        rec["_mtime"] = _atomic_write(_scene_path(sid),
+                                      {"scene": rec["scene"], "undo": rec["undo"],
+                                       "task": rec["task"], "theme": rec["theme"]})
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _fresh_scene(sid: str) -> dict | None:
+    rec = _SCENES.get(sid)
+    p = _scene_path(sid)
+    disk = p.stat().st_mtime if p.exists() else None
+    if rec is None or (disk is not None and disk > rec.get("_mtime", 0.0)):
+        if p.exists():
+            try:
+                d = json.loads(p.read_text(encoding="utf-8"))
+                rec = {"scene": d["scene"], "undo": d.get("undo", []), "task": d.get("task", ""),
+                       "theme": d.get("theme", ""), "_mtime": p.stat().st_mtime}
+                _SCENES[sid] = rec
+            except Exception:  # noqa: BLE001
+                pass
+    return rec
+
+
 def put_scene(scene: dict, *, task: str = "", theme: str = "", scene_id: str | None = None) -> str:
     sid = scene_id or _rid("scene")
     with _LOCK:
-        _SCENES[sid] = {"scene": dict(scene), "undo": [], "task": task, "theme": theme}
+        rec = {"scene": dict(scene), "undo": [], "task": task, "theme": theme, "_mtime": 0.0}
+        _SCENES[sid] = rec
+        _write_scene(sid, rec)
     return sid
 
 
 def get_scene(scene_id: str) -> dict | None:
     with _LOCK:
-        rec = _SCENES.get(scene_id)
+        rec = _fresh_scene(scene_id)
         return dict(rec["scene"]) if rec else None
 
 
 def commit_scene(scene_id: str, new_scene: dict, *, theme: str | None = None) -> bool:
     with _LOCK:
-        rec = _SCENES.get(scene_id)
+        rec = _fresh_scene(scene_id)
         if rec is None:
             return False
         rec["undo"].append(dict(rec["scene"]))
@@ -97,28 +199,33 @@ def commit_scene(scene_id: str, new_scene: dict, *, theme: str | None = None) ->
         rec["scene"] = dict(new_scene)
         if theme is not None:
             rec["theme"] = theme
+        _write_scene(scene_id, rec)
         return True
 
 
 def undo_scene(scene_id: str) -> dict | None:
     with _LOCK:
-        rec = _SCENES.get(scene_id)
+        rec = _fresh_scene(scene_id)
         if not rec or not rec["undo"]:
             return None
         rec["scene"] = rec["undo"].pop()
+        _write_scene(scene_id, rec)
         return dict(rec["scene"])
 
 
 def scene_meta(scene_id: str) -> dict:
     with _LOCK:
-        rec = _SCENES.get(scene_id)
+        rec = _fresh_scene(scene_id)
         if rec is None:
             return {}
         return {"scene_id": scene_id, "task": rec["task"], "theme": rec["theme"],
                 "undo_depth": len(rec["undo"])}
 
 
-def reset() -> None:
-    """Clear all sessions (tests)."""
+def reset(*, wipe_disk: bool = False) -> None:
+    """Clear the in-memory cache (tests). ``wipe_disk`` also removes the session files."""
     with _LOCK:
         _ROBOTS.clear(); _SCENES.clear()
+        if wipe_disk:
+            import shutil
+            shutil.rmtree(_dir(), ignore_errors=True)
