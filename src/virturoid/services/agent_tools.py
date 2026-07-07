@@ -301,16 +301,40 @@ def tool_specs(view: str | None = None) -> list[dict]:
 
 def call_tool(name: str, args: dict | None = None) -> dict:
     """Dispatch a tool by name. Returns ``{ok, tool, result}`` or ``{ok: False, tool, error}`` — never raises,
-    so an agent gets a structured error instead of a crash."""
+    so an agent gets a structured error instead of a crash. H3: every result carries ``took_s`` so an agent can
+    budget (verify_full ~14 s vs quick ~0.1 s)."""
+    import time
     spec = TOOLS.get(name)
     if spec is None:
         return {"ok": False, "tool": name, "error": f"unknown tool '{name}'; call list_tools to discover"}
+    t0 = time.monotonic()
     try:
-        return {"ok": True, "tool": name, "result": spec["handler"](args or {})}
+        result = spec["handler"](args or {})
+        if isinstance(result, dict):
+            result.setdefault("took_s", round(time.monotonic() - t0, 3))
+        return {"ok": True, "tool": name, "result": result}
     except KeyError as exc:
-        return {"ok": False, "tool": name, "error": f"missing required argument: {exc}"}
+        return {"ok": False, "tool": name, "error": f"missing required argument: {exc}", "took_s": round(time.monotonic() - t0, 3)}
     except Exception as exc:  # noqa: BLE001 - agent-facing: return the error, don't crash the caller
-        return {"ok": False, "tool": name, "error": f"{type(exc).__name__}: {exc}"}
+        return {"ok": False, "tool": name, "error": f"{type(exc).__name__}: {exc}", "took_s": round(time.monotonic() - t0, 3)}
+
+
+# H2 (plan_v5): confine agent-supplied write paths (out_dir/build_root) under build/ so a tool can't be
+# steered to write outside the workspace. Resolve + verify containment; fall back to the default on escape.
+def safe_build_path(value, default_subdir: str):
+    """Return an absolute path under ``build/`` for an agent-supplied dir arg, or the default if it escapes."""
+    build_root = (Path.cwd() / "build").resolve()
+    default = build_root / default_subdir
+    if not value:
+        return default
+    try:
+        cand = Path(value)
+        if not cand.is_absolute():
+            cand = build_root / cand
+        cand = cand.resolve()
+    except (OSError, RuntimeError, ValueError):
+        return default
+    return cand if (cand == build_root or build_root in cand.parents) else default
 
 
 def _slug(text: str) -> str:

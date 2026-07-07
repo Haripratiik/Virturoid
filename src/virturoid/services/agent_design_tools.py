@@ -142,7 +142,8 @@ def export_held(args: dict) -> dict:
     if gene is None:
         return {"ok": False, "error": f"no robot '{args['robot_id']}'"}
     fmts = args.get("formats") or ["mjcf"]
-    out_dir = Path(args.get("out_dir") or "build/agent_exports") / args["robot_id"]
+    from virturoid.services.agent_tools import safe_build_path  # H2: confine writes under build/
+    out_dir = safe_build_path(args.get("out_dir"), "agent_exports") / args["robot_id"]
     out_dir.mkdir(parents=True, exist_ok=True)
     artifacts = {}
     if "mjcf" in fmts:
@@ -170,9 +171,10 @@ def train_held(args: dict) -> dict:
     rid = args.get("robot_id")
     if not rid or S.get_robot(rid) is None:
         return {"ok": False, "error": f"no robot '{rid}'; submit_design/create_robot first"}
+    from virturoid.services.agent_tools import safe_build_path  # H2: confine writes under build/
     job = J.create("train_gene", {"robot_id": rid, "mode": args.get("mode", "gait_search"),
                                   "max_evals": int(args.get("max_evals", 8)), "iters": int(args.get("iters", 200))},
-                   Path(args.get("build_root") or "build/agent_builds"))
+                   safe_build_path(args.get("build_root"), "agent_builds"))
     return {"ok": True, "job_id": job.get("id"), "status": job.get("status"),
             "note": "poll get_job(job_id, since) for progress + the honest gait verdict"}
 

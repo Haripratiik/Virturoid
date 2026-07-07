@@ -125,6 +125,24 @@ def _resources_list() -> dict:
     return {"resources": items}
 
 
+# H1 (plan_v5): the ONLY filesystem roots resources/read may serve. Canonicalize + confine, so a
+# `file://../../etc/passwd` or a symlink can't escape — the Equixly 22%-of-servers arbitrary-read class
+# (Filesystem-MCP CVE-2025-53109/53110 remedy: resolve then allowlist). Artifacts we produce live here.
+_ALLOWED_READ_ROOTS = ("build/agent_renders", "build/agent_exports", "build/sessions")
+
+
+def _read_allowed(path: Path) -> bool:
+    try:
+        target = path.resolve()
+    except (OSError, RuntimeError):
+        return False
+    for root in _ALLOWED_READ_ROOTS:
+        r = Path(root).resolve()
+        if r == target or r in target.parents:
+            return True
+    return False
+
+
 def _resources_read(params: dict) -> dict:
     import base64
     uri = str(params.get("uri", ""))
@@ -134,7 +152,9 @@ def _resources_read(params: dict) -> dict:
         payload = call_tool("get_robot", {"robot_id": rid}).get("result", {})
         return {"contents": [{"uri": uri, "mimeType": "application/json", "text": json.dumps(payload, default=str)}]}
     path = Path(uri.replace("file://", ""))
-    if not path.exists():
+    if not _read_allowed(path):                                 # H1: confine to our artifact roots
+        raise PermissionError(f"resource outside the allowed roots {_ALLOWED_READ_ROOTS}: {uri}")
+    if not path.exists() or path.is_dir():
         raise FileNotFoundError(f"no resource {uri}")
     data = base64.b64encode(path.read_bytes()).decode("ascii")
     mime = "image/gif" if path.suffix == ".gif" else "image/png"
