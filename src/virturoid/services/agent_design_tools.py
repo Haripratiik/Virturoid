@@ -90,7 +90,15 @@ def get_design_schema(_args: dict) -> dict:
                       "roles MUST come from the roles list above; an unknown role is rejected with a teaching "
                       "error (it is NOT silently compiled into a limb)",
                       "the compiler + validity gates run on submit; a broken graph returns a teaching error"],
-            "examples": {"quadruped": _EXAMPLE_QUAD, "hexapod": _EXAMPLE_HEX, "rover": _EXAMPLE_ROVER}}
+            "examples": {"quadruped": _EXAMPLE_QUAD, "hexapod": _EXAMPLE_HEX, "rover": _EXAMPLE_ROVER},
+            # HONEST out-of-box capability of each example (measured, not assumed): so the agent knows what
+            # walks/drives immediately vs what needs training. The scripted wave gait is a strong PRIOR for a
+            # 4-leg body but marginal for 6+ legs (a known frontier — the learned residual/train_held closes it).
+            "example_capability": {
+                "quadruped": "VERIFIED walker out of the box (scripted crawl gait, ~1.7 m in verify)",
+                "rover": "VERIFIED driver out of the box (torque wheels, ~0.4 m in verify)",
+                "hexapod": "compiles + is structurally correct (6 legs), but the SCRIPTED gait is marginal for "
+                           "6+ legs (~0 net) — call train_held to find a credible gait, or expect a weak verdict"}}
 
 
 # M16 buildable-scale bands (metres). Generous — an elephant leg is ~1.5 m, an industrial arm link ~1.2 m —
