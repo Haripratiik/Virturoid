@@ -269,6 +269,11 @@ try:
     TOOLS.update(AGENT_DESIGN_TOOLS)                          # G-A/G-C: the external agent as the designer
 except Exception:  # noqa: BLE001
     pass
+try:
+    from virturoid.services.input_training_tools import INPUT_TRAINING_TOOLS
+    TOOLS.update(INPUT_TRAINING_TOOLS)                       # input-ingestion + training-improvement plan tools
+except Exception:  # noqa: BLE001
+    pass
 
 
 # The CONSOLIDATED MCP surface (agent_first_plan.md G-G). Research: Cursor caps ~40 active tools ACROSS all

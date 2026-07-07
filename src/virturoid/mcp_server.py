@@ -182,6 +182,13 @@ def _handle(method: str, params: dict):
                     "the real skills, and scores it (list_skills for the vocabulary; submit_task to author the "
                     "sequence yourself). Long runs: train_held returns a job_id -> poll get_job. export_held "
                     "writes real MJCF/CAD.\n"
+                    "INPUT & TRAINING (folded — call by name, not in the menu): interpret_prompt (provenance for "
+                    "a build prompt — what was stated vs inferred), inspect_project_bundle {path} (classify a "
+                    "dropped enterprise folder/zip into a project graph), import_robot_model {path} (a .urdf/.mjcf "
+                    "faithful + inferred-RobotGene import report with fixable warnings), plan_training {task} (the "
+                    "three-phase trainer ladder), check_perception_leakage (reject a policy that cheats with "
+                    "privileged sim truth), amplify_demonstrations {prompt} (one walking body -> many "
+                    "physics-validated gait demos), data_dividends (the flywheel 'what did we improve?' ledger).\n"
                     "HONESTY: never claim a walk without verify_robot's traces (survived + cadence + forward "
                     "displacement). Every edit is localized to the held gene — you keep the robot across turns.")}
     if method == "tools/list":
