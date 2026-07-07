@@ -49,6 +49,17 @@ class VerifyByKindTests(unittest.TestCase):
         self.assertEqual(v["kind"], "legged")
         self.assertIn("cadence", v)                               # the gait verdict fields survive
         self.assertIn("credible_walk", v)
+        self.assertNotIn("physics_envelope", v)                  # a terrestrial dog is in-tier, no flag
+
+    def test_swim_fly_intent_is_flagged_not_silently_land_verdicted(self):
+        # T7-lite: an eel/drone routes terrestrial (no fluid tier) -> the verdict must be flagged a LAND PROXY,
+        # never presented as its real swimming/flying capability.
+        for prompt, env in (("an eel robot that swims", "aquatic"), ("a quadcopter drone", "aerial")):
+            rid = self._call("create_robot", {"prompt": prompt})["robot_id"]
+            v = self._call("verify_robot", {"robot_id": rid, "mode": "quick"})
+            self.assertEqual(v.get("physics_envelope"), env, f"{prompt} must flag {env}")
+            self.assertFalse(v["credible_walk"], "an unsupported-envelope body is never a credible walker")
+            self.assertIn("proxy", v["envelope_note"].lower())
 
 
 if __name__ == "__main__":

@@ -55,6 +55,29 @@ def _render_gene(gene, tag: str, *, azimuth: float = 50.0, elevation: float = -1
         return None
 
 
+# T7-lite: swim/fly INTENT words. Virturoid has no fluid/aerial physics tier yet, so a body meant to swim or
+# fly gets routed to a terrestrial body and a LAND verdict — honest to FLAG that the verdict is only a land
+# proxy, never to silently present it as the real thing. The full tier (MuJoCo fluid + rotor/thruster
+# actuators + swim-intent routing) is the larger T7.
+_AQUATIC_WORDS = ("swim", "aquatic", "underwater", "submarine", "eel", "fish", "shark", "whale", "dolphin",
+                  "manatee", "narwhal", "seahorse", "jellyfish", "octopus", "squid", "ray ", "sting ray")
+_AERIAL_WORDS = ("fly", "flying", "aerial", "drone", "quadcopter", "helicopter", "hover", "aircraft", "winged")
+
+
+def _flag_physics_envelope(res: dict, prompt: str, kind: str) -> None:
+    """If the prompt implies a swim/fly envelope we don't yet simulate, annotate the verdict honestly instead
+    of letting a land-gait verdict masquerade as the real capability (T7-lite)."""
+    p = (prompt or "").lower()
+    env = "aquatic" if any(w in p for w in _AQUATIC_WORDS) else ("aerial" if any(w in p for w in _AERIAL_WORDS) else None)
+    if env and kind in ("legged", "mobile"):
+        res["physics_envelope"] = env
+        res["credible_walk"] = False
+        res["envelope_note"] = (
+            f"this prompt implies a {env.upper()} body, but Virturoid has no {env} physics tier yet (T7): it "
+            f"was built + simulated as a terrestrial body, so the verdict above is a LAND-BASED PROXY, not its "
+            f"real {'swimming' if env == 'aquatic' else 'flying'} capability. Treat it as unsupported-envelope.")
+
+
 def _honest_gait(gene, *, steps: int = 1200, render: bool = False, tag: str = "gait") -> dict:
     """Run the general scripted gait and return the ANTI-GOODHART verdict (survived+cadence+support+upright+
     forward, forward == actual displacement) — the honesty gate as a tool result, never a raw qpos dump."""
@@ -339,6 +362,7 @@ def verify_robot(args: dict) -> dict:
         if scene_note:
             res["scene_id"] = sid
             res["scene_note"] = scene_note
+        _flag_physics_envelope(res, (S.robot_meta(args["robot_id"]) or {}).get("prompt", ""), kind)
     except Exception as exc:  # noqa: BLE001 - an odd body must yield an honest error, not a crash
         res = {"kind": kind, "verdict": f"could not simulate ({type(exc).__name__})", "credible_walk": False,
                "error": str(exc)[:200]}
