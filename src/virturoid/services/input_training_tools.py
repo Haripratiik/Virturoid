@@ -111,6 +111,16 @@ def _amplify_demonstrations(args: dict) -> dict:
     return res.report()
 
 
+def _import_bom(args: dict) -> dict:
+    from virturoid.services.bom_importer import parse_bom_file
+    path = (args or {}).get("path", "")
+    if not path:
+        return {"error": "path is required (a .csv/.json/.yaml/.xlsx BOM)"}
+    if not os.path.exists(path):
+        return {"error": f"path not found: {path}"}
+    return parse_bom_file(path).to_dict()
+
+
 def _data_dividends(args: dict) -> dict:
     from virturoid.services.data_dividend import dividend_summary
     memory_dir = (args or {}).get("memory_dir")
@@ -181,6 +191,14 @@ INPUT_TRAINING_TOOLS: dict[str, dict] = {
             "n_variants": {"type": "integer", "default": 6},
             "base_freq": {"type": "number", "default": 1.4}, "seed": {"type": "integer", "default": 0}}},
         "handler": _amplify_demonstrations, "heavy": True,
+    },
+    "import_bom": {
+        "description": "Import a user Bill of Materials (.csv/.json/.yaml/.xlsx): classify arbitrary columns to "
+                       "canonical fields, normalize units (g->kg), merge duplicate parts, and return typed line "
+                       "items with provenance — ready to override/augment the generated BOM. No physics.",
+        "parameters": {"type": "object", "required": ["path"], "properties": {
+            "path": {"type": "string", "description": "a .csv/.json/.yaml/.xlsx BOM file"}}},
+        "handler": _import_bom, "heavy": False,
     },
     "data_dividends": {
         "description": "The flywheel ledger summary: across every run, which reusable priors (skill/reward/body/"
