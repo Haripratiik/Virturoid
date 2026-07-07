@@ -984,6 +984,23 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float = 1.5, hip_amp: f
     # which contact friction breaks). The probe picks whichever actually carries the body +x.
     ph_fwd = {i: (seg_of[i] * (1.0 - beta) + 0.5 * is_right[i]) % 1.0 for i in hip_k}
     ph_rev = {i: ((max_seg - seg_of[i]) * (1.0 - beta) + 0.5 * is_right[i]) % 1.0 for i in hip_k}
+    # MANY-LEG METACHRONAL CRAWL (>=10 legs, e.g. a centipede): the default phase formula CLUSTERS a long body's
+    # legs into few distinct phases, so at beta=0.5 (lift_duty ~0.5) HALF the legs swing at once -> the body
+    # loses support and collapses (measured: a 14-leg body stands statically but sinks in ~65 steps under the
+    # clustered gait). Fix = a true metachronal wave: order the legs head->tail per side, spread their phases
+    # EVENLY across the cycle, and lift only ~1.5 legs at a time (small lift_duty) so >=12 of 14 feet stay
+    # planted -> stable + propulsive (measured +0.09 m upright). Quad/hexapod/octopod (<10) keep the wave gait.
+    if len(hip_k) >= 10:
+        _order = sorted(hip_k, key=lambda i: (seg_of[i], is_right[i]))
+        _rank = {i: r for r, i in enumerate(_order)}
+        _n = len(hip_k)
+        ph_fwd = {i: _rank[i] / _n for i in hip_k}
+        ph_rev = {i: (_n - 1 - _rank[i]) / _n for i in hip_k}
+        lift_duty = min(lift_duty, 1.4 / _n)                  # only ~1.3 legs in swing at once
+        hip_amp = min(hip_amp, 0.3)                           # GENTLE swing — a big hip swing on a 14-leg body
+        knee_amp = min(knee_amp, 0.35)                        # over-lifts + destabilises (measured); keep it low
+        kp = max(kp, 160.0); kd = max(kd, 7.0)                # STIFF stance legs hold the long body up (soft kp=32
+        #                                                       let it sink; measured kp~160 keeps height_ratio >0.6)
     dt = float(model.opt.timestep)
     _gz0 = np.asarray(data.geom_xpos[:, 2]); body_g = [gi for gi in range(model.ngeom) if int(model.geom_bodyid[gi]) != 0]
     feet = []
@@ -993,12 +1010,18 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float = 1.5, hip_amp: f
 
     def _run(ph_of: dict, freq_: float, nsteps: int, record: bool):
         d = mujoco.MjData(model); mujoco.mj_resetData(model, d); mujoco.mj_forward(model, d)
+        _qref, _z0 = q_def, z0
+        if len(hip_k) >= 10:                                   # MANY-LEG: settle to the NATURAL stance pose and
+            for _ in range(150):                              # hold/measure from THAT (the baked q_def let a long
+                mujoco.mj_step(model, d)                       # 14-leg body sink to hr 0.49; settling holds hr >0.6)
+            _qref = np.array([float(d.qpos[qadr[k]]) for k in range(graph.n_tokens)])
+            _z0 = float(d.qpos[bq + 2]) or z0
         x0 = float(d.qpos[bq]); alive = nsteps; hr = 1.0
         frames = [] if record else None
         c_prev = (np.asarray(d.geom_xpos[feet_idx, 2]) < fz0 + 0.02) if len(feet_idx) else np.zeros(0, bool)
         lifts = up_steps = support_steps = 0
         for t in range(nsteps):
-            ph = freq_ * t * dt; tgt = q_def.copy()
+            ph = freq_ * t * dt; tgt = _qref.copy()
             for key in hip_k:
                 u = (ph + ph_of[key]) % 1.0                   # phase in [0,1): swing then stance
                 # EXPLICIT swing/stance step (physically-correct propulsion, ANY body): SWING lifts the foot +
@@ -1010,8 +1033,8 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float = 1.5, hip_amp: f
                     lift = 0.5 * (1 - np.cos(2 * np.pi * u / lift_duty)); s = -np.cos(np.pi * u / lift_duty)
                 else:
                     lift = 0.0; s = np.cos(np.pi * (u - lift_duty) / max(1e-3, 1.0 - lift_duty))
-                tgt[knee_k[key]] = q_def[knee_k[key]] + knee_amp * lift
-                tgt[hip_k[key]] = q_def[hip_k[key]] + hip_amp * hip_sign[key] * s
+                tgt[knee_k[key]] = _qref[knee_k[key]] + knee_amp * lift
+                tgt[hip_k[key]] = _qref[hip_k[key]] + hip_amp * hip_sign[key] * s
             for k in range(graph.n_tokens):
                 qv = float(d.qvel[vadr[k]])
                 tau = kp * (tgt[k] - float(d.qpos[qadr[k]])) - kd * qv
@@ -1021,11 +1044,11 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float = 1.5, hip_amp: f
                 alive = t; break
             if record and t % frame_every == 0:
                 frames.append(d.qpos.copy())
-            z = float(d.qpos[bq + 2]); hr = min(1.0, max(0.0, z / z0))
+            z = float(d.qpos[bq + 2]); hr = min(1.0, max(0.0, z / _z0))
             q = d.qpos[bq + 3:bq + 7]; upr = 1.0 - 2.0 * (float(q[1]) ** 2 + float(q[2]) ** 2)
-            if z < 0.5 * z0:
+            if z < 0.5 * _z0:
                 alive = t; break
-            if z > 0.7 * z0 and upr > 0.6:
+            if z > 0.7 * _z0 and upr > 0.6:
                 up_steps += 1
             if len(feet_idx):
                 c_now = np.asarray(d.geom_xpos[feet_idx, 2]) < fz0 + 0.02
