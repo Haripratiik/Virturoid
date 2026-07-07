@@ -83,13 +83,34 @@ def _base_body_id(model):
     return (1 if model.nbody > 1 else 0), False
 
 
-def _honest_drive(gene, *, steps: int = 800) -> dict:
+def _compose_scene_xml(gene, sg) -> str | None:
+    """B2: robot MJCF + the held scene's OBSTACLES spliced into the worldbody (the robot MJCF already brings a
+    floor, so the scene's own floor is skipped). Returns None if the composed model won't compile — the caller
+    then falls back to the bare-floor rollout with an honest note."""
+    import mujoco
+    from virturoid.services.morph_policy import robot_mjcf
+    from virturoid.services.mujoco_exporter import _scene_objects_xml
+    xml = robot_mjcf(gene)
+    objs = [o for o in sg.objects if getattr(o, "object_type", "") not in ("floor",)]
+    if not objs:
+        return None
+    geoms = "\n".join(_scene_objects_xml(objs))
+    composed = xml.replace("</worldbody>", geoms + "\n</worldbody>", 1)
+    try:
+        mujoco.MjModel.from_xml_string(composed)               # validate it compiles before committing to it
+        return composed
+    except Exception:  # noqa: BLE001 - a scene material/name clash -> fall back to bare floor, honestly noted
+        return None
+
+
+def _honest_drive(gene, *, steps: int = 800, world_xml: str | None = None) -> dict:
     """B1: the DRIVE verdict for a wheeled/mobile body — actuate all wheels forward and measure REAL forward
-    displacement + upright, the wheeled analogue of the gait verdict (never a bogus gait verdict on a rover)."""
+    displacement + upright, the wheeled analogue of the gait verdict (never a bogus gait verdict on a rover).
+    B2: ``world_xml`` (robot composed into a scene) makes the drive contend with real obstacles."""
     import numpy as np
     import mujoco
     from virturoid.services.morph_policy import compiled_model, robot_mjcf
-    model = compiled_model(robot_mjcf(gene))
+    model = compiled_model(world_xml or robot_mjcf(gene))
     data = mujoco.MjData(model)
     mujoco.mj_resetData(model, data); mujoco.mj_forward(model, data)
     bid, free = _base_body_id(model)
@@ -119,13 +140,13 @@ def _honest_drive(gene, *, steps: int = 800) -> dict:
             "note": "task capability (navigation/goal-reach) via evaluate_held"}
 
 
-def _honest_reach(gene, *, steps: int = 500) -> dict:
+def _honest_reach(gene, *, steps: int = 500, world_xml: str | None = None) -> dict:
     """B1: the REACH verdict for a manipulator — sweep the joints and measure the end-effector's workspace
     travel + base stability. An arm is NOT scored on locomotion; its capability verdict is evaluate_held."""
     import numpy as np
     import mujoco
     from virturoid.services.morph_policy import compiled_model, robot_mjcf
-    model = compiled_model(robot_mjcf(gene))
+    model = compiled_model(world_xml or robot_mjcf(gene))
     data = mujoco.MjData(model)
     mujoco.mj_resetData(model, data); mujoco.mj_forward(model, data)
     if model.nu == 0:
@@ -286,21 +307,38 @@ def verify_robot(args: dict) -> dict:
         return {"ok": False, "error": f"no robot '{args['robot_id']}'"}
     quick = str(args.get("mode", "full")).lower() == "quick"
     kind = robot_kind(gene)
+    # B2: run the motion verdict IN a held scene (obstacles matter most for drive/reach). robot_and_scene share
+    # one world; a scene the model can't compose falls back to bare floor with an honest note.
+    world_xml, scene_note = None, None
+    sid = args.get("scene_id")
+    if sid:
+        sc = S.get_scene(sid)
+        if sc is None:
+            scene_note = f"scene '{sid}' not found — ran on a bare floor"
+        elif kind == "legged":
+            scene_note = "legged gait verdict is obstacle-free; use run_task/evaluate_held for scene navigation"
+        else:
+            world_xml = _compose_scene_xml(gene, _scene_from_dict(sc))
+            scene_note = (f"composed into scene '{sid}'" if world_xml
+                          else f"scene '{sid}' had no obstacles or would not compose — bare floor")
     try:
         if kind == "legged":
             steps = int(args.get("steps", 400 if quick else 1500))
             res = _honest_gait(gene, steps=steps, render=not quick, tag=f"{args['robot_id']}_verify")
             res["credible_walk"] = res["verdict"].startswith("CREDIBLE")
         elif kind == "mobile":
-            res = _honest_drive(gene, steps=int(args.get("steps", 400 if quick else 800)))
+            res = _honest_drive(gene, steps=int(args.get("steps", 400 if quick else 800)), world_xml=world_xml)
             res["credible_walk"] = False                       # not a walker; "drives" is its success signal
         elif kind == "manipulator":
-            res = _honest_reach(gene, steps=int(args.get("steps", 300 if quick else 500)))
+            res = _honest_reach(gene, steps=int(args.get("steps", 300 if quick else 500)), world_xml=world_xml)
             res["credible_walk"] = False
         else:                                                  # spray / unknown envelope: no locomotion verdict
             res = {"kind": kind, "verdict": f"{kind.upper()}: no locomotion verdict for this kind",
                    "credible_walk": False,
                    "note": "use evaluate_held for this body's task-matched capability score"}
+        if scene_note:
+            res["scene_id"] = sid
+            res["scene_note"] = scene_note
     except Exception as exc:  # noqa: BLE001 - an odd body must yield an honest error, not a crash
         res = {"kind": kind, "verdict": f"could not simulate ({type(exc).__name__})", "credible_walk": False,
                "error": str(exc)[:200]}
