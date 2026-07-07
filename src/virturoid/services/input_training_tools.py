@@ -121,6 +121,27 @@ def _import_bom(args: dict) -> dict:
     return parse_bom_file(path).to_dict()
 
 
+def _sandbox_policy(args: dict) -> dict:
+    from virturoid.services.policy_importer import static_parse_python
+    from virturoid.services.policy_sandbox import sandbox_policy_step
+    args = args or {}
+    source = args.get("source")
+    if not source:
+        return {"error": "source (an inline Python controller defining e.g. def act(obs): ...) is required"}
+    entrypoint = args.get("entrypoint")
+    action_dim = args.get("action_dim")
+    if not entrypoint or action_dim is None:                   # recover them via the P1 static parse
+        spec = static_parse_python(source)
+        entrypoint = entrypoint or spec.entrypoint
+        action_dim = action_dim if action_dim is not None else spec.action_dim
+    if not entrypoint:
+        return {"error": "no callable entrypoint found; pass 'entrypoint'"}
+    return sandbox_policy_step(
+        source, entrypoint=entrypoint, observation=args.get("observation", []),
+        action_dim=action_dim, safety_limits=args.get("safety_limits"),
+        timeout=float(args.get("timeout", 10.0)))
+
+
 def _import_controller_interface(args: dict) -> dict:
     from virturoid.services.ros2_control_parser import controller_interface_from_ros2_control, parse_ros2_control
     args = args or {}
@@ -234,6 +255,18 @@ INPUT_TRAINING_TOOLS: dict[str, dict] = {
         "parameters": {"type": "object", "required": ["path"], "properties": {
             "path": {"type": "string", "description": "a .csv/.json/.yaml/.xlsx BOM file"}}},
         "handler": _import_bom, "heavy": False,
+    },
+    "sandbox_policy": {
+        "description": "PolicyImporter Tier P2: run an inbound Python controller ONCE against a simulated "
+                       "observation inside an isolated, AST-gated subprocess (no network/keys/os; numpy only — "
+                       "torch/onnx route to a native adapter), and validate the action is dimension-correct, "
+                       "finite, and within safety limits. Fail-closed. The entrypoint/action_dim are auto-detected.",
+        "parameters": {"type": "object", "required": ["source"], "properties": {
+            "source": {"type": "string", "description": "inline Python controller (e.g. def act(obs): ...)"},
+            "observation": {"type": "array", "description": "one observation vector"},
+            "entrypoint": {"type": "string"}, "action_dim": {"type": "integer"},
+            "safety_limits": {"type": "object"}, "timeout": {"type": "number", "default": 10.0}}},
+        "handler": _sandbox_policy, "heavy": False,
     },
     "import_controller_interface": {
         "description": "Extract a controller contract from a ROS 2 robot: parse the <ros2_control> URDF/xacro tag "
