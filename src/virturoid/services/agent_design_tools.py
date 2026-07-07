@@ -217,6 +217,74 @@ def run_train_gene_job(args: dict, progress=None) -> dict:
                       "failure_mode": b.artifact.get("failure_mode")} if b else None)}
 
 
+def list_skills(_args: dict) -> dict:
+    """T5: the general TASK vocabulary — the skills an agent can sequence + the closed predicate ops a goal
+    scores. The task layer is morphology-agnostic: a spec is VERIFIED against the body (an arm asked to walk is
+    honestly infeasible), then executed with real skills. Call before run_task/submit_task."""
+    from virturoid.schemas.task_spec import PredicateOp
+    from virturoid.services.capability_registry import REGISTRY
+    skills = [{"skill": s.skill, "summary": s.summary, "morphologies": list(s.morphologies),
+               "establishes": [o.value for o in s.establishes]} for s in REGISTRY.values()]
+    return {"ok": True, "skills": skills, "predicate_ops": [op.value for op in PredicateOp],
+            "note": "run_task {robot_id, goal} to plan+verify+run from a goal; submit_task to author the "
+                    "skill sequence yourself"}
+
+
+def run_task(args: dict) -> dict:
+    """T5: give the HELD robot a goal in open language; the substrate PROPOSES a skill sequence, VERIFIES it
+    against the morphology (honest infeasible on a mismatch), RUNS the real skills, and scores the goal
+    predicates. The general 'any task' capability — no per-task hard-coding (task_executor.evaluate_task)."""
+    from virturoid.services import session_state as S
+    from virturoid.services.task_executor import evaluate_task
+    gene = S.get_robot(args.get("robot_id"))
+    if gene is None:
+        return {"ok": False, "error": f"no robot '{args.get('robot_id')}'; submit_design/create_robot first"}
+    goal = args.get("goal") or (S.robot_meta(args["robot_id"]) or {}).get("prompt", "")
+    if not goal:
+        return {"ok": False, "error": "provide goal: a plain-language task (e.g. 'navigate to the far corner')"}
+    r = evaluate_task(str(goal), gene, llm="auto")             # llm None under NO_INTERNAL_LLM -> heuristic plan
+    return {"ok": True, "goal": goal, "feasible": bool(r.get("feasible")), "success": bool(r.get("success")),
+            "score": round(float(r.get("score", 0.0)), 3), "goal_met": r.get("goal_met"),
+            "goal_total": r.get("goal_total"), "task": r.get("task"), "planned_skills": r.get("steps_planned"),
+            "steps": [{"skill": s.get("skill"), "success": s.get("success"), "detail": s.get("detail")}
+                      for s in (r.get("steps") or [])], "issues": r.get("issues") or []}
+
+
+def submit_task(args: dict) -> dict:
+    """T5: the agent AUTHORS the task itself — an explicit skill sequence + goal predicates (the pivot: you are
+    the planner). Builds a TaskSpec, VERIFIES it against the held morphology (teaching error on an unknown skill
+    or an infeasible plan), runs it, and scores the predicates. See list_skills for the vocabulary."""
+    from virturoid.schemas.task_spec import Entity, Predicate, PredicateOp, SkillCall, TaskSpec
+    from virturoid.services import session_state as S
+    from virturoid.services.task_executor import run_task as _run
+    from virturoid.services.task_verifier import verify_task
+    gene = S.get_robot(args.get("robot_id"))
+    if gene is None:
+        return {"ok": False, "error": f"no robot '{args.get('robot_id')}'; submit_design/create_robot first"}
+    steps_in = args.get("steps")
+    if not isinstance(steps_in, list) or not steps_in:
+        return {"ok": False, "error": "provide steps:[{skill, params?}] + goal:[{op, args?}]; call list_skills"}
+    try:
+        steps = [SkillCall(str(s.get("step_id") or f"s{i}"), str(s["skill"]), dict(s.get("params") or {}))
+                 for i, s in enumerate(steps_in)]
+        goal = [Predicate(PredicateOp(g["op"]), list(g.get("args") or [])) for g in (args.get("goal") or [])]
+    except (KeyError, ValueError) as exc:
+        return {"ok": False, "error": f"bad step/goal ({exc}); each step needs a 'skill', each goal a valid "
+                f"'op' — call list_skills for the skill + predicate_op vocabulary"}
+    ents = [Entity(str(e["id"]), str(e.get("kind", "object"))) for e in (args.get("entities") or []) if e.get("id")]
+    spec = TaskSpec(name=str(args.get("name") or "agent_task"), prompt=str(args.get("goal_text") or ""),
+                    entities=ents, steps=steps, goal=goal, source="agent")
+    v = verify_task(spec, gene)
+    if not v.get("ok"):
+        return {"ok": False, "feasible": False, "error": "task INFEASIBLE for this morphology: "
+                + "; ".join(v.get("issues", [])[:4]), "issues": v.get("issues")}
+    r = _run(spec, gene)
+    return {"ok": True, "feasible": True, "success": bool(r.get("success")),
+            "score": round(float(r.get("score", 0.0)), 3), "goal_met": r.get("goal_met"),
+            "goal_total": r.get("goal_total"), "steps": [{"skill": s.get("skill"), "success": s.get("success")}
+                                                          for s in (r.get("steps") or [])]}
+
+
 def llm_spend(_args: dict) -> dict:
     """The internal-LLM spend ledger (G-D). Proof of the zero-our-tokens pitch: after an agent-driven loop,
     ``totals.internal_calls`` should be 0 (every role fell through to the deterministic substrate or the
@@ -262,4 +330,19 @@ AGENT_DESIGN_TOOLS: dict[str, dict] = {
                    "get_job). mode 'gait_search'(CPU, default) or 'gpu_rl'(MJX PPO when the box is up).", "heavy": False,
                    "handler": train_held, "parameters": {"type": "object", "required": ["robot_id"], "properties": {
                        "robot_id": {"type": "string"}, "mode": {"type": "string"}, "max_evals": {"type": "integer"}}}},
+    "list_skills": {"description": "The general TASK vocabulary: skills you can sequence + the predicate ops a "
+                    "goal scores. Call before run_task/submit_task. No args.", "heavy": False,
+                    "handler": list_skills, "parameters": {"type": "object", "properties": {}}},
+    "run_task": {"description": "Give the HELD robot a GOAL in plain language: the substrate proposes a skill "
+                 "sequence, VERIFIES it against the morphology (honest infeasible on a mismatch), runs the real "
+                 "skills, and scores the goal — the general 'any task' capability (real physics).", "heavy": True,
+                 "handler": run_task, "parameters": {"type": "object", "required": ["robot_id"], "properties": {
+                     "robot_id": {"type": "string"}, "goal": {"type": "string", "description": "plain-language task"}}}},
+    "submit_task": {"description": "AUTHOR the task yourself: an explicit skill sequence + goal predicates "
+                    "(you are the planner). Verified against the held morphology, run, scored. See list_skills.",
+                    "heavy": True, "handler": submit_task, "parameters": {"type": "object",
+                    "required": ["robot_id", "steps"], "properties": {"robot_id": {"type": "string"},
+                    "steps": {"type": "array", "items": {"type": "object"}},
+                    "goal": {"type": "array", "items": {"type": "object"}},
+                    "entities": {"type": "array", "items": {"type": "object"}}}}},
 }

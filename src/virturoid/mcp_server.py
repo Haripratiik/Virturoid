@@ -177,7 +177,11 @@ def _handle(method: str, params: dict):
                     "length 1.2 — never regenerate), render_view to SEE it, verify_robot (mode:'quick' while "
                     "iterating, 'full' for the definitive verdict+GIF) and evaluate_held for the task score. "
                     "Scenes: create_scene + edit_scene (e.g. 'house instead of warehouse' keeps the task/robot). "
-                    "Long runs: train_held returns a job_id -> poll get_job. export_held writes real MJCF/CAD.\n"
+                    "Tasks: run_task {robot_id, goal} gives the robot a goal in plain language — it plans a "
+                    "skill sequence, VERIFIES it against the morphology (honest infeasible on a mismatch), runs "
+                    "the real skills, and scores it (list_skills for the vocabulary; submit_task to author the "
+                    "sequence yourself). Long runs: train_held returns a job_id -> poll get_job. export_held "
+                    "writes real MJCF/CAD.\n"
                     "HONESTY: never claim a walk without verify_robot's traces (survived + cadence + forward "
                     "displacement). Every edit is localized to the held gene — you keep the robot across turns.")}
     if method == "tools/list":

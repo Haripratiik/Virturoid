@@ -282,7 +282,7 @@ except Exception:  # noqa: BLE001
 MCP_TOOL_VIEW: tuple[str, ...] = (
     "get_design_schema", "submit_design", "create_robot",      # author / generate a robot
     "get_robot", "edit_robot", "render_view",                  # inspect / localized-edit / see
-    "verify_robot", "evaluate_held",                           # honest verdict / task score
+    "verify_robot", "evaluate_held", "run_task",               # honest verdict / task score / any-goal task
     "create_scene", "edit_scene",                              # themed scene + re-theme
     "train_held", "get_job", "export_held",                    # train (job) / poll / export
     "recall_knowledge", "llm_spend",                           # memory recall / zero-token proof
