@@ -62,7 +62,8 @@ def _honest_gait(gene, *, steps: int = 1200, render: bool = False, tag: str = "g
     from scripts.verify_gait import classify, orientation_summary
     r = crawl_gait_rollout(gene, steps=steps, record_qpos=True)
     o = orientation_summary(r.get("qpos_frames") or [])
-    out = {"verdict": classify(r), "survived": bool(r.get("survived")), "forward_m": round(float(r.get("forward", 0)), 3),
+    out = {"kind": "legged", "verdict": classify(r), "survived": bool(r.get("survived")),
+           "forward_m": round(float(r.get("forward", 0)), 3),
            "speed_mps": round(float(r.get("speed", 0)), 3), "cadence": round(float(r.get("cadence", 0)), 1),
            "support_frac": round(float(r.get("support_frac", 0)), 2), "height_ratio": r.get("height_ratio"),
            "roll_max_deg": o.get("roll_max"), "pitch_max_deg": o.get("pitch_max")}
@@ -71,6 +72,80 @@ def _honest_gait(gene, *, steps: int = 1200, render: bool = False, tag: str = "g
         if gif:
             out["artifacts"] = [gif]
     return out
+
+
+def _base_body_id(model):
+    """The free-base body (its 6-DOF free joint), or the first non-world body for a fixed base."""
+    import mujoco
+    for j in range(model.njnt):
+        if model.jnt_type[j] == mujoco.mjtJoint.mjJNT_FREE:
+            return int(model.jnt_bodyid[j]), True
+    return (1 if model.nbody > 1 else 0), False
+
+
+def _honest_drive(gene, *, steps: int = 800) -> dict:
+    """B1: the DRIVE verdict for a wheeled/mobile body — actuate all wheels forward and measure REAL forward
+    displacement + upright, the wheeled analogue of the gait verdict (never a bogus gait verdict on a rover)."""
+    import numpy as np
+    import mujoco
+    from virturoid.services.morph_policy import compiled_model, robot_mjcf
+    model = compiled_model(robot_mjcf(gene))
+    data = mujoco.MjData(model)
+    mujoco.mj_resetData(model, data); mujoco.mj_forward(model, data)
+    bid, free = _base_body_id(model)
+    if model.nu == 0:
+        return {"kind": "mobile", "verdict": "NO ACTUATORS (cannot drive)", "survived": True, "forward_m": 0.0}
+    p0 = np.array(data.xpos[bid]); z0 = float(p0[2]); up_min = 1.0
+    drive = np.where(model.actuator_ctrlrange[:, 1] > model.actuator_ctrlrange[:, 0],
+                     0.85 * model.actuator_ctrlrange[:, 1], 1.0)     # forward wheel command within range
+    for _ in range(steps):
+        data.ctrl[:] = drive
+        mujoco.mj_step(model, data)
+        up_min = min(up_min, float(data.xmat[bid].reshape(3, 3)[2, 2]))   # world-z of the body's local-z
+    p1 = np.array(data.xpos[bid])
+    fwd = float(np.hypot(p1[0] - p0[0], p1[1] - p0[1]))              # planar travel (heading-agnostic: it moved)
+    dz = float(p1[2] - z0)
+    upright = up_min > 0.5 and dz > -0.15
+    verdict = (f"DRIVES ({fwd:.2f} m traveled)" if fwd > 0.15 and upright
+               else "TIPPED (lost upright while driving)" if not upright
+               else "STUCK (wheels spin, no travel)")
+    return {"kind": "mobile", "verdict": verdict, "survived": bool(upright), "forward_m": round(fwd, 3),
+            "upright_min": round(up_min, 2), "n_actuators": int(model.nu),
+            "note": "task capability (navigation/goal-reach) via evaluate_held"}
+
+
+def _honest_reach(gene, *, steps: int = 500) -> dict:
+    """B1: the REACH verdict for a manipulator — sweep the joints and measure the end-effector's workspace
+    travel + base stability. An arm is NOT scored on locomotion; its capability verdict is evaluate_held."""
+    import numpy as np
+    import mujoco
+    from virturoid.services.morph_policy import compiled_model, robot_mjcf
+    model = compiled_model(robot_mjcf(gene))
+    data = mujoco.MjData(model)
+    mujoco.mj_resetData(model, data); mujoco.mj_forward(model, data)
+    if model.nu == 0:
+        return {"kind": "manipulator", "verdict": "NO ACTUATORS (cannot articulate)", "survived": True, "reach_span_m": 0.0}
+    ee = None                                                       # the end-effector segment's body
+    for name in (s.name for s in gene.segments if getattr(s, "is_end_effector", False)):
+        try:
+            ee = model.body(name).id; break
+        except (KeyError, ValueError):
+            continue
+    if ee is None:
+        ee, _ = _base_body_id(model); ee = model.nbody - 1          # fall back to the last (distal) body
+    lo = model.actuator_ctrlrange[:, 0].copy(); hi = model.actuator_ctrlrange[:, 1].copy()
+    mid = np.where(hi > lo, 0.5 * (lo + hi), 0.0); amp = np.where(hi > lo, 0.5 * (hi - lo), 0.6)
+    pts = []
+    for t in range(steps):
+        data.ctrl[:] = mid + amp * np.sin(2 * np.pi * (t / 180.0) + np.linspace(0, 3.0, model.nu))
+        mujoco.mj_step(model, data)
+        if t % 5 == 0:
+            pts.append(np.array(data.xpos[ee]))
+    pts = np.array(pts)
+    span = float(np.linalg.norm(pts.max(0) - pts.min(0))) if len(pts) else 0.0
+    verdict = f"ARTICULATES (reach span {span:.2f} m)" if span > 0.05 else "STUCK (end-effector barely moves)"
+    return {"kind": "manipulator", "verdict": verdict, "survived": True, "reach_span_m": round(span, 3),
+            "n_actuators": int(model.nu), "note": "task capability (grasp / pick-place) via evaluate_held"}
 
 
 def _render_gait_gif(gene, qpos_frames, tag: str) -> str | None:
@@ -194,17 +269,36 @@ def simulate_gait(args: dict) -> dict:
 
 
 def verify_robot(args: dict) -> dict:
-    """The anti-hallucination gate as a tool: honest gait metrics + verdict, so an agent NEVER claims a walk
-    without the traces (same discipline as scripts/verify_gait). ``mode``: ``full`` (default; 1500 steps + a GIF,
-    for the definitive verdict) or ``quick`` (400 steps, no GIF — a fast iterate check). Folds simulate_gait (G-G)."""
+    """The anti-hallucination gate as a tool: an honest motion verdict FOR THE BODY'S KIND (B1), so an agent
+    never gets a bogus gait verdict on a rover or an arm. Dispatches on structural ``robot_kind``: legged ->
+    gait (survived/cadence/forward), mobile -> DRIVE (real travel + upright), manipulator -> REACH (workspace
+    span), spray/other -> honest structural read (no locomotion verdict). ``mode``: ``full`` (default; long +
+    a GIF for legged) or ``quick`` (fast iterate check). Folds simulate_gait (G-G)."""
     from virturoid.services import session_state as S
+    from virturoid.services.task_matched_eval import robot_kind
     gene = S.get_robot(args["robot_id"])
     if gene is None:
         return {"ok": False, "error": f"no robot '{args['robot_id']}'"}
     quick = str(args.get("mode", "full")).lower() == "quick"
-    steps = int(args.get("steps", 400 if quick else 1500))
-    res = _honest_gait(gene, steps=steps, render=not quick, tag=f"{args['robot_id']}_verify")
-    res["credible_walk"] = res["verdict"].startswith("CREDIBLE")
+    kind = robot_kind(gene)
+    try:
+        if kind == "legged":
+            steps = int(args.get("steps", 400 if quick else 1500))
+            res = _honest_gait(gene, steps=steps, render=not quick, tag=f"{args['robot_id']}_verify")
+            res["credible_walk"] = res["verdict"].startswith("CREDIBLE")
+        elif kind == "mobile":
+            res = _honest_drive(gene, steps=int(args.get("steps", 400 if quick else 800)))
+            res["credible_walk"] = False                       # not a walker; "drives" is its success signal
+        elif kind == "manipulator":
+            res = _honest_reach(gene, steps=int(args.get("steps", 300 if quick else 500)))
+            res["credible_walk"] = False
+        else:                                                  # spray / unknown envelope: no locomotion verdict
+            res = {"kind": kind, "verdict": f"{kind.upper()}: no locomotion verdict for this kind",
+                   "credible_walk": False,
+                   "note": "use evaluate_held for this body's task-matched capability score"}
+    except Exception as exc:  # noqa: BLE001 - an odd body must yield an honest error, not a crash
+        res = {"kind": kind, "verdict": f"could not simulate ({type(exc).__name__})", "credible_walk": False,
+               "error": str(exc)[:200]}
     res["mode"] = "quick" if quick else "full"
     return {"ok": True, **res}
 
