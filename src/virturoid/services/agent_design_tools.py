@@ -100,6 +100,25 @@ def _check_scale(graph: dict) -> str | None:
     return None
 
 
+def _bank_to_flywheel(gene, *, prompt: str, task: str, success_rate: float, source: str = "agent") -> None:
+    """B4: write an agent-authored design/outcome into the design flywheel (memory_db + species memory) so
+    recall_knowledge / nearest_bodies / search_memory surface the agent's OWN prior work — the moat compounds
+    from exactly the usage the pivot created. Best-effort: memory is value-add, never blocks the design loop."""
+    try:
+        from virturoid.services.agent_tools import safe_build_path
+        from virturoid.services.memory_db import MemoryDB
+        from virturoid.services.task_matched_eval import robot_kind
+        mem_dir = safe_build_path(None, "memory")
+        mem_dir.mkdir(parents=True, exist_ok=True)
+        with MemoryDB(mem_dir / "virturoid_memory.db") as db:
+            db.record_run(prompt=prompt or f"[{source}] {gene.robot_class}", robot_class=gene.robot_class,
+                          task_type=task or robot_kind(gene), converged_design=gene.to_dict(),
+                          success_rate=float(success_rate), species=gene.robot_class,
+                          succeeded=success_rate >= 0.5, design_source=source)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def submit_design(args: dict) -> dict:
     """The agent AUTHORS a robot: compile its anatomy graph, run the validity gates, and HOLD it under a
     robot_id for the rest of the loop (simulate/edit/train/export). No prompt, no internal generator — the
@@ -136,6 +155,7 @@ def submit_design(args: dict) -> dict:
         pass
     from virturoid.services.ai_native_tools import _render_gene, _summary
     rid = S.put_robot(gene, prompt=f"[submitted:{graph.get('name', 'design')}]", label="submitted")
+    _bank_to_flywheel(gene, prompt=f"[agent] {graph.get('name', 'design')}", task="", success_rate=0.0)  # B4 provenance
     out = {"ok": True, **_summary(gene, rid), "name": graph.get("name")}
     img = _render_gene(gene, rid)
     if img:
@@ -301,6 +321,10 @@ def run_train_gene_job(args: dict, progress=None) -> dict:
                             max_evals=int(args.get("max_evals", 8)), gates=gates)
     b = rep.best
     say("done", f"searched {rep.n_evals} configs; solved={rep.solved}")
+    # B4: bank the real trained OUTCOME (walking distance -> success) into the flywheel, source=agent
+    _fwd = float(b.result.get("forward", 0)) if b else 0.0
+    _bank_to_flywheel(gene, prompt=f"[agent-trained] {gene.robot_class}", task="locomotion",
+                      success_rate=min(1.0, max(0.0, _fwd / 0.5)), source="agent_trained")
     return {"mode": "gait_search", "solved": rep.solved, "n_evals": rep.n_evals,
             "best": ({"params": b.spec.get("params"), "forward_m": round(float(b.result.get("forward", 0)), 3),
                       "cadence": round(float(b.result.get("cadence", 0)), 1),
