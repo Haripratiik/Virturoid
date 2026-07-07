@@ -7,8 +7,8 @@ import importlib.util
 import os
 import unittest
 
-os.environ.setdefault("VIRTUROID_NO_LOCAL_ENV", "1")
-os.environ.setdefault("VIRTUROID_NO_INTERNAL_LLM", "1")
+os.environ.setdefault("VIRTUROID_NO_LOCAL_ENV", "1")   # offline: skip .env, so get_llm returns None (no
+# module-level NO_INTERNAL_LLM here — that leaks process-wide during collection and breaks the llm-router tests)
 _MUJOCO = importlib.util.find_spec("mujoco") is not None
 
 
