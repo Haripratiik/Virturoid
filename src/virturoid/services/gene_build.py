@@ -764,6 +764,17 @@ def _maybe_write_spec_compliance(output_dir: Path, gene, prompt: str) -> None:
             json.dumps(bom_sim_fidelity(gene), indent=2, default=str), encoding="utf-8")
     except Exception:  # noqa: BLE001 - the fidelity report is value-add; never block a build
         pass
+
+    # Input Compiler Phase 0: write input/interpretation.json for EVERY prompt build (provenance for every
+    # inferred vs stated field), so a downstream compliance report can point back to what the user actually asked.
+    interpretation = None
+    try:
+        from virturoid.services.input_evidence import interpret_prompt, write_interpretation
+        interpretation = interpret_prompt(prompt or "")
+        write_interpretation(interpretation, str(output_dir))
+    except Exception:  # noqa: BLE001 - the interpretation is value-add; never block a build
+        interpretation = None
+
     try:
         from virturoid.services.spec_parser import parse_prompt_spec, spec_compliance_report
         spec = parse_prompt_spec(prompt or "")
@@ -776,6 +787,12 @@ def _maybe_write_spec_compliance(output_dir: Path, gene, prompt: str) -> None:
         except Exception:  # noqa: BLE001 - the report still covers height/weight without a BOM
             pass
         report = spec_compliance_report(gene, spec, bom=bom)
+        if interpretation is not None:                          # link each constraint back to its input evidence
+            try:
+                from virturoid.services.input_evidence import link_compliance_to_evidence
+                report = link_compliance_to_evidence(interpretation, report)
+            except Exception:  # noqa: BLE001 - linking is a nicety; keep the raw report if it fails
+                pass
         (output_dir / "reports").mkdir(parents=True, exist_ok=True)
         (output_dir / "reports" / "spec_compliance.json").write_text(
             json.dumps(report, indent=2, default=str), encoding="utf-8")
