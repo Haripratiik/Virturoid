@@ -167,6 +167,16 @@ def _import_controller_interface(args: dict) -> dict:
             "sensors": parsed["sensors"], "warnings": parsed["warnings"]}
 
 
+def _import_cad(args: dict) -> dict:
+    from virturoid.services.cad_importer import import_cad
+    path = (args or {}).get("path", "")
+    if not path:
+        return {"error": "path is required (a .stl/.obj mesh; .step is deferred)"}
+    if not os.path.exists(path):
+        return {"error": f"path not found: {path}"}
+    return import_cad(path, material=args.get("material", "abs")).to_dict()
+
+
 def _import_dataset(args: dict) -> dict:
     from virturoid.services.dataset_importer import import_dataset
     path = (args or {}).get("path", "")
@@ -278,6 +288,17 @@ INPUT_TRAINING_TOOLS: dict[str, dict] = {
             "xml": {"type": "string", "description": "inline URDF/xacro XML (alternative to path)"},
             "controller_yaml_path": {"type": "string"}, "controller_yaml": {"type": "string"}}},
         "handler": _import_controller_interface, "heavy": False,
+    },
+    "import_cad": {
+        "description": "Import a CAD mesh (.stl binary/ascii or .obj): recover triangle/vertex count, the "
+                       "axis-aligned bounding box + real dimensions, a unit-scale guess (mm-modeled parts read "
+                       "~1000x too big), a mesh volume, and an inertial mass estimate from an assumed density "
+                       "(with a warning). STEP/IGES is honestly deferred to a CAD kernel. No physics.",
+        "parameters": {"type": "object", "required": ["path"], "properties": {
+            "path": {"type": "string", "description": "a .stl or .obj mesh file"},
+            "material": {"type": "string", "enum": ["abs", "pla", "aluminum", "steel", "nylon"],
+                         "description": "density prior for the mass estimate (default abs)"}}},
+        "handler": _import_cad, "heavy": False,
     },
     "import_dataset": {
         "description": "Import a demonstration/log dataset (LeRobot dir, robomimic .hdf5, .mcap/.bag/.db3 log, or "
