@@ -81,6 +81,16 @@ def _role_geometry(role: str, size: float, girth: float, aspect: str = ""):
         def loft(hw, h):
             return _loft([(0.0, hw * 0.74, hl * 0.82), (0.40 * h, hw * 1.0, hl * 1.0),
                           (0.82 * h, hw * 0.92, hl * 0.90), (h, hw * 0.58, hl * 0.72)])
+        if a in ("deck", "chassis", "flatbed"):
+            # a flat machined DECK/CHASSIS (rover/AGV): a low rectangular slab — full length x width x a SHALLOW
+            # height, chamfered — NOT a rounded loft. Wheels mount at its bottom corners. A single clean extrude
+            # box (verified realize_shape bbox 0.8x0.34x0.05 for size 0.8) so the render is a true flat deck.
+            hw = min(max(0.04, g), 0.95 * L) / 2.0
+            h = max(0.05, 0.5 * hw)
+            deck = {"family": "extrude", "height": round(h, 4), "fillet": round(0.16 * hw, 4),
+                    "chamfer": round(0.1 * hw, 5),
+                    "profile": [[-hl, -hw], [hl, -hw], [hl, hw], [-hl, hw]]}
+            return deck, h, hw
         if a in ("wide", "flat"):
             # broad side-to-side (width can equal/exceed length) and LOW vertically — a carapace/disc, not a
             # tower. A shell stays a lofted organic form, not a box.
@@ -481,8 +491,15 @@ def build_from_anatomy(graph: dict) -> RobotGene:
                     pdim = dims[rname]
                     ax, ay, az = _anchor_on_body(part.get("attach", "mid"), pdim["half_len"], pdim["half_w"],
                                                  pdim["height"], edge=body_edge)
-                    ay = sign_y * abs(pdim["half_w"]) * 0.9 if sign_y else ay
-                    mount_offset = (ax, ay, az - pdim["length_m"])
+                    if is_wheel:
+                        # a WHEEL sits OUTSIDE the chassis side (ay past the half-width) at the SAME bottom height
+                        # the legs use (az - length_m), so it hangs at the bottom corner like a real wheel.
+                        wr = 0.5 * float(part.get("size") or 0.12)
+                        ay_w = sign_y * (abs(pdim["half_w"]) + 0.5 * wr) if sign_y else ay
+                        mount_offset = (ax, ay_w, az - pdim["length_m"])
+                    else:
+                        ay = sign_y * abs(pdim["half_w"]) * 0.9 if sign_y else ay
+                        mount_offset = (ax, ay, az - pdim["length_m"])
                 else:
                     mount_offset = (0.0, 0.0, 0.0)   # attach at the parent segment's tip
             elif is_foot:

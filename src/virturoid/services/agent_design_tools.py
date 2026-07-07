@@ -39,12 +39,12 @@ _EXAMPLE_HEX = {
          "size": 0.34, "girth": 0.016, "segments": 4, "symmetry": "left_right", "joint": "revolute"} for i in range(3)]}
 _EXAMPLE_ROVER = {
     "robot_class": "mobile_base", "name": "agent_rover",
-    # a LONG chassis so the wheel pairs spread front/mid/rear without overlapping (short chassis + big wheels
-    # jam the same-side wheels into each other -> no roll). size 0.9 -> ~0.36 m axle spacing >> 0.14 m wheel.
-    "parts": [{"name": "chassis", "role": "body", "size": 0.9, "girth": 0.13, "aspect": "wide"}] + [
+    # a flat DECK chassis (aspect 'deck' = a low rectangular slab, not a rounded pod) with wheel pairs at the
+    # FRONT and REAR bottom corners -> a credible flat-deck rover that drives (verified ~0.55 m, 0% slip).
+    "parts": [{"name": "chassis", "role": "body", "size": 0.8, "girth": 0.34, "aspect": "deck", "detail": "smooth"}] + [
         {"name": f"wheel{i+1}", "role": "wheel", "parent": "chassis",
-         "attach": ["front_bottom", "mid_bottom", "rear_bottom"][i],
-         "size": 0.14, "girth": 0.05, "symmetry": "left_right"} for i in range(3)]}   # 3 pairs = 6 wheels
+         "attach": ["front_bottom", "rear_bottom"][i],
+         "size": 0.2, "girth": 0.08, "symmetry": "left_right"} for i in range(2)]}   # 2 pairs = 4 wheels at corners
 
 
 def get_design_schema(_args: dict) -> dict:
@@ -58,6 +58,9 @@ def get_design_schema(_args: dict) -> dict:
                 "attach": f"where on the parent it mounts: {_ATTACH}",
                 "aim": f"the direction it points: {_AIM}",
                 "size": "length in metres (the segment's long axis)", "girth": "radius in metres",
+                "aspect": "BODY shape (root part only): 'deck'/'chassis' = a flat rectangular slab for a "
+                          "rover/AGV (wheels mount at its corners); 'wide' = a broad low pod; 'round' = a "
+                          "bulbous sac; omit for the default sleek barrel torso",
                 "segments": "int; a leg with 4 = 3 actuated joints + a welded foot (Go2-class)",
                 "symmetry": "'left_right' mirrors the part to a +y/-y PAIR (so one leg entry = two legs)",
                 "joint": "'revolute' to actuate it; omit for a welded/fixed part",

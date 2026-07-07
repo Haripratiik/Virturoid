@@ -27,7 +27,7 @@ class WheelRoleTests(unittest.TestCase):
         sch = self._call("get_design_schema")
         r = self._call("submit_design", {"graph": sch["examples"]["rover"]})
         self.assertTrue(r["ok"], r.get("error"))
-        self.assertEqual(r["appendages"]["wheels"], 6, "wheel parts must compile as WHEELS")
+        self.assertEqual(r["appendages"]["wheels"], 4, "wheel parts must compile as WHEELS (deck rover = 4)")
         self.assertEqual(r["appendages"]["legs"], 0, "a rover has no legs")
 
     def test_wheeled_body_routes_mobile_with_a_drive_verdict(self):
