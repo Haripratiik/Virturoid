@@ -37,7 +37,7 @@ class StructuralDispatchTests(unittest.TestCase):
         g = copy.deepcopy(self._call("get_design_schema")["examples"]["rover"])
         g["robot_class"] = "legged"                            # wheels, but LABELED legged
         r = self._call("submit_design", {"graph": g})
-        self.assertEqual(r["appendages"]["wheels"], 6)         # still detected as wheels
+        self.assertEqual(r["appendages"]["wheels"], 4)         # still detected as wheels (deck rover = 4)
         v = self._call("verify_robot", {"robot_id": r["robot_id"], "mode": "quick"})
         self.assertEqual(v["kind"], "mobile")                  # driven, not walked, despite the 'legged' label
 
