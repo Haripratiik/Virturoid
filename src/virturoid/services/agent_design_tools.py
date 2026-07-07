@@ -61,7 +61,22 @@ def get_design_schema(_args: dict) -> dict:
                 "segments": "int; a leg with 4 = 3 actuated joints + a welded foot (Go2-class)",
                 "symmetry": "'left_right' mirrors the part to a +y/-y PAIR (so one leg entry = two legs)",
                 "joint": "'revolute' to actuate it; omit for a welded/fixed part",
-                "curl": "float; a resting curl spread across a multi-segment part (a curved tail/neck)"},
+                "curl": "float; a resting curl spread across a multi-segment part (a curved tail/neck)",
+                "geometry": "OPTIONAL shape program to AUTHOR a single-segment part's own visual shape (T4); "
+                            "physics collider stays the size/girth primitive. See geometry_families."},
+            # T4: author arbitrary part geometry (visual). Single-segment parts only; the collider is untouched.
+            "geometry_families": {
+                "extrude": "{family:'extrude', profile:[[x,y],...], height} - extrude a 2-D polygon (plates, "
+                           "brackets, L-shapes)",
+                "revolve": "{family:'revolve', profile:[[r,z],...]} - revolve a profile about z (domes, cones, "
+                           "nozzles, shells)",
+                "tapered": "{family:'tapered', length, r0, r1} - a frustum (tapered shaft)",
+                "loft": "{family:'loft', sections:[[z,half_y,half_x],...]} - an elliptical loft (organic bodies)",
+                "modifiers": "any family also takes fillet (mm, round edges), chamfer (mm, bevel), cutouts (list)",
+                "example": {"name": "dome", "role": "head", "parent": "torso", "attach": "front_top",
+                            "aim": "forward", "size": 0.14, "girth": 0.06,
+                            "geometry": {"family": "revolve",
+                                         "profile": [[0.0, 0.0], [0.06, 0.0], [0.055, 0.05], [0.0, 0.08]]}}},
             # T8: real dimension bands (metres) grounded in production robots (Go2/Spot legs, UR5e links,
             # rover wheels) so the agent authors CREDIBLE sizes, not a tiny/toy or absurd body. size = the
             # part's long axis; girth = its radius (half-width). Stay within these unless the prompt is explicit.
@@ -132,6 +147,31 @@ def _proportion_warnings(graph: dict) -> list[str]:
     return warns[:4]
 
 
+# T4 shape-programs: the geometry families the mesh layer (cad_geometry.realize_shape) renders, + their
+# required fields. A part may carry an optional ``geometry`` to author its OWN visual shape.
+_GEO_FIELDS = {"extrude": ["profile", "height"], "revolve": ["profile"],
+               "tapered": ["length", "r0", "r1"], "loft": ["sections"]}
+
+
+def _check_geometry(graph: dict) -> str | None:
+    """Return a teaching error if any part's optional ``geometry`` spec is malformed (T4) — so a bad shape
+    program is REJECTED, not silently rendered as a fallback capsule. None if all geometry is valid/absent."""
+    for p in graph.get("parts") or []:
+        g = p.get("geometry")
+        if g is None:
+            continue
+        if not isinstance(g, dict):
+            return f"part '{p.get('name','?')}' geometry must be an object {{family, ...}}"
+        fam = str(g.get("family") or "").lower()
+        if fam not in _GEO_FIELDS:
+            return (f"part '{p.get('name','?')}' geometry.family '{fam}' is not one of {sorted(_GEO_FIELDS)}; "
+                    f"see get_design_schema.geometry_families")
+        missing = [k for k in _GEO_FIELDS[fam] if k not in g]
+        if missing:
+            return f"part '{p.get('name','?')}' {fam} geometry needs {missing} (see get_design_schema)"
+    return None
+
+
 def _check_scale(graph: dict) -> str | None:
     """Return a teaching error if any part's size/girth is outside the buildable band (M16), else None."""
     parts = graph.get("parts") or []
@@ -189,6 +229,9 @@ def submit_design(args: dict) -> dict:
     scale_err = _check_scale(graph)                            # M16: reject absurd proportions with a teaching error
     if scale_err:
         return {"ok": False, "error": scale_err}
+    geo_err = _check_geometry(graph)                           # T4: reject a malformed shape program (no silent fallback)
+    if geo_err:
+        return {"ok": False, "error": geo_err}
     try:
         gene = build_from_anatomy(graph)
     except Exception as exc:  # noqa: BLE001

@@ -446,6 +446,13 @@ def build_from_anatomy(graph: dict) -> RobotGene:
             g_i = girth * (0.82 ** i)
             geo, length_m, radius_m = _role_geometry(seg_role, seg_len * (1.0 if not last or n == 1 else 0.6), g_i)
             geo = _apply_detail(geo, detail, length_m, g_i, part_chamfer)
+            # T4 shape-programs: a part may AUTHOR its own visual geometry (extrude/revolve/tapered/loft +
+            # fillet/chamfer/cutouts) — the mesh layer realizes it (cad_geometry.realize_shape, safe capsule
+            # fallback). Applies to single-segment parts; the primitive COLLIDER (size/girth) is unchanged, so
+            # physics is untouched and only the rendered shape changes (a dome sensor, a bracket, a nozzle).
+            _cg = part.get("geometry")
+            if isinstance(_cg, dict) and n == 1:
+                geo = _cg
             if is_wheel:
                 joint_type = "revolute"                            # a wheel is always a (continuous) hinge
             elif explicit_joint == "fixed" or (last and is_limb and n > 1):
