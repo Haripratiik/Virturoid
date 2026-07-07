@@ -59,6 +59,32 @@ def get_design_schema(_args: dict) -> dict:
             "examples": {"quadruped": _EXAMPLE_QUAD, "hexapod": _EXAMPLE_HEX}}
 
 
+# M16 buildable-scale bands (metres). Generous — an elephant leg is ~1.5 m, an industrial arm link ~1.2 m —
+# so a real design never trips them, but a 30 m leg (which held a 19.7 m / 130 kg "robot" silently) is caught
+# with a teaching error instead of compiling. Function-agnostic: applies to any part in any body.
+_SIZE_BAND = (0.005, 6.0)        # a single segment's long axis
+_GIRTH_BAND = (0.002, 1.2)       # a single segment's radius
+_MAX_PARTS = 80
+
+
+def _check_scale(graph: dict) -> str | None:
+    """Return a teaching error if any part's size/girth is outside the buildable band (M16), else None."""
+    parts = graph.get("parts") or []
+    if len(parts) > _MAX_PARTS:
+        return f"{len(parts)} parts exceeds the buildable limit ({_MAX_PARTS}); simplify the design"
+    for p in parts:
+        nm = p.get("name", "?")
+        sz = p.get("size")
+        if sz is not None and not (_SIZE_BAND[0] <= float(sz) <= _SIZE_BAND[1]):
+            return (f"part '{nm}' size {sz} m is outside the buildable band {_SIZE_BAND} m — real robot "
+                    f"segments are sub-metre to a few metres; scale it down (or split into segments)")
+        gr = p.get("girth")
+        if gr is not None and not (_GIRTH_BAND[0] <= float(gr) <= _GIRTH_BAND[1]):
+            return (f"part '{nm}' girth {gr} m (radius) is outside the buildable band {_GIRTH_BAND} m; "
+                    f"pick a realistic limb/body thickness")
+    return None
+
+
 def submit_design(args: dict) -> dict:
     """The agent AUTHORS a robot: compile its anatomy graph, run the validity gates, and HOLD it under a
     robot_id for the rest of the loop (simulate/edit/train/export). No prompt, no internal generator — the
@@ -72,6 +98,9 @@ def submit_design(args: dict) -> dict:
     if len(roots) != 1:
         return {"ok": False, "error": f"a design needs EXACTLY ONE root part with role 'body' and no parent "
                 f"(found {len(roots)}); see get_design_schema examples"}
+    scale_err = _check_scale(graph)                            # M16: reject absurd proportions with a teaching error
+    if scale_err:
+        return {"ok": False, "error": scale_err}
     try:
         gene = build_from_anatomy(graph)
     except Exception as exc:  # noqa: BLE001

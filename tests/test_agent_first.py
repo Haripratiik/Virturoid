@@ -44,6 +44,18 @@ class DesignSubmissionTests(unittest.TestCase):
         self.assertFalse(r["ok"])
         self.assertIn("body", r["error"])                     # tells the agent it needs a body root
 
+    def test_absurd_scale_is_gated(self):
+        # M16: a 30 m leg used to hold a 19.7 m / 130 kg "robot" silently -> now a teaching error, before compile.
+        g = {"robot_class": "quadruped", "name": "absurd", "parts": [
+            {"name": "torso", "role": "body", "size": 0.5, "girth": 0.14},
+            {"name": "leg1", "role": "leg", "parent": "torso", "attach": "front_bottom", "aim": "down_out",
+             "size": 30.0, "girth": 0.02, "segments": 4, "symmetry": "left_right", "joint": "revolute"}]}
+        r = self._call("submit_design", {"graph": g})
+        self.assertFalse(r["ok"])
+        self.assertIn("band", r["error"])                     # names the buildable band, teaches the fix
+        # a sane design is NOT a false positive (the taught examples still hold)
+        self.assertTrue(self._call("submit_design", {"graph": self._call("get_design_schema")["examples"]["quadruped"]})["ok"])
+
     def test_submit_scene_spec(self):
         objs = [{"name": "floor", "object_type": "floor", "category": "floor", "size_xyz": [4, 4, 0.05],
                  "pose_xyz_rpy": [0, 0, -0.025, 0, 0, 0]},
