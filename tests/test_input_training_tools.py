@@ -75,6 +75,20 @@ class ToolRegistrationTests(unittest.TestCase):
         self.assertIn("error", r["result"])
 
 
+@unittest.skipUnless(_MUJOCO, "needs MuJoCo for the physics-grounded amplifier")
+class FlywheelClosureTests(unittest.TestCase):
+    def test_amplify_banks_a_data_dividend(self):
+        # one call closes the flywheel: amplify demos -> auto-bank the demonstration_dataset dividend.
+        mem = tempfile.mkdtemp(prefix="moat_")
+        out = _ok("amplify_demonstrations",
+                  {"prompt": "a quadruped robot dog", "n_variants": 3, "bank_dividend": True, "memory_dir": mem})
+        self.assertGreater(out["kept"], 0)
+        self.assertIn("data_dividend", out)
+        self.assertTrue(out["data_dividend"]["reusable_by_default"])
+        ledger = _ok("data_dividends", {"memory_dir": mem})
+        self.assertEqual(ledger["total_dividends"], 1)
+
+
 @unittest.skipUnless(_MUJOCO, "needs MuJoCo to compile the import lanes")
 class ImportModelToolTests(unittest.TestCase):
     def test_import_robot_model_tool(self):

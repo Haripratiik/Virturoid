@@ -108,7 +108,19 @@ def _amplify_demonstrations(args: dict) -> dict:
         base_freq=float(args.get("base_freq", 1.4)),
         steps=int(args.get("steps", 1200)),
         seed=int(args.get("seed", 0)))
-    return res.report()
+    report = res.report()
+    if args.get("bank_dividend") and res.kept > 0:              # close the flywheel: record what this run improved
+        from virturoid.services.data_dividend import compute_dividend, record_dividend
+        rec = compute_dividend(
+            run_id=f"amp_{prompt[:24]}", improved_prior_type="demonstration_dataset",
+            improved_prior_ref=f"gait_demos::{prompt[:40]}",
+            before_metrics={"validated_demos": 1}, after_metrics={"validated_demos": res.kept},
+            key_metric="validated_demos", evidence_refs=[v.variant_id for v in res.lineage if v.accepted])
+        path = (record_dividend(rec, memory_dir=args["memory_dir"]) if args.get("memory_dir")
+                else record_dividend(rec))
+        report["data_dividend"] = {"reusable_by_default": rec.reusable_by_default,
+                                   "measured_delta": rec.measured_delta, "ledger": path}
+    return report
 
 
 def _import_bom(args: dict) -> dict:
@@ -255,7 +267,10 @@ INPUT_TRAINING_TOOLS: dict[str, dict] = {
         "parameters": {"type": "object", "properties": {
             "prompt": {"type": "string", "default": "a quadruped robot dog"},
             "n_variants": {"type": "integer", "default": 6},
-            "base_freq": {"type": "number", "default": 1.4}, "seed": {"type": "integer", "default": 0}}},
+            "base_freq": {"type": "number", "default": 1.4}, "seed": {"type": "integer", "default": 0},
+            "bank_dividend": {"type": "boolean", "default": False,
+                              "description": "also record a DataDividend (the demonstration_dataset prior improved)"},
+            "memory_dir": {"type": "string"}}},
         "handler": _amplify_demonstrations, "heavy": True,
     },
     "import_bom": {
