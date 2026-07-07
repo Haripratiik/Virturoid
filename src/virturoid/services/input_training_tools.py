@@ -121,6 +121,31 @@ def _import_bom(args: dict) -> dict:
     return parse_bom_file(path).to_dict()
 
 
+def _import_controller_interface(args: dict) -> dict:
+    from virturoid.services.ros2_control_parser import controller_interface_from_ros2_control, parse_ros2_control
+    args = args or {}
+    xml = args.get("xml")
+    path = args.get("path")
+    if not xml and path:
+        if not os.path.exists(path):
+            return {"error": f"path not found: {path}"}
+        with open(path, encoding="utf-8") as handle:
+            xml = handle.read()
+    if not xml:
+        return {"error": "provide 'path' to a URDF/xacro with a <ros2_control> block, or inline 'xml'"}
+    ctrl_yaml = None
+    ypath = args.get("controller_yaml_path")
+    if ypath and os.path.exists(ypath):
+        with open(ypath, encoding="utf-8") as handle:
+            ctrl_yaml = handle.read()
+    elif args.get("controller_yaml"):
+        ctrl_yaml = args["controller_yaml"]
+    parsed = parse_ros2_control(xml)
+    spec = controller_interface_from_ros2_control(xml, controller_yaml=ctrl_yaml)
+    return {"interface": spec.to_dict(), "hardware_plugins": parsed["hardware_plugins"],
+            "sensors": parsed["sensors"], "warnings": parsed["warnings"]}
+
+
 def _import_dataset(args: dict) -> dict:
     from virturoid.services.dataset_importer import import_dataset
     path = (args or {}).get("path", "")
@@ -209,6 +234,17 @@ INPUT_TRAINING_TOOLS: dict[str, dict] = {
         "parameters": {"type": "object", "required": ["path"], "properties": {
             "path": {"type": "string", "description": "a .csv/.json/.yaml/.xlsx BOM file"}}},
         "handler": _import_bom, "heavy": False,
+    },
+    "import_controller_interface": {
+        "description": "Extract a controller contract from a ROS 2 robot: parse the <ros2_control> URDF/xacro tag "
+                       "(+ optional controller_manager YAML) into joint command/state interfaces, joint order, "
+                       "safety limits, hardware plugin, and control rate — the truth needed to map an imported "
+                       "policy to actuators. Static parse (no xacro execution). No physics.",
+        "parameters": {"type": "object", "properties": {
+            "path": {"type": "string", "description": "a .urdf/.xacro/.xml with a <ros2_control> block"},
+            "xml": {"type": "string", "description": "inline URDF/xacro XML (alternative to path)"},
+            "controller_yaml_path": {"type": "string"}, "controller_yaml": {"type": "string"}}},
+        "handler": _import_controller_interface, "heavy": False,
     },
     "import_dataset": {
         "description": "Import a demonstration/log dataset (LeRobot dir, robomimic .hdf5, .mcap/.bag/.db3 log, or "
