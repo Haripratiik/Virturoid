@@ -95,9 +95,14 @@ def _honest_drive(gene, *, steps: int = 800) -> dict:
     bid, free = _base_body_id(model)
     if model.nu == 0:
         return {"kind": "mobile", "verdict": "NO ACTUATORS (cannot drive)", "survived": True, "forward_m": 0.0}
+    for _ in range(80):                                             # SETTLE: let the body drop so wheels contact
+        mujoco.mj_step(model, data)
     p0 = np.array(data.xpos[bid]); z0 = float(p0[2]); up_min = 1.0
-    drive = np.where(model.actuator_ctrlrange[:, 1] > model.actuator_ctrlrange[:, 0],
-                     0.85 * model.actuator_ctrlrange[:, 1], 1.0)     # forward wheel command within range
+    lo, hi = model.actuator_ctrlrange[:, 0], model.actuator_ctrlrange[:, 1]
+    frc = model.actuator_forcerange[:, 1]
+    # bounded ctrl (position/velocity servo) -> command 0.85*max; an UNBOUNDED torque motor (ctrlrange 0,0) ->
+    # a solid torque within its forcerange so the wheels actually spin (they were getting ctrl=1 before).
+    drive = np.where(hi > lo, 0.85 * hi, np.where(frc > 0, 0.7 * frc, 2.0))
     for _ in range(steps):
         data.ctrl[:] = drive
         mujoco.mj_step(model, data)

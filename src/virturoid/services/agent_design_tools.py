@@ -12,8 +12,9 @@ from pathlib import Path
 
 # The REAL anatomy-graph vocabulary (extracted from anatomy_compiler.build_from_anatomy), so the schema we
 # teach the agent is accurate, not hallucinated. A part = one body/limb node; symmetry mirrors it to +-y.
-_ROLES = ["body", "neck", "head", "tail", "leg", "arm", "wing", "fin", "flipper", "foot", "hand", "claw",
-          "paw", "ear", "eye", "horn", "antenna", "shell", "beak", "snout"]
+_ROLES = ["body", "neck", "head", "tail", "leg", "arm", "wheel", "wing", "fin", "flipper", "foot", "hand",
+          "claw", "paw", "ear", "eye", "horn", "antenna", "shell", "beak", "snout"]
+_ROLESET = frozenset(_ROLES)
 _ATTACH = ["front_top", "front_bottom", "front_mid_bottom", "mid_bottom", "rear_mid_bottom", "rear_bottom",
            "rear_top", "tip"]
 _AIM = ["forward", "back", "up", "down", "out", "forward_up", "forward_out", "forward_down_out",
@@ -35,6 +36,14 @@ _EXAMPLE_HEX = {
         {"name": f"leg{i+1}", "role": "leg", "parent": "torso",
          "attach": ["front_bottom", "mid_bottom", "rear_bottom"][i], "aim": "down_out",
          "size": 0.34, "girth": 0.016, "segments": 4, "symmetry": "left_right", "joint": "revolute"} for i in range(3)]}
+_EXAMPLE_ROVER = {
+    "robot_class": "mobile_base", "name": "agent_rover",
+    # a LONG chassis so the wheel pairs spread front/mid/rear without overlapping (short chassis + big wheels
+    # jam the same-side wheels into each other -> no roll). size 0.9 -> ~0.36 m axle spacing >> 0.14 m wheel.
+    "parts": [{"name": "chassis", "role": "body", "size": 0.9, "girth": 0.13, "aspect": "wide"}] + [
+        {"name": f"wheel{i+1}", "role": "wheel", "parent": "chassis",
+         "attach": ["front_bottom", "mid_bottom", "rear_bottom"][i],
+         "size": 0.14, "girth": 0.05, "symmetry": "left_right"} for i in range(3)]}   # 3 pairs = 6 wheels
 
 
 def get_design_schema(_args: dict) -> dict:
@@ -54,9 +63,14 @@ def get_design_schema(_args: dict) -> dict:
                 "curl": "float; a resting curl spread across a multi-segment part (a curved tail/neck)"},
             "rules": ["exactly one root part with role 'body' and no parent",
                       "a WALKING leg needs segments>=4 and joint='revolute' and aim 'down_out' for a stable stance",
-                      "symmetry:'left_right' counts as TWO legs — 2 leg parts = a quadruped, 3 = a hexapod",
+                      "a WHEEL (role 'wheel') is a rolling cylinder: size=diameter, girth=tread width; the axle "
+                      "is laid lateral automatically, so a mobile_base with wheel pairs DRIVES (not walks)",
+                      "symmetry:'left_right' counts as TWO of the part — 2 leg parts = a quadruped, 3 = a hexapod, "
+                      "3 wheel parts = a six-wheeled rover",
+                      "roles MUST come from the roles list above; an unknown role is rejected with a teaching "
+                      "error (it is NOT silently compiled into a limb)",
                       "the compiler + validity gates run on submit; a broken graph returns a teaching error"],
-            "examples": {"quadruped": _EXAMPLE_QUAD, "hexapod": _EXAMPLE_HEX}}
+            "examples": {"quadruped": _EXAMPLE_QUAD, "hexapod": _EXAMPLE_HEX, "rover": _EXAMPLE_ROVER}}
 
 
 # M16 buildable-scale bands (metres). Generous — an elephant leg is ~1.5 m, an industrial arm link ~1.2 m —
@@ -98,6 +112,10 @@ def submit_design(args: dict) -> dict:
     if len(roots) != 1:
         return {"ok": False, "error": f"a design needs EXACTLY ONE root part with role 'body' and no parent "
                 f"(found {len(roots)}); see get_design_schema examples"}
+    bad_roles = sorted({str(p.get("role") or "").lower() for p in graph["parts"]} - _ROLESET - {""})
+    if bad_roles:                                              # T3: teach, never silently mis-compile an unknown role
+        return {"ok": False, "error": f"unknown part role(s) {bad_roles}; use only {sorted(_ROLESET)} "
+                f"(an unknown role is NOT silently turned into a limb)"}
     scale_err = _check_scale(graph)                            # M16: reject absurd proportions with a teaching error
     if scale_err:
         return {"ok": False, "error": scale_err}

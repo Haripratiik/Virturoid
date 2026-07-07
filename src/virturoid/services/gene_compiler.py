@@ -452,6 +452,8 @@ def _detail_geoms_xml(seg, pad: str, *, suppress_motor: bool = False) -> str:
     L = float(seg.length_m)
     vis = ' mass="0" contype="0" conaffinity="0"'
     parts: list[str] = []
+    if seg.shape == "cylinder":
+        return ""                          # a WHEEL is a clean cylinder — no motor-can/collar/fairing limb hardware
     # Actuator housing: a slightly-fat "motor can" coaxial with the joint axis, centered at the joint
     # (which sits at this body's local origin). This is the single biggest "robot vs toy" cue.
     if seg.joint_type == "revolute" and not suppress_motor:

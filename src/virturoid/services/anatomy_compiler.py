@@ -113,6 +113,13 @@ def _role_geometry(role: str, size: float, girth: float, aspect: str = ""):
         return ({"family": "extrude", "height": round(L, 4), "fillet": round(0.4 * hw, 4),
                  "chamfer": round(0.3 * hw, 5),   # crisp machined bevel -> a sensor head, not a soft blob
                  "profile": [[-hw, -hw], [hw, -0.85 * hw], [hw, 0.85 * hw], [-hw, hw]]}, L, hw)
+    if role == "wheel":
+        # T3: a real ROLLING wheel — a flat cylinder. ``size`` = wheel diameter-ish (radius = 0.5*size),
+        # ``girth`` = tread WIDTH (thin). Physics is a cylinder (shape='cylinder'); the segment loop lays the
+        # axle LATERAL so it rolls. length_m carries the width (the cylinder's axis), radius_m the roll radius.
+        rad = max(0.03, 0.5 * L)
+        width = max(0.02, min(g if girth else 0.35 * rad, 0.7 * rad))
+        return _tapered(width, rad, rad), width, rad          # uniform-radius cylinder of length=width
     if role in ("beak", "horn", "fang", "claw"):
         return _tapered(L, g, max(0.004, 0.28 * g)), L, g     # pointed (beak/horn/fang/claw)
     if role in ("snout", "muzzle"):
@@ -435,10 +442,13 @@ def build_from_anatomy(graph: dict) -> RobotGene:
             last = i == n - 1
             is_foot = is_limb and last and n > 1            # terminal segment of a walking limb -> a real foot
             seg_role = ("foot" if is_foot else role)
+            is_wheel = seg_role == "wheel"
             g_i = girth * (0.82 ** i)
             geo, length_m, radius_m = _role_geometry(seg_role, seg_len * (1.0 if not last or n == 1 else 0.6), g_i)
             geo = _apply_detail(geo, detail, length_m, g_i, part_chamfer)
-            if explicit_joint == "fixed" or (last and is_limb and n > 1):
+            if is_wheel:
+                joint_type = "revolute"                            # a wheel is always a (continuous) hinge
+            elif explicit_joint == "fixed" or (last and is_limb and n > 1):
                 joint_type = None                                  # welded paw / explicitly-fixed part
             elif explicit_joint == "revolute" or role in _ARTICULATED or is_limb:
                 joint_type = "revolute"
@@ -456,6 +466,8 @@ def build_from_anatomy(graph: dict) -> RobotGene:
                 else:
                     aim_world = d
                 R_des = _aim_R(aim_world)
+                if is_wheel:                     # T3: lay the cylinder axle LATERAL (local z -> world y) so it rolls
+                    R_des = np.array([[1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, -1.0, 0.0]])
                 mount_euler = _R_to_euler(prev_world_R.T @ R_des)
                 seg_world_R = R_des
                 if body_attached:
@@ -484,7 +496,9 @@ def build_from_anatomy(graph: dict) -> RobotGene:
             # HIP + KNEE about world-y (fore-aft STRIDE). Converted into each segment's local frame via seg_world_R
             # so it's correct for any leg aim. Only a real walking leg (role 'leg', >=3 actuated -> n>=4 w/ foot).
             _ja, _jlo, _jhi = (0.0, 1.0, 0.0), -2.6, 2.6
-            if role == "leg" and joint_type == "revolute" and n >= 4:
+            if is_wheel:                                        # spin about the axle (local z), UNLIMITED (rolls)
+                _ja, _jlo, _jhi = (0.0, 0.0, 1.0), None, None
+            elif role == "leg" and joint_type == "revolute" and n >= 4:
                 _w = np.array([1.0, 0.0, 0.0]) if i == 0 else np.array([0.0, 1.0, 0.0])  # abduction vs stride axis
                 _loc = seg_world_R.T @ _w
                 _nrm = float(np.linalg.norm(_loc)) or 1.0
@@ -492,7 +506,8 @@ def build_from_anatomy(graph: dict) -> RobotGene:
                 if i == 0:
                     _jlo, _jhi = -0.6, 0.6                              # abduction range (Go2-class ~+-0.5 rad)
             segs.append(GeneSegment(
-                name=seg_name, parent=prev, shape="capsule", length_m=length_m, radius_m=max(0.006, radius_m),
+                name=seg_name, parent=prev, shape=("cylinder" if is_wheel else "capsule"),
+                length_m=length_m, radius_m=max(0.006, radius_m),
                 mass_kg=max(0.02, 1.2 * length_m * radius_m * 30), joint_type=joint_type, joint_axis=_ja,
                 joint_lower=_jlo if joint_type else None, joint_upper=_jhi if joint_type else None,
                 mount_offset=mount_offset, mount_euler=mount_euler,
