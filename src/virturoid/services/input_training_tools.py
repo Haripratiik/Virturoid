@@ -121,6 +121,16 @@ def _import_bom(args: dict) -> dict:
     return parse_bom_file(path).to_dict()
 
 
+def _import_dataset(args: dict) -> dict:
+    from virturoid.services.dataset_importer import import_dataset
+    path = (args or {}).get("path", "")
+    if not path:
+        return {"error": "path is required (a dataset dir/file: lerobot/hdf5/mcap/bag/db3/npz)"}
+    if not os.path.exists(path):
+        return {"error": f"path not found: {path}"}
+    return import_dataset(path).to_dict()
+
+
 def _data_dividends(args: dict) -> dict:
     from virturoid.services.data_dividend import dividend_summary
     memory_dir = (args or {}).get("memory_dir")
@@ -199,6 +209,14 @@ INPUT_TRAINING_TOOLS: dict[str, dict] = {
         "parameters": {"type": "object", "required": ["path"], "properties": {
             "path": {"type": "string", "description": "a .csv/.json/.yaml/.xlsx BOM file"}}},
         "handler": _import_bom, "heavy": False,
+    },
+    "import_dataset": {
+        "description": "Import a demonstration/log dataset (LeRobot dir, robomimic .hdf5, .mcap/.bag/.db3 log, or "
+                       "virturoid npz) into a typed spec: episodes, rate, modalities, and candidate observation/"
+                       "action keys to seed training. Grounded where deps allow, honest where they don't. No physics.",
+        "parameters": {"type": "object", "required": ["path"], "properties": {
+            "path": {"type": "string", "description": "a dataset directory or file"}}},
+        "handler": _import_dataset, "heavy": False,
     },
     "data_dividends": {
         "description": "The flywheel ledger summary: across every run, which reusable priors (skill/reward/body/"
