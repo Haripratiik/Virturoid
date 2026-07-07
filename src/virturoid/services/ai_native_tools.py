@@ -42,9 +42,17 @@ def _render_gene(gene, tag: str, *, azimuth: float = 50.0, elevation: float = -1
         import mujoco
         import PIL.Image
 
-        from virturoid.services.gene_compiler import compile_gene_to_mjcf, standing_spawn_z
+        from virturoid.services.gene_compiler import compile_gene_to_mjcf, gene_to_meshed_mjcf, standing_spawn_z
         _RENDER_DIR.mkdir(parents=True, exist_ok=True)
-        m = mujoco.MjModel.from_xml_string(compile_gene_to_mjcf(gene, include_floor=True, spawn_z=standing_spawn_z(gene)))
+        spawn_z = standing_spawn_z(gene)
+        # Render the MESHED model (the true geometry the app viewport shows), NOT the crude box collider — the
+        # non-meshed render drew a chassis as its tiny bounding box, so a wheeled body read as a small box with
+        # oversized disconnected wheels. Fall back to the primitive model only if meshing fails.
+        try:
+            xml = gene_to_meshed_mjcf(gene, include_floor=True, spawn_z=spawn_z)
+        except Exception:  # noqa: BLE001
+            xml = compile_gene_to_mjcf(gene, include_floor=True, spawn_z=spawn_z)
+        m = mujoco.MjModel.from_xml_string(xml)
         d = mujoco.MjData(m); mujoco.mj_resetData(m, d); mujoco.mj_forward(m, d)
         rr = mujoco.Renderer(m, height=420, width=560); cam = mujoco.MjvCamera()
         cam.lookat[:] = [0.0, 0.0, 0.15]; cam.distance, cam.azimuth, cam.elevation = 1.9, float(azimuth), float(elevation)
@@ -127,40 +135,63 @@ def _compose_scene_xml(gene, sg) -> str | None:
 
 
 def _honest_drive(gene, *, steps: int = 800, world_xml: str | None = None) -> dict:
-    """B1: the DRIVE verdict for a wheeled/mobile body — actuate all wheels forward and measure REAL forward
-    displacement + upright, the wheeled analogue of the gait verdict (never a bogus gait verdict on a rover).
-    B2: ``world_xml`` (robot composed into a scene) makes the drive contend with real obstacles."""
+    """B1: the DRIVE verdict for a wheeled/mobile body — the wheeled analogue of the gait verdict, VERIFIED so
+    it can't be gamed: 'DRIVES' requires the wheels to be in GROUND CONTACT, actually SPINNING, and the base
+    to stay upright at ~constant height — not a slide, a tip, or wheels spinning in the air. B2: ``world_xml``
+    (robot composed into a scene) makes the drive contend with real obstacles."""
     import numpy as np
     import mujoco
     from virturoid.services.morph_policy import compiled_model, robot_mjcf
     model = compiled_model(world_xml or robot_mjcf(gene))
     data = mujoco.MjData(model)
     mujoco.mj_resetData(model, data); mujoco.mj_forward(model, data)
-    bid, free = _base_body_id(model)
+    bid, _free = _base_body_id(model)
     if model.nu == 0:
-        return {"kind": "mobile", "verdict": "NO ACTUATORS (cannot drive)", "survived": True, "forward_m": 0.0}
-    for _ in range(80):                                             # SETTLE: let the body drop so wheels contact
+        return {"kind": "mobile", "verdict": "NO ACTUATORS (cannot drive)", "survived": True, "forward_m": 0.0,
+                "note": "task capability (navigation/goal-reach) via evaluate_held"}
+    # identify wheel geoms (the cylinders), the floor plane, and each actuator's driven joint dof
+    wheel_geoms = {g for g in range(model.ngeom) if model.geom_type[g] == mujoco.mjtGeom.mjGEOM_CYLINDER}
+    floor_geoms = {g for g in range(model.ngeom) if model.geom_type[g] == mujoco.mjtGeom.mjGEOM_PLANE}
+    wheel_r = float(np.mean([model.geom_size[g][0] for g in wheel_geoms])) if wheel_geoms else 0.05
+    dofs = [int(model.jnt_dofadr[int(model.actuator_trnid[u, 0])]) for u in range(model.nu)]
+    for _ in range(60):                                             # brief settle to steady wheel contact
         mujoco.mj_step(model, data)
     p0 = np.array(data.xpos[bid]); z0 = float(p0[2]); up_min = 1.0
-    lo, hi = model.actuator_ctrlrange[:, 0], model.actuator_ctrlrange[:, 1]
+    hi, lo = model.actuator_ctrlrange[:, 1], model.actuator_ctrlrange[:, 0]
     frc = model.actuator_forcerange[:, 1]
-    # bounded ctrl (position/velocity servo) -> command 0.85*max; an UNBOUNDED torque motor (ctrlrange 0,0) ->
-    # a solid torque within its forcerange so the wheels actually spin (they were getting ctrl=1 before).
     drive = np.where(hi > lo, 0.85 * hi, np.where(frc > 0, 0.7 * frc, 2.0))
+    contact_steps, spins = 0, []
     for _ in range(steps):
         data.ctrl[:] = drive
         mujoco.mj_step(model, data)
-        up_min = min(up_min, float(data.xmat[bid].reshape(3, 3)[2, 2]))   # world-z of the body's local-z
+        up_min = min(up_min, float(data.xmat[bid].reshape(3, 3)[2, 2]))
+        touching = any((c.geom1 in wheel_geoms and c.geom2 in floor_geoms) or
+                       (c.geom2 in wheel_geoms and c.geom1 in floor_geoms) for c in data.contact[:data.ncon])
+        contact_steps += int(touching)
+        spins.append(float(np.mean(np.abs([data.qvel[j] for j in dofs]))))
     p1 = np.array(data.xpos[bid])
-    fwd = float(np.hypot(p1[0] - p0[0], p1[1] - p0[1]))              # planar travel (heading-agnostic: it moved)
+    fwd = float(np.hypot(p1[0] - p0[0], p1[1] - p0[1]))
     dz = float(p1[2] - z0)
+    spin = float(np.mean(spins))                                    # mean wheel angular speed (rad/s)
+    contact_frac = contact_steps / max(1, steps)
+    dt = float(model.opt.timestep)
+    roll_ref = spin * steps * dt * wheel_r                          # distance if the spin were pure rolling
+    slip = 1.0 - min(1.0, fwd / roll_ref) if roll_ref > 1e-6 else 1.0
     upright = up_min > 0.5 and dz > -0.15
-    verdict = (f"DRIVES ({fwd:.2f} m traveled)" if fwd > 0.15 and upright
-               else "TIPPED (lost upright while driving)" if not upright
-               else "STUCK (wheels spin, no travel)")
-    return {"kind": "mobile", "verdict": verdict, "survived": bool(upright), "forward_m": round(fwd, 3),
-            "upright_min": round(up_min, 2), "n_actuators": int(model.nu),
-            "note": "task capability (navigation/goal-reach) via evaluate_held"}
+    if not upright:
+        verdict = "TIPPED (lost upright / fell while driving)"
+    elif spin < 0.3:
+        verdict = "STUCK (wheels do not turn)"
+    elif contact_frac < 0.2:
+        verdict = "WHEELS OFF GROUND (spinning in the air, no traction)"
+    elif fwd < 0.12:
+        verdict = "SPINS IN PLACE (wheels turn + touch, but no travel)"
+    else:
+        verdict = f"DRIVES ({fwd:.2f} m, wheel-slip {int(slip * 100)}%)"
+    return {"kind": "mobile", "verdict": verdict, "survived": bool(upright and contact_frac > 0.2),
+            "forward_m": round(fwd, 3), "upright_min": round(up_min, 2),
+            "wheel_spin_radps": round(spin, 2), "wheel_ground_contact_frac": round(contact_frac, 2),
+            "n_actuators": int(model.nu), "note": "task capability (navigation/goal-reach) via evaluate_held"}
 
 
 def _honest_reach(gene, *, steps: int = 500, world_xml: str | None = None) -> dict:

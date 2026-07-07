@@ -46,6 +46,29 @@ class WheelRoleTests(unittest.TestCase):
         self.assertEqual(v["kind"], "mobile")
         self.assertGreater(v["forward_m"], 0.1, f"a rover should drive forward, got {v['verdict']}")
 
+    def test_drive_verdict_is_verified_rolling_not_gameable(self):
+        # a 'DRIVES' verdict must be backed by REAL rolling: wheels in ground contact AND spinning AND upright,
+        # so a slide/tip/float can't earn it (the honesty fix after the floating-wheels regression).
+        rid = self._call("create_robot", {"prompt": "a six-wheeled rover"})["robot_id"]
+        v = self._call("verify_robot", {"robot_id": rid, "mode": "full"})
+        if v["verdict"].startswith("DRIVES"):
+            self.assertGreater(v["wheel_spin_radps"], 0.3, "DRIVES requires the wheels to actually turn")
+            self.assertGreater(v["wheel_ground_contact_frac"], 0.2, "DRIVES requires wheels on the ground")
+            self.assertGreater(v["upright_min"], 0.5, "DRIVES requires staying upright")
+
+    def test_wheels_rest_on_the_ground_at_spawn_not_floating(self):
+        # the render/spawn pose must show wheels ON the floor (the bug: a 30 mm legged-foot clearance floated
+        # the wheels). Measure the lowest wheel point at the spawn pose (no hidden settle).
+        import mujoco
+        from virturoid.services import session_state as S
+        from virturoid.services.morph_policy import compiled_model, robot_mjcf
+        rid = self._call("submit_design", {"graph": self._call("get_design_schema")["examples"]["rover"]})["robot_id"]
+        gene = S.get_robot(rid)
+        m = compiled_model(robot_mjcf(gene)); d = mujoco.MjData(m); mujoco.mj_forward(m, d)
+        wheel_geoms = [g for g in range(m.ngeom) if m.geom_type[g] == mujoco.mjtGeom.mjGEOM_CYLINDER]
+        bottom = min(d.geom_xpos[g][2] - m.geom_size[g][0] for g in wheel_geoms)
+        self.assertLess(bottom, 0.01, f"wheels must rest on the floor at spawn, lowest={bottom:.3f} (floating)")
+
     def test_unknown_role_teaches_not_silently_compiles(self):
         g = {"robot_class": "x", "name": "y", "parts": [
             {"name": "b", "role": "body", "size": 0.4, "girth": 0.1},

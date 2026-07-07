@@ -239,12 +239,21 @@ def _lowest_world_z(mj, d) -> float:
     return lo
 
 
-def standing_spawn_z(gene: RobotGene, *, clearance: float = 0.03, meshed: bool = True) -> float:
+def standing_spawn_z(gene: RobotGene, *, clearance: float | None = None, meshed: bool = True) -> float:
     """Spawn height for a free-base body so its LOWEST point rests ~``clearance`` above the floor — it spawns
     standing on its feet instead of penetrating the floor (legacy fixed 0.1) and getting ejected. ``meshed``
     measures the DISPLAYED visual meshes (what the viewport shows — the mesh can hang below the primitive
     collider, which was the visible foot-penetration bug); pass ``meshed=False`` on hot training paths to
-    measure the cheap primitive model instead. Falls back to the legacy height if MuJoCo is unavailable."""
+    measure the cheap primitive model instead. Falls back to the legacy height if MuJoCo is unavailable.
+
+    ``clearance`` default is kind-aware: a WHEELED body rests on its wheels (~2 mm) instead of hovering the
+    legged 30 mm foot-safety margin — a rover spawned 30 mm up reads as 'floating wheels' in the viewport
+    (measured bug) and only touched down after a settle. Legged bodies keep the 30 mm margin so a mesh foot
+    that hangs below its collider doesn't spawn penetrating."""
+    if clearance is None:
+        has_wheels = any(getattr(s, "shape", None) == "cylinder" and s.joint_type == "revolute"
+                         for s in gene.segments)
+        clearance = 0.002 if has_wheels else 0.03
     if gene.base_mount != "free":
         return _MOUNT_Z.get(gene.base_mount, TABLE_TOP_Z)
     ref = _MOUNT_Z["free"]                                       # measure the body's downward reach at 0.1
