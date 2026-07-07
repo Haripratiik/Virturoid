@@ -216,6 +216,73 @@ def create_server(host: str, port: int, build_root: Path) -> ThreadingHTTPServer
     return ThreadingHTTPServer((host, port), VirturoidRequestHandler)
 
 
+def build_agent_sessions_html() -> str:
+    """C1-C3 (plan_v5 W-C): the 'watch the agent build' viewer. A self-contained page that live-polls
+    /api/sessions and, per held robot, shows its fresh render + summary from /api/sessions/<id>. Because
+    sessions are file-backed (G-B), a robot authored by a SEPARATE stdio MCP client (Claude Code/Codex)
+    appears here in the running app — the app is the viewer for the external agent's work."""
+    return """<!doctype html><html><head><meta charset="utf-8"><title>Virturoid - Agent Sessions</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+:root{color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;background:#0d1117;color:#c9d1d9;font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}
+header{padding:18px 24px;border-bottom:1px solid #21262d;display:flex;align-items:baseline;gap:14px}
+h1{margin:0;font-size:18px;letter-spacing:.3px;color:#e6edf3}
+.sub{color:#7d8590;font-size:12px}
+.dot{width:8px;height:8px;border-radius:50%;background:#3fb950;display:inline-block;margin-right:6px;animation:p 2s infinite}
+@keyframes p{50%{opacity:.35}}
+main{display:grid;grid-template-columns:300px 1fr;gap:0;height:calc(100vh - 61px)}
+#list{border-right:1px solid #21262d;overflow:auto}
+.row{padding:12px 18px;border-bottom:1px solid #161b22;cursor:pointer}
+.row:hover{background:#161b22}
+.row.sel{background:#1f2937;border-left:3px solid #58a6ff;padding-left:15px}
+.rid{color:#58a6ff;font-size:12px}
+.rlabel{color:#e6edf3;margin-top:2px}
+.rprompt{color:#7d8590;font-size:11px;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#detail{padding:24px;overflow:auto}
+#detail img{max-width:560px;width:100%;border:1px solid #21262d;border-radius:8px;background:#010409}
+table{border-collapse:collapse;margin-top:16px;font-size:13px}
+td{padding:4px 16px 4px 0;border-bottom:1px solid #161b22}
+td:first-child{color:#7d8590}
+.empty{color:#7d8590;padding:40px;text-align:center}
+.badge{display:inline-block;padding:1px 8px;border-radius:10px;background:#1f6feb33;color:#58a6ff;font-size:11px}
+</style></head><body>
+<header><h1>Virturoid</h1><span class="sub"><span class="dot"></span>Agent Sessions - live view of what the connected agent is holding</span></header>
+<main>
+  <div id="list"><div class="empty">no sessions yet<br><span style="font-size:11px">connect an agent (submit_design / create_robot) and it appears here</span></div></div>
+  <div id="detail"><div class="empty">select a robot</div></div>
+</main>
+<script>
+let sel=null, robots=[];
+async function poll(){
+  try{
+    const r=await fetch('/api/sessions'); const j=await r.json(); robots=j.robots||[];
+    const list=document.getElementById('list');
+    if(!robots.length){list.innerHTML='<div class="empty">no sessions yet<br><span style="font-size:11px">connect an agent and it appears here</span></div>';return;}
+    list.innerHTML=robots.map(x=>`<div class="row ${x.robot_id===sel?'sel':''}" onclick="pick('${x.robot_id}')">`+
+      `<div class="rid">${x.robot_id}</div><div class="rlabel">${x.robot_class||'?'} <span class="badge">${x.label||''}</span></div>`+
+      `<div class="rprompt">${(x.prompt||'').replace(/</g,'&lt;')}</div></div>`).join('');
+    if(!sel && robots.length){pick(robots[0].robot_id);}
+  }catch(e){}
+}
+async function pick(id){
+  sel=id; poll();
+  const d=document.getElementById('detail'); d.innerHTML='<div class="empty">rendering '+id+'...</div>';
+  try{
+    const r=await fetch('/api/sessions/'+id); const j=await r.json(); const s=j.summary||{};
+    const rows=[['class',s.robot_class],['kind',s.kind],['segments',s.n_segments],['dof',s.dof],
+      ['appendages',JSON.stringify(s.appendages||{})],['height (m)',s.standing_height_m],
+      ['mass (kg)',s.total_mass_kg],['material',s.material],['end effector',s.end_effector],
+      ['undo depth',(j.meta||{}).undo_depth]];
+    d.innerHTML=(j.render_url?`<img src="${j.render_url}?t=${Date.now()}">`:'<div class="empty">no render</div>')+
+      '<table>'+rows.filter(x=>x[1]!=null&&x[1]!=='').map(x=>`<tr><td>${x[0]}</td><td>${x[1]}</td></tr>`).join('')+'</table>';
+  }catch(e){d.innerHTML='<div class="empty">could not load '+id+'</div>';}
+}
+poll(); setInterval(poll, 2500);
+</script></body></html>"""
+
+
 def build_ui_html() -> str:
     """Return the Virturoid Studio shell.
 
@@ -637,6 +704,9 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/assistant/status":
             self._send_json(assistant_status())
+            return
+        if parsed.path == "/sessions":                         # C1-C3: the 'watch the agent build' viewer page
+            self._send_text(build_agent_sessions_html(), "text/html; charset=utf-8")
             return
         if parsed.path == "/api/sessions":                     # G-B: the app is the VIEWER of external-agent work
             from virturoid.services import session_state

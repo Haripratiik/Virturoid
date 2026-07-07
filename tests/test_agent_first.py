@@ -393,6 +393,16 @@ class ViewerRoutesTests(unittest.TestCase):
         self.assertEqual(ctype, "image/png")
         self.assertGreater(len(img), 1000)
 
+    def test_sessions_viewer_page_serves(self):
+        # C1-C3: the 'watch the agent build' viewer page is served and references the live APIs it polls.
+        st, ctype, body = self._get("/sessions")
+        self.assertEqual(st, 200)
+        self.assertIn("text/html", ctype)
+        html = body.decode("utf-8", "ignore")
+        self.assertIn("Agent Sessions", html)
+        self.assertIn("/api/sessions", html)                    # it polls the session list
+        self.assertIn("render_url", html)                       # and shows each robot's render
+
 
 if __name__ == "__main__":
     unittest.main()
