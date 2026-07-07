@@ -997,8 +997,10 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float = 1.5, hip_amp: f
         ph_fwd = {i: _rank[i] / _n for i in hip_k}
         ph_rev = {i: (_n - 1 - _rank[i]) / _n for i in hip_k}
         lift_duty = min(lift_duty, 1.4 / _n)                  # only ~1.3 legs in swing at once
-        hip_amp = min(hip_amp, 0.3)                           # GENTLE swing — a big hip swing on a 14-leg body
-        knee_amp = min(knee_amp, 0.35)                        # over-lifts + destabilises (measured); keep it low
+        hip_amp = min(hip_amp, 0.3)                           # a solid fore-aft STRIDE for propulsion — the stiff
+        #                                                       settled stance below holds the body up even at 0.6
+        #                                                       (0.3 is the stable-forward sweet spot; 0.4+ nets backward with the integrated cosine propulsion)
+        knee_amp = min(knee_amp, 0.35)                        # low knee lift so few feet leave the ground
         kp = max(kp, 160.0); kd = max(kd, 7.0)                # STIFF stance legs hold the long body up (soft kp=32
         #                                                       let it sink; measured kp~160 keeps height_ratio >0.6)
     dt = float(model.opt.timestep)
