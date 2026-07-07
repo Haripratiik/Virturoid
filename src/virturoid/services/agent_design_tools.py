@@ -8,6 +8,7 @@ verdict contract with teaching errors (SWE-agent ACI). Registered into ``agent_t
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 # The REAL anatomy-graph vocabulary (extracted from anatomy_compiler.build_from_anatomy), so the schema we
@@ -182,17 +183,27 @@ def evaluate_held(args: dict) -> dict:
             "value": res.get("value"), "scored_gait": (res.get("detail") or {}).get("scored_gait")}
 
 
+_EXPORT_FORMATS = ("mjcf", "cad", "urdf", "ros2", "bom", "spec")
+
+
 def export_held(args: dict) -> dict:
-    """Export the HELD robot to real, usable files: MJCF (the sim model, always) + CAD meshes. Returns paths."""
+    """Export the HELD robot to real, buildable files. ``formats`` (default all): mjcf (runnable sim model) |
+    cad (meshes) | urdf (ROS/Gazebo robot description) | ros2 (installable ament_python package) | bom (real
+    sized bill-of-materials: motors/sensors/battery, json+md) | spec (a spec sheet). B3: the whole buildable-
+    robot bundle, not just sim files."""
     from virturoid.services import session_state as S
     gene = S.get_robot(args["robot_id"])
     if gene is None:
         return {"ok": False, "error": f"no robot '{args['robot_id']}'"}
-    fmts = args.get("formats") or ["mjcf"]
+    fmts = args.get("formats") or list(_EXPORT_FORMATS)
+    bad = [f for f in fmts if f not in _EXPORT_FORMATS]
+    if bad:
+        return {"ok": False, "error": f"unknown format(s) {bad}; choose from {list(_EXPORT_FORMATS)}"}
     from virturoid.services.agent_tools import safe_build_path  # H2: confine writes under build/
     out_dir = safe_build_path(args.get("out_dir"), "agent_exports") / args["robot_id"]
     out_dir.mkdir(parents=True, exist_ok=True)
-    artifacts = {}
+    task = str(args.get("task") or (S.robot_meta(args["robot_id"]) or {}).get("prompt", ""))
+    artifacts: dict = {}
     if "mjcf" in fmts:
         from virturoid.services.gene_compiler import compile_gene_to_mjcf, standing_spawn_z
         p = out_dir / "robot.xml"
@@ -205,8 +216,40 @@ def export_held(args: dict) -> dict:
             artifacts["cad"] = cad if isinstance(cad, dict) else str(out_dir / "cad")
         except Exception as exc:  # noqa: BLE001
             artifacts["cad_error"] = f"{type(exc).__name__}: {exc}"
-    return {"ok": bool(artifacts), "artifacts": artifacts,
-            "note": "MJCF is the runnable sim model; a full URDF/ROS2 package comes from the build pipeline"}
+    if "urdf" in fmts or "ros2" in fmts:
+        # _write_genome_and_urdf produces robot_genome.json + robot.urdf + (best-effort) the installable ROS2 pkg
+        try:
+            from virturoid.services.gene_build import _write_genome_and_urdf
+            _write_genome_and_urdf(gene, out_dir)
+            urdf = out_dir / "robot" / "robot.urdf"
+            if "urdf" in fmts and urdf.exists():
+                artifacts["urdf"] = str(urdf)
+            ros2_root = out_dir / "export" / "ros2"
+            if "ros2" in fmts and ros2_root.exists():
+                pkgs = [str(p) for p in ros2_root.glob("*") if p.is_dir()]
+                artifacts["ros2"] = pkgs[0] if pkgs else str(ros2_root)
+        except Exception as exc:  # noqa: BLE001
+            artifacts["urdf_error"] = f"{type(exc).__name__}: {exc}"
+    if "bom" in fmts:
+        try:
+            from virturoid.services.bom_builder import build_bom, format_bom_markdown
+            bom = build_bom(gene, task=task)
+            (out_dir / "bom.json").write_text(json.dumps(bom, indent=2, default=str), encoding="utf-8")
+            (out_dir / "bom.md").write_text(format_bom_markdown(bom), encoding="utf-8")
+            artifacts["bom"] = str(out_dir / "bom.json")
+        except Exception as exc:  # noqa: BLE001
+            artifacts["bom_error"] = f"{type(exc).__name__}: {exc}"
+    if "spec" in fmts:
+        try:
+            from virturoid.services.spec_sheet import write_spec_sheet
+            sp = write_spec_sheet(out_dir)
+            if sp:
+                artifacts["spec"] = str(sp)
+        except Exception as exc:  # noqa: BLE001
+            artifacts["spec_error"] = f"{type(exc).__name__}: {exc}"
+    real = {k: v for k, v in artifacts.items() if not k.endswith("_error")}
+    return {"ok": bool(real), "artifacts": artifacts, "out_dir": str(out_dir),
+            "note": "MJCF runs in sim; URDF/ROS2 deploy; BOM is the real sized parts list; spec is the datasheet"}
 
 
 def train_held(args: dict) -> dict:

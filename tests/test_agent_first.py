@@ -83,6 +83,22 @@ class HeldChainTests(unittest.TestCase):
         self.assertTrue(ex["ok"])
         self.assertTrue(os.path.exists(ex["artifacts"]["mjcf"]), "MJCF must be a real file on disk")
 
+    def test_export_the_full_buildable_bundle(self):
+        # B3: urdf/ros2/bom/spec are real files, not just sim (the buildable-robot story).
+        rid = self._call("submit_design", {"graph": self._call("get_design_schema")["examples"]["quadruped"]})["robot_id"]
+        ex = self._call("export_held", {"robot_id": rid, "formats": ["mjcf", "urdf", "ros2", "bom", "spec"], "task": "walk"})
+        self.assertTrue(ex["ok"])
+        for fmt in ("mjcf", "urdf", "bom", "spec"):
+            self.assertIn(fmt, ex["artifacts"], f"{fmt} must be produced")
+            self.assertTrue(os.path.exists(ex["artifacts"][fmt]), f"{fmt} must be a real file: {ex['artifacts'].get(fmt)}")
+        self.assertTrue(os.path.isdir(ex["artifacts"]["ros2"]), "ros2 must be an installable package dir")
+
+    def test_export_rejects_unknown_format(self):
+        rid = self._call("submit_design", {"graph": self._call("get_design_schema")["examples"]["quadruped"]})["robot_id"]
+        ex = self._call("export_held", {"robot_id": rid, "formats": ["stl_but_typo"]})
+        self.assertFalse(ex["ok"])
+        self.assertIn("unknown format", ex["error"])
+
     def test_train_held_job_completes_with_verdict(self):
         rid = self._call("submit_design", {"graph": self._call("get_design_schema")["examples"]["quadruped"]})["robot_id"]
         jid = self._call("train_held", {"robot_id": rid, "mode": "gait_search", "max_evals": 3})["job_id"]
