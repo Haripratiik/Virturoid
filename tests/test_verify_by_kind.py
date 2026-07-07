@@ -51,15 +51,23 @@ class VerifyByKindTests(unittest.TestCase):
         self.assertIn("credible_walk", v)
         self.assertNotIn("physics_envelope", v)                  # a terrestrial dog is in-tier, no flag
 
-    def test_swim_fly_intent_is_flagged_not_silently_land_verdicted(self):
-        # T7-lite: an eel/drone routes terrestrial (no fluid tier) -> the verdict must be flagged a LAND PROXY,
-        # never presented as its real swimming/flying capability.
-        for prompt, env in (("an eel robot that swims", "aquatic"), ("a quadcopter drone", "aerial")):
-            rid = self._call("create_robot", {"prompt": prompt})["robot_id"]
-            v = self._call("verify_robot", {"robot_id": rid, "mode": "quick"})
-            self.assertEqual(v.get("physics_envelope"), env, f"{prompt} must flag {env}")
-            self.assertFalse(v["credible_walk"], "an unsupported-envelope body is never a credible walker")
-            self.assertIn("proxy", v["envelope_note"].lower())
+    def test_aquatic_body_is_simulated_in_water_not_land_proxied(self):
+        # T7: an aquatic prompt runs the REAL MuJoCo fluid sim (kind=aquatic + an honest swim_m), NOT a land
+        # proxy. The verdict is honest about thrust (never claims swimming falsely).
+        rid = self._call("create_robot", {"prompt": "an eel robot that swims"})["robot_id"]
+        v = self._call("verify_robot", {"robot_id": rid, "mode": "quick"})
+        self.assertEqual(v["kind"], "aquatic")
+        self.assertIn("swim_m", v)                              # a real fluid-sim measurement, not a gait verdict
+        self.assertFalse(v["credible_walk"])
+        self.assertTrue(v["verdict"].startswith("SWIMS") or v["verdict"].startswith("DOES NOT SWIM"))
+
+    def test_aerial_intent_still_flagged_no_aerial_tier(self):
+        # aerial has no physics tier yet -> still honestly flagged as an unsupported land proxy.
+        rid = self._call("create_robot", {"prompt": "a quadcopter drone"})["robot_id"]
+        v = self._call("verify_robot", {"robot_id": rid, "mode": "quick"})
+        self.assertEqual(v.get("physics_envelope"), "aerial")
+        self.assertFalse(v["credible_walk"])
+        self.assertIn("proxy", v["envelope_note"].lower())
 
 
 if __name__ == "__main__":

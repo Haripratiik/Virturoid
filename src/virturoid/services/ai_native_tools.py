@@ -67,23 +67,88 @@ def _render_gene(gene, tag: str, *, azimuth: float = 50.0, elevation: float = -1
 # fly gets routed to a terrestrial body and a LAND verdict — honest to FLAG that the verdict is only a land
 # proxy, never to silently present it as the real thing. The full tier (MuJoCo fluid + rotor/thruster
 # actuators + swim-intent routing) is the larger T7.
-_AQUATIC_WORDS = ("swim", "aquatic", "underwater", "submarine", "eel", "fish", "shark", "whale", "dolphin",
-                  "manatee", "narwhal", "seahorse", "jellyfish", "octopus", "squid", "ray ", "sting ray")
+_AQUATIC_WORDS = ("swim", "swimming", "aquatic", "underwater", "submarine", "eel", "fish", "shark", "whale",
+                  "dolphin", "manatee", "narwhal", "seahorse", "jellyfish", "octopus", "squid", "stingray")
 _AERIAL_WORDS = ("fly", "flying", "aerial", "drone", "quadcopter", "helicopter", "hover", "aircraft", "winged")
+
+
+def _env_words(prompt: str, words) -> bool:
+    """WORD-BOUNDARY match (not substring) so 'wh-EEL-ed'/'sp-RAY' don't false-trigger the fluid/aerial tier."""
+    import re
+    p = (prompt or "").lower()
+    return any(re.search(rf"\b{re.escape(w)}\b", p) for w in words)
 
 
 def _flag_physics_envelope(res: dict, prompt: str, kind: str) -> None:
     """If the prompt implies a swim/fly envelope we don't yet simulate, annotate the verdict honestly instead
     of letting a land-gait verdict masquerade as the real capability (T7-lite)."""
-    p = (prompt or "").lower()
-    env = "aquatic" if any(w in p for w in _AQUATIC_WORDS) else ("aerial" if any(w in p for w in _AERIAL_WORDS) else None)
+    if res.get("kind") == "aquatic":
+        return                                                 # T7: already simulated in water — the swim verdict stands
+    env = "aquatic" if _env_words(prompt, _AQUATIC_WORDS) else ("aerial" if _env_words(prompt, _AERIAL_WORDS) else None)
     if env and kind in ("legged", "mobile"):
         res["physics_envelope"] = env
         res["credible_walk"] = False
         res["envelope_note"] = (
-            f"this prompt implies a {env.upper()} body, but Virturoid has no {env} physics tier yet (T7): it "
-            f"was built + simulated as a terrestrial body, so the verdict above is a LAND-BASED PROXY, not its "
-            f"real {'swimming' if env == 'aquatic' else 'flying'} capability. Treat it as unsupported-envelope.")
+            f"this prompt implies a {env.upper()} body; Virturoid simulates AQUATIC bodies in water (T7) but has "
+            f"no AERIAL tier yet, so this {env} verdict is a LAND-BASED PROXY — treat it as unsupported-envelope." if env == "aerial"
+            else f"this prompt implies an aquatic body; it was simulated in water (see swim_m).")
+
+
+def _swim_model(gene):
+    """T7: compile the gene into a WATER medium — a fluid <option> (density 1000, viscosity ~1e-3, gravity 0
+    for neutral buoyancy) + per-geom ``fluidshape='ellipsoid'`` drag on the collision geoms. This is a REAL
+    MuJoCo fluid model (verified: an idealised undulator swims ~0.85 m); density MUST be set at compile so the
+    ellipsoid ``geom_fluid`` coefficients are populated."""
+    import re
+    import mujoco
+    from virturoid.services.gene_compiler import compile_gene_to_mjcf
+    xml = compile_gene_to_mjcf(gene, include_floor=False)
+    mm = re.search(r"<option\b([^>]*?)(/?)>", xml)
+    if mm:
+        attrs = re.sub(r'\s(density|viscosity|gravity)="[^"]*"', "", mm.group(1))
+        xml = (xml[:mm.start()] + f'<option{attrs} density="1000" viscosity="0.0009" gravity="0 0 0"{mm.group(2)}>'
+               + xml[mm.end():])
+    else:
+        xml = re.sub(r"(<mujoco\b[^>]*>)", r'\1<option density="1000" viscosity="0.0009" gravity="0 0 0"/>', xml, count=1)
+
+    def _add(g):
+        s = g.group(0)
+        return s if ('type="plane"' in s or 'contype="0"' in s or "fluidshape=" in s) else s[:-2] + ' fluidshape="ellipsoid"/>'
+    xml = re.sub(r"<geom\b[^>]*?/>", _add, xml)
+    return mujoco.MjModel.from_xml_string(xml)
+
+
+def _honest_swim(gene, *, steps: int = 2500) -> dict:
+    """T7: the honest SWIM verdict — put the body in water (neutral buoyancy) and drive its joints with a
+    PD-tracked travelling wave, measuring REAL net planar thrust. Like the gait/drive verdicts it never lies:
+    a body whose geometry can't generate thrust honestly reads DOES NOT SWIM. The fluid physics is real; swim
+    performance (like walk performance) is body/control-dependent (the general swim controller is a frontier)."""
+    import numpy as np
+    import mujoco
+    try:
+        m = _swim_model(gene)
+    except Exception as exc:  # noqa: BLE001
+        return {"kind": "aquatic", "verdict": f"could not build fluid model ({type(exc).__name__})", "swim_m": 0.0}
+    d = mujoco.MjData(m); mujoco.mj_resetData(m, d); mujoco.mj_forward(m, d)
+    if m.nu == 0:
+        return {"kind": "aquatic", "verdict": "NO ACTUATORS (cannot swim)", "survived": True, "swim_m": 0.0}
+    bid, _free = _base_body_id(m)
+    qadr = [m.jnt_qposadr[int(m.actuator_trnid[u, 0])] for u in range(m.nu)]
+    vadr = [m.jnt_dofadr[int(m.actuator_trnid[u, 0])] for u in range(m.nu)]
+    frc = m.actuator_forcerange[:, 1].copy(); frc[frc <= 0] = 3.0
+    p0 = np.array(d.xpos[bid]).copy()
+    for t in range(steps):
+        ph = 2 * np.pi * t * m.opt.timestep * 1.3
+        for k in range(m.nu):                                   # PD-track a travelling wave head->tail
+            tgt = 0.7 * np.sin(ph - k * 1.1)
+            d.ctrl[k] = float(np.clip(8.0 * (tgt - d.qpos[qadr[k]]) - 0.3 * d.qvel[vadr[k]], -frc[k], frc[k]))
+        mujoco.mj_step(m, d)
+    swim = float(np.hypot(*(np.array(d.xpos[bid])[:2] - p0[:2])))
+    verdict = (f"SWIMS ({swim:.2f} m undulatory thrust)" if swim > 0.15
+               else f"DOES NOT SWIM ({swim:.2f} m — this body's geometry yields little thrust)")
+    return {"kind": "aquatic", "verdict": verdict, "survived": True, "swim_m": round(swim, 3),
+            "n_actuators": int(m.nu),
+            "note": "REAL MuJoCo fluid sim (water + neutral buoyancy); thrust is body/geometry-dependent"}
 
 
 def _honest_gait(gene, *, steps: int = 1200, render: bool = False, tag: str = "gait") -> dict:
@@ -375,8 +440,14 @@ def verify_robot(args: dict) -> dict:
             world_xml = _compose_scene_xml(gene, _scene_from_dict(sc))
             scene_note = (f"composed into scene '{sid}'" if world_xml
                           else f"scene '{sid}' had no obstacles or would not compose — bare floor")
+    _prompt = (S.robot_meta(args["robot_id"]) or {}).get("prompt", "")
+    _aquatic = _env_words(_prompt, _AQUATIC_WORDS)
     try:
-        if kind == "legged":
+        if _aquatic and kind in ("legged", "mobile"):
+            # T7: a swim-intent body is SIMULATED IN WATER (real MuJoCo fluid), not given a land proxy.
+            res = _honest_swim(gene, steps=int(args.get("steps", 1500 if quick else 2500)))
+            res["credible_walk"] = False
+        elif kind == "legged":
             steps = int(args.get("steps", 400 if quick else 1500))
             res = _honest_gait(gene, steps=steps, render=not quick, tag=f"{args['robot_id']}_verify")
             res["credible_walk"] = res["verdict"].startswith("CREDIBLE")
