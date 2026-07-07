@@ -44,6 +44,27 @@ class DesignSubmissionTests(unittest.TestCase):
         self.assertFalse(r["ok"])
         self.assertIn("body", r["error"])                     # tells the agent it needs a body root
 
+    def test_schema_has_numeric_grounding(self):
+        # T8: the schema teaches realistic dimension bands so the agent authors credible sizes.
+        sch = self._call("get_design_schema")
+        self.assertIn("typical_dimensions_m", sch)
+        self.assertIn("wheel", sch["typical_dimensions_m"])
+        self.assertIn("proportion_rules", sch)
+
+    def test_disproportionate_design_is_flagged_not_silently_held(self):
+        # T8: a wheel larger than the chassis (the exact 'box with oversized wheels' failure) warns the agent.
+        bad = {"robot_class": "mobile_base", "name": "bad", "parts": [
+            {"name": "c", "role": "body", "size": 0.4, "girth": 0.05, "aspect": "wide"},
+            {"name": "w", "role": "wheel", "parent": "c", "attach": "front_bottom", "size": 0.3, "girth": 0.08,
+             "symmetry": "left_right"}]}
+        r = self._call("submit_design", {"graph": bad})
+        self.assertTrue(r["ok"])                                # non-blocking — held, but flagged
+        self.assertTrue(any("dwarf" in w for w in r.get("proportion_warnings", [])))
+        # the taught examples are proportionate -> no warnings
+        for ex in ("quadruped", "rover"):
+            g = self._call("submit_design", {"graph": self._call("get_design_schema")["examples"][ex]})
+            self.assertFalse(g.get("proportion_warnings"), f"{ex} example should be proportionate")
+
     def test_absurd_scale_is_gated(self):
         # M16: a 30 m leg used to hold a 19.7 m / 130 kg "robot" silently -> now a teaching error, before compile.
         g = {"robot_class": "quadruped", "name": "absurd", "parts": [

@@ -62,6 +62,25 @@ def get_design_schema(_args: dict) -> dict:
                 "symmetry": "'left_right' mirrors the part to a +y/-y PAIR (so one leg entry = two legs)",
                 "joint": "'revolute' to actuate it; omit for a welded/fixed part",
                 "curl": "float; a resting curl spread across a multi-segment part (a curved tail/neck)"},
+            # T8: real dimension bands (metres) grounded in production robots (Go2/Spot legs, UR5e links,
+            # rover wheels) so the agent authors CREDIBLE sizes, not a tiny/toy or absurd body. size = the
+            # part's long axis; girth = its radius (half-width). Stay within these unless the prompt is explicit.
+            "typical_dimensions_m": {
+                "body": {"size(length)": "0.3-1.2", "girth(half_width)": "0.08-0.30",
+                         "note": "the torso/chassis; a dog ~0.5, a humanoid torso ~0.5, a rover chassis 0.6-1.0"},
+                "leg": {"size(length)": "0.25-0.6", "girth": "0.02-0.05", "segments": "4 (=3 DOF + foot)",
+                        "note": "SLENDER: length/diameter >= ~2.5 (a real leg, not a sausage stub)"},
+                "wheel": {"size(diameter)": "0.10-0.40", "girth(tread_width)": "0.03-0.10",
+                          "note": "a rover wheel ~0.15-0.25 dia; keep wheel dia < ~0.4x the chassis length so "
+                                  "the wheels don't dwarf the body"},
+                "arm": {"size(length)": "0.4-1.0", "girth": "0.03-0.06", "segments": "4-6",
+                        "note": "a tabletop arm ~0.6-0.8 reach; the hand/gripper is a short terminal part"},
+                "head": {"size": "0.08-0.2", "girth": "0.03-0.08"}, "neck": {"size": "0.08-0.25"},
+                "tail": {"size": "0.1-0.4", "girth": "0.015-0.04"}},
+            "proportion_rules": [
+                "a limb/wheel should be a FRACTION of the body, not larger than it — size appendages relative "
+                "to the body you chose (a wheel radius > the chassis half-width reads as wheels-with-a-box)",
+                "parts outside 0.005-6.0 m (size) / 0.002-1.2 m (girth) are rejected as absurd (M16 gate)"],
             "rules": ["exactly one root part with role 'body' and no parent",
                       "a WALKING leg needs segments>=4 and joint='revolute' and aim 'down_out' for a stable stance",
                       "a WHEEL (role 'wheel') is a rolling cylinder: size=diameter, girth=tread width; the axle "
@@ -80,6 +99,29 @@ def get_design_schema(_args: dict) -> dict:
 _SIZE_BAND = (0.005, 6.0)        # a single segment's long axis
 _GIRTH_BAND = (0.002, 1.2)       # a single segment's radius
 _MAX_PARTS = 80
+
+
+def _proportion_warnings(graph: dict) -> list[str]:
+    """T8: NON-blocking advisories when an appendage is out of proportion to the body — the exact class that
+    made a rover read as 'a box with oversized wheels'. Teaches without rejecting (a real design may be odd)."""
+    parts = graph.get("parts") or []
+    body = next((p for p in parts if p.get("role") == "body" and not p.get("parent")), None)
+    if not body:
+        return []
+    bsize = float(body.get("size") or 0.5)
+    bgirth = float(body.get("girth") or 0.42 * bsize)
+    warns = []
+    for p in parts:
+        role, nm = p.get("role"), p.get("name", "?")
+        sz = float(p.get("size") or 0.0)
+        if role == "wheel":
+            if 0.5 * sz > bgirth * 1.2:                        # wheel RADIUS (0.5*size) vs chassis half-width
+                warns.append(f"wheel '{nm}' radius {0.5*sz:.2f} m is larger than the chassis half-width "
+                             f"{bgirth:.2f} m — it will dwarf the body; shrink the wheel or widen the chassis")
+        elif role in ("leg", "arm") and sz > 1.4 * bsize:
+            warns.append(f"{role} '{nm}' length {sz:.2f} m exceeds the body length {bsize:.2f} m — a limb longer "
+                         f"than the whole body reads as disproportionate")
+    return warns[:4]
 
 
 def _check_scale(graph: dict) -> str | None:
@@ -157,6 +199,9 @@ def submit_design(args: dict) -> dict:
     rid = S.put_robot(gene, prompt=f"[submitted:{graph.get('name', 'design')}]", label="submitted")
     _bank_to_flywheel(gene, prompt=f"[agent] {graph.get('name', 'design')}", task="", success_rate=0.0)  # B4 provenance
     out = {"ok": True, **_summary(gene, rid), "name": graph.get("name")}
+    warns = _proportion_warnings(graph)                        # T8: non-blocking proportion advisories
+    if warns:
+        out["proportion_warnings"] = warns
     img = _render_gene(gene, rid)
     if img:
         out["artifacts"] = [img]
