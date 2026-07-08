@@ -214,13 +214,22 @@ def _import_dataset(args: dict) -> dict:
 
 
 def _learn_gait(args: dict) -> dict:
-    from virturoid.services.anatomy_compiler import ensure_walkable_quad
     from virturoid.services.gait_flywheel import learn_gait_flywheel
     from virturoid.services.memory_db import MemoryDB
-    from virturoid.services.morphology_composer import compose_robot
     args = args or {}
-    prompt = args.get("prompt", "a quadruped robot dog")
-    gene = ensure_walkable_quad(compose_robot(prompt), prompt)
+    rid = args.get("robot_id")
+    if rid:                                                    # learn for the EXACT held body (what verify runs)
+        from virturoid.services import session_state as _S
+        rec = _S.get_robot(rid)
+        if not rec:
+            return {"error": f"no held robot {rid}"}
+        gene = rec["gene"]
+        prompt = rec.get("prompt", "") or getattr(gene, "robot_class", "legged")
+    else:
+        from virturoid.services.anatomy_compiler import ensure_walkable_quad
+        from virturoid.services.morphology_composer import compose_robot
+        prompt = args.get("prompt", "a quadruped robot dog")
+        gene = ensure_walkable_quad(compose_robot(prompt), prompt)
     # Go through the FLYWHEEL: recall a specific prior for this body -> screened warm-start -> bank -> provenance.
     # So repeated/adjacent bodies compound (the bank persists in the shared memory dir), not cold-start every time.
     db = MemoryDB(**({"db_path": args["db_path"]} if args.get("db_path") else {}))
@@ -383,9 +392,11 @@ INPUT_TRAINING_TOOLS: dict[str, dict] = {
                        "CONSTRUCTION (it IS the deploy controller). Returns the best gait + measured forward/height. "
                        "Real MuJoCo, slow.",
         "parameters": {"type": "object", "properties": {
+            "robot_id": {"type": "string", "description": "learn for THIS held robot (what verify_robot runs); "
+                                                          "omit to compose from prompt"},
             "prompt": {"type": "string", "default": "a quadruped robot dog"},
-            "generations": {"type": "integer", "default": 8}, "pop": {"type": "integer", "default": 20},
-            "steps": {"type": "integer", "default": 900}, "seed": {"type": "integer", "default": 0}}},
+            "generations": {"type": "integer", "default": 10}, "pop": {"type": "integer", "default": 20},
+            "steps": {"type": "integer", "default": 1000}, "seed": {"type": "integer", "default": 0}}},
         "handler": _learn_gait, "heavy": True,
     },
     "classify_failure": {

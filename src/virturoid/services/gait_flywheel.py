@@ -100,25 +100,45 @@ def recall_gait(db, gene, *, task: str = LOCOMOTION) -> dict | None:
     return None
 
 
-def learn_gait_flywheel(gene, db, *, generations: int = 8, pop: int = 20, steps: int = 900,
-                        seed: int = 0, workers: int = 1, bank: bool = True, vm=None) -> dict:
-    """Recall a specific prior -> SCREENED warm-start search -> bank -> record provenance. The compounding loop.
+_DEFAULT_GAIT = {"freq": 1.5, "hip_amp": 0.9, "knee_amp": 1.0, "duty": 0.25, "kp": 32.0, "kd": 1.5}
 
-    Returns ``{forward_m, height_ratio, survived, reused_prior, prior_transfer_forward, banked_skill,
-    compounding_delta}`` where ``compounding_delta`` = how much the search beat the prior's zero-shot transfer
-    (the measured value the reuse added; None when nothing was reused).
+
+class _DeployResult:
+    """A result-shaped holder carrying DEPLOY-horizon metrics for banking."""
+    def __init__(self, params, r):
+        self.best_params = params
+        self.best_forward = float(r["forward"])
+        self.best_height_ratio = float(r["height_ratio"])
+        self.best_survived = bool(r["survived"])
+
+
+def learn_gait_flywheel(gene, db, *, generations: int = 10, pop: int = 20, steps: int = 900,
+                        deploy_steps: int = 1500, seed: int = 0, workers: int = 1, bank: bool = True,
+                        vm=None) -> dict:
+    """Recall a specific prior -> SCREENED warm-start search -> DEPLOY-SELECT vs the default -> bank -> provenance.
+
+    Deploy-select (honesty): the search optimizes at ``steps``, but the winner is re-measured at the longer
+    ``deploy_steps`` horizon AND compared to the SHIPPED default gait there — the learned gait is banked ONLY if
+    it beats the default at deploy (never trust the search horizon; the bank must always deploy BETTER than default).
     """
-    from virturoid.services.gait_search import search_gait
+    from virturoid.services.gait_search import evaluate_gait, search_gait
 
     prior = recall_gait(db, gene)
     res = search_gait(gene, generations=generations, pop=pop, steps=steps, seed=seed,
                       workers=workers, warm_start=prior)
-    skill_id = bank_gait(db, gene, res) if bank else None
+    # DEPLOY-SELECT at the deploy horizon: learned winner vs the shipped default.
+    learned = evaluate_gait(gene, res.best_params, steps=deploy_steps)
+    default = evaluate_gait(gene, _DEFAULT_GAIT, steps=deploy_steps)
+    beats_default = (learned["survived"] and abs(learned["forward"]) > abs(default["forward"]) + 0.02)
+
+    skill_id = None
+    if bank and beats_default:
+        skill_id = bank_gait(db, gene, _DeployResult(res.best_params, learned))   # bank the DEPLOY metrics
 
     compounding_delta = None
     if prior is not None and res.prior_transfer_forward is not None:
         compounding_delta = round(abs(res.best_forward) - abs(res.prior_transfer_forward), 4)
-        if skill_id is not None:                              # record the warm-start edge with the measured delta
+        if skill_id is not None:
             try:
                 if vm is None:
                     from virturoid.services.robotics_vector_memory import RoboticsVectorMemory
@@ -126,15 +146,18 @@ def learn_gait_flywheel(gene, db, *, generations: int = 8, pop: int = 20, steps:
                 vm.record_provenance("skill", skill_id, parent_type="skill", parent_id="gait_prior",
                                      kind="gait_warm_start", delta=compounding_delta,
                                      meta={"prior_transfer_forward": res.prior_transfer_forward,
-                                           "final_forward": res.best_forward})
+                                           "deploy_forward": learned["forward"]})
             except Exception:  # noqa: BLE001 - provenance is best-effort; never fail the learn
                 pass
 
     return {
-        "forward_m": round(res.best_forward, 4), "height_ratio": round(res.best_height_ratio, 3),
-        "survived": bool(res.best_survived), "reused_prior": prior is not None,
+        "forward_m": round(learned["forward"], 4),           # the DEPLOY-horizon distance (honest)
+        "search_forward_m": round(res.best_forward, 4),
+        "default_forward_m": round(default["forward"], 4),
+        "beats_default": bool(beats_default),
+        "height_ratio": round(learned["height_ratio"], 3), "survived": bool(learned["survived"]),
+        "reused_prior": prior is not None,
         "prior_transfer_forward": (round(res.prior_transfer_forward, 4)
                                    if res.prior_transfer_forward is not None else None),
-        "banked_skill": skill_id, "compounding_delta": compounding_delta,
-        "params": res.best_params,
+        "banked_skill": skill_id, "compounding_delta": compounding_delta, "params": res.best_params,
     }

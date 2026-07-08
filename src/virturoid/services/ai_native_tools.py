@@ -156,9 +156,33 @@ def _honest_gait(gene, *, steps: int = 1200, render: bool = False, tag: str = "g
     forward, forward == actual displacement) — the honesty gate as a tool result, never a raw qpos dump."""
     from virturoid.services.morph_policy import crawl_gait_rollout
     from scripts.verify_gait import classify, orientation_summary
-    r = crawl_gait_rollout(gene, steps=steps, record_qpos=True)
+    # FLYWHEEL: use the best banked LEARNED gait for this body's morphology if one exists (recalled by embedding),
+    # so the product's legged robots walk with learned control that compounds over builds — else the shipped default.
+    gait_params: dict = {}
+    gait_source = "default_crawl"
+    try:
+        from virturoid.services.gait_flywheel import recall_gait
+        from virturoid.services.memory_db import DEFAULT_DB_PATH, MemoryDB
+        if DEFAULT_DB_PATH.exists():
+            with MemoryDB(DEFAULT_DB_PATH) as _db:
+                _p = recall_gait(_db, gene)
+            if _p:
+                gait_params = {k: float(_p[k]) for k in ("freq", "hip_amp", "knee_amp", "duty", "kp", "kd")
+                               if k in _p}
+                gait_source = "learned_flywheel"
+    except Exception:  # noqa: BLE001 - the flywheel is an accelerant; a miss just uses the default gait
+        gait_params = {}
+    r = crawl_gait_rollout(gene, steps=steps, record_qpos=True, **gait_params)
+    # DEPLOY-SELECT safety net: a recalled gait must never make THIS body walk worse than the shipped default
+    # (gene-construction paths differ slightly, so a banked gait may not fit every body). If it underperforms,
+    # re-run the default on this exact gene and keep whichever actually walks further — the flywheel only ever helps.
+    if gait_params and (not r.get("survived") or abs(float(r.get("forward", 0))) < 0.30):
+        r_def = crawl_gait_rollout(gene, steps=steps, record_qpos=True)
+        if abs(float(r_def.get("forward", 0))) >= abs(float(r.get("forward", 0))):
+            r, gait_source = r_def, "default_crawl"
     o = orientation_summary(r.get("qpos_frames") or [])
     out = {"kind": "legged", "verdict": classify(r), "survived": bool(r.get("survived")),
+           "gait_source": gait_source,
            "forward_m": round(float(r.get("forward", 0)), 3),
            "speed_mps": round(float(r.get("speed", 0)), 3), "cadence": round(float(r.get("cadence", 0)), 1),
            "support_frac": round(float(r.get("support_frac", 0)), 2), "height_ratio": r.get("height_ratio"),
