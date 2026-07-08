@@ -126,10 +126,12 @@ def learn_gait_flywheel(gene, db, *, generations: int = 10, pop: int = 20, steps
     prior = recall_gait(db, gene)
     res = search_gait(gene, generations=generations, pop=pop, steps=steps, seed=seed,
                       workers=workers, warm_start=prior)
-    # DEPLOY-SELECT at the deploy horizon: learned winner vs the shipped default.
+    # DEPLOY-SELECT at the deploy horizon: learned winner vs the shipped default. Bank ONLY a CREDIBLE walk that
+    # beats the default's forward — a slide (fast but no real stepping) must never enter the bank.
     learned = evaluate_gait(gene, res.best_params, steps=deploy_steps)
     default = evaluate_gait(gene, _DEFAULT_GAIT, steps=deploy_steps)
-    beats_default = (learned["survived"] and abs(learned["forward"]) > abs(default["forward"]) + 0.02)
+    beats_default = (learned["survived"] and learned.get("credible", False)
+                     and abs(learned["forward"]) > abs(default["forward"]) + 0.02)
 
     skill_id = None
     if bank and beats_default:

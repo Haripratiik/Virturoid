@@ -220,11 +220,10 @@ def _learn_gait(args: dict) -> dict:
     rid = args.get("robot_id")
     if rid:                                                    # learn for the EXACT held body (what verify runs)
         from virturoid.services import session_state as _S
-        rec = _S.get_robot(rid)
-        if not rec:
+        gene = _S.get_robot(rid)                               # get_robot returns the RobotGene directly (or None)
+        if gene is None:
             return {"error": f"no held robot {rid}"}
-        gene = rec["gene"]
-        prompt = rec.get("prompt", "") or getattr(gene, "robot_class", "legged")
+        prompt = getattr(gene, "robot_class", "legged")
     else:
         from virturoid.services.anatomy_compiler import ensure_walkable_quad
         from virturoid.services.morphology_composer import compose_robot

@@ -347,7 +347,10 @@ def create_robot(args: dict) -> dict:
     from virturoid.services import session_state as S
     from virturoid.services.morphology_composer import compose_robot
     prompt = args["prompt"]
-    gene = compose_robot(prompt, ensure_walkable=bool(args.get("ensure_walkable", False)))
+    # Walkable-by-default: a legged body gets a wide walkable stance so it ACTUALLY walks (fanned quad walks
+    # ~0.65 m with auto-tune vs ~0.09 m un-fanned). ensure_walkable_quad is a no-op for non-quad morphologies,
+    # so manipulators/rovers/etc. are byte-identical.
+    gene = compose_robot(prompt, ensure_walkable=bool(args.get("ensure_walkable", True)))
     rid = S.put_robot(gene, prompt=prompt)
     out = {"ok": True, **_summary(gene, rid), "prompt": prompt}
     img = _render_gene(gene, rid)

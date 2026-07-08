@@ -62,13 +62,23 @@ def evaluate_gait(gene, params: dict, *, steps: int = 1200) -> dict:
     r = crawl_gait_rollout(gene, steps=steps, freq=p["freq"], hip_amp=p["hip_amp"], knee_amp=p["knee_amp"],
                            duty=p["duty"], kp=p["kp"], kd=p["kd"])
     if not r.get("finite", True):
-        return {"fitness": -10.0, "forward": 0.0, "height_ratio": 0.0, "survived": False}
+        return {"fitness": -10.0, "forward": 0.0, "height_ratio": 0.0, "survived": False,
+                "cadence": 0.0, "support_frac": 0.0, "credible": False}
     fwd = float(r.get("forward", 0.0))
     hr = float(r.get("height_ratio", 0.0))
+    cad = float(r.get("cadence", 0.0))
+    sup = float(r.get("support_frac", 0.0))
     survived = bool(r.get("survived"))
-    upright = survived and hr >= 0.6
-    fitness = abs(fwd) if upright else (hr - 1.2)              # falling -> negative; upright -> reward |travel|
-    return {"fitness": fitness, "forward": fwd, "height_ratio": hr, "survived": survived}
+    # UN-GAMEABLE: reward forward travel ONLY for a CREDIBLE WALK (real foot-lift cadence + stepping support +
+    # upright), matching verify_gait.classify's bar. A SLIDE (fast but feet barely lift) is heavily discounted so
+    # the search finds a stepping walk that goes far, not a slide that games raw distance.
+    credible = survived and hr >= 0.6 and cad >= 1.0 and sup >= 0.25
+    if not survived or hr < 0.5:
+        fitness = hr - 1.2                                    # fell -> negative
+    else:
+        fitness = abs(fwd) * (1.0 if credible else 0.3)      # discount non-credible (slide/crouch) travel
+    return {"fitness": fitness, "forward": fwd, "height_ratio": hr, "survived": survived,
+            "cadence": cad, "support_frac": sup, "credible": credible}
 
 
 def search_gait(gene, *, generations: int = 8, pop: int = 24, elite_frac: float = 0.3,
