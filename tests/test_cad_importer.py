@@ -3,6 +3,7 @@
 Builds a real binary STL cube and checks dimensions/volume/mass; checks mm-unit detection, OBJ, and the honest
 STEP deferral. Pure/offline (AGENTS.md).
 """
+import importlib.util
 import os
 import struct
 import tempfile
@@ -82,13 +83,30 @@ class CadImportTests(unittest.TestCase):
         self.assertIsNone(res.estimated_mass_kg)                 # OBJ: no reliable closed volume
         self.assertAlmostEqual(res.size_m[0], 0.5, places=5)
 
-    def test_step_is_honestly_deferred(self):
+    def test_malformed_step_is_rejected_not_fatal(self):
         d = tempfile.mkdtemp(prefix="cad_")
         p = os.path.join(d, "part.step")
-        Path(p).write_text("ISO-10303-21;", encoding="utf-8")
+        Path(p).write_text("ISO-10303-21;", encoding="utf-8")   # not a real STEP body
         res = import_cad(p)
         self.assertEqual(res.format, "step")
-        self.assertTrue(any("CAD kernel" in w for w in res.warnings))
+        self.assertTrue(res.warnings)                            # honest failure, never crashes
+
+
+@unittest.skipUnless(importlib.util.find_spec("build123d") is not None, "needs build123d for STEP")
+class StepImportTests(unittest.TestCase):
+    def test_step_roundtrip_dimensions_and_mass(self):
+        import build123d as b3d
+        d = tempfile.mkdtemp(prefix="cad_step_")
+        p = os.path.join(d, "box.step")
+        b3d.export_step(b3d.Box(100, 200, 300), p)              # 100x200x300 mm == 0.1x0.2x0.3 m
+        res = import_cad(p, material="aluminum")
+        self.assertEqual(res.format, "step")
+        self.assertEqual(res.unit_guess, "mm")
+        self.assertAlmostEqual(res.size_m[0], 0.1, places=4)
+        self.assertAlmostEqual(res.size_m[1], 0.2, places=4)
+        self.assertAlmostEqual(res.size_m[2], 0.3, places=4)
+        self.assertAlmostEqual(res.volume_m3, 0.006, places=5)   # 0.1*0.2*0.3
+        self.assertAlmostEqual(res.estimated_mass_kg, 0.006 * 2700.0, places=2)  # aluminum density
 
 
 if __name__ == "__main__":

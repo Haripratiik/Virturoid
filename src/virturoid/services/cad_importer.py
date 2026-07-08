@@ -105,6 +105,39 @@ def _mesh_volume(triangles) -> float:
     return abs(vol)
 
 
+def _import_step(path: str, material: str) -> CadImportResult:
+    """Import a STEP part via build123d/OCC (a real CAD kernel). OCC normalizes to millimetres, so dimensions and
+    volume are scaled to metres. Returns bbox + volume + an inertial mass estimate, or an honest fallback."""
+    try:
+        import build123d as b3d
+    except ImportError:
+        return CadImportResult(source=path, format="step",
+                               warnings=["build123d not installed; export as STL/OBJ for dimensions + inertia."])
+    try:
+        part = b3d.import_step(path)
+        bb = part.bounding_box()
+        lo = (bb.min.X, bb.min.Y, bb.min.Z)
+        hi = (bb.max.X, bb.max.Y, bb.max.Z)
+        vol_mm3 = float(part.volume)
+    except Exception as exc:  # noqa: BLE001
+        return CadImportResult(source=path, format="step", warnings=[f"STEP import failed: {exc}"])
+
+    size_m = tuple(round((hi[i] - lo[i]) * 0.001, 6) for i in range(3))
+    volume_m3 = round(vol_mm3 * 1e-9, 9) if vol_mm3 > 0 else None
+    warnings = ["STEP imported via build123d/OCC (normalized to mm -> scaled to metres)."]
+    mass = density = None
+    if volume_m3:
+        density = _DENSITY.get(material, _DENSITY["abs"])
+        mass = round(volume_m3 * density, 5)
+        warnings.append(f"mass ESTIMATED from solid volume @ {material} density ({density} kg/m^3); "
+                        "provide a BOM/CAD mass to override.")
+    return CadImportResult(
+        source=path, format="step", triangles=0, vertices=0,
+        bbox_min=tuple(round(v * 0.001, 6) for v in lo), bbox_max=tuple(round(v * 0.001, 6) for v in hi),
+        size_m=size_m, unit_guess="mm", suggested_scale=0.001, volume_m3=volume_m3,
+        estimated_mass_kg=mass, density_kg_m3=density, warnings=warnings)
+
+
 def import_cad(path: str, *, material: str = "abs") -> CadImportResult:
     """Import an STL/OBJ mesh into a :class:`CadImportResult` (bbox, unit guess, volume + mass estimate)."""
     if not os.path.exists(path):
@@ -116,10 +149,12 @@ def import_cad(path: str, *, material: str = "abs") -> CadImportResult:
             fmt, tris, verts = parse_stl(path)
         elif ext == ".obj":
             fmt, tris, verts = parse_obj(path)
-        elif ext in (".step", ".stp", ".iges", ".igs"):
-            return CadImportResult(source=path, format="step",
-                                   warnings=["STEP/IGES needs a CAD kernel (build123d/OCC); "
-                                             "export the part as STL/OBJ for dimensions + inertia."])
+        elif ext in (".step", ".stp"):
+            return _import_step(path, material)
+        elif ext in (".iges", ".igs"):
+            return CadImportResult(source=path, format="iges",
+                                   warnings=["IGES needs a CAD kernel with an IGES reader; "
+                                             "export the part as STEP or STL/OBJ for dimensions + inertia."])
         else:
             return CadImportResult(source=path, warnings=[f"unsupported CAD extension '{ext}'"])
     except Exception as exc:  # noqa: BLE001
