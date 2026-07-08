@@ -478,6 +478,41 @@ def _pin_part(args: dict) -> dict:
             "all_pins": pins, "bom_pins": bom.get("pins"), "bom_totals": bom.get("totals")}
 
 
+def _train_camera_policy(args: dict) -> dict:
+    """Train the CV IN-HOUSE on a held camera-equipped robot's OWN onboard camera: render its functional robot_cam
+    over many target placements, encode with the tiny 2-conv CNN, and fit a readout that reads the target's bearing
+    — then BANK the learned vision policy on the robot so it deploys with it. Returns the held-out accuracy vs an
+    untrained baseline (the un-gameable proof the CV is trained on THIS robot's camera). Real MuJoCo renders; slow."""
+    from virturoid.services import session_state as _S
+    args = args or {}
+    rid = args.get("robot_id")
+    if not rid:
+        return {"error": "robot_id is required (the held camera-equipped robot to train vision on)"}
+    gene = _S.get_robot(rid)
+    if gene is None:
+        return {"error": f"no held robot {rid}"}
+    from virturoid.services.camera_perception import robot_camera_part
+    part = robot_camera_part(gene)
+    if part is None:
+        return {"error": "this robot carries no camera in its BOM; give it a camera (a nav/inspect task) or "
+                         "pin_part a camera first, then train its vision"}
+    from virturoid.services.robot_vision import train_robot_vision
+    tr = train_robot_vision(gene, n=int(args.get("n_train", 280)), seed=int(args.get("seed", 0)))
+    md = dict(getattr(gene, "metadata", None) or {})
+    md["vision_policy"] = {"trained": True, "enc_seed": int(tr["enc_seed"]),
+                           "readout": [float(v) for v in tr["readout"]], "camera_part": part.name,
+                           "bearing_mae_deg": tr["test_mae_deg"],
+                           "method": "tiny-CNN features + fitted readout on the robot's own camera"}
+    gene.metadata = md
+    _S.commit_robot(rid, gene, label="train camera vision")
+    return {"robot_id": rid, "trained_in_house": True, "banked": True, "camera_part": part.name,
+            "bearing_mae_deg": tr["test_mae_deg"], "baseline_norm": tr["baseline_mae"],
+            "improvement_x": tr["improvement_x"], "learned": tr["learned"],
+            "verdict": (f"trained the robot's vision on its own {part.name} camera to {tr['test_mae_deg']} deg "
+                        f"bearing error ({tr['improvement_x']}x baseline)" if tr["learned"]
+                        else "vision training did not clearly beat the baseline this budget")}
+
+
 def _import_dataset(args: dict) -> dict:
     from virturoid.services.dataset_importer import import_dataset
     path = (args or {}).get("path", "")
@@ -718,6 +753,19 @@ INPUT_TRAINING_TOOLS: dict[str, dict] = {
         "parameters": {"type": "object", "required": ["path"], "properties": {
             "path": {"type": "string", "description": "a dataset directory or file"}}},
         "handler": _import_dataset, "heavy": False,
+    },
+    "train_camera_policy": {
+        "description": "Train COMPUTER VISION in-house on a held camera-equipped robot's OWN onboard camera: render "
+                       "its functional robot_cam over many target placements, encode with the tiny 2-conv CNN, and fit "
+                       "a readout that reads the target's bearing from THIS robot's camera — then BANK the learned "
+                       "vision policy on the robot (it deploys with it). Returns the held-out bearing error vs an "
+                       "untrained baseline (the un-gameable proof the CV is trained on this robot's actual camera). "
+                       "Errors if the robot carries no camera. Real MuJoCo renders, slow.",
+        "parameters": {"type": "object", "required": ["robot_id"], "properties": {
+            "robot_id": {"type": "string", "description": "the held camera-equipped robot to train vision on"},
+            "n_train": {"type": "integer", "default": 280, "description": "rendered training frames"},
+            "seed": {"type": "integer", "default": 0}}},
+        "handler": _train_camera_policy, "heavy": True,
     },
     "learn_gait": {
         "description": "LEARN a deployable walk for a legged body: CEM-optimize the crawl-gait controller's "

@@ -45,10 +45,14 @@ def render_px_for_camera(part) -> int:
     return int(min(256, max(64, round(64 * math.sqrt(max(0.3, mp))))))
 
 
-def _inject_target(xml: str, xy, rgb) -> str:
-    """Drop a coloured target box into the scene in front of the robot (a thing for the camera to SEE)."""
-    box = (f'<body name="cv_target" pos="{xy[0]:.3f} {xy[1]:.3f} 0.18"><geom type="box" size="0.09 0.09 0.18" '
-           f'rgba="{rgb[0]:.3f} {rgb[1]:.3f} {rgb[2]:.3f} 1" contype="0" conaffinity="0"/></body>')
+def _inject_target(xml: str, xy, rgb, *, size=(0.09, 0.09, 0.18), z: float = 0.18) -> str:
+    """Drop a coloured target into the scene in front of the robot (a thing for the camera to SEE). Default is a
+    small floor box (a detection check); training uses a taller LANDMARK (bigger size + height) so a distant goal is
+    still a meaningful signal once the view is downsampled to the tiny encoder's 16x16 input."""
+    sx, sy, sz = size
+    box = (f'<body name="cv_target" pos="{xy[0]:.3f} {xy[1]:.3f} {z:.3f}"><geom type="box" '
+           f'size="{sx:.3f} {sy:.3f} {sz:.3f}" rgba="{rgb[0]:.3f} {rgb[1]:.3f} {rgb[2]:.3f} 1" '
+           f'contype="0" conaffinity="0"/></body>')
     return xml.replace("</worldbody>", box + "\n</worldbody>", 1)
 
 
@@ -86,6 +90,14 @@ def robot_sees_target(gene, *, goal_ahead_m: float = 1.6, goal_rgb=(0.1, 0.85, 0
         data = mujoco.MjData(model); mujoco.mj_forward(model, data)
         rr = mujoco.Renderer(model, height=px, width=px); rr.update_scene(data, camera="robot_cam")
         img = rr.render().copy(); rr.close()
+        # if the caller didn't supply a detector, PREFER the robot's own banked learned vision (trained on its own
+        # camera by train_camera_policy) over the colour detector — the trained CV actually gets consumed here.
+        trained = False
+        if bearing_fn is None:
+            from virturoid.services.robot_vision import learned_bearing_fn
+            learned = learned_bearing_fn(gene, goal_rgb=goal_rgb)
+            if learned is not None:
+                bearing_fn, trained = learned, True
         detect = bearing_fn if bearing_fn is not None else (lambda f: detect_goal_bearing(f, goal_rgb))
         bearing, frac = detect(img)
         # the geometric bearing to the target from the robot's base (for an honest accuracy check)
@@ -95,7 +107,8 @@ def robot_sees_target(gene, *, goal_ahead_m: float = 1.6, goal_rgb=(0.1, 0.85, 0
         if bearing is not None:
             out["bearing"] = round(float(bearing), 3)
             out["target_bearing"] = round(tgt_bearing, 3)
-        out["perception"] = "onboard_camera + tiny_cv"
+        out["vision_trained"] = bool(trained)                    # the robot's OWN learned readout drove this perception
+        out["perception"] = ("learned_onboard_camera + tiny_cv" if trained else "onboard_camera + tiny_cv")
     except Exception as exc:  # noqa: BLE001
         out.update(sees=False, error=f"{type(exc).__name__}: {exc}")
     return out

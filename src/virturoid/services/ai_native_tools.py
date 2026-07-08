@@ -556,8 +556,8 @@ def verify_robot(args: dict) -> dict:
                 from virturoid.services.camera_perception import robot_sees_target
                 cam = robot_sees_target(gene)
                 if cam.get("has_camera"):
-                    res["vision"] = {k: cam[k] for k in ("camera_part", "fovy_deg", "render_px", "sees", "perception")
-                                     if k in cam}
+                    res["vision"] = {k: cam[k] for k in ("camera_part", "fovy_deg", "render_px", "sees",
+                                                         "vision_trained", "perception") if k in cam}
             except Exception:  # noqa: BLE001 - vision is value-add; the motion verdict still stands
                 pass
     except Exception as exc:  # noqa: BLE001 - an odd body must yield an honest error, not a crash
