@@ -121,30 +121,21 @@ def main() -> int:
     if script is None:
         print("   no control script detected in the folder; skipping the adopt step.")
     else:
+        # The ingested robot WALKS (a legged import that can't stand on its own stance is given the same walkable
+        # fanned stance a composed body gets), so the customer's controller runs and improves ON THEIR OWN robot.
         ad = call_tool("adopt_control_script", {"robot_id": rid, "script_path": script,
                                                 "generations": 6, "pop": 16, "steps": 800}).get("result", {})
         if ad.get("error"):
             print(f"   adopt error: {ad['error']}")
         else:
             print(f"   parsed control script: {ad.get('control_script')}")
-            print(f"   ON THE INGESTED BODY — UTILISED: {ad.get('utilised')}")
-            print(f"                          IMPROVED: {ad.get('improved')}  -> {ad.get('verdict')}")
-        # A robot re-imported from a bare URDF/MJCF keeps its geometry + axes + BOM, but a SCRIPTED gait controller
-        # doesn't automatically drive an arbitrary re-imported morphology (the control-generalization frontier). To
-        # show the utilise->improve loop DELIVERING, run it on the robot's drivable design form (what our control
-        # stack composes for this class). This is the honest split: file-ingest is solved; control on a raw import
-        # still needs adaptation (learned control), which is the real frontier.
-        print("   [capability check] same controller, on the drivable design our stack builds for this class:")
-        rid2 = call_tool("create_robot", {"prompt": "a quadruped robot dog"})["result"]["robot_id"]
-        ad2 = call_tool("adopt_control_script", {"robot_id": rid2, "script_path": script,
-                                                 "generations": 6, "pop": 16, "steps": 800}).get("result", {})
-        if not ad2.get("error"):
-            print(f"      UTILISED (their controller): {ad2.get('utilised')}")
-            print(f"      IMPROVED (our sim tuned it): {ad2.get('improved')}")
-            print(f"      -> {ad2.get('verdict')}  (gain {ad2.get('forward_gain_x')}x)")
+            print(f"   UTILISED (their controller): {ad.get('utilised')}")
+            print(f"   IMPROVED (our sim tuned it): {ad.get('improved')}")
+            print(f"   -> {ad.get('verdict')}  (gain {ad.get('forward_gain_x')}x)")
 
     print(f"\nDone. The customer dropped a folder; Virturoid parsed model+BOM+CAD+NLP into one editable robot, "
-          f"amended its design, and ran+improved their controller — all measured in real physics.\nSession: {work}")
+          f"amended its design, and ran+improved their controller on their own robot — all measured in real physics."
+          f"\nSession: {work}")
     return 0
 
 

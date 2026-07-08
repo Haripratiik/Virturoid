@@ -124,6 +124,21 @@ class IngestAndAdoptE2ETests(unittest.TestCase):
         self.assertTrue(r["robot_id"])
         self.assertTrue(r.get("control_scripts"), "a dropped control script must be surfaced for adopt_control_script")
 
+    def test_ingested_quadruped_actually_walks(self):
+        # the fix: a legged import gets a FREE base + a walkable stance, so the INGESTED robot walks in our sim
+        # (before: welded base -> base_jid=-1 -> cadence 0 -> "control-generalization frontier" that was really 2 bugs)
+        from virturoid.services.agent_tools import call_tool
+        from virturoid.services.input_training_tools import _ingest_project
+        d = tempfile.mkdtemp(prefix="proj_")
+        Path(d, "robot").mkdir()
+        Path(d, "robot", "quad.urdf").write_text(_quad_urdf(), encoding="utf-8")
+        r = _ingest_project({"project_path": d, "description": "a quadruped robot"})
+        self.assertTrue(r["robot_id"])
+        v = call_tool("verify_robot", {"robot_id": r["robot_id"], "mode": "quick"}).get("result", {})
+        self.assertEqual(v.get("kind"), "legged")
+        self.assertTrue(v.get("credible_walk"),
+                        f"the ingested quadruped must actually walk, got: {v.get('verdict')}")
+
     def test_adopt_control_script_utilises_and_improves(self):
         # the user's controller RUNS in our sim and the sim tunes it -> credible walk that beats it (on a body our
         # stack drives). Small budget = smoke; asserts the improve loop produces a credible, non-worse result.

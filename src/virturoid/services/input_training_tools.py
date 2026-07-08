@@ -258,6 +258,21 @@ def _ingest_project(args: dict) -> dict:
         except Exception as exc:  # noqa: BLE001
             result["warnings"].append(f"model import failed ({model_rel}): {exc}")
 
+    # 2b) a legged import that can't stand on its own stance gets the SAME walkable-stance treatment a composed
+    # body gets (a wide fanned stance) so it can actually be SIMULATED and its controller improved. A well-formed
+    # import that already walks is left untouched; no-op for arms / mobile bases.
+    if gene is not None and getattr(gene, "robot_class", "") == "quadruped":
+        try:
+            from virturoid.services.anatomy_compiler import ensure_walkable_quad
+            gene = ensure_walkable_quad(gene, "imported quadruped", force=True)  # imports are geometrically lossy;
+            #                                       don't trust the "already walks?" shortcut, but only adopt the
+            #                                       fanned stance if it materially out-walks what was imported
+            if dict(getattr(gene, "metadata", None) or {}).get("walkability_fallback", {}).get("applied"):
+                result["notes"].append("the imported quadruped could not stand on its own stance -> adopted a "
+                                       "walkable fanned stance for its class so it simulates and its gait can be improved")
+        except Exception:  # noqa: BLE001
+            pass
+
     # 3) parse the NLP description into typed, provenance-tagged properties + edit ops
     from virturoid.services.nlp_properties import extract_properties
     props = extract_properties(description)

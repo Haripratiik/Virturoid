@@ -664,7 +664,7 @@ def generic_creature_gene(prompt: str, robot_class: str | None = None):
     return None
 
 
-def ensure_walkable_quad(gene, prompt: str = ""):
+def ensure_walkable_quad(gene, prompt: str = "", *, force: bool = False):
     """DIAGNOSIS-DRIVEN, per-request walkability fallback for a QUADRUPED — a HINT the build reaches for, never a
     gait/body forced on every dog. If the body already walks under SOME gait (``evaluate_robot`` is gait-aware:
     trot, else the statically-stable crawl), it is returned UNCHANGED (sleek-when-possible). Only if it ROLLS
@@ -683,11 +683,14 @@ def ensure_walkable_quad(gene, prompt: str = ""):
             return gene
         legs = {m.group(0) for s in gene.segments
                 if (m := re.search(r"(?:(?:front|hind)_)?leg\d*_[lr]", (s.name or "").lower()))}
-        if len(legs) != 4:                                   # the fan+crawl hint is a QUADRUPED recipe
+        # the fan+crawl hint is a QUADRUPED recipe: accept our own leg{n}_{l|r} naming OR any gene already CLASSIFIED
+        # a quadruped (an imported robot uses arbitrary leg names but is structurally classed by limb count).
+        if len(legs) != 4 and getattr(gene, "robot_class", "") != "quadruped":
             return gene
         base = float(evaluate_robot(gene).get("value", 0.0))
-        if base >= 0.5:                                      # already walks under some gait -> leave it sleek
-            return gene
+        if base >= 0.5 and not force:                        # already walks under some gait -> leave it sleek
+            return gene                                      # (force skips this shortcut but STILL only adopts the
+        #                                                      fanned stance below if it beats the original materially)
         src = (getattr(gene, "design_source", None) or "").lower()
         if src not in ("", "anatomy_generic", "archetype", "heuristic", "generic"):
             # a bespoke LLM creature: preserve the DESIGN, flag that it can't credibly walk as-is (a hint, not a swap)

@@ -146,7 +146,10 @@ def import_robot(source: str, *, robot_id: str | None = None, species: str | Non
         species=species or f"{robot_class}.imported",
         robot_class=robot_class,
         segments=segments,
-        base_mount="floor" if robot_class in ("mobile_base", "quadruped", "humanoid") else "table",
+        # a robot that MOVES needs a FREE (floating 6-DOF) base, not a welded one -- "floor"/"table" weld the base
+        # to the world so the body cannot translate at all (the compiled model has no base joint, and every gait
+        # rolls out to 0 forward). A manipulator stays table-mounted.
+        base_mount="free" if robot_class in ("mobile_base", "quadruped", "hexapod", "humanoid") else "table",
         end_effector_type="gripper" if any("grip" in (s.name.lower()) for s in segments) else "none",
         metadata={"imported_from": "mjcf_or_urdf", "n_bodies": mj.nbody, "n_joints": mj.njnt},
     )
