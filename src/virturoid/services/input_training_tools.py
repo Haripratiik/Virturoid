@@ -421,6 +421,63 @@ def _adopt_control_script(args: dict) -> dict:
     return out
 
 
+def _list_parts(args: dict) -> dict:
+    """The real catalog: every part (or one category) with its STRUCTURED specs — motor peak/rated torque + no-load
+    RPM + voltage; camera resolution/fps/FOV; lidar channels/range/FOV; imu DOF/rate; compute TOPS; power Wh — so a
+    part choice or swap is grounded in real numbers, not a headline string."""
+    from virturoid.services.component_catalog import PART_CATEGORIES, list_parts
+    args = args or {}
+    cat = args.get("category")
+    if cat and cat not in PART_CATEGORIES:
+        return {"error": f"unknown category '{cat}'; valid: {list(PART_CATEGORIES)}"}
+    parts = list_parts(cat)
+    return {"category": cat or "all", "count": len(parts), "categories": list(PART_CATEGORIES), "parts": parts}
+
+
+def _part_specs(args: dict) -> dict:
+    """The real STRUCTURED specs of ONE named part (exact or substring, e.g. 'AK80-9' or 'Ouster OS1')."""
+    from virturoid.services.component_catalog import part_specs
+    name = (args or {}).get("part") or (args or {}).get("name", "")
+    if not name:
+        return {"error": "part (a catalog part name or substring) is required"}
+    spec = part_specs(name)
+    return spec if spec else {"error": f"no catalog part matching '{name}'; call list_parts to see options"}
+
+
+def _pin_part(args: dict) -> dict:
+    """SPECIFY an exact part for a held robot: pin a real catalog part for a category (e.g. category='lidar',
+    part='Ouster OS1-32', or category='actuator', part='AK80-9'). The BOM is rebuilt using the pinned part and the
+    pin travels with the robot/export. A part that doesn't exist, or whose category doesn't match, is rejected."""
+    from virturoid.services import session_state as _S
+    from virturoid.services.component_catalog import resolve_part
+    args = args or {}
+    rid = args.get("robot_id")
+    if not rid:
+        return {"error": "robot_id is required (the held robot to pin the part on)"}
+    gene = _S.get_robot(rid)
+    if gene is None:
+        return {"error": f"no held robot {rid}"}
+    name = args.get("part") or args.get("name", "")
+    part = resolve_part(name)
+    if part is None:
+        return {"error": f"no catalog part matching '{name}'; call list_parts to see the options"}
+    pcat = "actuator" if hasattr(part, "peak_torque_nm") else part.category
+    category = args.get("category") or pcat
+    if category != pcat:
+        return {"error": f"'{part.name}' is a {pcat}, not a {category} — pick a {category} or set category='{pcat}'"}
+    md = dict(getattr(gene, "metadata", None) or {})
+    pins = dict(md.get("pinned_parts") or {})
+    pins[category] = part.name
+    md["pinned_parts"] = pins
+    gene.metadata = md
+    from virturoid.services.bom_builder import build_bom
+    bom = build_bom(gene, task=args.get("task", ""), pins=pins)
+    gene.metadata["bom"] = bom
+    _S.commit_robot(rid, gene, label=f"pin {category}={part.name}")
+    return {"robot_id": rid, "pinned": {category: part.name}, "specs": part.to_spec(),
+            "all_pins": pins, "bom_pins": bom.get("pins"), "bom_totals": bom.get("totals")}
+
+
 def _import_dataset(args: dict) -> dict:
     from virturoid.services.dataset_importer import import_dataset
     path = (args or {}).get("path", "")
@@ -624,6 +681,35 @@ INPUT_TRAINING_TOOLS: dict[str, dict] = {
             "generations": {"type": "integer", "default": 6}, "pop": {"type": "integer", "default": 16},
             "steps": {"type": "integer", "default": 800}, "seed": {"type": "integer", "default": 0}}},
         "handler": _adopt_control_script, "heavy": True,
+    },
+    "list_parts": {
+        "description": "The real part catalog with STRUCTURED specs: motors (peak/rated torque, no-load RPM, "
+                       "voltage, gear ratio), cameras (resolution MP, fps, FOV, range), lidar (channels/beams, "
+                       "range m, FOV, point rate), imu (DOF, rate), compute (TOPS, RAM), power (Wh, rail V), "
+                       "grippers, wheels. Optionally filter by category. The queryable options for a build or a swap.",
+        "parameters": {"type": "object", "properties": {
+            "category": {"type": "string", "description": "actuator|camera|lidar|imu|force_torque|thermal|gps|"
+                                                          "microphone|compute|power|drive_motor|wheel|gripper"}}},
+        "handler": _list_parts, "heavy": False,
+    },
+    "part_specs": {
+        "description": "The real STRUCTURED specs of one named part (exact or substring, e.g. 'AK80-9' or "
+                       "'Ouster OS1') — the actual datasheet numbers (torque range, RPM, resolution, range, "
+                       "channels, FOV, ...), not a headline string.",
+        "parameters": {"type": "object", "required": ["part"], "properties": {
+            "part": {"type": "string", "description": "a catalog part name or substring"}}},
+        "handler": _part_specs, "heavy": False,
+    },
+    "pin_part": {
+        "description": "SPECIFY an exact part for a held robot: pin a real catalog part for a category (e.g. "
+                       "{category:'lidar', part:'Ouster OS1-32'} or {category:'actuator', part:'AK80-9'}). The BOM "
+                       "is rebuilt with the pinned part (and the pin travels with the robot/export). A part that "
+                       "isn't in the catalog, or whose category doesn't match, is rejected with a teaching error.",
+        "parameters": {"type": "object", "required": ["robot_id", "part"], "properties": {
+            "robot_id": {"type": "string"}, "part": {"type": "string", "description": "a catalog part name/substring"},
+            "category": {"type": "string", "description": "the part's category (inferred from the part if omitted)"},
+            "task": {"type": "string", "description": "task text so the rest of the sensor suite stays task-adaptive"}}},
+        "handler": _pin_part, "heavy": False,
     },
     "import_dataset": {
         "description": "Import a demonstration/log dataset (LeRobot dir, robomimic .hdf5, .mcap/.bag/.db3 log, or "

@@ -388,10 +388,12 @@ def _mobile_drive(gene: RobotGene) -> list[tuple[str, int, str]]:
             ("Caster wheel 2in", 1, "passive balance caster")]
 
 
-def build_bom(gene: RobotGene, *, capabilities=None, task: str = "") -> dict:
+def build_bom(gene: RobotGene, *, capabilities=None, task: str = "", pins: dict | None = None) -> dict:
     """Spec the whole robot as a real parts list. ``task`` (the build prompt / task description) makes the
     sensor suite TASK-ADAPTIVE — a navigator gets a LiDAR, an inspector a thermal camera, a sorter a detection
-    camera. Returns per-line items, the joint->actuator map, and rolled-up totals (count/mass/price/power/DOF)."""
+    camera. ``pins`` (or ``gene.metadata['pinned_parts']``) lets a user SPECIFY an exact part for a category
+    (e.g. {'lidar': 'Ouster OS1-32', 'actuator': 'T-Motor AK80-9'}) — the auto-selected part is swapped for it.
+    Returns per-line items, the joint->actuator map, and rolled-up totals (count/mass/price/power/DOF)."""
     lines: list[BomLine] = []
 
     # 1) ACTUATORS — one per actuated joint, smallest real motor that meets the joint's torque (with margin).
@@ -441,6 +443,35 @@ def build_bom(gene: RobotGene, *, capabilities=None, task: str = "") -> dict:
             continue
         lines.append(BomLine(c.name, c.category, qty, c.mass_kg, c.price_usd, f"{c.spec} - {mounting}"))
 
+    # PART PINS — honor any user-SPECIFIED exact parts (gene.metadata['pinned_parts'] merged with the `pins` arg):
+    # swap the auto-selected part of a category for the pinned one. A pin the catalog lacks, or a category mismatch,
+    # is REJECTED (reported), never silently dropped. This is how "use the Ouster OS1-32 lidar" or "swap to the
+    # AK80-9 motor" gets specified.
+    from virturoid.services.component_catalog import resolve_part
+    all_pins = {**(gene.metadata.get("pinned_parts") or {}), **(pins or {})}
+    pins_applied, pins_rejected = [], []
+    for cat, pname in all_pins.items():
+        part = resolve_part(pname)
+        if part is None:
+            pins_rejected.append({"category": cat, "part": pname, "reason": "no such part in the catalog"}); continue
+        pcat = "actuator" if hasattr(part, "peak_torque_nm") else part.category
+        if cat != pcat:
+            pins_rejected.append({"category": cat, "part": part.name, "reason": f"that part is a {pcat}, not a {cat}"}); continue
+        if cat == "actuator":
+            n = len(joints)
+            lines = [ln for ln in lines if ln.category != "actuator"]
+            lines.insert(0, BomLine(part.name, "actuator", n, part.mass_kg, part.price_usd,
+                                    f"{part.kind}, peak {part.peak_torque_nm:g} Nm @ {part.voltage_v:g} V, "
+                                    f"{part.no_load_rpm:g} rpm, gear {part.gear_ratio:g}:1 (pinned)"))
+            for k in actuator_map:
+                actuator_map[k] = part.name
+            bus_w = part.rated_torque_nm * part.max_speed_radps * 0.3 * n     # recompute the bus draw for the pinned motor
+        else:
+            qty = sum(ln.qty for ln in lines if ln.category == cat) or 1
+            lines = [ln for ln in lines if ln.category != cat]
+            lines.append(BomLine(part.name, cat, qty, part.mass_kg, part.price_usd, f"{part.spec} (pinned)"))
+        pins_applied.append({"category": cat, "part": part.name})
+
     # TOTALS
     total_mass = round(sum(ln.mass_kg for ln in lines), 3)
     total_price = round(sum(ln.price_usd for ln in lines), 2)
@@ -455,6 +486,7 @@ def build_bom(gene: RobotGene, *, capabilities=None, task: str = "") -> dict:
         "lines": [asdict(ln) | {"mass_kg": ln.mass_kg, "price_usd": ln.price_usd} for ln in lines],
         "totals": {"line_items": len(lines), "actuators": len(joints), "mass_kg": total_mass,
                    "price_usd": total_price, "est_power_w": est_power},
+        **({"pins": {"applied": pins_applied, "rejected": pins_rejected}} if (pins_applied or pins_rejected) else {}),
         "note": ("Representative real-world components (manufacturer datasheets, ~2024); verify exact specs "
                  "against the live datasheet before procurement."),
     }

@@ -15,14 +15,15 @@ not a purchase order. Torque/voltage/mass drive the selection logic; price is a 
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import math
+from dataclasses import dataclass, field
 
 
 @dataclass(frozen=True)
 class Actuator:
     name: str
     kind: str                 # "servo" | "qdd" (quasi-direct-drive) | "harmonic" | "gearmotor"
-    peak_torque_nm: float     # short-term peak (selection ceiling)
+    peak_torque_nm: float     # short-term peak / stall (selection ceiling)
     rated_torque_nm: float    # continuous
     mass_kg: float
     voltage_v: float
@@ -35,6 +36,21 @@ class Actuator:
     envelope_m: tuple = (0.08, 0.08, 0.04)   # datasheet bounding box (x, y, z) in metres
     axis_dim: int = 2         # which envelope dim the output/rotation axis runs along (0=x servos, 2=z pancakes)
 
+    @property
+    def no_load_rpm(self) -> float:
+        """No-load output speed in RPM (the servo/motor's rated shaft speed), from ``max_speed_radps``."""
+        return round(self.max_speed_radps * 60.0 / (2.0 * math.pi), 1)
+
+    def to_spec(self) -> dict:
+        """The part's real, STRUCTURED operating specs (queryable numbers, not a headline string)."""
+        return {
+            "part": self.name, "category": "actuator", "kind": self.kind, "vendor": self.vendor,
+            "peak_torque_nm": self.peak_torque_nm, "rated_torque_nm": self.rated_torque_nm,
+            "no_load_rpm": self.no_load_rpm, "max_speed_radps": round(self.max_speed_radps, 2),
+            "voltage_v": self.voltage_v, "gear_ratio": self.gear_ratio,
+            "mass_kg": self.mass_kg, "price_usd": self.price_usd,
+        }
+
 
 @dataclass(frozen=True)
 class Component:
@@ -44,7 +60,13 @@ class Component:
     power_w: float            # nominal electrical draw (0 for passive parts like wheels)
     price_usd: float
     vendor: str
-    spec: str                 # one-line headline spec
+    spec: str                 # one-line headline spec (human-readable)
+    specs: dict = field(default_factory=dict)   # STRUCTURED real datasheet specs (resolution_mp, range_m, channels, fps, fov_deg, rate_hz, ...)
+
+    def to_spec(self) -> dict:
+        """The part's real, STRUCTURED specs merged with its commercial fields — queryable, not a headline string."""
+        return {"part": self.name, "category": self.category, "vendor": self.vendor, "headline": self.spec,
+                "mass_kg": self.mass_kg, "power_w": self.power_w, "price_usd": self.price_usd, **self.specs}
 
 
 @dataclass(frozen=True)
@@ -92,45 +114,77 @@ ACTUATORS: tuple[Actuator, ...] = (
 
 # --- SENSORS / COMPUTE / POWER / DRIVE / END-EFFECTORS ------------------------------------------------------
 COMPONENTS: tuple[Component, ...] = (
-    # cameras (a robot's "eyes")
-    Component("Intel RealSense D435i", "camera", 0.072, 3.5, 334.0, "Intel", "RGB-D stereo + IMU, 0.2-10m"),
-    Component("Luxonis OAK-D Pro", "camera", 0.091, 5.0, 299.0, "Luxonis", "stereo depth + 12MP RGB + on-board AI"),
-    Component("Logitech C920", "camera", 0.162, 1.5, 70.0, "Logitech", "1080p RGB webcam"),
-    Component("Arducam OV9281 global-shutter", "camera", 0.010, 1.0, 30.0, "Arducam", "1MP global-shutter mono (VIO/tracking)"),
-    Component("Basler ace 5MP", "camera", 0.090, 2.5, 420.0, "Basler", "5MP industrial machine-vision"),
-    # lidar
-    Component("Slamtec RPLIDAR A2M12", "lidar", 0.190, 1.5, 320.0, "Slamtec", "2D 360deg, 12m, 8kHz"),
-    Component("Livox Mid-360", "lidar", 0.265, 6.5, 749.0, "Livox", "3D 360deg x 59deg, 40m"),
-    Component("Ouster OS1-32", "lidar", 0.447, 14.0, 8000.0, "Ouster", "3D 32-beam, 120m"),
-    Component("Ouster OS2-128", "lidar", 0.92, 22.0, 18000.0, "Ouster", "3D 128-beam, 240m (large/outdoor)"),
+    # cameras (a robot's "eyes") — resolution (MP), frame rate (fps), depth range + FOV are real datasheet figures
+    Component("Intel RealSense D435i", "camera", 0.072, 3.5, 334.0, "Intel", "RGB-D stereo + IMU, 0.2-10m",
+              {"modality": "rgbd", "rgb_mp": 2.1, "depth_resolution": "1280x720", "fps": 90,
+               "range_m": 10.0, "min_range_m": 0.2, "fov_deg": [87, 58], "onboard_imu": True}),
+    Component("Luxonis OAK-D Pro", "camera", 0.091, 5.0, 299.0, "Luxonis", "stereo depth + 12MP RGB + on-board AI",
+              {"modality": "rgbd", "rgb_mp": 12.0, "fps": 60, "range_m": 19.0, "fov_deg": [80, 55], "onboard_ai_tops": 4}),
+    Component("Logitech C920", "camera", 0.162, 1.5, 70.0, "Logitech", "1080p RGB webcam",
+              {"modality": "rgb", "rgb_mp": 2.1, "resolution": "1920x1080", "fps": 30, "fov_deg": [78]}),
+    Component("Arducam OV9281 global-shutter", "camera", 0.010, 1.0, 30.0, "Arducam", "1MP global-shutter mono (VIO/tracking)",
+              {"modality": "mono", "rgb_mp": 1.0, "resolution": "1280x800", "fps": 120, "shutter": "global"}),
+    Component("Basler ace 5MP", "camera", 0.090, 2.5, 420.0, "Basler", "5MP industrial machine-vision",
+              {"modality": "rgb", "rgb_mp": 5.0, "resolution": "2592x2048", "fps": 35}),
+    # lidar — channels (beam count), range (m), FOV (deg), point rate are real datasheet figures
+    Component("Slamtec RPLIDAR A2M12", "lidar", 0.190, 1.5, 320.0, "Slamtec", "2D 360deg, 12m, 8kHz",
+              {"dimensions": "2D", "channels": 1, "range_m": 12.0, "fov_deg": [360, 0], "scan_hz": 15, "points_per_s": 8000}),
+    Component("Livox Mid-360", "lidar", 0.265, 6.5, 749.0, "Livox", "3D 360deg x 59deg, 40m",
+              {"dimensions": "3D", "channels": "non-repetitive", "range_m": 40.0, "fov_deg": [360, 59], "points_per_s": 200000}),
+    Component("Ouster OS1-32", "lidar", 0.447, 14.0, 8000.0, "Ouster", "3D 32-beam, 120m",
+              {"dimensions": "3D", "channels": 32, "range_m": 120.0, "fov_deg": [360, 45], "points_per_s": 655360}),
+    Component("Ouster OS2-128", "lidar", 0.92, 22.0, 18000.0, "Ouster", "3D 128-beam, 240m (large/outdoor)",
+              {"dimensions": "3D", "channels": 128, "range_m": 240.0, "fov_deg": [360, 22.5], "points_per_s": 2621440}),
     # imu / force-torque / gps / thermal (task-specific perception)
-    Component("Bosch BNO055", "imu", 0.003, 0.04, 35.0, "Bosch", "9-DOF IMU + sensor fusion"),
-    Component("VectorNav VN-100", "imu", 0.015, 0.2, 800.0, "VectorNav", "industrial AHRS/IMU"),
-    Component("Robotiq FT 300-S", "force_torque", 0.300, 2.0, 4500.0, "Robotiq", "6-axis wrist F/T sensor"),
-    Component("FLIR Boson 640", "thermal", 0.0075, 0.5, 1200.0, "Teledyne FLIR", "640x512 LWIR thermal core"),
-    Component("u-blox ZED-F9P RTK GPS", "gps", 0.030, 0.5, 220.0, "u-blox", "cm-level RTK GNSS (outdoor)"),
-    Component("ReSpeaker Mic Array v2", "microphone", 0.030, 1.0, 70.0, "Seeed", "4-mic far-field array"),
-    # compute
-    Component("Raspberry Pi 5 (8GB)", "compute", 0.046, 8.0, 80.0, "Raspberry Pi", "quad A76, no GPU AI"),
-    Component("NVIDIA Jetson Orin Nano 8GB", "compute", 0.176, 15.0, 249.0, "NVIDIA", "40 TOPS edge AI"),
-    Component("NVIDIA Jetson AGX Orin 64GB", "compute", 0.700, 60.0, 1999.0, "NVIDIA", "275 TOPS edge AI"),
-    # power
-    Component("LiPo 4S 5200mAh (14.8V)", "power", 0.440, 0.0, 45.0, "Turnigy", "77Wh, ~12V rail"),
-    Component("LiPo 6S 8000mAh (22.2V)", "power", 1.05, 0.0, 110.0, "Turnigy", "178Wh, 24V rail"),
-    Component("Li-ion 48V 12Ah pack", "power", 2.6, 0.0, 320.0, "custom", "576Wh, 48V rail (legged/humanoid)"),
+    Component("Bosch BNO055", "imu", 0.003, 0.04, 35.0, "Bosch", "9-DOF IMU + sensor fusion",
+              {"dof": 9, "rate_hz": 100, "onboard_fusion": True}),
+    Component("VectorNav VN-100", "imu", 0.015, 0.2, 800.0, "VectorNav", "industrial AHRS/IMU",
+              {"dof": 9, "rate_hz": 800, "onboard_fusion": True, "grade": "industrial"}),
+    Component("Robotiq FT 300-S", "force_torque", 0.300, 2.0, 4500.0, "Robotiq", "6-axis wrist F/T sensor",
+              {"axes": 6, "force_range_n": 300, "torque_range_nm": 30, "rate_hz": 100}),
+    Component("FLIR Boson 640", "thermal", 0.0075, 0.5, 1200.0, "Teledyne FLIR", "640x512 LWIR thermal core",
+              {"modality": "thermal", "resolution": "640x512", "fps": 60, "spectral_band": "LWIR"}),
+    Component("u-blox ZED-F9P RTK GPS", "gps", 0.030, 0.5, 220.0, "u-blox", "cm-level RTK GNSS (outdoor)",
+              {"type": "RTK-GNSS", "accuracy_m": 0.01, "rate_hz": 8}),
+    Component("ReSpeaker Mic Array v2", "microphone", 0.030, 1.0, 70.0, "Seeed", "4-mic far-field array",
+              {"mics": 4, "type": "far-field", "onboard_aec": True}),
+    # compute — AI throughput (TOPS) + RAM
+    Component("Raspberry Pi 5 (8GB)", "compute", 0.046, 8.0, 80.0, "Raspberry Pi", "quad A76, no GPU AI",
+              {"cpu": "quad Cortex-A76", "ai_tops": 0, "ram_gb": 8}),
+    Component("NVIDIA Jetson Orin Nano 8GB", "compute", 0.176, 15.0, 249.0, "NVIDIA", "40 TOPS edge AI",
+              {"ai_tops": 40, "ram_gb": 8, "gpu": "Ampere 1024-core"}),
+    Component("NVIDIA Jetson AGX Orin 64GB", "compute", 0.700, 60.0, 1999.0, "NVIDIA", "275 TOPS edge AI",
+              {"ai_tops": 275, "ram_gb": 64, "gpu": "Ampere 2048-core"}),
+    # power — usable energy (Wh) + rail voltage; tethered PSUs vs onboard packs
+    Component("LiPo 4S 5200mAh (14.8V)", "power", 0.440, 0.0, 45.0, "Turnigy", "77Wh, ~12V rail",
+              {"type": "LiPo", "capacity_wh": 77, "voltage_v": 14.8, "tethered": False}),
+    Component("LiPo 6S 8000mAh (22.2V)", "power", 1.05, 0.0, 110.0, "Turnigy", "178Wh, 24V rail",
+              {"type": "LiPo", "capacity_wh": 178, "voltage_v": 22.2, "tethered": False}),
+    Component("Li-ion 48V 12Ah pack", "power", 2.6, 0.0, 320.0, "custom", "576Wh, 48V rail (legged/humanoid)",
+              {"type": "Li-ion", "capacity_wh": 576, "voltage_v": 48, "tethered": False}),
     # power — socketed (wall) PSUs: the DEFAULT supply for tethered/benchtop robots, sized above the draw
-    Component("Mean Well RSP-150-24", "power", 0.65, 0.0, 55.0, "Mean Well", "150W 24V enclosed PSU (socketed/wall)"),
-    Component("Mean Well RSP-320-48", "power", 1.30, 0.0, 78.0, "Mean Well", "320W 48V enclosed PSU (socketed/wall)"),
-    Component("Mean Well RSP-750-48", "power", 2.40, 0.0, 140.0, "Mean Well", "750W 48V enclosed PSU (socketed/wall)"),
-    Component("Mean Well RSP-1500-48", "power", 4.20, 0.0, 320.0, "Mean Well", "1500W 48V enclosed PSU (socketed/wall)"),
+    Component("Mean Well RSP-150-24", "power", 0.65, 0.0, 55.0, "Mean Well", "150W 24V enclosed PSU (socketed/wall)",
+              {"type": "PSU", "output_w": 150, "voltage_v": 24, "tethered": True}),
+    Component("Mean Well RSP-320-48", "power", 1.30, 0.0, 78.0, "Mean Well", "320W 48V enclosed PSU (socketed/wall)",
+              {"type": "PSU", "output_w": 320, "voltage_v": 48, "tethered": True}),
+    Component("Mean Well RSP-750-48", "power", 2.40, 0.0, 140.0, "Mean Well", "750W 48V enclosed PSU (socketed/wall)",
+              {"type": "PSU", "output_w": 750, "voltage_v": 48, "tethered": True}),
+    Component("Mean Well RSP-1500-48", "power", 4.20, 0.0, 320.0, "Mean Well", "1500W 48V enclosed PSU (socketed/wall)",
+              {"type": "PSU", "output_w": 1500, "voltage_v": 48, "tethered": True}),
     # mobile drive
-    Component("Pololu 37Dx70L 12V gearmotor + encoder", "drive_motor", 0.215, 11.0, 40.0, "Pololu", "12V, 0.8Nm, 64CPR"),
-    Component("100mm rubber drive wheel + hub", "wheel", 0.150, 0.0, 15.0, "Pololu", "100mm dia, 6mm hex"),
-    Component("100mm Mecanum wheel", "wheel", 0.350, 0.0, 42.0, "Nexus", "100mm omni/strafe"),
-    Component("Caster wheel 2in", "wheel", 0.080, 0.0, 8.0, "generic", "passive support caster"),
+    Component("Pololu 37Dx70L 12V gearmotor + encoder", "drive_motor", 0.215, 11.0, 40.0, "Pololu", "12V, 0.8Nm, 64CPR",
+              {"voltage_v": 12, "stall_torque_nm": 0.8, "no_load_rpm": 100, "encoder_cpr": 64}),
+    Component("100mm rubber drive wheel + hub", "wheel", 0.150, 0.0, 15.0, "Pololu", "100mm dia, 6mm hex",
+              {"diameter_mm": 100, "type": "rubber", "driven": True}),
+    Component("100mm Mecanum wheel", "wheel", 0.350, 0.0, 42.0, "Nexus", "100mm omni/strafe",
+              {"diameter_mm": 100, "type": "mecanum", "driven": True}),
+    Component("Caster wheel 2in", "wheel", 0.080, 0.0, 8.0, "generic", "passive support caster",
+              {"diameter_mm": 50, "type": "caster", "driven": False}),
     # end effectors
-    Component("Robotiq 2F-85 gripper", "gripper", 0.900, 6.0, 5500.0, "Robotiq", "85mm 2-finger adaptive"),
-    Component("Dynamixel-driven 2-finger gripper", "gripper", 0.250, 4.0, 380.0, "ROBOTIS", "XM430 parallel jaw"),
+    Component("Robotiq 2F-85 gripper", "gripper", 0.900, 6.0, 5500.0, "Robotiq", "85mm 2-finger adaptive",
+              {"fingers": 2, "stroke_mm": 85, "grip_force_n": 235, "type": "adaptive"}),
+    Component("Dynamixel-driven 2-finger gripper", "gripper", 0.250, 4.0, 380.0, "ROBOTIS", "XM430 parallel jaw",
+              {"fingers": 2, "stroke_mm": 60, "type": "parallel"}),
 )
 
 # --- STRUCTURAL MATERIALS for the links. ``tier`` lets the per-part selector pick a STRONG load-path material
@@ -173,6 +227,43 @@ def component(name: str) -> Component | None:
 
 def by_category(category: str) -> list[Component]:
     return [c for c in COMPONENTS if c.category == category]
+
+
+# categories the auto-selector fills; "actuator" is the ladder above. Used to validate a pin's category.
+PART_CATEGORIES = ("actuator", "camera", "lidar", "imu", "force_torque", "thermal", "gps", "microphone",
+                   "compute", "power", "drive_motor", "wheel", "gripper")
+
+
+def resolve_part(name: str):
+    """Find a part by exact or case-insensitive substring name across BOTH the actuator ladder and the component
+    catalog. Returns the Actuator/Component object, or None. Lets a user say 'AK80-9' or 'Ouster OS1'."""
+    if not name:
+        return None
+    pool = list(ACTUATORS) + list(COMPONENTS)
+    for p in pool:                                             # exact first
+        if p.name == name:
+            return p
+    low = name.lower()
+    hits = [p for p in pool if low in p.name.lower()]
+    return hits[0] if len(hits) == 1 else next((p for p in hits if p.name.lower() == low), hits[0] if hits else None)
+
+
+def part_specs(name: str) -> dict | None:
+    """The real STRUCTURED specs of one part (torque/rpm for a motor; resolution/range/channels/fps for a sensor)."""
+    p = resolve_part(name)
+    return p.to_spec() if p is not None else None
+
+
+def list_parts(category: str | None = None) -> list[dict]:
+    """Every catalog part (or one category) with its real structured specs — the queryable options for a build or a
+    part swap. category='actuator' lists the motor ladder; otherwise the sensor/compute/power/drive/gripper parts."""
+    out: list[dict] = []
+    if category in (None, "actuator"):
+        out += [a.to_spec() for a in sorted(ACTUATORS, key=lambda a: a.peak_torque_nm)]
+    for c in COMPONENTS:
+        if category in (None, c.category):
+            out.append(c.to_spec())
+    return out
 
 
 def material(name: str) -> Material | None:

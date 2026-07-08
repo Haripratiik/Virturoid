@@ -193,6 +193,11 @@ def _handle(method: str, params: dict):
                     "three-phase trainer ladder), check_perception_leakage (reject a policy that cheats with "
                     "privileged sim truth), amplify_demonstrations {prompt} (one walking body -> many "
                     "physics-validated gait demos), data_dividends (the flywheel 'what did we improve?' ledger).\n"
+                    "PARTS (folded — the real component catalog): list_parts {category} + part_specs {part} give the "
+                    "STRUCTURED datasheet specs of every part (motor peak/rated torque + no-load RPM + voltage; "
+                    "camera resolution/fps/FOV/range; lidar channels/range/FOV; imu DOF/rate; compute TOPS; power "
+                    "Wh); pin_part {robot_id, category, part} SPECIFIES an exact part (e.g. the Ouster OS1-32 lidar "
+                    "or the AK80-9 motor) — the BOM swaps to it and the pin travels with the robot.\n"
                     "HONESTY: never claim a walk without verify_robot's traces (survived + cadence + forward "
                     "displacement). Every edit is localized to the held gene — you keep the robot across turns.")}
     if method == "tools/list":
