@@ -76,11 +76,20 @@ def gather_banked_policies(models_dir: str = "models", *, extra=None, recursive:
 
 
 def transfer_policy_for(gene, *, models_dir: str = "models", candidates=None, steps: int = 600,
-                        min_forward: float = 0.02):
+                        min_forward: float = 0.02, max_candidates: int = 24):
     """Cross-embodiment warm-start selection (generalizes ``learn_locomotion.banked_policy_for`` beyond same
     species): sweep the banked pool and return ``(policy, npz, ranked)`` for the best FORWARD transfer to
-    ``gene``, or ``(None, None, ranked)`` if none transfers forward (-> train from scratch)."""
+    ``gene``, or ``(None, None, ranked)`` if none transfers forward (-> train from scratch).
+
+    ``max_candidates`` BOUNDS the sweep: screening runs one rollout PER candidate, so an ever-growing banked
+    pool (``build/models`` accumulates a checkpoint per training iteration) would make this scale without limit
+    and eventually look like a hang. We keep the most RECENT ``max_candidates`` by mtime -- the newest banked
+    skills are the most relevant warm-starts -- so screening time is bounded regardless of how much has piled up."""
     cands = candidates if candidates is not None else gather_banked_policies(models_dir)
+    if max_candidates and len(cands) > max_candidates:
+        import os
+        cands = sorted(cands, key=lambda p: (os.path.getmtime(p) if os.path.exists(p) else 0.0),
+                       reverse=True)[:max_candidates]
     best, ranked = best_transfer_seed(gene, cands, steps=steps, min_forward=min_forward)
     if best is None:
         return None, None, ranked

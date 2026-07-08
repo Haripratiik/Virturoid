@@ -35,6 +35,29 @@ def _summary(gene, robot_id: str | None = None) -> dict:
     return out
 
 
+def _pose_manipulator_for_render(m, d, gene) -> None:
+    """A static rest pose (qpos=0) renders an ARM as a straight vertical pole — which reads as broken. For a
+    manipulator, bend its hinge joints into a natural 'ready' pose (an elbow bend + a slight reach) so the still
+    shows a real articulated arm. Legged/mobile bodies look right standing, so they're left at rest."""
+    import mujoco
+    rc = (getattr(gene, "robot_class", "") or "").lower()
+    sp = (getattr(gene, "species", "") or "").lower()
+    if "manipulator" not in rc and "arm" not in rc and "arm" not in sp:
+        return
+    bends = [0.5, -1.1, 1.0, -0.6, 0.5]                         # shoulder out, elbow in, wrist — an L-shaped reach
+    ai = 0
+    for jn in range(m.njnt):
+        if m.jnt_type[jn] != mujoco.mjtJoint.mjJNT_HINGE:       # only revolute arm joints (leave gripper slides)
+            continue
+        adr = int(m.jnt_qposadr[jn])
+        a = bends[ai] if ai < len(bends) else 0.3
+        if m.jnt_limited[jn]:                                   # clamp the bend into the joint's real range
+            lo, hi = float(m.jnt_range[jn][0]), float(m.jnt_range[jn][1])
+            a = min(max(a, lo + 0.05 * (hi - lo)), hi - 0.05 * (hi - lo))
+        d.qpos[adr] = a
+        ai += 1
+
+
 def _render_gene(gene, tag: str, *, azimuth: float = 50.0, elevation: float = -16.0) -> str | None:
     import os
     os.environ.setdefault("MUJOCO_GL", "glfw")
@@ -53,7 +76,9 @@ def _render_gene(gene, tag: str, *, azimuth: float = 50.0, elevation: float = -1
         except Exception:  # noqa: BLE001
             xml = compile_gene_to_mjcf(gene, include_floor=True, spawn_z=spawn_z)
         m = mujoco.MjModel.from_xml_string(xml)
-        d = mujoco.MjData(m); mujoco.mj_resetData(m, d); mujoco.mj_forward(m, d)
+        d = mujoco.MjData(m); mujoco.mj_resetData(m, d)
+        _pose_manipulator_for_render(m, d, gene)               # bend an arm into a natural pose (no-op for others)
+        mujoco.mj_forward(m, d)
         rr = mujoco.Renderer(m, height=420, width=560); cam = mujoco.MjvCamera()
         cam.lookat[:] = [0.0, 0.0, 0.15]; cam.distance, cam.azimuth, cam.elevation = 1.9, float(azimuth), float(elevation)
         rr.update_scene(d, camera=cam); img = PIL.Image.fromarray(rr.render().copy()); rr.close()

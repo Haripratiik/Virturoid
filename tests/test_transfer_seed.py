@@ -57,6 +57,28 @@ class TransferSeedTests(unittest.TestCase):
         self.assertIsNone(pol)
         self.assertIsNone(npz)
 
+    def test_transfer_policy_for_bounds_the_sweep_to_recent(self):
+        # screening runs a rollout PER candidate, so an ever-growing banked pool must NOT scale the sweep without
+        # limit (that made the golden/night path look like a hang). The sweep is capped to the most-recent N.
+        import os
+        import virturoid.services.transfer_seed as ts
+        with tempfile.TemporaryDirectory() as tmp:
+            for i in range(30):
+                p = Path(tmp) / f"ckpt_{i:02d}.npz"
+                p.write_bytes(b"x")
+                os.utime(p, (1000 + i, 1000 + i))                          # ascending mtime -> ckpt_29 newest
+            captured = {}
+            orig = ts.best_transfer_seed
+            ts.best_transfer_seed = lambda gene, cands, **kw: (captured.update(cands=list(cands)) or (None, []))
+            try:
+                ts.transfer_policy_for(gene=None, models_dir=tmp, max_candidates=8)
+            finally:
+                ts.best_transfer_seed = orig
+            kept = {os.path.basename(c) for c in captured["cands"]}
+            self.assertEqual(len(kept), 8, "the sweep must be bounded to max_candidates")
+            self.assertIn("ckpt_29.npz", kept)                             # most-recent kept
+            self.assertNotIn("ckpt_00.npz", kept)                          # oldest dropped
+
     def test_deploy_selection_picks_best_deploying_checkpoint(self):
         # plan v2 T0.1: deploy-sim checkpoint selection — never select on train-sim reward. Encodes the divergence
         # curve (iter-80 deploys WORSE than iter-10), so min_forward is disabled to still return the LEAST-bad if
