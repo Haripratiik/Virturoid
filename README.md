@@ -66,7 +66,9 @@ Every body below was generated from a one-line prompt by the same pipeline — n
 
 **Use it**
 - A native desktop studio with a live MuJoCo viewport, or a full command-line interface.
-- Imports an existing MJCF or URDF robot and learns a controller for it.
+- Edits a built robot in plain language — make it taller, give it carbon-fiber legs, or make it carry 10 kg — and re-engineers the body for it, sizing bigger motors and updating the bill of materials, then re-verifying.
+- Ingests an existing robot project: drop a folder with a URDF or MJCF model, a bill of materials, CAD meshes, and a plain-English description, and one agent parses all of it into a single editable, simulate-able robot — even when the referenced meshes are missing.
+- Runs and improves your own controller: hand it your control script or policy and it executes it in real physics, then tunes it into a better gait.
 - Exports a controller bundle, a runnable ROS 2 package, and browsable reports.
 
 ## How it works
@@ -115,6 +117,10 @@ The effect compounds. On a block-sorting task, a second build of a robot reused 
 ### 7. The readiness gate
 
 Each build is checked stage by stage against the artifacts actually on disk: real CAD geometry, a real physics pass, and measured task outcomes. A design is marked ready to export only when the evidence is present, which keeps the studio honest about what a given robot can really do.
+
+### 8. Bring your own robot
+
+Virturoid is not only a generator; it is a simulation home for robots you already have. Drop a project folder — a URDF or MJCF model, a bill of materials, CAD meshes, and a plain-English description like *"aluminum chassis, carbon-fiber legs, carries a 5 kg payload"* — and one ingestion agent parses all of it into a single editable robot. It imports the model (recovering the kinematic structure even when the referenced meshes are missing), reads the description into typed materials and payload and applies them, and folds in the parts list. From there the same tools that build a robot amend and improve it: ask it to carry more and it re-sizes the motors and updates the bill of materials. You can also hand it your own control script or policy — it runs the controller in real physics, then warm-starts a search from your parameters to tune it into a better gait, and keeps your controller if it cannot honestly beat it.
 
 ## Project structure
 
@@ -184,6 +190,12 @@ python -m virturoid.build --train --prompt "a tabletop arm that sorts blocks" --
 
 # Import an existing robot model and learn a controller for it
 python -m virturoid.import_robot --mjcf-file path/to/robot.xml --output build/imported
+
+# Browse a gallery of robots built from text, each verified in real physics
+python scripts/run_mvp_demo.py                      # writes a self-contained build/demo/index.html
+
+# End-to-end: ingest a folder of an existing robot (model + BOM + CAD + description + control script) and improve it
+python scripts/demo_ingest_customer.py
 ```
 
 `--co-design` physics-tunes a freshly composed body before building, `--evaluate` scores it on its morphology-matched task, and `--benchmark` scores it across a difficulty suite. Every build writes a complete package: the Robot Genome, the compiled MuJoCo model, generated task and scene sets, the bill of materials, parametric and B-rep CAD, training artifacts, a controller bundle, and browsable reports. Open `reports/index.html` in any package to explore everything it generated.
