@@ -213,6 +213,15 @@ def _import_dataset(args: dict) -> dict:
     return import_dataset(path).to_dict()
 
 
+def _classify_failure(args: dict) -> dict:
+    from virturoid.services.failure_classifier import repairs_for_metrics
+    args = args or {}
+    metrics = args.get("metrics")
+    if not isinstance(metrics, dict):
+        return {"error": "metrics (an episode-metrics dict) is required"}
+    return repairs_for_metrics(metrics, domain=args.get("domain", "auto"))
+
+
 def _data_dividends(args: dict) -> dict:
     from virturoid.services.data_dividend import dividend_summary
     memory_dir = (args or {}).get("memory_dir")
@@ -347,6 +356,16 @@ INPUT_TRAINING_TOOLS: dict[str, dict] = {
         "parameters": {"type": "object", "required": ["path"], "properties": {
             "path": {"type": "string", "description": "a dataset directory or file"}}},
         "handler": _import_dataset, "heavy": False,
+    },
+    "classify_failure": {
+        "description": "Turn raw episode metrics (survived/height_ratio/forward/contacts/lifted/...) into a "
+                       "failure label AND the concrete curriculum repairs for it (closes metrics -> failure -> "
+                       "repair). Rule-based cold start; refines with a learned classifier as episodes accrue. "
+                       "No physics.",
+        "parameters": {"type": "object", "required": ["metrics"], "properties": {
+            "metrics": {"type": "object", "description": "episode metrics dict"},
+            "domain": {"type": "string", "enum": ["auto", "legged", "manipulator"], "default": "auto"}}},
+        "handler": _classify_failure, "heavy": False,
     },
     "data_dividends": {
         "description": "The flywheel ledger summary: across every run, which reusable priors (skill/reward/body/"
