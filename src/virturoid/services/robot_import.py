@@ -78,6 +78,19 @@ def import_robot(source: str, *, robot_id: str | None = None, species: str | Non
             warnings.append(f"body {bname!r} has zero/negative mass — inertia missing or massless link; using 0.01 kg.")
             mass = 0.01
 
+        # Recover a link's LENGTH from the kinematic span to its child joint. A URDF's joint origins encode link
+        # lengths even when the visual/collision MESH is missing (it imported as a tiny placeholder box) — so a
+        # limb whose geom underrepresents the span to the next joint is rebuilt as a capsule of that real length.
+        child_ids = children.get(i, [])
+        if child_ids:
+            span = max(float((mj.body_pos[c][0] ** 2 + mj.body_pos[c][1] ** 2 + mj.body_pos[c][2] ** 2) ** 0.5)
+                       for c in child_ids)
+            placeholder = shape == "box" and length_m <= 0.09 and abs(length_m - radius_m) < 0.03
+            if span >= 0.04 and (placeholder or span > length_m * 1.8):
+                length_m = float(min(1.5, span))
+                shape = "capsule"
+                radius_m = float(min(max(radius_m, 0.02), 0.12, max(0.02, span * 0.18)))
+
         joint_type, axis, lo, hi, torque = _joint_for_body(mj, i, jnts_of, jnt_force, bname, warnings)
         is_leaf = i in leaves
         name_hit = any(h in bname.lower() for h in _EE_NAME_HINTS)
@@ -152,18 +165,56 @@ def import_robot(source: str, *, robot_id: str | None = None, species: str | Non
 
 
 # --------------------------------------------------------------------------- helpers
+def _sanitize_urdf_meshes(text: str, base_dir: str | None) -> tuple[str, int]:
+    """Neutralize ``<mesh filename=...>`` references whose file can't be found (the #1 enterprise-URDF problem:
+    a robot description ships without its meshes, or with them at a different relative path). A missing mesh geom
+    is replaced with a modest primitive BOX so MuJoCo still compiles and the KINEMATIC TREE (links + joints +
+    inertials) — the part the editable RobotGene needs — is preserved. Returns (new_text, n_replaced)."""
+    import os
+    import re
+
+    def _present(fn: str) -> bool:
+        if os.path.isabs(fn) and os.path.exists(fn):
+            return True
+        for root in filter(None, (base_dir,)):
+            if os.path.exists(os.path.normpath(os.path.join(root, fn))):
+                return True
+        return False
+
+    n = 0
+
+    def repl(mo):
+        nonlocal n
+        fn_mo = re.search(r'filename\s*=\s*"([^"]+)"', mo.group(0))
+        if fn_mo and not _present(fn_mo.group(1)):
+            n += 1
+            return '<box size="0.06 0.06 0.06"/>'               # keep the link collidable + sized, not a mesh
+        return mo.group(0)
+
+    # both the self-closing <mesh .../> and the paired <mesh ...>...</mesh> forms
+    text = re.sub(r'<mesh\b[^>]*?/>', repl, text)
+    text = re.sub(r'<mesh\b[^>]*?>.*?</mesh>', repl, text, flags=re.DOTALL)
+    return text, n
+
+
 def _load_model(source: str, mujoco, warnings: list[str]):
-    """Load an MjModel from a path or XML string; handle URDF (which MuJoCo loads from a file)."""
+    """Load an MjModel from a path or XML string. URDFs load from a file (MuJoCo runs its URDF compiler); a URDF
+    that references MISSING meshes is retried with those meshes swapped for primitive geoms so the import still
+    succeeds (with a warning) instead of hard-failing on a moved/mesh-less folder."""
     p = Path(source)
+    is_file = len(source) < 512 and p.exists()
+    base_dir = str(p.parent) if is_file else None
     try:
-        if len(source) < 512 and p.exists():
-            return mujoco.MjModel.from_xml_path(str(p))
-    except (OSError, ValueError):
-        pass
-    text = source
-    if "<robot" in text[:400].lower():  # URDF string -> MuJoCo needs a file path
-        with tempfile.NamedTemporaryFile("w", suffix=".urdf", delete=False, encoding="utf-8") as f:
-            f.write(text); tmp = f.name
+        text = p.read_text(encoding="utf-8", errors="replace") if is_file else source
+    except OSError:
+        text = source
+    is_urdf = "<robot" in text[:400].lower()
+
+    def _compile(xml_text: str):
+        if not is_urdf:
+            return mujoco.MjModel.from_xml_string(xml_text)
+        with tempfile.NamedTemporaryFile("w", suffix=".urdf", delete=False, encoding="utf-8", dir=base_dir) as f:
+            f.write(xml_text); tmp = f.name                     # write NEXT TO the real meshes so relative paths resolve
         try:
             return mujoco.MjModel.from_xml_path(tmp)
         finally:
@@ -171,7 +222,23 @@ def _load_model(source: str, mujoco, warnings: list[str]):
                 Path(tmp).unlink()
             except OSError:
                 pass
-    return mujoco.MjModel.from_xml_string(text)
+
+    # 1) faithful attempt (a real file loads straight from its path so meshes/compiler resolve)
+    try:
+        return mujoco.MjModel.from_xml_path(str(p)) if is_file else _compile(text)
+    except (OSError, ValueError) as exc:
+        first_err = str(exc)
+    # 2) URDF with missing meshes -> swap them for primitives and retry
+    if is_urdf:
+        sanitized, n = _sanitize_urdf_meshes(text, base_dir)
+        if n:
+            warnings.append(f"{n} mesh file(s) referenced by the URDF were missing; imported with primitive geoms "
+                            "in their place (kinematic tree + inertials preserved).")
+            try:
+                return _compile(sanitized)
+            except (OSError, ValueError) as exc2:
+                first_err = str(exc2)
+    raise ValueError(first_err)
 
 
 def _primary_geom(mj, body_id: int, GEOM, name_of, warnings: list[str]):
@@ -218,13 +285,41 @@ def _joint_for_body(mj, body_id, jnts_of, jnt_force, bname, warnings):
 
 
 def _infer_class(segments, roots, mj) -> str:
-    """Lightweight species/class guess from the morphology (honest, coarse)."""
+    """Species/class guess from the morphology. Counts LIMB-CHAINS hanging off the root (a child that begins a
+    chain of >=2 actuated segments = a leg/arm) so a symmetric multi-legged body is recognized as legged instead
+    of defaulting to 'manipulator' — which is what let an imported quadruped URDF read as an arm."""
+    from collections import defaultdict
+
     n_rev = sum(1 for s in segments if s.joint_type == "revolute")
     has_grip = any("grip" in s.name.lower() or "finger" in s.name.lower() for s in segments)
-    # a free root joint => floating base => mobile
     free_root = any(int(mj.jnt_type[j]) == 0 for j in range(mj.njnt))
+
+    by_name = {s.name: s for s in segments}
+    children = defaultdict(list)
+    for s in segments:
+        if s.parent:
+            children[s.parent].append(s.name)
+
+    def actuated_depth(name: str, seen=None) -> int:
+        seen = seen or set()
+        if name in seen or name not in by_name:
+            return 0
+        seen.add(name)
+        s = by_name[name]
+        deepest = max((actuated_depth(c, seen) for c in children.get(name, [])), default=0)
+        return (1 if s.joint_type in ("revolute", "prismatic") else 0) + deepest
+
+    root_names = [s.name for s in segments if not s.parent] or [segments[0].name] if segments else []
+    limbs = sum(1 for rn in root_names for c in children.get(rn, []) if actuated_depth(c) >= 2)
+
+    if limbs >= 6:
+        return "hexapod"
+    if limbs >= 4:
+        return "quadruped"
     if free_root:
         return "mobile_base"
+    if limbs == 2 and n_rev >= 6:
+        return "humanoid"                                       # a bipedal / two-limb body with many joints
     if n_rev <= 1 and not has_grip:
         return "mobile_base"
     return "manipulator"

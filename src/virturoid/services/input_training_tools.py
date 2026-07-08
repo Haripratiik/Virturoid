@@ -318,6 +318,13 @@ def _ingest_project(args: dict) -> dict:
                         if getattr(x, "media_type", "") == "bom" and x.extracted_refs), None)
         cad_ref = next((x.extracted_refs[0] for x in arts
                         if getattr(x, "media_type", "") == "cad" and x.extracted_refs), None)
+        # a user's OWN control scripts / policies -> surface them so the agent can run+improve via adopt_control_script
+        ctl_refs = [x.extracted_refs[0] for x in arts
+                    if getattr(x, "media_type", "") in ("controller", "policy") and x.extracted_refs]
+        if ctl_refs and scan_root:
+            result["control_scripts"] = [os.path.join(scan_root, r.replace("/", os.sep)) for r in ctl_refs][:8]
+            result["notes"].append(f"found {len(ctl_refs)} control/policy file(s) -> call adopt_control_script "
+                                   "{robot_id, script_path} to RUN them in sim and IMPROVE them")
         if bom_ref and scan_root:
             try:
                 from virturoid.services.bom_importer import parse_bom_file
@@ -344,6 +351,59 @@ def _ingest_project(args: dict) -> dict:
                          f"{len(result['materials_applied'])} material(s) applied, "
                          f"payload={result['payload_kg']} kg, {len(result['warnings'])} warning(s). Ready to edit/verify.")
     return result
+
+
+def _adopt_control_script(args: dict) -> dict:
+    """A user's OWN control script / policy: RUN it on a held robot in real physics, then IMPROVE it (gait search
+    warm-started from their params). Accepts a control-script .py path, a policy-params .json path, or inline
+    params; statically parses the .py (safety/entrypoint) and reads its params where present. Returns measured
+    before/after + the improved params + an honest verdict (keeps the user's controller if tuning can't beat it)."""
+    import json
+
+    args = args or {}
+    rid = args.get("robot_id")
+    if not rid:
+        return {"error": "robot_id is required (the held robot to run/improve the controller on)"}
+    from virturoid.services import session_state as _S
+    gene = _S.get_robot(rid)
+    if gene is None:
+        return {"error": f"no held robot {rid}"}
+
+    params = args.get("params") if isinstance(args.get("params"), dict) else None
+    script_meta = None
+    ppath = args.get("params_path") or args.get("script_path")
+    if params is None and not ppath:
+        return {"error": "provide params (inline dict), params_path (a policy_params.json), or script_path (a .py controller)"}
+    if ppath:
+        if not os.path.exists(ppath):
+            return {"error": f"path not found: {ppath}"}
+        # a .py controller -> statically parse it (entrypoint/deps/safety) and look for a sibling params json
+        if ppath.endswith(".py"):
+            try:
+                from virturoid.services.policy_importer import static_parse_python
+                spec = static_parse_python(open(ppath, encoding="utf-8").read(), source_ref=os.path.basename(ppath))
+                script_meta = {"entrypoint": spec.entrypoint, "dependencies": spec.dependencies[:8],
+                               "warnings": list(getattr(spec, "warnings", []))[:5]}
+            except Exception as exc:  # noqa: BLE001
+                script_meta = {"parse_error": str(exc)}
+            sib = [os.path.join(os.path.dirname(ppath), n) for n in ("policy_params.json", "params.json")]
+            jp = next((c for c in sib if os.path.exists(c)), None)
+            if jp:
+                params = json.load(open(jp, encoding="utf-8"))
+        elif params is None:
+            try:
+                params = json.load(open(ppath, encoding="utf-8"))
+            except Exception as exc:  # noqa: BLE001
+                return {"error": f"could not read control params from {ppath}: {exc}"}
+    params = params or {}                                       # no readable params -> adopter falls back to a mid gait
+
+    from virturoid.services.control_adopter import adopt_control_script
+    out = adopt_control_script(gene, params, steps=int(args.get("steps", 800)),
+                               generations=int(args.get("generations", 6)), pop=int(args.get("pop", 16)),
+                               seed=int(args.get("seed", 0)))
+    if script_meta:
+        out["control_script"] = script_meta
+    return out
 
 
 def _import_dataset(args: dict) -> dict:
@@ -532,6 +592,23 @@ INPUT_TRAINING_TOOLS: dict[str, dict] = {
             "description": {"type": "string", "description": "NLP about the robot (materials per part, payload, DOF)"},
             "robot_id": {"type": "string", "description": "reuse/replace a specific held robot id (optional)"}}},
         "handler": _ingest_project, "heavy": False,
+    },
+    "adopt_control_script": {
+        "description": "A user's OWN control script / policy: RUN it on a held robot in real physics, then IMPROVE "
+                       "it. Point it at a control-script .py (statically parsed for entrypoint/deps/safety), a "
+                       "policy_params.json, or inline params; the sim rolls out the imported controller AND runs a "
+                       "gait search WARM-STARTED from the user's params, returning a measured before/after + the "
+                       "improved params. Honest: it keeps the user's controller if tuning can't credibly beat it. "
+                       "Measured: an imported CPG that shuffled 0.34 m (not credible) improved to a 0.62 m credible "
+                       "walk (1.8x). Real MuJoCo, slow.",
+        "parameters": {"type": "object", "required": ["robot_id"], "properties": {
+            "robot_id": {"type": "string", "description": "the held robot to run/improve the controller on"},
+            "script_path": {"type": "string", "description": "a .py control script (a sibling policy_params.json is auto-found)"},
+            "params_path": {"type": "string", "description": "a policy_params.json (freq/amplitude/... )"},
+            "params": {"type": "object", "description": "inline control params (alternative to a path)"},
+            "generations": {"type": "integer", "default": 6}, "pop": {"type": "integer", "default": 16},
+            "steps": {"type": "integer", "default": 800}, "seed": {"type": "integer", "default": 0}}},
+        "handler": _adopt_control_script, "heavy": True,
     },
     "import_dataset": {
         "description": "Import a demonstration/log dataset (LeRobot dir, robomimic .hdf5, .mcap/.bag/.db3 log, or "

@@ -63,9 +63,13 @@ def _link_to_urdf_lines(link_name: str, layout: LinkLayout | None, mesh_prefix: 
         '      <origin xyz="0 0 0" rpy="0 0 0" />',
         f'      <geometry><mesh filename="{mesh_prefix}/{mesh_name}" /></geometry>',
         "    </visual>",
+        # Collision is a PRIMITIVE box sized from the real layout (2*half wide, `length` along local z, centered at
+        # length/2) -- NOT the visual mesh. This keeps the URDF SELF-CONTAINED: the physics + a mesh-less re-import
+        # both work even when the visual mesh isn't shipped alongside the .urdf (and primitive colliders are the
+        # correct, faster choice for simulation regardless).
         "    <collision>",
-        '      <origin xyz="0 0 0" rpy="0 0 0" />',
-        f'      <geometry><mesh filename="{mesh_prefix}/{mesh_name}" /></geometry>',
+        f'      <origin xyz="0 0 {center_z}" rpy="0 0 0" />',
+        f'      <geometry><box size="{round(2 * half, 5)} {round(2 * half, 5)} {round(max(length, 0.01), 5)}" /></geometry>',
         "    </collision>",
         "  </link>",
     ]

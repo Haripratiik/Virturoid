@@ -977,7 +977,14 @@ def _gene_to_genome(gene: RobotGene) -> dict:
         "links": [s.name for s in gene.segments],
         "joints": [
             {"name": f"{s.name}_joint", "joint_type": s.joint_type,
-             "parent_link": s.parent, "child_link": s.name}
+             "parent_link": s.parent, "child_link": s.name,
+             # carry the REAL joint axis + limits so the exported URDF round-trips: without axis_xyz every joint
+             # defaulted to +z, which flattened a quadruped's hip-abduction/knee axes and left a re-imported body
+             # unable to walk. (effort = the sized actuator's peak torque; a real velocity ceiling for the servo.)
+             "axis_xyz": list(s.joint_axis),
+             "limit": {"lower": (s.joint_lower if s.joint_lower is not None else -3.14159),
+                       "upper": (s.joint_upper if s.joint_upper is not None else 3.14159),
+                       "effort": float(s.actuator_torque_nm or 20.0), "velocity": 10.0}}
             for s in gene.segments if s.joint_type in ("revolute", "prismatic")
         ],
         "end_effectors": [s.name for s in gene.segments if s.is_end_effector],
