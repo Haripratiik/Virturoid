@@ -9,6 +9,10 @@ the body stays upright and survives (un-gameable — a fast fall-forward scores 
 
 This is honest learned control: the physics is the judge, the verdict is forward+upright+survived, and the banked
 policy is the actual deploy controller. Deterministic for a given seed; CPU MuJoCo; parallel across cores.
+
+NOT quad-specific: ``crawl_gait_rollout`` is the one wave-gait engine for ANY leg count, so the same search learns
+deployable walks across morphologies — measured upright+surviving walks for quadruped (1.85 m), hexapod (1.03 m),
+and octopod (0.71 m); a 14-leg centipede stays upright but its many-leg propulsion is weak (honest frontier).
 """
 
 from __future__ import annotations

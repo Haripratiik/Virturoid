@@ -50,6 +50,16 @@ class GaitSearchTests(unittest.TestCase):
             self.assertGreaterEqual(v, _LO[k] - 1e-6)
             self.assertLessEqual(v, _HI[k] + 1e-6)
 
+    def test_generalizes_to_hexapod(self):
+        # the learner is not quad-specific: crawl_gait_rollout handles any leg count, so a hexapod learns a walk too.
+        from virturoid.services.gait_search import search_gait
+        from virturoid.services.morphology_composer import compose_robot
+        g = compose_robot("a hexapod robot")
+        res = search_gait(g, generations=4, pop=10, steps=700, seed=1, workers=1)
+        self.assertTrue(res.best_survived)
+        self.assertGreaterEqual(res.best_height_ratio, 0.6)
+        self.assertGreater(abs(res.best_forward), 0.3)          # a real 6-leg walk, deployable by construction
+
     def test_deterministic_for_seed(self):
         from virturoid.services.gait_search import search_gait
         g = self._quad()
