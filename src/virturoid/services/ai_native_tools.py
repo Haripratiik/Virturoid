@@ -174,11 +174,16 @@ def _honest_gait(gene, *, steps: int = 1200, render: bool = False, tag: str = "g
         gait_params = {}
     r = crawl_gait_rollout(gene, steps=steps, record_qpos=True, **gait_params)
     # DEPLOY-SELECT safety net: a recalled gait must never make THIS body walk worse than the shipped default
-    # (gene-construction paths differ slightly, so a banked gait may not fit every body). If it underperforms,
-    # re-run the default on this exact gene and keep whichever actually walks further — the flywheel only ever helps.
-    if gait_params and (not r.get("survived") or abs(float(r.get("forward", 0))) < 0.30):
+    # (gene-construction paths differ, so a banked gait may not fit every body). When a gait was recalled, ALSO
+    # run the default and keep whichever is CREDIBLE (tie-break: further) — so a mismatched banked SLIDE can never
+    # beat a credible default. The flywheel only ever helps.
+    if gait_params:
         r_def = crawl_gait_rollout(gene, steps=steps, record_qpos=True)
-        if abs(float(r_def.get("forward", 0))) >= abs(float(r.get("forward", 0))):
+        cred_r = classify(r).startswith("CREDIBLE")
+        cred_def = classify(r_def).startswith("CREDIBLE")
+        better_def = (cred_def and not cred_r) or (
+            cred_def == cred_r and abs(float(r_def.get("forward", 0))) > abs(float(r.get("forward", 0))))
+        if better_def:
             r, gait_source = r_def, "default_crawl"
     o = orientation_summary(r.get("qpos_frames") or [])
     out = {"kind": "legged", "verdict": classify(r), "survived": bool(r.get("survived")),
@@ -312,9 +317,30 @@ def _honest_reach(gene, *, steps: int = 500, world_xml: str | None = None) -> di
             pts.append(np.array(data.xpos[ee]))
     pts = np.array(pts)
     span = float(np.linalg.norm(pts.max(0) - pts.min(0))) if len(pts) else 0.0
-    verdict = f"ARTICULATES (reach span {span:.2f} m)" if span > 0.05 else "STUCK (end-effector barely moves)"
-    return {"kind": "manipulator", "verdict": verdict, "survived": True, "reach_span_m": round(span, 3),
-            "n_actuators": int(model.nu), "note": "task capability (grasp / pick-place) via evaluate_held"}
+    # TRUE kinematic reach = sum of the actuated link lengths (how far the arm extends), not the small sine-sweep
+    # bbox diagonal (which read a misleading ~0.07 m). The sweep now only proves the joints MOVE (liveness).
+    reach_m = round(sum(float(getattr(s, "length_m", 0.0) or 0.0) for s in gene.actuated_joints()), 3)
+    moves = span > 0.02
+    if not moves:
+        verdict = "STUCK (end-effector barely moves)"
+    else:
+        verdict = f"ARTICULATES (reach {reach_m:.2f} m)"
+    return {"kind": "manipulator", "verdict": verdict, "survived": True, "reach_m": reach_m,
+            "reach_span_m": round(span, 3), "n_actuators": int(model.nu),
+            "note": "reach = kinematic link length; grasp/pick-place capability via evaluate_held / run_task"}
+
+
+def _honest_grasp(gene) -> dict | None:
+    """Run the REAL friction grasp-and-lift an arm implies and return a verdict (PICKS UP / GRASP WEAK), or None if
+    this body can't grasp (no gripper) — so verify_robot shows a manipulator's true pick-up capability, not just reach."""
+    try:
+        from virturoid.services.grasp_eval import evaluate_grasp_lift
+        r = evaluate_grasp_lift(gene)
+        sr = float(r.get("success_rate", 0.0))
+    except Exception:  # noqa: BLE001 - not a grippered arm / grasp path unavailable -> reach verdict stands alone
+        return None
+    verdict = "PICKS UP (real friction grasp + lift)" if sr >= 0.5 else f"GRASP WEAK (success {sr:.0%})"
+    return {"verdict": verdict, "success_rate": round(sr, 3), "detail": r}
 
 
 def _render_gait_gif(gene, qpos_frames, tag: str) -> str | None:
@@ -475,7 +501,8 @@ def verify_robot(args: dict) -> dict:
             res = _honest_swim(gene, steps=int(args.get("steps", 1500 if quick else 2500)))
             res["credible_walk"] = False
         elif kind == "legged":
-            steps = int(args.get("steps", 400 if quick else 1500))
+            # quick uses 800 steps (not 400) so cadence/support register — 400 read a credible walk as a SLIDE.
+            steps = int(args.get("steps", 800 if quick else 1500))
             res = _honest_gait(gene, steps=steps, render=not quick, tag=f"{args['robot_id']}_verify")
             res["credible_walk"] = res["verdict"].startswith("CREDIBLE")
         elif kind == "mobile":
@@ -484,6 +511,11 @@ def verify_robot(args: dict) -> dict:
         elif kind == "manipulator":
             res = _honest_reach(gene, steps=int(args.get("steps", 300 if quick else 500)), world_xml=world_xml)
             res["credible_walk"] = False
+            if not quick:                                      # also run the REAL friction grasp (the capability
+                _grasp = _honest_grasp(gene)                   # an arm actually implies) and fold it into the verdict
+                if _grasp is not None:
+                    res["grasp"] = _grasp
+                    res["verdict"] = f"{res['verdict']}; {_grasp['verdict']}"
         else:                                                  # spray / unknown envelope: no locomotion verdict
             res = {"kind": kind, "verdict": f"{kind.upper()}: no locomotion verdict for this kind",
                    "credible_walk": False,
