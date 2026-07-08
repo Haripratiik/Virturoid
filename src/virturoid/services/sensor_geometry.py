@@ -69,6 +69,29 @@ def _cyl(name, a, b, rad, mat):
             f'size="{rad:.4f}" material="{mat}" {_VIS}/>')
 
 
+def _pinned_camera(gene):
+    """The camera the user PINNED for this robot (its datasheet FOV wins over the auto-selected suite camera)."""
+    name = (getattr(gene, "metadata", None) or {}).get("pinned_parts", {}).get("camera")
+    if name:
+        from virturoid.services.component_catalog import resolve_part
+        p = resolve_part(name)
+        if p is not None and getattr(p, "category", "") == "camera":
+            return p
+    return None
+
+
+def _camera_fovy_deg(comp) -> float:
+    """The camera part's VERTICAL field of view (MuJoCo fovy) from its real datasheet specs, or a sensible default.
+    fov_deg is stored [horizontal, vertical] (or [h]); MuJoCo's fovy is the vertical angle."""
+    specs = getattr(comp, "specs", None) or {}
+    fov = specs.get("fov_deg")
+    if isinstance(fov, (list, tuple)) and fov:
+        return float(fov[1] if len(fov) > 1 else fov[0])
+    if isinstance(fov, (int, float)):
+        return float(fov)
+    return 60.0
+
+
 def plan_sensor_geoms(gene, sensors, frames=None) -> dict:
     """``sensors`` = [(part_name, qty, mount), ...] from the BOM. Returns {segment_name: "<geom .../>\\n..."} —
     visual sensor geoms nested in each host body, positioned + oriented from the host's WORLD frame."""
@@ -79,6 +102,7 @@ def plan_sensor_geoms(gene, sensors, frames=None) -> dict:
         frames = _world_frames(gene)
 
     out: dict = {}
+    robot_cam_done = False
     for idx, (name, qty, mount) in enumerate(sensors):
         c = component(name)
         cat = c.category if c else "imu"
@@ -111,6 +135,19 @@ def plan_sensor_geoms(gene, sensors, frames=None) -> dict:
                 p = base + lat * o
                 geoms.append(_box(f"{nm}_cam{idx}_{j}", p, max(0.012, 0.32 * r), max(0.011, 0.27 * r), 0.014, "mat_joint"))
                 geoms.append(_cyl(f"{nm}_lens{idx}_{j}", p, p + fwd * 0.024, max(0.009, 0.12 * r), "mat_ee"))
+            # ...and a FUNCTIONAL MuJoCo <camera name="robot_cam"> at the eye, looking FORWARD, with the vertical FOV
+            # taken from the REAL camera part's datasheet (so a wide-FOV RealSense and a narrow lens differ in sim).
+            # A MuJoCo cam looks down its own -z; xyaxes gives (right, up), and view = -cross(right, up) = fwd when
+            # right = cross(fwd, up). Emitted once (the perception camera), keyed so the render path can find it.
+            if not robot_cam_done:
+                fov = _camera_fovy_deg(_pinned_camera(gene) or c)  # a pinned camera's real FOV wins
+                right = np.cross(fwd, up)
+                eye = center + fwd * reach(fwd)
+                geoms.append(
+                    f'<camera name="robot_cam" pos="{eye[0]:.4f} {eye[1]:.4f} {eye[2]:.4f}" '
+                    f'xyaxes="{right[0]:.4f} {right[1]:.4f} {right[2]:.4f} {up[0]:.4f} {up[1]:.4f} {up[2]:.4f}" '
+                    f'fovy="{fov:.1f}"/>')
+                robot_cam_done = True
         elif cat == "lidar":                            # vertical scanning puck on TOP, pointing up
             base = center + up * reach(up)
             geoms.append(_cyl(f"{nm}_lidar{idx}", base, base + up * 0.05, min(0.05, 0.5 * r), "mat_joint"))

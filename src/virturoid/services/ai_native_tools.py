@@ -549,6 +549,17 @@ def verify_robot(args: dict) -> dict:
             res["scene_id"] = sid
             res["scene_note"] = scene_note
         _flag_physics_envelope(res, (S.robot_meta(args["robot_id"]) or {}).get("prompt", ""), kind)
+        # a camera-equipped robot's ONBOARD camera + CV is exercised here (not just the rangefinder): render its
+        # own functional robot_cam (FOV + resolution from the real camera part) at a target and report what it SEES.
+        if not quick:
+            try:
+                from virturoid.services.camera_perception import robot_sees_target
+                cam = robot_sees_target(gene)
+                if cam.get("has_camera"):
+                    res["vision"] = {k: cam[k] for k in ("camera_part", "fovy_deg", "render_px", "sees", "perception")
+                                     if k in cam}
+            except Exception:  # noqa: BLE001 - vision is value-add; the motion verdict still stands
+                pass
     except Exception as exc:  # noqa: BLE001 - an odd body must yield an honest error, not a crash
         res = {"kind": kind, "verdict": f"could not simulate ({type(exc).__name__})", "credible_walk": False,
                "error": str(exc)[:200]}
