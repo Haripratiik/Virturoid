@@ -156,6 +156,39 @@ def set_leg_count(gene, *, n_pairs: int):
                "note": "topology changed (legs rebuilt); torso/appendage customization not carried over"}
 
 
+def set_payload(gene, *, payload_kg: float = 2.0, girth_scale: bool = True):
+    """CAPABILITY amend: make the robot CARRY / LIFT a target payload by upsizing its actuators (and, optionally,
+    the load-path link girth) so its joints can hold the extra load. The actuated joints must support the robot's
+    own weight PLUS the payload, so each joint's required torque is scaled by ``(total_mass + payload)/total_mass``;
+    re-grounding then selects BIGGER real motors for that torque and the BOM/mass rise honestly (a stronger robot
+    costs more + weighs more). This is what turns 'make it lift 10 kg' into a real amendment, not just a wish."""
+    if not (0.1 <= float(payload_kg) <= 50.0):
+        raise EditError(f"payload {payload_kg} kg out of the safe range [0.1, 50.0]; "
+                        "for heavier loads redesign with a larger actuator class")
+    g = _clone(gene)
+    actuated = [s for s in g.segments if s.joint_type in ("revolute", "prismatic")]
+    if not actuated:
+        raise EditError("this robot has no actuated joints, so it cannot be amended to carry a payload")
+    total_mass = sum(float(s.mass_kg or 0.0) for s in g.segments) or 1.0
+    load_factor = (total_mass + float(payload_kg)) / total_mass
+    changed = []
+    for s in actuated:                                          # ground_gene reads actuator_torque_nm as the
+        before = round(float(s.actuator_torque_nm or 8.0), 2)   # REQUIREMENT, so scaling it here upsizes the motor
+        s.actuator_torque_nm = round(before * load_factor, 2)
+        changed.append({"segment": s.name, "required_nm": [before, round(s.actuator_torque_nm, 2)]})
+    if girth_scale and load_factor > 1.05:                      # thicken the load-path limbs (sub-linear) for rigidity
+        girth_mult = min(1.4, float(load_factor) ** 0.3)
+        for s in actuated:
+            if s.radius_m and s.radius_m > 0:
+                s.radius_m = round(max(0.005, s.radius_m * girth_mult), 5)
+    mass0 = round(total_mass, 3)
+    _reground_and_gate(g, material=_dominant_material(gene))    # upsizes actuators for the new torque; re-derives mass
+    mass1 = round(sum(float(s.mass_kg or 0.0) for s in g.segments), 3)
+    return g, {"op": "set_payload", "payload_kg": float(payload_kg), "load_factor": round(load_factor, 3),
+               "n_joints_upsized": len(changed), "changed": changed[:8], "total_mass_kg": [mass0, mass1],
+               "note": "joint torque raised for the payload -> re-grounding upsized the real motors (mass/cost rose)"}
+
+
 # op name -> callable(gene, **args). The typed operator library the intent-classifier maps requests onto.
 OPERATORS = {
     "scale_group": scale_group,
@@ -163,6 +196,7 @@ OPERATORS = {
     "scale_robot": scale_robot,
     "set_material": set_material,
     "set_leg_count": set_leg_count,
+    "set_payload": set_payload,
 }
 _STRUCTURAL = {"set_leg_count"}
 
@@ -177,6 +211,8 @@ def op_specs() -> list[dict]:
         {"op": "set_material", "args": {"group": list(_GROUP_WORDS) + ["all"], "material": "steel|aluminum|carbon_fiber|titanium|..."},
          "for": "change what a part is made of"},
         {"op": "set_leg_count", "args": {"n_pairs": "1-8"}, "for": "STRUCTURAL: change how many legs (rebuilds)"},
+        {"op": "set_payload", "args": {"payload_kg": "0.1-50.0", "girth_scale": "true|false"},
+         "for": "make it CARRY/LIFT heavier: upsize actuators (+ load-path girth) for the payload; BOM/mass rise"},
     ]
 
 
