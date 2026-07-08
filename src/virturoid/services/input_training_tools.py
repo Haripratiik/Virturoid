@@ -154,6 +154,20 @@ def _sandbox_policy(args: dict) -> dict:
         timeout=float(args.get("timeout", 10.0)))
 
 
+def _import_onnx_policy(args: dict) -> dict:
+    from virturoid.services.policy_native_adapter import inspect_onnx, run_onnx_policy
+    args = args or {}
+    path = args.get("path", "")
+    if not path:
+        return {"error": "path is required (a .onnx policy file)"}
+    if not os.path.exists(path):
+        return {"error": f"path not found: {path}"}
+    if args.get("observation") is None:                        # no obs -> just inspect the IO contract
+        return inspect_onnx(path)
+    return run_onnx_policy(path, args["observation"], action_dim=args.get("action_dim"),
+                           safety_limits=args.get("safety_limits"))
+
+
 def _import_controller_interface(args: dict) -> dict:
     from virturoid.services.ros2_control_parser import controller_interface_from_ros2_control, parse_ros2_control
     args = args or {}
@@ -292,6 +306,17 @@ INPUT_TRAINING_TOOLS: dict[str, dict] = {
             "entrypoint": {"type": "string"}, "action_dim": {"type": "integer"},
             "safety_limits": {"type": "object"}, "timeout": {"type": "number", "default": 10.0}}},
         "handler": _sandbox_policy, "heavy": False,
+    },
+    "import_onnx_policy": {
+        "description": "PolicyImporter Tier P3: load an inbound ONNX policy and (given an observation) run one "
+                       "inference, validating the action's dimension/finiteness/limits. ONNX is a computation "
+                       "GRAPH (safe to load, unlike a torch pickle). Without an observation, returns the model's "
+                       "declared input/output tensor contract. No physics.",
+        "parameters": {"type": "object", "required": ["path"], "properties": {
+            "path": {"type": "string", "description": "a .onnx policy file"},
+            "observation": {"type": "array", "description": "one observation vector (omit to just inspect IO)"},
+            "action_dim": {"type": "integer"}, "safety_limits": {"type": "object"}}},
+        "handler": _import_onnx_policy, "heavy": False,
     },
     "import_controller_interface": {
         "description": "Extract a controller contract from a ROS 2 robot: parse the <ros2_control> URDF/xacro tag "
