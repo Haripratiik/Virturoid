@@ -45,6 +45,26 @@ class GaitFlywheelTests(unittest.TestCase):
         self.assertIsNotNone(recalled)
         self.assertAlmostEqual(recalled["kp"], 200.0, places=3)
 
+    def test_recall_by_morphology_embedding_across_species(self):
+        # the flywheel retrieves via the ROBOTICS TOKENIZATION: a structurally-similar body finds a prior gait
+        # even when its species/class STRING differs (semantic morphology retrieval, not exact string match).
+        from virturoid.services.anatomy_compiler import ensure_walkable_quad
+        from virturoid.services.gait_flywheel import bank_gait, recall_gait
+        from virturoid.services.morphology_composer import compose_robot
+        db = self._db()
+        gA = ensure_walkable_quad(compose_robot("a quadruped robot dog"), "a quadruped robot dog")
+
+        class _Walk:
+            best_survived, best_height_ratio, best_forward = True, 0.88, 1.6
+            best_params = {"freq": 1.42, "hip_amp": 1.1, "knee_amp": 0.78, "duty": 0.42, "kp": 233.0, "kd": 6.7}
+        bank_gait(db, gA, _Walk())
+
+        gB = ensure_walkable_quad(compose_robot("a four legged walking robot"), "a four legged walking robot")
+        if getattr(gB, "species", None) != getattr(gA, "species", None):    # only meaningful if strings differ
+            recalled = recall_gait(db, gB)
+            self.assertIsNotNone(recalled, "morphology embedding should retrieve a structurally-similar prior")
+            self.assertAlmostEqual(recalled["kp"], 233.0, places=3)         # reused A's actual controller params
+
     def test_flywheel_compounds_on_reuse(self):
         from virturoid.services.gait_flywheel import learn_gait_flywheel
         from virturoid.services.gait_search import search_gait
