@@ -59,6 +59,16 @@ class SetPayloadTests(unittest.TestCase):
         with self.assertRaises(EditError):
             set_payload(g, payload_kg=5.0)
 
+    def test_over_catalog_payload_is_flagged_not_faked(self):
+        # a payload that exceeds the strongest real motor must be reported, not silently maxed-out-and-called-fine
+        _, diff = set_payload(_arm(), payload_kg=50.0)
+        self.assertIn("undersized_joints", diff)
+        self.assertIn("warning", diff)
+        self.assertGreater(len(diff["undersized_joints"]), 0)
+        # ...and a payload that DOES fit must not be falsely flagged
+        _, ok = set_payload(_arm(), payload_kg=3.0)
+        self.assertNotIn("warning", ok)
+
     def test_is_registered(self):
         from virturoid.services.edit_operators import OPERATORS, op_specs
         self.assertIn("set_payload", OPERATORS)

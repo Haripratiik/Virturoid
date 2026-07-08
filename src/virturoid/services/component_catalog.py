@@ -194,4 +194,16 @@ def select_actuator(required_torque_nm: float, *, margin: float = 1.3,
     for a in ladder:
         if a.peak_torque_nm >= need_pk and a.max_speed_radps >= need_spd and a.rated_torque_nm >= need_cont:
             return a
-    return max(ladder, key=lambda a: a.peak_torque_nm * a.max_speed_radps)   # best capability we can offer
+    # Nothing clears every constraint -> offer the CLOSEST: best worst-case coverage across the ACTIVE
+    # constraints. This is monotone in the requirement (a bigger load never selects a weaker motor) and
+    # matches the docstring's "strongest": when torque is the shortfall it will NOT trade peak torque away
+    # for raw speed (the old ``max(peak*speed)`` did -- handing back a fast-but-weaker motor under overload,
+    # so asking a robot to carry MORE could silently downsize its actuators).
+    def _coverage(a):
+        ratios = [a.peak_torque_nm / need_pk]
+        if need_spd > 0:
+            ratios.append(a.max_speed_radps / need_spd)
+        if need_cont > 0:
+            ratios.append(a.rated_torque_nm / need_cont)
+        return min(ratios)
+    return max(ladder, key=lambda a: (_coverage(a), a.peak_torque_nm * a.max_speed_radps))

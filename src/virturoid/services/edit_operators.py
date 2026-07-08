@@ -181,12 +181,27 @@ def set_payload(gene, *, payload_kg: float = 2.0, girth_scale: bool = True):
         for s in actuated:
             if s.radius_m and s.radius_m > 0:
                 s.radius_m = round(max(0.005, s.radius_m * girth_mult), 5)
+    required_by_name = {c["segment"]: c["required_nm"][1] for c in changed}
     mass0 = round(total_mass, 3)
     _reground_and_gate(g, material=_dominant_material(gene))    # upsizes actuators for the new torque; re-derives mass
     mass1 = round(sum(float(s.mass_kg or 0.0) for s in g.segments), 3)
-    return g, {"op": "set_payload", "payload_kg": float(payload_kg), "load_factor": round(load_factor, 3),
-               "n_joints_upsized": len(changed), "changed": changed[:8], "total_mass_kg": [mass0, mass1],
-               "note": "joint torque raised for the payload -> re-grounding upsized the real motors (mass/cost rose)"}
+    # HONEST saturation check: if a joint's chosen real motor can't actually meet the scaled requirement, the
+    # payload exceeds what the actuator catalog can drive -- say so (a gearbox / bigger class is needed) rather
+    # than pretending the maxed-out motor is enough.
+    undersized = []
+    for s in g.segments:
+        req = required_by_name.get(s.name)
+        if req is not None and float(s.actuator_torque_nm or 0.0) + 1e-6 < float(req):
+            undersized.append({"segment": s.name, "required_nm": round(float(req), 1),
+                               "best_motor_nm": round(float(s.actuator_torque_nm or 0.0), 1)})
+    out = {"op": "set_payload", "payload_kg": float(payload_kg), "load_factor": round(load_factor, 3),
+           "n_joints_upsized": len(changed), "changed": changed[:8], "total_mass_kg": [mass0, mass1],
+           "note": "joint torque raised for the payload -> re-grounding upsized the real motors (mass/cost rose)"}
+    if undersized:
+        out["undersized_joints"] = undersized[:8]
+        out["warning"] = (f"{len(undersized)} joint(s) exceed the strongest catalog motor for this payload -- add a "
+                          "gearbox / reduction stage or split the load; the design is over the actuator envelope here")
+    return g, out
 
 
 # op name -> callable(gene, **args). The typed operator library the intent-classifier maps requests onto.
