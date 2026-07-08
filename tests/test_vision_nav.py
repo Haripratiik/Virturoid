@@ -59,3 +59,17 @@ def test_record_frames_and_save_montage():
     with tempfile.TemporaryDirectory() as td:
         path = save_vision_montage(r["frames"], os.path.join(td, "montage.png"))
         assert os.path.exists(path)
+
+
+def test_learned_encoder_drives_nav_end_to_end():
+    # the LEARNED tiny 2-conv CNN — not the hand-written colour detector — closes the nav loop: train it to see the
+    # goal's bearing, then drive to the goal on that learned perception alone. Proves the CV isn't just classic
+    # colour segmentation dressed up as "vision".
+    from virturoid.services.vision_train import evaluate_learned_vision_nav
+    try:
+        r = evaluate_learned_vision_nav(n_train=300, epochs=60, seed=0)
+    except Exception as exc:  # noqa: BLE001
+        pytest.skip(f"no GL render context: {exc}")
+    assert r["perception"] == "learned_tiny_cnn"
+    assert r["bearing_mae_deg"] < 5.0, f"the learned encoder must see the goal accurately (got {r['bearing_mae_deg']} deg)"
+    assert r["reached"] >= 3, f"the learned CV must navigate to the goal (reached {r['reached']}/4)"

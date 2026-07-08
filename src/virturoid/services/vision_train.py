@@ -121,6 +121,22 @@ def train_goal_seer(*, n: int = 400, epochs: int = 80, seed: int = 0):
     return params, report
 
 
+def evaluate_learned_vision_nav(*, n_train: int = 400, epochs: int = 80, goal_x: float = 3.0, seed: int = 0) -> dict:
+    """End-to-end LEARNED-CV navigation: train the tiny 2-conv encoder to predict the goal's bearing, then drive the
+    robot to the goal using ONLY that learned perception — NOT the hand-written colour detector. This is the honest
+    'the learned CV closes the nav loop' measurement (evaluate_vision_nav uses the colour detector for speed).
+    Returns the perception accuracy AND the closed-loop success from 4 starts (goal ahead + off each side + behind)."""
+    from virturoid.services.vision_nav import run_vision_nav_episode
+    params, report = train_goal_seer(n=n_train, epochs=epochs, seed=seed)
+    fn = make_learned_bearing_fn(params)
+    starts = [((0.0, 0.0), 0.0), ((0.0, 0.0), math.pi / 2), ((0.0, 0.0), -math.pi / 2), ((0.0, 0.0), math.pi)]
+    runs = [run_vision_nav_episode(goal_xy=(goal_x, 0.0), start=s, start_yaw=yw, bearing_fn=fn) for s, yw in starts]
+    reached = sum(1 for r in runs if r["reached"])
+    return {"perception": "learned_tiny_cnn", "bearing_mae_deg": report.get("test_mae_deg"),
+            "success_rate": round(reached / len(runs), 3), "reached": reached, "n_starts": len(runs),
+            "sensed_only": True, "final_distances_m": [round(float(r["final_distance_m"]), 3) for r in runs]}
+
+
 def make_learned_bearing_fn(params: dict, goal_rgb=(0.1, 0.85, 0.15)):
     """Wrap trained params as a ``bearing_fn(frame) -> (bearing|None, frac)`` for vision_nav.run_vision_nav_episode.
 
