@@ -279,7 +279,7 @@ def _ingest_project(args: dict) -> dict:
         return result
 
     # 4) apply the stated materials (only to parts that EXIST -- no fabrication) + payload, one gate per op
-    from virturoid.services.edit_operators import EditError, apply_op, segments_for_group
+    from virturoid.services.edit_operators import apply_op, segments_for_group
     try:
         from virturoid.services.grounded_physics import ground_gene
         ground_gene(gene)                                        # real baseline torques/mass so set_payload is grounded
@@ -303,7 +303,7 @@ def _ingest_project(args: dict) -> dict:
                 result["payload_kg"] = a.get("payload_kg")
                 if diff.get("warning"):
                     result["warnings"].append(diff["warning"])
-        except (EditError, Exception) as exc:  # noqa: BLE001 - a bad op is skipped + noted, never aborts ingest
+        except Exception as exc:  # noqa: BLE001 - a bad op (incl. EditError) is skipped + noted, never aborts ingest
             result["skipped_ops"].append({**op, "reason": str(exc)})
 
     # 5) hold the unified robot in the session so it's immediately editable / verifiable
