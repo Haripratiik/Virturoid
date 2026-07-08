@@ -119,6 +119,18 @@ class AssistantConversationTests(unittest.TestCase):
         h = t["diffs"][0]["standing_height_m"]
         self.assertGreater(h[1], h[0])
 
+    def test_make_it_carry_heavier(self):
+        # the user's own question: "if i ask the robot to lift heavier stuff, does it amend the robot?" -> yes
+        from virturoid.services.assistant_core import handle_turn
+        rid = self._new_dog()
+        t = handle_turn("make it carry 15 kg of payload", robot_id=rid, llm=None)
+        self.assertEqual(t["scope"], "feature")
+        self.assertTrue(t["applied"], "a capability amend (heavier payload) must land as a real edit")
+        d = t["diffs"][0]
+        self.assertEqual(d["op"], "set_payload")
+        self.assertGreater(d["load_factor"], 1.0)
+        self.assertGreater(d["total_mass_kg"][1], d["total_mass_kg"][0])   # stronger motors -> heavier robot (honest cost)
+
     def test_house_instead_of_warehouse(self):
         from virturoid.services.agent_tools import call_tool
         from virturoid.services.assistant_core import handle_turn

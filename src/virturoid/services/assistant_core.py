@@ -89,6 +89,19 @@ def _fallback_intent(msg: str, robot_id: str | None, scene_id: str | None) -> di
         tgt = val / 100.0 if unit.startswith("cm") else val
         return {"scope": "parameter", "target": "robot", "restatement": f"Make the robot ~{tgt} m tall",
                 "ops": [{"op": "set_height", "args": {"target_m": tgt}}], "needs_confirmation": False}
+    # CAPABILITY amend: "make it lift / carry N kg", "heavier payload", "carry more" -> upsize the actuators
+    # (set_payload). Guard against the pure size words (bigger/taller) which are geometry, not load.
+    if re.search(r"\b(lift|lifts|carry|carries|carrying|payload|heavier|stronger)\b", m) \
+            and not re.search(r"\b(taller|shorter|bigger|larger|smaller)\b", m):
+        mk = re.search(r"(\d+(?:\.\d+)?)\s*(kg|kilo|kilogram|kilograms|kgs|lb|lbs|pound|pounds)\b", m)
+        if mk:
+            val = float(mk.group(1)); unit = mk.group(2)
+            payload = round(val * 0.4536, 2) if unit.startswith(("lb", "pound")) else round(val, 2)
+        else:
+            payload = 5.0                                       # "heavier / stronger" with no number -> a real default load
+        payload = min(50.0, max(0.1, payload))
+        return {"scope": "feature", "target": "robot", "restatement": f"Upsize the actuators to carry {payload} kg",
+                "ops": [{"op": "set_payload", "args": {"payload_kg": payload}}], "needs_confirmation": False}
     for phrase, mat in _MATERIALS.items():
         if phrase in m:
             grp = "legs" if "leg" in m else ("torso" if re.search(r"\b(body|torso|frame)\b", m) else "all")
