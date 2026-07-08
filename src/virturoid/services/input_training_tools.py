@@ -213,6 +213,22 @@ def _import_dataset(args: dict) -> dict:
     return import_dataset(path).to_dict()
 
 
+def _learn_gait(args: dict) -> dict:
+    from virturoid.services.anatomy_compiler import ensure_walkable_quad
+    from virturoid.services.gait_search import search_gait
+    from virturoid.services.morphology_composer import compose_robot
+    args = args or {}
+    prompt = args.get("prompt", "a quadruped robot dog")
+    gene = ensure_walkable_quad(compose_robot(prompt), prompt)
+    res = search_gait(gene, generations=int(args.get("generations", 8)), pop=int(args.get("pop", 20)),
+                      steps=int(args.get("steps", 900)), seed=int(args.get("seed", 0)),
+                      workers=int(args.get("workers", 1)))
+    out = res.to_dict()
+    out["prompt"] = prompt
+    out["deployable"] = True                                   # the learned params ARE the deploy controller
+    return out
+
+
 def _classify_failure(args: dict) -> dict:
     from virturoid.services.failure_classifier import repairs_for_metrics
     args = args or {}
@@ -356,6 +372,18 @@ INPUT_TRAINING_TOOLS: dict[str, dict] = {
         "parameters": {"type": "object", "required": ["path"], "properties": {
             "path": {"type": "string", "description": "a dataset directory or file"}}},
         "handler": _import_dataset, "heavy": False,
+    },
+    "learn_gait": {
+        "description": "LEARN a deployable walk for a legged body: CEM-optimize the crawl-gait controller's "
+                       "parameters (freq/amps/duty/gains) with an un-gameable fitness (forward travel counts only "
+                       "when upright + survived). Unlike an MJX policy, the result is CPU-deployable BY "
+                       "CONSTRUCTION (it IS the deploy controller). Returns the best gait + measured forward/height. "
+                       "Real MuJoCo, slow.",
+        "parameters": {"type": "object", "properties": {
+            "prompt": {"type": "string", "default": "a quadruped robot dog"},
+            "generations": {"type": "integer", "default": 8}, "pop": {"type": "integer", "default": 20},
+            "steps": {"type": "integer", "default": 900}, "seed": {"type": "integer", "default": 0}}},
+        "handler": _learn_gait, "heavy": True,
     },
     "classify_failure": {
         "description": "Turn raw episode metrics (survived/height_ratio/forward/contacts/lifted/...) into a "
