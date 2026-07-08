@@ -42,6 +42,7 @@ def moat_status(memory_dir=DEFAULT_MEMORY_DIR) -> dict:
     memory_dir = Path(memory_dir)
     counts = {"runs": 0, "designs": 0, "skills": 0, "lessons": 0, "species_tree": 0}
     species_nodes = 0
+    reuse_edges = seeded_builds = 0
     try:
         from virturoid.services.memory_db import MemoryDB
 
@@ -51,6 +52,13 @@ def moat_status(memory_dir=DEFAULT_MEMORY_DIR) -> dict:
                 s = db.stats()
                 counts = {k: int(s.get(k, 0)) for k in counts}
                 species_nodes = len(db.species_tree_nodes())
+                try:                                          # ACTUAL-reuse signal: recorded warm-start edges
+                    from virturoid.services.robotics_vector_memory import RoboticsVectorMemory
+                    _cs = RoboticsVectorMemory(db).compounding_summary()
+                    reuse_edges = int(_cs.get("edges", 0) or 0)
+                    seeded_builds = int(_cs.get("seeded_builds", 0) or 0)
+                except Exception:  # noqa: BLE001
+                    pass
     except Exception:  # noqa: BLE001 - status must never crash
         pass
 
@@ -78,22 +86,31 @@ def moat_status(memory_dir=DEFAULT_MEMORY_DIR) -> dict:
         "trainable_builds": trainable,
         "warm_started_builds": warm,
         "utilization": round(warm / trainable, 3) if trainable else 0.0,
+        "provenance_reuse_edges": reuse_edges,
     }
+    # HONEST compounding: the flywheel COMPOUNDS only when later builds actually REUSE prior learning — a warm-start
+    # or a recorded provenance edge. Merely accumulating designs is NOT compounding (the old flag conflated them).
+    reused = warm > 0 or seeded_builds > 0
+    accumulating = (counts["designs"] + len(skills)) >= 2 and counts["runs"] >= 2
 
     summary = (
         f"Moat status: {counts['runs']} builds banked -> "
         f"{counts['designs']} designs, {len(skills)} distinct skills/policies, {counts['lessons']} lessons, "
         f"{species_nodes} species-tree nodes. "
         f"Warm-start reused prior learning in {warm}/{trainable} trainable builds "
-        f"({warm_start['utilization']:.0%}). "
+        f"({warm_start['utilization']:.0%}); {reuse_edges} provenance reuse edges. "
         + (f"Best banked skill: {skills[0]['skill_id']} ({skills[0]['best_success']:.0%}, "
-           f"{skills[0]['builds']} builds)." if skills else "No skills banked yet.")
+           f"{skills[0]['builds']} builds). " if skills else "No skills banked yet. ")
+        + ("COMPOUNDING (prior learning is being reused)." if reused
+           else "Accumulating but NOT yet compounding (0 reuse recorded)." if accumulating
+           else "Empty flywheel.")
     )
     return {
         "counts": counts,
         "skills": skills,
         "warm_start": warm_start,
         "species_tree_nodes": species_nodes,
-        "compounding": (counts["designs"] + len(skills)) >= 2 and (counts["runs"] >= 2),
+        "compounding": bool(reused),
+        "accumulating": bool(accumulating),
         "summary": summary,
     }

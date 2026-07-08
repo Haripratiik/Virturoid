@@ -215,15 +215,18 @@ def _import_dataset(args: dict) -> dict:
 
 def _learn_gait(args: dict) -> dict:
     from virturoid.services.anatomy_compiler import ensure_walkable_quad
-    from virturoid.services.gait_search import search_gait
+    from virturoid.services.gait_flywheel import learn_gait_flywheel
+    from virturoid.services.memory_db import MemoryDB
     from virturoid.services.morphology_composer import compose_robot
     args = args or {}
     prompt = args.get("prompt", "a quadruped robot dog")
     gene = ensure_walkable_quad(compose_robot(prompt), prompt)
-    res = search_gait(gene, generations=int(args.get("generations", 8)), pop=int(args.get("pop", 20)),
-                      steps=int(args.get("steps", 900)), seed=int(args.get("seed", 0)),
-                      workers=int(args.get("workers", 1)))
-    out = res.to_dict()
+    # Go through the FLYWHEEL: recall a specific prior for this body -> screened warm-start -> bank -> provenance.
+    # So repeated/adjacent bodies compound (the bank persists in the shared memory dir), not cold-start every time.
+    db = MemoryDB(**({"db_path": args["db_path"]} if args.get("db_path") else {}))
+    out = learn_gait_flywheel(
+        gene, db, generations=int(args.get("generations", 8)), pop=int(args.get("pop", 20)),
+        steps=int(args.get("steps", 900)), seed=int(args.get("seed", 0)), workers=int(args.get("workers", 1)))
     out["prompt"] = prompt
     out["deployable"] = True                                   # the learned params ARE the deploy controller
     return out

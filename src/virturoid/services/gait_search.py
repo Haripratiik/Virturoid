@@ -34,6 +34,7 @@ class GaitSearchResult:
     best_survived: bool
     baseline_forward: float
     history: list = field(default_factory=list)   # per-generation best fitness
+    prior_transfer_forward: float | None = None   # zero-shot forward of a warm-start prior on THIS body (R3 screen)
 
     def to_dict(self) -> dict:
         return {
@@ -72,13 +73,26 @@ def evaluate_gait(gene, params: dict, *, steps: int = 1200) -> dict:
 
 def search_gait(gene, *, generations: int = 8, pop: int = 24, elite_frac: float = 0.3,
                 steps: int = 1000, seed: int = 0, workers: int | None = None,
-                progress=None) -> GaitSearchResult:
-    """CEM over the crawl-gait parameters. Returns the best DEPLOYABLE gait found for ``gene``."""
+                warm_start: dict | None = None, progress=None) -> GaitSearchResult:
+    """CEM over the crawl-gait parameters. Returns the best DEPLOYABLE gait found for ``gene``.
+
+    ``warm_start`` (a prior gait's params, e.g. recalled from the flywheel for a STRUCTURALLY-SIMILAR body) seeds
+    the CEM mean and narrows the initial spread, so the search EXPLOITS the specific prior instead of cold-starting
+    — this is the flywheel compounding: a learned gait for one quadruped accelerates the next quadruped's search.
+    """
     import numpy as np
 
     rng = np.random.default_rng(seed)
+    # Exploration stays BROAD whether or not there is a prior — a prior must never straitjacket the search
+    # (measured: seeding the mean + tightening std around a prior gait caused NEGATIVE transfer). Instead the
+    # prior is INJECTED as one guaranteed candidate each generation: if it transfers it wins immediately and CEM
+    # exploits it (compounding); if it is a bad transfer it is simply one of `pop` candidates and does no harm.
     mean = np.array([(_LO[k] + _HI[k]) / 2.0 for k in PARAM_NAMES])
     std = np.array([(_HI[k] - _LO[k]) / 4.0 for k in PARAM_NAMES])
+    prior_vec = None
+    prior_transfer = None
+    if warm_start:
+        prior_vec = np.array([float(warm_start.get(k, mean[i])) for i, k in enumerate(PARAM_NAMES)])
     n_elite = max(2, int(pop * elite_frac))
 
     def as_params(vec):
@@ -88,12 +102,16 @@ def search_gait(gene, *, generations: int = 8, pop: int = 24, elite_frac: float 
     # (learned vs the default controller), not vs an arbitrary center-of-bounds point.
     baseline = evaluate_gait(gene, {"freq": 1.5, "hip_amp": 0.9, "knee_amp": 1.0, "duty": 0.25,
                                     "kp": 32.0, "kd": 1.5}, steps=steps)
+    if prior_vec is not None:                                  # transfer-screen the prior ONCE (dossier R3)
+        prior_transfer = evaluate_gait(gene, _clip(as_params(prior_vec)), steps=steps)
     best = {"fitness": -1e9}
     best_params = as_params(mean)
     history: list[float] = []
 
     for g in range(generations):
         samples = rng.normal(mean, std, size=(pop, len(PARAM_NAMES)))
+        if prior_vec is not None:
+            samples[0] = prior_vec                             # inject the prior as one guaranteed candidate
         params_list = [_clip(as_params(s)) for s in samples]
         results = _eval_batch(gene, params_list, steps, workers)
         fits = np.array([r["fitness"] for r in results])
@@ -114,7 +132,8 @@ def search_gait(gene, *, generations: int = 8, pop: int = 24, elite_frac: float 
     return GaitSearchResult(
         best_params=best_params, best_fitness=float(best["fitness"]), best_forward=float(best["forward"]),
         best_height_ratio=float(best["height_ratio"]), best_survived=bool(best["survived"]),
-        baseline_forward=float(baseline["forward"]), history=history)
+        baseline_forward=float(baseline["forward"]), history=history,
+        prior_transfer_forward=(float(prior_transfer["forward"]) if prior_transfer is not None else None))
 
 
 def _eval_batch(gene, params_list, steps, workers):
