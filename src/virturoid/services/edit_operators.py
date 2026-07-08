@@ -172,10 +172,12 @@ def set_payload(gene, *, payload_kg: float = 2.0, girth_scale: bool = True):
     total_mass = sum(float(s.mass_kg or 0.0) for s in g.segments) or 1.0
     load_factor = (total_mass + float(payload_kg)) / total_mass
     changed = []
-    for s in actuated:                                          # ground_gene reads actuator_torque_nm as the
-        before = round(float(s.actuator_torque_nm or 8.0), 2)   # REQUIREMENT, so scaling it here upsizes the motor
-        s.actuator_torque_nm = round(before * load_factor, 2)
-        changed.append({"segment": s.name, "required_nm": [before, round(s.actuator_torque_nm, 2)]})
+    for s in actuated:                                          # scale the joint's torque REQUIREMENT (not the last
+        req0 = s.torque_req_nm if s.torque_req_nm is not None else abs(s.actuator_torque_nm or 8.0)
+        before = round(float(req0), 2)                          # motor's peak) so re-grounding upsizes the motor and
+        s.torque_req_nm = round(before * load_factor, 2)        # stays idempotent under repeated grounding
+        s.actuator_torque_nm = s.torque_req_nm                  # keep them consistent until ground re-selects the peak
+        changed.append({"segment": s.name, "required_nm": [before, round(s.torque_req_nm, 2)]})
     if girth_scale and load_factor > 1.05:                      # thicken the load-path limbs (sub-linear) for rigidity
         girth_mult = min(1.4, float(load_factor) ** 0.3)
         for s in actuated:

@@ -76,7 +76,14 @@ def ground_gene(gene, *, material: str = "aluminum", fill: float = 0.3, margin: 
         struct = _link_volume_m3(s.shape, s.length_m, s.radius_m) * density * fill
         act_mass = 0.0
         if s.joint_type in ("revolute", "prismatic"):
-            required = abs(s.actuator_torque_nm or 8.0)
+            # The joint's torque REQUIREMENT is fixed by the design -- pin it the first time so re-grounding is
+            # IDEMPOTENT. Before this, `required` re-read `actuator_torque_nm`, which grounding overwrites with the
+            # SELECTED motor's PEAK; so each re-ground treated a motor peak as the new requirement and sized an even
+            # bigger motor -- a 120 Nm joint ratcheted to 520 Nm after two grounds, silently over-sizing every arm
+            # (and its housing geom, which then collided in grasp scenes). Now the requirement is remembered.
+            if s.torque_req_nm is None:
+                s.torque_req_nm = abs(s.actuator_torque_nm or 8.0)
+            required = s.torque_req_nm
             # rated torque must cover the sustained requirement (with margin) -> thermal headroom; peak then has
             # a real transient reserve above it. This is what makes a grounded body BOTH walk and certify.
             act = select_actuator(required, margin=margin, continuous_torque_nm=required * margin)

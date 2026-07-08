@@ -41,7 +41,9 @@ class GeneSegment:
     joint_upper: float | None = None
     mount_euler: tuple[float, float, float] = (0.0, 0.0, 0.0)  # fixed rotation of this segment vs its parent's tip
     mount_offset: tuple[float, float, float] = (0.0, 0.0, 0.0)  # translational offset from parent tip (e.g. side-by-side gripper fingers)
-    actuator_torque_nm: float | None = None  # drives the compiler's actuator gain
+    actuator_torque_nm: float | None = None  # drives the compiler's actuator gain (= the SELECTED motor's peak once grounded)
+    torque_req_nm: float | None = None        # the joint's fixed torque REQUIREMENT; keeps grounding idempotent
+    #                                           (re-grounding sizes from this, not from the last motor's peak)
     is_end_effector: bool = False
     geometry: dict | None = None       # optional ARBITRARY CAD shape spec (cad_geometry.realize_shape): the
     #                                    blueprint can make this block any shape (extrude/revolve/tapered/…),
@@ -137,8 +139,8 @@ class RobotGene:
                  "radius_m": s.radius_m, "mass_kg": s.mass_kg, "joint_type": s.joint_type,
                  "joint_axis": list(s.joint_axis), "joint_lower": s.joint_lower, "joint_upper": s.joint_upper,
                  "mount_euler": list(s.mount_euler), "mount_offset": list(s.mount_offset),
-                 "actuator_torque_nm": s.actuator_torque_nm, "is_end_effector": s.is_end_effector,
-                 "geometry": s.geometry, "material": s.material}
+                 "actuator_torque_nm": s.actuator_torque_nm, "torque_req_nm": s.torque_req_nm,
+                 "is_end_effector": s.is_end_effector, "geometry": s.geometry, "material": s.material}
                 for s in self.segments
             ],
         }
@@ -157,7 +159,8 @@ class RobotGene:
                     joint_lower=s.get("joint_lower"), joint_upper=s.get("joint_upper"),
                     mount_euler=tuple(s.get("mount_euler", (0, 0, 0))),
                     mount_offset=tuple(s.get("mount_offset", (0, 0, 0))),
-                    actuator_torque_nm=s.get("actuator_torque_nm"), is_end_effector=s.get("is_end_effector", False),
+                    actuator_torque_nm=s.get("actuator_torque_nm"), torque_req_nm=s.get("torque_req_nm"),
+                    is_end_effector=s.get("is_end_effector", False),
                     geometry=s.get("geometry"), material=s.get("material"),
                 )
                 for s in d["segments"]

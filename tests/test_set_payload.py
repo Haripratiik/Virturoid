@@ -60,12 +60,19 @@ class SetPayloadTests(unittest.TestCase):
             set_payload(g, payload_kg=5.0)
 
     def test_over_catalog_payload_is_flagged_not_faked(self):
-        # a payload that exceeds the strongest real motor must be reported, not silently maxed-out-and-called-fine
-        _, diff = set_payload(_arm(), payload_kg=50.0)
+        # a payload whose torque genuinely exceeds the strongest real motor must be REPORTED, not silently
+        # maxed-out-and-called-fine. Use a high-torque-joint arm (an industrial-class joint) so a big payload
+        # actually clears the 520 Nm catalog ceiling.
+        g = _arm()
+        for s in g.segments:
+            if s.joint_type in ("revolute", "prismatic"):
+                s.torque_req_nm = 240.0                          # a heavy industrial joint (base requirement)
+                s.actuator_torque_nm = 240.0
+        _, diff = set_payload(g, payload_kg=40.0)                # 240 x large load_factor -> well over 520 Nm
         self.assertIn("undersized_joints", diff)
         self.assertIn("warning", diff)
         self.assertGreater(len(diff["undersized_joints"]), 0)
-        # ...and a payload that DOES fit must not be falsely flagged
+        # ...and a modest payload a small arm CAN carry must not be falsely flagged
         _, ok = set_payload(_arm(), payload_kg=3.0)
         self.assertNotIn("warning", ok)
 
