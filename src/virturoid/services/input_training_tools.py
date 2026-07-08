@@ -203,6 +203,149 @@ def _import_cad(args: dict) -> dict:
     return import_cad(path, material=args.get("material", "abs")).to_dict()
 
 
+def _ingest_project(args: dict) -> dict:
+    """INGESTION AGENT (Part B): a robotics team drops a project FOLDER/ZIP of their existing robot (URDF/MJCF +
+    optional BOM/CAD) plus an NLP description ("aluminum body, carbon-fiber legs, 5 kg payload, 6-DOF arm"), and
+    gets back ONE unified, immediately-editable RobotGene held in the session -- the user's stated materials +
+    load already applied, with a project graph + BOM/CAD summary + honest per-step warnings. It ORCHESTRATES the
+    importers already built (classifier, robot_import, bom_importer, cad_importer) + nlp_properties + edit_operators."""
+    import shutil
+
+    args = args or {}
+    path = args.get("project_path") or args.get("path")
+    description = (args.get("description") or args.get("nlp") or "").strip()
+    if not path and not description:
+        return {"error": "provide project_path (a folder or .zip of the robot's files) and/or description (NLP)"}
+
+    result: dict = {"robot_id": None, "materials_applied": [], "payload_kg": None,
+                    "applied_ops": [], "skipped_ops": [], "warnings": [], "notes": []}
+    workdir: str | None = None
+    scan_root: str | None = None
+    bundle = None
+
+    # 1) scan the project into a Project Graph (extract a zip to a temp dir so its model is importable)
+    if path:
+        if not os.path.exists(path):
+            return {"error": f"path not found: {path}"}
+        from virturoid.services.input_classifier import project_graph_summary, scan_folder
+        try:
+            if path.lower().endswith(".zip"):
+                import tempfile
+                import zipfile
+                workdir = tempfile.mkdtemp(prefix="ingest_")
+                with zipfile.ZipFile(path) as archive:
+                    archive.extractall(workdir)
+                scan_root = workdir
+            else:
+                scan_root = os.path.abspath(path)
+            bundle = scan_folder(scan_root)
+            result["project_graph"] = project_graph_summary(bundle)
+        except Exception as exc:  # noqa: BLE001
+            result["warnings"].append(f"project scan failed: {exc}")
+
+    # 2) import the robot model -> the inferred, EDITABLE RobotGene (the twin we amend)
+    gene = None
+    model_rel = (result.get("project_graph") or {}).get("first_runnable_sim_target")
+    if model_rel and scan_root:
+        model_path = os.path.join(scan_root, model_rel.replace("/", os.sep))
+        try:
+            from virturoid.services.robot_import import import_robot
+            imp = import_robot(model_path, robot_id=args.get("robot_id"))
+            gene = imp.get("gene")
+            result["import"] = {"source": model_rel, "robot_class": imp.get("robot_class"),
+                                "species": imp.get("species"), "valid": imp.get("valid"),
+                                "warnings": list(imp.get("warnings", []))[:8]}
+        except Exception as exc:  # noqa: BLE001
+            result["warnings"].append(f"model import failed ({model_rel}): {exc}")
+
+    # 3) parse the NLP description into typed, provenance-tagged properties + edit ops
+    from virturoid.services.nlp_properties import extract_properties
+    props = extract_properties(description)
+    result["nlp"] = props.to_dict()
+    result["notes"].extend(props.notes)
+
+    # fallback: no importable model but a description -> compose an editable robot from the words (still ingest-able)
+    if gene is None and description:
+        try:
+            from virturoid.services.morphology_composer import compose_robot
+            gene = compose_robot(description)
+            result["notes"].append("no importable robot model found -> composed an editable robot from the description")
+        except Exception as exc:  # noqa: BLE001
+            result["warnings"].append(f"could not compose a robot from the description: {exc}")
+    if gene is None:
+        result["warnings"].append("no robot could be produced (no importable model and no usable description)")
+        if workdir:
+            shutil.rmtree(workdir, ignore_errors=True)
+        return result
+
+    # 4) apply the stated materials (only to parts that EXIST -- no fabrication) + payload, one gate per op
+    from virturoid.services.edit_operators import EditError, apply_op, segments_for_group
+    try:
+        from virturoid.services.grounded_physics import ground_gene
+        ground_gene(gene)                                        # real baseline torques/mass so set_payload is grounded
+    except Exception:  # noqa: BLE001
+        pass
+    for op in props.ops:
+        name, a = op["op"], dict(op.get("args") or {})
+        if name == "set_material" and a.get("group") != "all":
+            try:
+                if not segments_for_group(gene, a["group"]):
+                    result["skipped_ops"].append({**op, "reason": f"this robot has no '{a['group']}' part"})
+                    continue
+            except Exception:  # noqa: BLE001
+                pass
+        try:
+            gene, diff = apply_op(gene, name, a)
+            result["applied_ops"].append({"op": name, "args": a})
+            if name == "set_material":
+                result["materials_applied"].append({"group": a["group"], "material": a["material"]})
+            elif name == "set_payload":
+                result["payload_kg"] = a.get("payload_kg")
+                if diff.get("warning"):
+                    result["warnings"].append(diff["warning"])
+        except (EditError, Exception) as exc:  # noqa: BLE001 - a bad op is skipped + noted, never aborts ingest
+            result["skipped_ops"].append({**op, "reason": str(exc)})
+
+    # 5) hold the unified robot in the session so it's immediately editable / verifiable
+    from virturoid.services import session_state as S
+    result["robot_id"] = S.put_robot(gene, prompt=(description[:120] or "ingested robot"),
+                                     label="ingested", robot_id=args.get("robot_id"))
+
+    # 6) fold in the BOM + CAD the user shipped (summaries; provenance for reconciliation)
+    if bundle is not None:
+        arts = getattr(bundle, "artifacts", [])
+        bom_ref = next((x.extracted_refs[0] for x in arts
+                        if getattr(x, "media_type", "") == "bom" and x.extracted_refs), None)
+        cad_ref = next((x.extracted_refs[0] for x in arts
+                        if getattr(x, "media_type", "") == "cad" and x.extracted_refs), None)
+        if bom_ref and scan_root:
+            try:
+                from virturoid.services.bom_importer import parse_bom_file
+                b = parse_bom_file(os.path.join(scan_root, bom_ref.replace("/", os.sep))).to_dict()
+                result["bom"] = {"source": bom_ref, "line_items": b.get("line_item_count") or len(b.get("items", [])),
+                                 "total_mass_kg": b.get("total_mass_kg")}
+            except Exception as exc:  # noqa: BLE001
+                result["warnings"].append(f"BOM import failed ({bom_ref}): {exc}")
+        if cad_ref and scan_root:
+            try:
+                from virturoid.services.cad_importer import import_cad
+                mat = (result["materials_applied"][0]["material"].split("_")[0]
+                       if result["materials_applied"] else "abs")
+                c = import_cad(os.path.join(scan_root, cad_ref.replace("/", os.sep)),
+                               material=mat if mat in ("abs", "pla", "aluminum", "steel", "nylon") else "abs").to_dict()
+                result["cad"] = {"source": cad_ref, "dimensions_m": c.get("dimensions_m") or c.get("bbox_m"),
+                                 "est_mass_kg": c.get("est_mass_kg") or c.get("mass_kg")}
+            except Exception as exc:  # noqa: BLE001
+                result["warnings"].append(f"CAD import failed ({cad_ref}): {exc}")
+
+    if workdir:
+        shutil.rmtree(workdir, ignore_errors=True)
+    result["summary"] = (f"Ingested -> {result['robot_id']}: "
+                         f"{len(result['materials_applied'])} material(s) applied, "
+                         f"payload={result['payload_kg']} kg, {len(result['warnings'])} warning(s). Ready to edit/verify.")
+    return result
+
+
 def _import_dataset(args: dict) -> dict:
     from virturoid.services.dataset_importer import import_dataset
     path = (args or {}).get("path", "")
@@ -375,6 +518,20 @@ INPUT_TRAINING_TOOLS: dict[str, dict] = {
             "material": {"type": "string", "enum": ["abs", "pla", "aluminum", "steel", "nylon"],
                          "description": "density prior for the mass estimate (default abs)"}}},
         "handler": _import_cad, "heavy": False,
+    },
+    "ingest_project": {
+        "description": "INGESTION AGENT: bring in a user's EXISTING robot end-to-end. Point it at a project "
+                       "FOLDER or .zip (their URDF/MJCF + optional BOM/CAD) and/or an NLP description ('aluminum "
+                       "body, carbon-fiber legs, 5 kg payload, 6-DOF arm'); it classifies the folder, imports the "
+                       "model into an editable RobotGene, parses the description into typed materials/payload, "
+                       "APPLIES them (only to parts that exist -- no fabrication), folds in the BOM/CAD, and holds "
+                       "ONE unified robot in the session ready to verify/edit. Returns robot_id + what was applied/"
+                       "skipped + honest warnings. Composes from the description if no model is importable.",
+        "parameters": {"type": "object", "properties": {
+            "project_path": {"type": "string", "description": "a project folder or .zip of the robot's files"},
+            "description": {"type": "string", "description": "NLP about the robot (materials per part, payload, DOF)"},
+            "robot_id": {"type": "string", "description": "reuse/replace a specific held robot id (optional)"}}},
+        "handler": _ingest_project, "heavy": False,
     },
     "import_dataset": {
         "description": "Import a demonstration/log dataset (LeRobot dir, robomimic .hdf5, .mcap/.bag/.db3 log, or "
