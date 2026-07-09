@@ -74,7 +74,7 @@ def build_quadcopter(prompt: str = "a quadcopter drone", *, span_m: float = 0.25
     # camera/sensor pod hangs just under the hub center (a real drone's gimbal) and is the single end effector
     segs.append(GeneSegment(name="camera_pod", parent="hub", shape="box", length_m=0.03, radius_m=0.022,
                             mass_kg=round(0.09 * mass_kg, 4), joint_type="fixed",
-                            mount_offset=(0.0, 0.0, -(hub_len + 0.02)), is_end_effector=True, material="metal"))
+                            mount_offset=(0.0, 0.0, -(hub_len + 0.02)), is_end_effector=True, material="aluminum"))
     gene = RobotGene(
         id="aerial_quadcopter", species="aerial.quadcopter", robot_class="aerial", segments=segs,
         base_mount="free", end_effector_type="none",

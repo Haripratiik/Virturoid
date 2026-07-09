@@ -185,6 +185,15 @@ COMPONENTS: tuple[Component, ...] = (
               {"fingers": 2, "stroke_mm": 85, "grip_force_n": 235, "type": "adaptive"}),
     Component("Dynamixel-driven 2-finger gripper", "gripper", 0.250, 4.0, 380.0, "ROBOTIS", "XM430 parallel jaw",
               {"fingers": 2, "stroke_mm": 60, "type": "parallel"}),
+    # aerial propulsion — a quadcopter's defining parts (one motor+prop and one ESC PER rotor, one flight controller)
+    Component("T-Motor MN3110 700KV + 9x4.5 prop", "rotor", 0.110, 180.0, 33.0, "T-Motor",
+              "700KV brushless outrunner + 9in prop, ~0.9 kg thrust",
+              {"kv": 700, "prop_in": 9.0, "max_thrust_kg": 0.9, "voltage_v": 14.8}),
+    Component("BLHeli-32 40A ESC", "esc", 0.028, 0.0, 14.0, "generic", "40A brushless ESC w/ BEC (one per rotor)",
+              {"current_a": 40, "protocol": "DShot600"}),
+    Component("Holybro Pixhawk 6C flight controller", "flight_controller", 0.060, 3.0, 210.0, "Holybro",
+              "PX4/ArduPilot autopilot, dual IMU + barometer + failsafe",
+              {"imus": 2, "baro": True, "stack": "PX4/ArduPilot"}),
 )
 
 # --- STRUCTURAL MATERIALS for the links. ``tier`` lets the per-part selector pick a STRONG load-path material

@@ -388,6 +388,19 @@ def _mobile_drive(gene: RobotGene) -> list[tuple[str, int, str]]:
             ("Caster wheel 2in", 1, "passive balance caster")]
 
 
+def _aerial_propulsion(gene: RobotGene) -> list[tuple[str, int, str]]:
+    """A quadcopter's propulsion: one brushless motor+prop and one ESC PER rotor, plus a flight controller. The
+    rotors are welded thrust points (not actuated joints), so the joint-driven actuator loop misses them entirely
+    — without this a drone shipped a BOM with NO propulsion at all."""
+    md = getattr(gene, "metadata", None) or {}
+    if (gene.robot_class or "").lower() != "aerial" and not md.get("rotor_offsets"):
+        return []
+    n = len(md.get("rotor_offsets") or []) or sum(1 for s in gene.segments if "rotor" in (s.name or "").lower()) or 4
+    return [("T-Motor MN3110 700KV + 9x4.5 prop", n, "rotor propulsion (thrust)"),
+            ("BLHeli-32 40A ESC", n, "one ESC per rotor"),
+            ("Holybro Pixhawk 6C flight controller", 1, "autopilot: stabilization + IMU/baro")]
+
+
 def build_bom(gene: RobotGene, *, capabilities=None, task: str = "", pins: dict | None = None) -> dict:
     """Spec the whole robot as a real parts list. ``task`` (the build prompt / task description) makes the
     sensor suite TASK-ADAPTIVE — a navigator gets a LiDAR, an inspector a thermal camera, a sorter a detection
@@ -429,9 +442,17 @@ def build_bom(gene: RobotGene, *, capabilities=None, task: str = "", pins: dict 
 
     # 3) SENSORS / 4) COMPUTE+POWER / 5) MOBILE DRIVE / 6) END EFFECTOR
     scale_kg = sum(s.mass_kg for s in gene.segments)        # the robot's size drives sensor selection
+    # AERIAL bodies MUST be battery-powered (a flying drone can't be tethered to a wall PSU) — force the battery
+    # path by appending a battery hint to the power-selection task text, and add rotor propulsion + a flight controller.
+    _md = getattr(gene, "metadata", None) or {}
+    aerial = (gene.robot_class or "").lower() == "aerial" or bool(_md.get("rotor_offsets"))
+    power_task = (task + " battery untethered flying") if aerial else task
+    n_rotors = (len(_md.get("rotor_offsets") or []) or 4) if aerial else 0
+    prop_w = 180.0 * n_rotors                                            # rotor draw dominates a drone's power budget
     spec_items = (_sensor_suite(gene.robot_class, capabilities, task, scale_kg)
-                  + _compute_and_power(gene.robot_class, len(joints), task=task,
-                                       capabilities=capabilities, bus_w=bus_w)
+                  + _aerial_propulsion(gene)
+                  + _compute_and_power(gene.robot_class, len(joints), task=power_task,
+                                       capabilities=capabilities, bus_w=bus_w + prop_w)
                   + _mobile_drive(gene))
     if (gene.end_effector_type or "none") in ("gripper", "suction") and \
             (gene.robot_class or "").lower() in ("manipulator", "arm", "humanoid"):

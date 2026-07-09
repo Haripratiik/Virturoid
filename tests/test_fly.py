@@ -113,6 +113,23 @@ class FlightTests(unittest.TestCase):
         self.assertEqual(ev["task"], "flight")
         self.assertGreater(ev["value"], 0.6, f"a working quadcopter reaches most waypoints: {ev}")
 
+    def test_drone_bom_has_propulsion_and_a_battery(self):
+        # a buildable drone needs its DEFINING parts: a motor+ESC per rotor, a flight controller, a battery
+        # (NOT a socketed wall PSU — a flying robot can't be tethered). Rotors are welded, so the joint-driven
+        # actuator loop misses them without the aerial-propulsion path.
+        from virturoid.services.aerial import build_quadcopter
+        from virturoid.services.bom_builder import build_bom
+        bom = build_bom(build_quadcopter("a drone"))
+        cats = {l["category"] for l in bom["lines"]}
+        self.assertIn("rotor", cats, f"a drone BOM must list rotor propulsion: {cats}")
+        self.assertIn("flight_controller", cats)
+        rotor = next(l for l in bom["lines"] if l["category"] == "rotor")
+        self.assertEqual(rotor["qty"], 4, "a quadcopter has 4 rotor motors")
+        esc = next(l for l in bom["lines"] if l["category"] == "esc")
+        self.assertEqual(esc["qty"], 4, "one ESC per rotor")
+        power = next(l for l in bom["lines"] if l["category"] == "power")
+        self.assertNotIn("PSU", power["part"], f"a drone must be battery-powered, not a socketed PSU: {power['part']}")
+
 
 if __name__ == "__main__":
     unittest.main()
