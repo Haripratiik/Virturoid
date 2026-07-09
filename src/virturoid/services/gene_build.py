@@ -951,16 +951,52 @@ if __name__ == "__main__":
 '''
 
 
+def _verify_exported_gait(gene) -> dict:
+    """Run the EXPORTED bare feed-forward trot-CPG gait on the body (recipe rollout, ZERO learned residual = exactly
+    the exported control law) and classify it — so the control program can state HONESTLY whether this gait walks
+    the body, instead of unconditionally claiming it does. Same un-gameable principle as the flywheel bank: a
+    slide/crouch/fall is not a walk. Best-effort: an unverifiable body reports credible=False (conservative)."""
+    try:
+        from virturoid.services.gait_quality import classify
+        from virturoid.services.morph_graph import encode_robot
+        from virturoid.services.morph_policy import (CPG_DEFAULT, MorphPolicy, compiled_model,
+                                                     recipe_rollout_morph, robot_mjcf)
+        graph = encode_robot(compiled_model(robot_mjcf(gene)))
+        pol = MorphPolicy(graph.feature_dim, seed=0)
+        pol.cpg = CPG_DEFAULT                                    # zero residual + CPG prior == the exported bare gait
+        r = recipe_rollout_morph(gene, pol, steps=1200)
+        verdict = classify(r)
+        return {"credible": verdict.startswith("CREDIBLE"), "forward_m": abs(float(r.get("forward", 0.0))),
+                "survived": bool(r.get("survived", False)), "verdict": verdict}
+    except Exception:  # noqa: BLE001 - verification is best-effort; default to the conservative (non-credible) claim
+        return {"credible": False, "forward_m": 0.0, "survived": False, "verdict": "unverified"}
+
+
 def _write_gait_control_program(gene: RobotGene, genome: dict, output_dir: Path) -> None:
     """For LEGGED gene robots, export the deterministic trot gait as a standalone, runnable control program
     (software/control_program.json + software/gait_controller.py) -- the gene-path analogue of the legacy
     control_program.json, so a gene-built walker ships an actual deployable controller (a downstream PD loop tracks
-    the joint targets), not just a robot description. No-op for non-legged bodies (extract_gait_params -> None)."""
+    the joint targets), not just a robot description. No-op for non-legged bodies (extract_gait_params -> None).
+
+    HONESTY: the program VERIFIES the exported gait in sim and reports ``verified_walk`` + the measured distance,
+    instead of unconditionally claiming the gait walks -- so a customer building from the package is never told a
+    body walks when the bare feed-forward gait only crouches/slides on it (many composed bodies walk via a learned
+    residual or the crawl wave gait, NOT this bare trot-CPG)."""
     from virturoid.services.morph_policy import extract_gait_params
 
     gait = extract_gait_params(gene)
     if not gait:
         return
+    v = _verify_exported_gait(gene)
+    walks = bool(v["credible"])
+    note = (f"Deterministic feed-forward trot gait from the Virturoid recipe CPG prior. VERIFIED: this bare gait "
+            f"produced a CREDIBLE walk in simulation ({v['forward_m']:.2f} m forward, upright). A learned residual "
+            f"policy (morph_policy npz) refines it further."
+            if walks else
+            f"Deterministic feed-forward trot gait from the Virturoid recipe CPG prior. NOTE: the bare feed-forward "
+            f"gait did NOT achieve a credible walk on this body in simulation ({v['verdict']}, {v['forward_m']:.2f} m) "
+            f"— it is a STARTING POINT. Train a closed-loop residual policy (Virturoid train) or tune the gait before "
+            f"relying on it to walk.")
     program = {
         "id": f"gait_control_program_{genome.get('id', 'robot')}",
         "robot_genome_id": genome.get("id"),
@@ -968,9 +1004,11 @@ def _write_gait_control_program(gene: RobotGene, genome: dict, output_dir: Path)
         "control_law": "target[j] = default_pose[j] + amplitude[j]*sin(2*pi*frequency_hz*t + phase_offset[j]); "
                        "a downstream PD / ros2_control loop tracks these joint-position targets",
         "control_frequency_hz": 20.0,
+        "verified_walk": walks,                                 # did the EXPORTED gait credibly walk the body in sim?
+        "sim_forward_m": round(float(v["forward_m"]), 3),
+        "sim_verdict": v["verdict"],
         **gait,
-        "notes": ["Deterministic feed-forward trot gait extracted from the Virturoid recipe CPG prior; "
-                  "a learned residual policy (morph_policy npz) refines it, but the bare gait already walks."],
+        "notes": [note],
     }
     sw = output_dir / "software"
     sw.mkdir(parents=True, exist_ok=True)
