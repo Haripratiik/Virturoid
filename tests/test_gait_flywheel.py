@@ -69,7 +69,9 @@ class GaitFlywheelTests(unittest.TestCase):
         from virturoid.services.gait_flywheel import learn_gait_flywheel
         from virturoid.services.gait_search import search_gait
         db, g = self._db(), self._quad()
-        budget = dict(generations=3, pop=8, steps=600)
+        # the rest-stance default walk is strong (~0.83 m now that bodies spawn in their baked stance), so the
+        # search needs a real budget to BEAT it and bank — the compounding mechanism is unchanged, the baseline rose.
+        budget = dict(generations=8, pop=16, steps=800)
 
         cold = search_gait(g, seed=1, **budget)               # first solve, cold (nothing banked)
         self.assertTrue(cold.best_survived)

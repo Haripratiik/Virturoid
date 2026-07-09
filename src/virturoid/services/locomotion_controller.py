@@ -23,8 +23,8 @@ def run_locomotion_episode(model, horizon: int = 2400, settle: int = 400, freq: 
     from virturoid.services.pick_place_controller import _actuated_joint_map, _actuator_force_clamps
 
     data = mujoco.MjData(model)
-    mujoco.mj_resetData(model, data)
-    mujoco.mj_forward(model, data)
+    mujoco.mj_resetData(model, data)                                  # trot PD targets are tuned for qpos0; the
+    mujoco.mj_forward(model, data)                                    # crawl gait (which adapts q_def) honors rest
     base_j = next((j for j in range(model.njnt) if int(model.jnt_type[j]) == 0), -1)
     if base_j < 0:
         return {"distance_m": 0.0, "forward_m": 0.0, "upright": False, "status": "no_floating_base"}

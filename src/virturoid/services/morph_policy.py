@@ -618,7 +618,7 @@ def extract_gait_params(gene) -> dict | None:
     from virturoid.services.morph_graph import encode_robot
 
     model = compiled_model(robot_mjcf(gene)); model.opt.iterations = 20
-    data = mujoco.MjData(model); mujoco.mj_resetData(model, data); mujoco.mj_forward(model, data)
+    data = mujoco.MjData(model); _reset_to_rest(model, data); mujoco.mj_forward(model, data)
     graph = encode_robot(model)
     if graph.base_jid < 0 or graph.n_tokens == 0:               # fixed-base / no actuators: nothing to walk
         return None
@@ -968,6 +968,19 @@ def tune_crawl_gait(gene, *, steps: int = 800, grid=None, cache: bool = True) ->
     return best
 
 
+def _reset_to_rest(model, data) -> None:
+    """Reset to the body's BAKED REST STANCE (the ``<keyframe name="rest">`` the compiler emits from
+    metadata['rest_pose']) if it has one, else to qpos0. mj_resetData alone resets to qpos0 (all joints 0),
+    which spawned a rest-posed body — e.g. a SPIDER whose legs are bent DOWN in its rest pose — with legs
+    STRAIGHT OUT (horizontal) so it collapsed to the ground. Honoring the keyframe makes it spawn standing."""
+    import mujoco
+    kid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_KEY, "rest")
+    if kid >= 0:
+        mujoco.mj_resetDataKeyframe(model, data, kid)
+    else:
+        mujoco.mj_resetData(model, data)
+
+
 def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float | None = None, hip_amp: float | None = None,
                        knee_amp: float | None = None, duty: float = 0.25, kp: float = 32.0, kd: float = 1.5,
                        record_qpos: bool = False, frame_every: int = 5, turn_bias: float = 0.0,
@@ -994,7 +1007,7 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float | None = None, hi
     from virturoid.services.gait_engine import select_duty
     from virturoid.services.morph_graph import encode_robot
     model = compiled_model(robot_mjcf(gene)); model.opt.iterations = 20
-    data = mujoco.MjData(model); mujoco.mj_resetData(model, data); mujoco.mj_forward(model, data)
+    data = mujoco.MjData(model); _reset_to_rest(model, data); mujoco.mj_forward(model, data)
     graph = encode_robot(model)
     if graph.base_jid < 0 or graph.n_tokens == 0:
         return {"finite": True, "survived": True, "forward": 0.0, "height_ratio": 1.0, "alive": steps,
@@ -1070,7 +1083,7 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float | None = None, hi
         return float(np.arctan2(2 * (q[0] * q[3] + q[1] * q[2]), 1 - 2 * (q[2] ** 2 + q[3] ** 2)))
 
     def _run(ph_of: dict, freq_: float, nsteps: int, record: bool, turn_bias_: float = 0.0, steer_fn_=None):
-        d = mujoco.MjData(model); mujoco.mj_resetData(model, d); mujoco.mj_forward(model, d)
+        d = mujoco.MjData(model); _reset_to_rest(model, d); mujoco.mj_forward(model, d)
         _qref, _z0 = q_def, z0
         if len(hip_k) >= 10:                                   # MANY-LEG: settle to the NATURAL stance pose and
             for _ in range(150):                              # hold/measure from THAT (the baked q_def let a long
@@ -1199,7 +1212,7 @@ def serpentine_rollout(gene, *, steps: int = 2500, amp: float = 0.6, wavenum: fl
     dt = float(model.opt.timestep)
 
     def _run(direction: float, record: bool):
-        d = mujoco.MjData(model); mujoco.mj_resetData(model, d); mujoco.mj_forward(model, d)
+        d = mujoco.MjData(model); _reset_to_rest(model, d); mujoco.mj_forward(model, d)
         p0 = np.array(d.qpos[bq:bq + 2]).copy(); alive = steps
         frames = [] if record else None
         for t in range(steps):
