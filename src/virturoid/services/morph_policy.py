@@ -970,7 +970,8 @@ def tune_crawl_gait(gene, *, steps: int = 800, grid=None, cache: bool = True) ->
 
 def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float | None = None, hip_amp: float | None = None,
                        knee_amp: float | None = None, duty: float = 0.25, kp: float = 32.0, kd: float = 1.5,
-                       record_qpos: bool = False, frame_every: int = 5) -> dict:
+                       record_qpos: bool = False, frame_every: int = 5, turn_bias: float = 0.0,
+                       steer_fn=None) -> dict:
     """STATICALLY-STABLE CRAWL gait for a WIDE-stance quadruped (open-loop, NO policy). Lifts ONE leg at a time
     (the 4 legs at quarter-cycle phases with a LOW-DUTY knee pulse) so 3 feet are ALWAYS planted -> the CoM stays
     inside the support triangle -> it CANNOT roll over. On a FANNED wide-stance body
@@ -1064,7 +1065,11 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float | None = None, hi
         zmin = min(float(_gz0[gi]) for gi in body_g); feet = [gi for gi in body_g if float(_gz0[gi]) < zmin + 0.05]
     feet_idx = np.asarray(feet or body_g, int); fz0 = _gz0[feet_idx] if len(feet_idx) else np.zeros(0)
 
-    def _run(ph_of: dict, freq_: float, nsteps: int, record: bool):
+    def _yaw_of(d):
+        q = d.qpos[bq + 3:bq + 7]
+        return float(np.arctan2(2 * (q[0] * q[3] + q[1] * q[2]), 1 - 2 * (q[2] ** 2 + q[3] ** 2)))
+
+    def _run(ph_of: dict, freq_: float, nsteps: int, record: bool, turn_bias_: float = 0.0, steer_fn_=None):
         d = mujoco.MjData(model); mujoco.mj_resetData(model, d); mujoco.mj_forward(model, d)
         _qref, _z0 = q_def, z0
         if len(hip_k) >= 10:                                   # MANY-LEG: settle to the NATURAL stance pose and
@@ -1072,12 +1077,16 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float | None = None, hi
                 mujoco.mj_step(model, d)                       # 14-leg body sink to hr 0.49; settling holds hr >0.6)
             _qref = np.array([float(d.qpos[qadr[k]]) for k in range(graph.n_tokens)])
             _z0 = float(d.qpos[bq + 2]) or z0
-        x0 = float(d.qpos[bq]); alive = nsteps; hr = 1.0
+        x0 = float(d.qpos[bq]); y0 = float(d.qpos[bq + 1]); yaw0 = _yaw_of(d); alive = nsteps; hr = 1.0
         frames = [] if record else None
         c_prev = (np.asarray(d.geom_xpos[feet_idx, 2]) < fz0 + 0.02) if len(feet_idx) else np.zeros(0, bool)
         lifts = up_steps = support_steps = 0
         for t in range(nsteps):
             ph = freq_ * t * dt; tgt = _qref.copy()
+            # closed-loop steering: a follower's steer_fn reads the live pose and returns the turn_bias that
+            # points the body at its next waypoint (heading control). None -> the static turn_bias.
+            tb = (float(steer_fn_(float(d.qpos[bq]), float(d.qpos[bq + 1]), _yaw_of(d)))
+                  if steer_fn_ is not None else turn_bias_)
             for key in hip_k:
                 u = (ph + ph_of[key]) % 1.0                   # phase in [0,1): swing then stance
                 # EXPLICIT swing/stance step (physically-correct propulsion, ANY body): SWING lifts the foot +
@@ -1090,7 +1099,11 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float | None = None, hi
                 else:
                     lift = 0.0; s = np.cos(np.pi * (u - lift_duty) / max(1e-3, 1.0 - lift_duty))
                 tgt[knee_k[key]] = _qref[knee_k[key]] + knee_amp * lift
-                tgt[hip_k[key]] = _qref[hip_k[key]] + hip_amp * hip_sign[key] * s
+                # DIFFERENTIAL-STRIDE STEERING (like a diff-drive rover, but with legs): amplify the LEFT legs'
+                # stride and shrink the RIGHT (or vice-versa) so one side pushes harder -> the body YAWS. turn_bias
+                # 0 = straight; the follower sets it from the heading error to steer along a path.
+                amp_key = hip_amp * (1.0 + tb * (1.0 - 2.0 * is_right[key]))
+                tgt[hip_k[key]] = _qref[hip_k[key]] + amp_key * hip_sign[key] * s
             for k in range(graph.n_tokens):
                 qv = float(d.qvel[vadr[k]])
                 tau = kp * (tgt[k] - float(d.qpos[qadr[k]])) - kd * qv
@@ -1111,11 +1124,13 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float | None = None, hi
                 lifts += int(np.sum(c_prev & ~c_now)); ng = int(np.sum(c_now))
                 support_steps += int(0 < ng < len(feet_idx)); c_prev = c_now
         forward = float(d.qpos[bq] - x0)                      # + = the walk direction the dir_sign probe selected
+        yaw_change = float(np.arctan2(np.sin(_yaw_of(d) - yaw0), np.cos(_yaw_of(d) - yaw0)))
         _T = max(1, alive) * dt
         res = {"finite": True, "forward": round(forward, 3), "height_ratio": round(hr, 3), "alive": alive,
                "survived": bool(alive >= nsteps and hr > 0.6), "speed": round(forward / max(1, alive) / dt, 3),
                "cadence": round(lifts / _T, 2), "upright_frac": round(up_steps / max(1, alive), 3),
                "support_frac": round(support_steps / max(1, alive), 3), "n_feet": int(len(feet_idx)),
+               "yaw_change": round(yaw_change, 3), "lateral": round(float(d.qpos[bq + 1] - y0), 3),
                "gait": "crawl", "n_tokens": graph.n_tokens}
         if record:
             res["qpos_frames"] = frames or []
@@ -1127,14 +1142,39 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float | None = None, hi
     # The reported forward is the HONEST signed displacement of the chosen run (a body that can't walk stays
     # near 0, never masked). This is the scripted PRIOR; the learned residual (GEN-8) refines it further.
     if not hip_k:
-        return _run(ph_fwd, freq, steps, record_qpos)
+        return _run(ph_fwd, freq, steps, record_qpos, turn_bias, steer_fn)
     best_phd, best_fq, best_fwd = ph_fwd, freq, -1e9
     for phd in (ph_fwd, ph_rev):
         for fq in (freq, freq * 1.7):
-            f = _run(phd, fq, min(350, steps), False)["forward"]
+            f = _run(phd, fq, min(350, steps), False)["forward"]   # direction/freq probe is straight (turn_bias 0)
             if f > best_fwd:
                 best_fwd, best_phd, best_fq = f, phd, fq
-    return _run(best_phd, best_fq, steps, record_qpos)
+    return _run(best_phd, best_fq, steps, record_qpos, turn_bias, steer_fn)
+
+
+def legged_steer_to_goal(gene, goal_xy, *, steps: int = 4000, gain: float = 1.6, cap: float = 0.75,
+                         reach_radius: float = 0.6) -> dict:
+    """Closed-loop heading control for a legged body: run the crawl gait with a pure-pursuit ``steer_fn`` that
+    differentially strides the legs (see ``crawl_gait_rollout``'s ``turn_bias``) to point the body at ``goal_xy``.
+    MEASURED (walkable quad): reaches forward-cone goals precisely — (2.2, +-0.6) and (1.8, 1.0) all within ~0.1 m.
+    HONEST LIMIT: scripted differential steering handles course-correction, NOT sharp (>~60 deg) turns or tight
+    mazes — a goal behind the body, or dense corridors, need the LEARNED steering policy (``nav_learned``, GPU).
+    So this is legged navigation to a goal roughly ahead, not omnidirectional. Returns reached/dist + the metrics."""
+    import math
+
+    import numpy as np
+    gx, gy = float(goal_xy[0]), float(goal_xy[1])
+
+    def _steer(x, y, yaw):
+        err = math.atan2(math.sin(math.atan2(gy - y, gx - x) - yaw), math.cos(math.atan2(gy - y, gx - x) - yaw))
+        return float(np.clip(-gain * err, -cap, cap))          # -err: negative turn_bias -> +yaw (turn left)
+
+    r = crawl_gait_rollout(gene, steps=steps, steer_fn=_steer)
+    fx, fy = float(r.get("forward", 0.0)), float(r.get("lateral", 0.0))   # net world displacement from the origin
+    dist = float(math.hypot(fx - gx, fy - gy))
+    r.update({"goal_xy": [gx, gy], "final_xy": [round(fx, 3), round(fy, 3)], "goal_dist": round(dist, 3),
+              "reached_goal": bool(dist < reach_radius)})
+    return r
 
 
 def recipe_robustness(gene, policy: MorphPolicy | None = None, *, n: int = 8, gain: float = 0.15,
