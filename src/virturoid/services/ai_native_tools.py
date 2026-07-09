@@ -161,12 +161,15 @@ def _honest_swim(gene, *, steps: int = 2500) -> dict:
     qadr = [m.jnt_qposadr[int(m.actuator_trnid[u, 0])] for u in range(m.nu)]
     vadr = [m.jnt_dofadr[int(m.actuator_trnid[u, 0])] for u in range(m.nu)]
     frc = m.actuator_forcerange[:, 1].copy(); frc[frc <= 0] = 3.0
+    from virturoid.services.aquatic import SWIM_WAVE
+    w = SWIM_WAVE
     p0 = np.array(d.xpos[bid]).copy()
     for t in range(steps):
-        ph = 2 * np.pi * t * m.opt.timestep * 1.3
-        for k in range(m.nu):                                   # PD-track a travelling wave head->tail
-            tgt = 0.7 * np.sin(ph - k * 1.1)
-            d.ctrl[k] = float(np.clip(8.0 * (tgt - d.qpos[qadr[k]]) - 0.3 * d.qvel[vadr[k]], -frc[k], frc[k]))
+        ph = 2 * np.pi * t * m.opt.timestep * w["freq"]
+        for k in range(m.nu):                                   # PD-track the tuned travelling wave head->tail
+            tgt = w["amp"] * np.sin(ph - k * w["wavenum"])
+            d.ctrl[k] = float(np.clip(w["kp"] * (tgt - d.qpos[qadr[k]]) - w["kd"] * d.qvel[vadr[k]],
+                                      -frc[k], frc[k]))
         mujoco.mj_step(m, d)
     swim = float(np.hypot(*(np.array(d.xpos[bid])[:2] - p0[:2])))
     verdict = (f"SWIMS ({swim:.2f} m undulatory thrust)" if swim > 0.15

@@ -432,8 +432,10 @@ def _geom_xml(seg, pad: str, material: str = "mat_body", meshed: bool = False, p
     surf = ' rgba="0 0 0 0" group="3"' if meshed else f' material="{material}"'
     if seg.shape == "box":
         h = seg.length_m / 2.0
+        cs = getattr(seg, "cross_section", None)            # laterally-compressed (fish) body if set, else square
+        hx, hy = (float(cs[0]), float(cs[1])) if cs else (seg.radius_m, seg.radius_m)
         coll = (f'{pad}<geom name="{name}" type="box" pos="0 0 {h:.5f}" '
-                f'size="{seg.radius_m:.5f} {seg.radius_m:.5f} {h:.5f}" mass="{seg.mass_kg:.5f}"{surf}/>')
+                f'size="{hx:.5f} {hy:.5f} {h:.5f}" mass="{seg.mass_kg:.5f}"{surf}/>')
     else:
         # MJX has no cylinder collision; in physics_only mode a cylinder COLLIDER becomes a capsule (the closest
         # MJX-safe round primitive) so a cylinder-shaped link can still train on GPU.

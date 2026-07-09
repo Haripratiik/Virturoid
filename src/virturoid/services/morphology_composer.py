@@ -548,6 +548,17 @@ def compose_robot(prompt: str, *, llm="auto", reach_m: float | None = None,
     a robot for a WALKING task opts in; a generic build pays no eval cost."""
     gene = _compose_robot_impl(prompt, llm=llm, reach_m=reach_m, payload_kg=payload_kg, plan=plan)
     try:
+        # An aquatic prompt (fish/eel/shark/...) is an UNDULATOR, not a legged/quad body. Compose a serial spine
+        # (a snake) if the built body branches into legs, then laterally-compress it into a fish cross-section so
+        # it generates REAL undulatory thrust (measured 0.06 m round -> 0.25 m flat: DOES NOT SWIM -> SWIMS).
+        from virturoid.services.aquatic import _is_serial_spine, ensure_aquatic_body, is_aquatic_prompt
+        if is_aquatic_prompt(prompt):
+            if not _is_serial_spine(gene):
+                gene = _compose_robot_impl("a snake robot", llm=None)
+            ensure_aquatic_body(gene)
+    except Exception:  # noqa: BLE001 - aquatic reshape is value-add; never block a compose
+        pass
+    try:
         from virturoid.services.bom_builder import finalize_for_task
         finalize_for_task(gene, prompt)
     except Exception:  # noqa: BLE001 - finalization is value-add; never block a compose

@@ -45,6 +45,9 @@ class GeneSegment:
     torque_req_nm: float | None = None        # the joint's fixed torque REQUIREMENT; keeps grounding idempotent
     #                                           (re-grounding sizes from this, not from the last motor's peak)
     is_end_effector: bool = False
+    cross_section: tuple[float, float] | None = None  # box (local x,y) half-extents; overrides the square radius_m.
+    #                                    Lets a segment be LATERALLY COMPRESSED (a fish/eel body) for real
+    #                                    undulatory swim thrust (drag anisotropy). None = square from radius_m.
     geometry: dict | None = None       # optional ARBITRARY CAD shape spec (cad_geometry.realize_shape): the
     #                                    blueprint can make this block any shape (extrude/revolve/tapered/…),
     #                                    not just the primitive shape/length/radius above. None = use primitive.
@@ -140,7 +143,9 @@ class RobotGene:
                  "joint_axis": list(s.joint_axis), "joint_lower": s.joint_lower, "joint_upper": s.joint_upper,
                  "mount_euler": list(s.mount_euler), "mount_offset": list(s.mount_offset),
                  "actuator_torque_nm": s.actuator_torque_nm, "torque_req_nm": s.torque_req_nm,
-                 "is_end_effector": s.is_end_effector, "geometry": s.geometry, "material": s.material}
+                 "is_end_effector": s.is_end_effector,
+                 "cross_section": list(s.cross_section) if s.cross_section else None,
+                 "geometry": s.geometry, "material": s.material}
                 for s in self.segments
             ],
         }
@@ -161,6 +166,7 @@ class RobotGene:
                     mount_offset=tuple(s.get("mount_offset", (0, 0, 0))),
                     actuator_torque_nm=s.get("actuator_torque_nm"), torque_req_nm=s.get("torque_req_nm"),
                     is_end_effector=s.get("is_end_effector", False),
+                    cross_section=(tuple(s["cross_section"]) if s.get("cross_section") else None),
                     geometry=s.get("geometry"), material=s.get("material"),
                 )
                 for s in d["segments"]
