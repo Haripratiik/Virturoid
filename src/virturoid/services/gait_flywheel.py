@@ -40,8 +40,14 @@ def bank_gait(db, gene, result, *, task: str = LOCOMOTION) -> str | None:
 
     Only banks a DEPLOYABLE result (survived + real forward) — never a fall (honesty: the bank must stay a bank of
     working controllers). ``record_skill`` is idempotent-keep-best, so a weaker later gait can't clobber a stronger one.
+
+    UN-GAMEABLE: also rejects a non-CREDIBLE result — a body that SLIDES forward (feet never leave the ground) or
+    rears/lurches survives and covers distance but is NOT a walk; banking it would let a slide masquerade as a gait
+    and be recalled/reused. (A result double without ``best_credible`` is assumed credible for back-compat.)
     """
     if not getattr(result, "best_survived", False) or abs(getattr(result, "best_forward", 0.0)) < 0.15:
+        return None
+    if not getattr(result, "best_credible", True):
         return None
     cls = _class_of(gene)
     species = getattr(gene, "species", None) or cls
@@ -110,6 +116,7 @@ class _DeployResult:
         self.best_forward = float(r["forward"])
         self.best_height_ratio = float(r["height_ratio"])
         self.best_survived = bool(r["survived"])
+        self.best_credible = bool(r.get("credible", False))
 
 
 def learn_gait_flywheel(gene, db, *, generations: int = 10, pop: int = 20, steps: int = 900,
@@ -127,11 +134,17 @@ def learn_gait_flywheel(gene, db, *, generations: int = 10, pop: int = 20, steps
     res = search_gait(gene, generations=generations, pop=pop, steps=steps, seed=seed,
                       workers=workers, warm_start=prior)
     # DEPLOY-SELECT at the deploy horizon: learned winner vs the shipped default. Bank ONLY a CREDIBLE walk that
-    # beats the default's forward — a slide (fast but no real stepping) must never enter the bank.
+    # beats the default — a slide (fast but no real stepping) must never enter the bank.
     learned = evaluate_gait(gene, res.best_params, steps=deploy_steps)
     default = evaluate_gait(gene, _DEFAULT_GAIT, steps=deploy_steps)
-    beats_default = (learned["survived"] and learned.get("credible", False)
-                     and abs(learned["forward"]) > abs(default["forward"]) + 0.02)
+    # CREDIBILITY-FIRST (un-gameable): the learned gait must itself be a credible, surviving walk. It beats the
+    # default when the default is NOT a credible walk (a slide that merely covers distance must never block a real
+    # walk from banking) or — when the default IS a credible walk — when it travels meaningfully further. This makes
+    # the decision robust to the deploy horizon: a non-credible slide can never win by accumulating raw distance.
+    learned_ok = bool(learned["survived"]) and bool(learned.get("credible", False))
+    default_credible = bool(default["survived"]) and bool(default.get("credible", False))
+    beats_default = learned_ok and (not default_credible
+                                    or abs(learned["forward"]) > abs(default["forward"]) + 0.02)
 
     skill_id = None
     if bank and beats_default:

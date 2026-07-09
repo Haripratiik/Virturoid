@@ -45,6 +45,24 @@ class GaitFlywheelTests(unittest.TestCase):
         self.assertIsNotNone(recalled)
         self.assertAlmostEqual(recalled["kp"], 200.0, places=3)
 
+    def test_bank_rejects_a_non_credible_slide(self):
+        # UN-GAMEABLE: a body that SLIDES forward (survives + travels past the 0.15 m floor but never steps) is not a
+        # walk and must never enter the bank — else a slide masquerades as a gait and gets recalled/reused. This is
+        # the exact failure the measured sweep surfaced: crawl kp>=40 on a light quad "survives 0.85 m" as a SLIDE.
+        from virturoid.services.gait_flywheel import bank_gait, recall_gait
+        db, g = self._db(), self._quad()
+
+        class _Slide:                                          # survives + far, but not a credible walk
+            best_survived, best_forward, best_height_ratio, best_credible = True, 0.85, 0.79, False
+            best_params = {"freq": 1.5, "hip_amp": 0.9, "knee_amp": 1.0, "duty": 0.25, "kp": 40.0, "kd": 2.0}
+        self.assertIsNone(bank_gait(db, g, _Slide()))          # a slide is rejected...
+        self.assertIsNone(recall_gait(db, g))                  # ...so nothing is banked
+
+        class _Walk:                                           # a shorter but CREDIBLE walk IS bankable
+            best_survived, best_forward, best_height_ratio, best_credible = True, 0.55, 0.82, True
+            best_params = {"freq": 1.4, "hip_amp": 1.1, "knee_amp": 0.8, "duty": 0.2, "kp": 120.0, "kd": 8.0}
+        self.assertIsNotNone(bank_gait(db, g, _Walk()))
+
     def test_recall_by_morphology_embedding_across_species(self):
         # the flywheel retrieves via the ROBOTICS TOKENIZATION: a structurally-similar body finds a prior gait
         # even when its species/class STRING differs (semantic morphology retrieval, not exact string match).

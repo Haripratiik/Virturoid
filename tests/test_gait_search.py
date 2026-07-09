@@ -49,6 +49,12 @@ class GaitSearchTests(unittest.TestCase):
         for k, v in res.best_params.items():
             self.assertGreaterEqual(v, _LO[k] - 1e-6)
             self.assertLessEqual(v, _HI[k] + 1e-6)
+        # the credibility flag is carried and CONSISTENT with the fitness: a credible surviving walk scores its full
+        # forward (x1.0), a slide is discounted (x0.3) — so best_credible can never be silently decoupled from fitness.
+        self.assertIsInstance(res.best_credible, bool)
+        self.assertIn("best_credible", res.to_dict())
+        if res.best_survived and res.best_credible:
+            self.assertAlmostEqual(res.best_fitness, res.best_forward, places=6)
 
     def test_generalizes_to_hexapod(self):
         # the learner is not quad-specific: crawl_gait_rollout handles any leg count, so a hexapod learns a walk too.

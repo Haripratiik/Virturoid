@@ -262,12 +262,16 @@ def _auto_bank_gait(gene, r, base_params) -> str | None:
     empty: nothing on the ordinary path ever wrote to it). bank_gait is keep-best + keyed by morphology, so
     re-verifying the same body updates ONE skill (a stronger later gait replaces a weaker one), never floods."""
     from virturoid.services.gait_flywheel import _DEFAULT_GAIT, _DeployResult, bank_gait
+    from virturoid.services.gait_quality import classify
     from virturoid.services.memory_db import DEFAULT_DB_PATH, MemoryDB
     DEFAULT_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     params = {**_DEFAULT_GAIT, **{k: float(v) for k, v in (base_params or {}).items()}}
+    # Self-validate credibility from the rollout itself (defense in depth): bank_gait rejects a non-credible slide,
+    # so the flywheel self-update never banks a body that merely SLID forward even if a caller forgot to gate on it.
     holder = _DeployResult(params, {"forward": float(r.get("forward", 0.0)),
                                     "height_ratio": float(r.get("height_ratio", 1.0)),
-                                    "survived": bool(r.get("survived", False))})
+                                    "survived": bool(r.get("survived", False)),
+                                    "credible": classify(r).startswith("CREDIBLE")})
     with MemoryDB(DEFAULT_DB_PATH) as db:
         return bank_gait(db, gene, holder)
 

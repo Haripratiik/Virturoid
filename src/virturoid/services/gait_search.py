@@ -33,6 +33,9 @@ class GaitSearchResult:
     best_height_ratio: float
     best_survived: bool
     baseline_forward: float
+    # was the best a CREDIBLE walk (real stepping, level body) or merely a SLIDE/rearing lurch the fitness discounts?
+    # Banking gates on this so the flywheel holds only real walks — a surviving slide covers distance but is not a gait.
+    best_credible: bool = False
     history: list = field(default_factory=list)   # per-generation best fitness
     prior_transfer_forward: float | None = None   # zero-shot forward of a warm-start prior on THIS body (R3 screen)
 
@@ -40,7 +43,8 @@ class GaitSearchResult:
         return {
             "best_params": self.best_params, "best_fitness": round(self.best_fitness, 4),
             "best_forward": round(self.best_forward, 4), "best_height_ratio": round(self.best_height_ratio, 3),
-            "best_survived": self.best_survived, "baseline_forward": round(self.baseline_forward, 4),
+            "best_survived": self.best_survived, "best_credible": self.best_credible,
+            "baseline_forward": round(self.baseline_forward, 4),
             "improvement_x": (round(abs(self.best_forward) / abs(self.baseline_forward), 2)
                               if self.baseline_forward else None),
             "history": [round(h, 4) for h in self.history],
@@ -145,6 +149,7 @@ def search_gait(gene, *, generations: int = 8, pop: int = 24, elite_frac: float 
     return GaitSearchResult(
         best_params=best_params, best_fitness=float(best["fitness"]), best_forward=float(best["forward"]),
         best_height_ratio=float(best["height_ratio"]), best_survived=bool(best["survived"]),
+        best_credible=bool(best.get("credible", False)),
         baseline_forward=float(baseline["forward"]), history=history,
         prior_transfer_forward=(float(prior_transfer["forward"]) if prior_transfer is not None else None))
 
