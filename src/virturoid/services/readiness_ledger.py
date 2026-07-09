@@ -73,9 +73,16 @@ def write_product_readiness_ledger(package_dir, *, robot_class: str = "", gene=N
 
 # --------------------------------------------------------------------------- probes
 
+# Categories that make a robot ACTUATED / able to move: joint actuators (arm/legged), drive motors (mobile),
+# rotors (aerial). A body needs at least one — but which KIND depends on its morphology, so the gate must accept
+# all of them (a drone is propelled by ROTORS not joint actuators; a rover by DRIVE MOTORS — both are complete).
+_PROPULSION_CATEGORIES = ("actuator", "drive_motor", "rotor")
+
+
 def _probe_bom(pkg: Path) -> StageRecord:
     """G2 (fidelity gap-closure): a package is only buildable with a REAL bill of materials — present, parseable,
-    with at least one actuator line. Fail-closed: no BOM / empty lines / no actuators -> not attained."""
+    with at least one PROPULSION line (a joint actuator, a drive motor, OR a rotor — whichever its morphology
+    uses to move). Fail-closed: no BOM / empty lines / nothing that moves it -> not attained."""
     p = pkg / "robot" / "bill_of_materials.json"
     if not p.is_file():
         return StageRecord("bom_present", PLACEHOLDER, "no robot/bill_of_materials.json — a robot with no parts "
@@ -85,13 +92,14 @@ def _probe_bom(pkg: Path) -> StageRecord:
     except Exception:  # noqa: BLE001
         return StageRecord("bom_present", PLACEHOLDER, "bill_of_materials.json does not parse")
     lines = bom.get("lines") or bom.get("items") or []
-    n_act = sum(1 for ln in lines if (ln.get("category") or ln.get("kind")) == "actuator")
+    n_act = sum(1 for ln in lines if (ln.get("category") or ln.get("kind")) in _PROPULSION_CATEGORIES)
     if not lines:
         return StageRecord("bom_present", PLACEHOLDER, "BOM has zero line items")
     if n_act == 0:
-        return StageRecord("bom_present", BELOW_GATE, f"{len(lines)} lines but NO actuator lines")
-    return StageRecord("bom_present", ATTAINED, f"{len(lines)} lines incl. {n_act} actuator line(s)",
-                       evidence={"line_items": len(lines), "actuator_lines": n_act})
+        return StageRecord("bom_present", BELOW_GATE,
+                           f"{len(lines)} lines but NO propulsion (actuator/drive-motor/rotor) lines")
+    return StageRecord("bom_present", ATTAINED, f"{len(lines)} lines incl. {n_act} propulsion line(s)",
+                       evidence={"line_items": len(lines), "propulsion_lines": n_act})
 
 
 def _probe_schema_valid(pkg: Path) -> StageRecord:

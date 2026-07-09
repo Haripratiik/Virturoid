@@ -28,6 +28,33 @@ class IsRealCadTests(unittest.TestCase):
             self.assertFalse(is_real_cad(Path(d) / "missing.step"))
 
 
+class BomPropulsionGateTests(unittest.TestCase):
+    """The bom_present gate must recognize EVERY morphology's propulsion, not just joint actuators: a drone is
+    propelled by ROTORS and a rover by DRIVE MOTORS — both are complete, buildable BOMs, not 'below gate'."""
+
+    def _probe(self, category):
+        from virturoid.services.readiness_ledger import _probe_bom
+        with tempfile.TemporaryDirectory() as d:
+            pkg = Path(d)
+            (pkg / "robot").mkdir()
+            (pkg / "robot" / "bill_of_materials.json").write_text(json.dumps(
+                {"lines": [{"part": "frame", "category": "material"},
+                           {"part": "prop", "category": category, "qty": 4}]}), encoding="utf-8")
+            return _probe_bom(pkg)
+
+    def test_rotor_propulsion_attains_the_gate(self):
+        self.assertEqual(self._probe("rotor").status, ATTAINED, "a drone (rotors) has a real, buildable BOM")
+
+    def test_drive_motor_propulsion_attains_the_gate(self):
+        self.assertEqual(self._probe("drive_motor").status, ATTAINED, "a rover (drive motors) has a real BOM")
+
+    def test_joint_actuator_still_attains_the_gate(self):
+        self.assertEqual(self._probe("actuator").status, ATTAINED)
+
+    def test_no_propulsion_still_below_gate(self):
+        self.assertEqual(self._probe("camera").status, BELOW_GATE, "a body with nothing that moves it is not real")
+
+
 class ReadinessLedgerTests(unittest.TestCase):
     def test_placeholder_cad_blocks_safe_to_export(self):
         with tempfile.TemporaryDirectory() as d:
