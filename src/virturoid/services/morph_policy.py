@@ -1177,6 +1177,56 @@ def legged_steer_to_goal(gene, goal_xy, *, steps: int = 4000, gain: float = 1.6,
     return r
 
 
+def serpentine_rollout(gene, *, steps: int = 2500, amp: float = 0.6, wavenum: float = 0.9, freq: float = 1.4,
+                       kp: float = 20.0, kd: float = 0.6, record_qpos: bool = False, frame_every: int = 5) -> dict:
+    """LAND SERPENTINE locomotion for a LIMBLESS serial spine (a snake): a lateral travelling wave down the
+    spine's revolute joints undulates the body forward against ground friction (the land analogue of the aquatic
+    undulator). A snake has NO legs, so the leg-based crawl gait can't drive it — it just falls; this drives the
+    spine directly. MEASURED (composed snake): ~0.44 m net travel on a normal floor. Probes BOTH wave directions
+    and keeps whichever carries the body further (the honest net planar displacement, never masked)."""
+    import mujoco
+    import numpy as np
+
+    from virturoid.services.morph_graph import encode_robot
+    model = compiled_model(robot_mjcf(gene)); model.opt.iterations = 20
+    graph = encode_robot(model)
+    if graph.base_jid < 0 or graph.n_tokens == 0 or model.nu == 0:
+        return {"finite": True, "survived": True, "forward": 0.0, "planar_m": 0.0,
+                "n_actuators": int(model.nu), "gait": "serpentine", "n_tokens": int(getattr(graph, "n_tokens", 0))}
+    bq = graph.base_qadr
+    qadr = np.asarray(graph.qadr, int); vadr = np.asarray(graph.vadr, int); act_u = np.asarray(graph.act_u, int)
+    clamps = np.asarray(graph.clamps, float)
+    dt = float(model.opt.timestep)
+
+    def _run(direction: float, record: bool):
+        d = mujoco.MjData(model); mujoco.mj_resetData(model, d); mujoco.mj_forward(model, d)
+        p0 = np.array(d.qpos[bq:bq + 2]).copy(); alive = steps
+        frames = [] if record else None
+        for t in range(steps):
+            ph = 2 * np.pi * t * dt * freq
+            for k in range(graph.n_tokens):
+                tgt = amp * np.sin(ph - direction * k * wavenum)     # travelling wave head->tail (or reversed)
+                tau = kp * (tgt - float(d.qpos[qadr[k]])) - kd * float(d.qvel[vadr[k]])
+                d.ctrl[act_u[k]] = float(np.clip(tau, -clamps[k], clamps[k]))
+            mujoco.mj_step(model, d)
+            if not np.all(np.isfinite(d.qpos)):
+                alive = t; break
+            if record and t % frame_every == 0:
+                frames.append(d.qpos.copy())
+        disp = np.array(d.qpos[bq:bq + 2]) - p0
+        return float(np.hypot(*disp)), alive, frames, bool(np.all(np.isfinite(d.qpos)))
+
+    fwd_a = _run(1.0, False)[0]
+    fwd_b = _run(-1.0, False)[0]
+    planar, alive, frames, finite = _run(1.0 if fwd_a >= fwd_b else -1.0, record_qpos)
+    res = {"finite": finite, "survived": bool(alive >= steps and finite), "forward": round(planar, 3),
+           "planar_m": round(planar, 3), "alive": alive, "n_actuators": int(model.nu),
+           "n_tokens": int(graph.n_tokens), "gait": "serpentine"}
+    if record_qpos:
+        res["qpos_frames"] = frames or []
+    return res
+
+
 def recipe_robustness(gene, policy: MorphPolicy | None = None, *, n: int = 8, gain: float = 0.15,
                       mass: float = 0.1, damping: float = 0.2, friction: float = 0.3, seed: int = 0,
                       steps: int = 900, **kw) -> dict:

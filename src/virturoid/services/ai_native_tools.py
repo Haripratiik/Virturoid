@@ -272,11 +272,39 @@ def _auto_bank_gait(gene, r, base_params) -> str | None:
         return bank_gait(db, gene, holder)
 
 
+def _honest_serpentine(gene, *, steps: int = 2000, render: bool = False, tag: str = "serpentine") -> dict:
+    """The honest LAND-SERPENTINE verdict for a LIMBLESS serial spine (a snake): a lateral travelling wave down
+    the spine crawls it forward against ground friction (morph_policy.serpentine_rollout). A snake has no legs,
+    so the leg crawl gait can't drive it (it falls); this drives the spine directly. Never lies — a spine whose
+    undulation yields no net thrust reads DOES NOT CRAWL."""
+    from virturoid.services.morph_policy import serpentine_rollout
+    r = serpentine_rollout(gene, steps=steps, record_qpos=render)
+    m = float(r.get("planar_m", 0.0))
+    verdict = (f"CRAWLS (serpentine, {m:.2f} m lateral undulation)" if m > 0.15 and r.get("finite")
+               else f"DOES NOT CRAWL ({m:.2f} m — this spine's undulation yields little ground thrust)")
+    out = {"kind": "legged", "verdict": verdict, "survived": bool(r.get("survived")), "gait_source": "serpentine",
+           "forward_m": round(m, 3), "credible_walk": False, "n_actuators": r.get("n_actuators"),
+           "note": "limbless serial spine -> LAND serpentine (lateral travelling wave), not a leg gait"}
+    if render and r.get("qpos_frames"):
+        gif = _render_gait_gif(gene, r["qpos_frames"], tag)
+        if gif:
+            out["artifacts"] = [gif]
+    return out
+
+
 def _honest_gait(gene, *, steps: int = 1200, render: bool = False, tag: str = "gait") -> dict:
     """Run the general scripted gait and return the ANTI-GOODHART verdict (survived+cadence+support+upright+
     forward, forward == actual displacement) — the honesty gate as a tool result, never a raw qpos dump."""
     from virturoid.services.morph_policy import crawl_gait_rollout
     from virturoid.services.gait_quality import classify, orientation_summary
+    # A LIMBLESS serial spine (a snake) has no legs for the crawl gait — drive it as a land SERPENTINE undulator
+    # instead (else it just falls / scores 0). The land analogue of routing a fish to the swim tier.
+    try:
+        from virturoid.services.aquatic import _is_serial_spine
+        if _is_serial_spine(gene):
+            return _honest_serpentine(gene, steps=max(steps, 2000), render=render, tag=f"{tag}_serp")
+    except Exception:  # noqa: BLE001 - serpentine routing is value-add; fall back to the leg gait on any error
+        pass
     # FLYWHEEL: use the best banked LEARNED gait for this body's morphology if one exists (recalled by embedding),
     # so the product's legged robots walk with learned control that compounds over builds — else the shipped default.
     gait_params: dict = {}

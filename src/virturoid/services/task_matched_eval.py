@@ -82,6 +82,16 @@ def evaluate_robot(gene: RobotGene, *, prompt: str = "", controller_params: dict
     ee = gene.end_effector_type
 
     if kind == "legged":
+        # a LIMBLESS serial spine (snake) is scored on LAND SERPENTINE undulation, not a leg gait it can't run
+        try:
+            from virturoid.services.aquatic import _is_serial_spine
+            if _is_serial_spine(gene):
+                from virturoid.services.morph_policy import serpentine_rollout
+                sr = serpentine_rollout(gene, steps=2000)
+                return {"task": "serpentine_locomotion", "metric": "distance_m",
+                        "value": round(float(sr.get("planar_m", 0.0)), 3), "detail": sr}
+        except Exception:  # noqa: BLE001 - serpentine is value-add; fall through to the leg eval on any error
+            pass
         from virturoid.services.locomotion_controller import run_locomotion_episode
         mj = mujoco.MjModel.from_xml_string(compile_gene_to_mjcf(gene))
         r = run_locomotion_episode(mj)

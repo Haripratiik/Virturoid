@@ -72,6 +72,19 @@ def _run_navigate(gene, params):
 
 
 def _run_locomote(gene, params):
+    # A LIMBLESS serial spine (snake) crawls by LAND SERPENTINE undulation, not a leg gait — score it on that
+    # (the leg controllers leave it prone / 0 m). The land analogue of routing a fish to the swim skill.
+    try:
+        from virturoid.services.aquatic import _is_serial_spine
+        if _is_serial_spine(gene):
+            from virturoid.services.morph_policy import serpentine_rollout
+            sr = serpentine_rollout(gene, steps=int(params.get("horizon", 2000)))
+            m = float(sr.get("planar_m", 0.0))
+            ok = m >= float(params.get("distance", 0.15)) and bool(sr.get("finite"))
+            est = {PredicateOp.TRAVELED, PredicateOp.REACHED_GOAL} if ok else set()
+            return SkillOutcome("locomote", ok, est, m, {**sr, "gait": "serpentine"})
+    except Exception:  # noqa: BLE001 - serpentine is value-add; fall through to the leg controllers on any error
+        pass
     # Prefer a LEARNED morphology-conditioned policy over the scripted trot (the trot is brittle and drives
     # several composed bodies BACKWARD; the learned MorphPolicy walks them forward). Uses a banked policy for
     # this species if present, trains one on demand when params['learn'] is set, and always takes whichever
