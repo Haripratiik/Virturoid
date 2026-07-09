@@ -45,18 +45,19 @@ class RestStanceTests(unittest.TestCase):
         self.assertGreater(float(np.abs(q_rest - q_flat).max()), 0.3,
                            "the rest reset must bend the legs (some joint moves well off qpos0)")
 
-    def test_humanoid_reports_standing_not_a_flat_fall(self):
-        # a biped that the multi-leg crawl gait fells must honestly report STANDS (static balance) with dynamic
-        # walking flagged as the learned-control frontier -- not a bare 'FELL' implying it can't balance at all.
+    def test_humanoid_reports_real_locomotion_not_a_flat_fall(self):
+        # a biped that the multi-leg crawl gait fells must report its REAL best controller: it WALKS FORWARD via
+        # the trot (or a banked learned policy), else STANDS -- never a bare 'FELL' implying it can't balance.
         from virturoid.services import session_state as S
         from virturoid.services.ai_native_tools import create_robot, verify_robot
         S.reset()
         rid = create_robot({"prompt": "a humanoid robot"})["robot_id"]
         v = verify_robot({"robot_id": rid, "mode": "quick"})
-        self.assertEqual(v.get("gait_source"), "biped_stand")
-        self.assertIn("STANDS", v["verdict"])
-        self.assertIn("frontier", v["verdict"])                 # honestly names the deferred learned-walk frontier
-        self.assertFalse(v.get("credible_walk"))                # never overclaims a walk
+        self.assertTrue(str(v.get("gait_source", "")).startswith("biped"))
+        self.assertNotIn("FELL", v["verdict"])                  # not a flat fall
+        self.assertTrue("WALKS FORWARD" in v["verdict"] or "STANDS" in v["verdict"],
+                        f"a biped reports forward locomotion or static balance, not a fall: {v['verdict']}")
+        self.assertFalse(v.get("credible_walk"))                # honest: a trot/stand is not gated as a credible walk
 
     def test_a_quad_still_walks(self):
         # the fix must not regress the quad (its rest pose is a valid stance; default walk stays credible)

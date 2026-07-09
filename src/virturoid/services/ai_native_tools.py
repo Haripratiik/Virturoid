@@ -306,6 +306,21 @@ def _honest_biped(gene, *, steps: int = 1500) -> dict | None:
     m = mujoco.MjModel.from_xml_string(compile_gene_to_mjcf(gene, include_floor=True, spawn_z=standing_spawn_z(gene)))
     if build_appendage_map(m).n_legs != 2 or m.nu == 0:
         return None                                              # not a biped -> let the normal gait verdict stand
+    # FIRST: the biped's BEST real controller — a banked LEARNED walk policy if one exists (the GPU-trained
+    # humanoid), else the trot. If it moves the body FORWARD while upright, report THAT honest walk (the multi-leg
+    # crawl wave gait that fells it is just the wrong controller for 2 legs).
+    try:
+        from virturoid.services.learn_locomotion import locomotion_episode
+        lr = locomotion_episode(gene, horizon=steps)
+        fwd = float(lr.get("forward_m", 0.0))
+        if fwd > 0.3 and bool(lr.get("upright")):
+            src = "learned policy" if lr.get("source") == "learned" else "trot gait"
+            return {"kind": "legged", "verdict": f"WALKS FORWARD ({fwd:.2f} m, upright, {src})",
+                    "survived": True, "gait_source": "biped_" + str(lr.get("source", "trot")),
+                    "forward_m": round(fwd, 3), "credible_walk": False,
+                    "note": "biped: forward locomotion via its best controller, not the multi-leg crawl wave gait"}
+    except Exception:  # noqa: BLE001 - fall through to the static-balance check
+        pass
     d = mujoco.MjData(m); mujoco.mj_resetData(m, d); mujoco.mj_forward(m, d)
     z0 = float(d.qpos[2]) or 1.0
     qref = d.qpos.copy()
