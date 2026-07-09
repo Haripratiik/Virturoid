@@ -439,15 +439,24 @@ def run_train_gene_job(args: dict, progress=None) -> dict:
     def say(stage, msg):
         if progress:
             progress({"stage": stage, "message": msg})
-    gene = S.get_robot(args["robot_id"])
-    if gene is None:
-        raise RuntimeError(f"no robot '{args['robot_id']}' held")
+    # Accept a HELD robot_id OR a prompt (compose one) — never crash with a raw KeyError on a missing robot_id.
+    rid = args.get("robot_id")
+    if rid:
+        gene = S.get_robot(rid)
+        if gene is None:
+            return {"error": f"no robot '{rid}' held; create_robot/submit_design first, or pass a 'prompt'"}
+    elif str(args.get("prompt") or "").strip():
+        from virturoid.services.morphology_composer import compose_robot
+        gene = compose_robot(str(args["prompt"]).strip(), ensure_walkable=True)
+        rid = S.put_robot(gene, prompt=str(args["prompt"]).strip(), label="train_gene")
+    else:
+        return {"error": "provide 'robot_id' (a held robot) or 'prompt' (to compose one) to train"}
     mode = args.get("mode", "gait_search")
     if mode == "gpu_rl":
         from virturoid.services.gpu_trainer import gpu_available, train_gene_on_gpu
         if gpu_available(timeout=20):
             say("train", "GPU reachable — MJX PPO on the held gene")
-            out = Path("build/agent_builds") / args["robot_id"] / "policy.npz"
+            out = Path("build/agent_builds") / rid / "policy.npz"
             out.parent.mkdir(parents=True, exist_ok=True)
             npz = train_gene_on_gpu(gene, out_path=str(out), iters=int(args.get("iters", 200)), envs=512,
                                     cpg=True, dr=True, real_actuator=True, sphere_feet=True,

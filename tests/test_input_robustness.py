@@ -58,5 +58,21 @@ class EditNumericCoercionTests(unittest.TestCase):
         self.assertIn("out of the safe range", str(cm.exception))
 
 
+class TrainGeneJobTests(unittest.TestCase):
+    """The Train-tab job worker must not crash on a missing robot_id (it did: raw KeyError)."""
+
+    def test_missing_robot_and_prompt_is_a_clean_error(self):
+        from virturoid.services.agent_design_tools import run_train_gene_job
+        r = run_train_gene_job({})
+        self.assertIn("error", r)
+        self.assertIn("robot_id", r["error"])
+
+    def test_unheld_robot_id_is_a_clean_error_not_keyerror(self):
+        from virturoid.services.agent_design_tools import run_train_gene_job
+        r = run_train_gene_job({"robot_id": "does_not_exist_xyz"})
+        self.assertIn("error", r)
+        self.assertNotIn("KeyError", r["error"])          # a teaching error, not a raw exception string
+
+
 if __name__ == "__main__":
     unittest.main()
