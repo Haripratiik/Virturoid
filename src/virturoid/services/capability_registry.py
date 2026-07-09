@@ -86,10 +86,25 @@ def _run_locomote(gene, params):
                            models_dir=params.get("models_dir", "models"))
     need = float(params.get("distance", 0.3))
     forward = float(r.get("forward_m", r.get("distance_m", 0.0)))
+    upright = bool(r.get("upright"))
+    # The learned/trot path leaves several fresh composed bodies STANDING (a fresh quad measured -0.02 m) even
+    # though the open-loop CRAWL gait credibly walks the SAME body ~0.5 m. So also try the crawl gait and take it
+    # when it's a genuine CREDIBLE WALK (un-gameable classify — never a rearing lurch) that travels further. This
+    # is the credible controller verify_robot already uses; the task layer must not score "can't walk" on a body
+    # that demonstrably walks. (A hexapod, whose crawl isn't credible, is unaffected -> honest fail stands.)
+    try:
+        from virturoid.services.gait_quality import classify
+        from virturoid.services.morph_policy import crawl_gait_rollout
+        cg = crawl_gait_rollout(gene, steps=int(params.get("horizon", 900)), record_qpos=True)
+        if classify(cg).startswith("CREDIBLE") and float(cg.get("forward", 0.0)) > forward:
+            forward, upright = float(cg["forward"]), True
+            r = {**r, "forward_m": round(forward, 3), "controller": "crawl_gait", "gait_verdict": classify(cg)}
+    except Exception:  # noqa: BLE001 - the crawl comparison is a fallback; never break the task on it
+        pass
     est = set()
-    if r.get("upright"):
+    if upright:
         est.add(PredicateOp.UPRIGHT)
-    if forward >= need and r.get("upright"):
+    if forward >= need and upright:
         est |= {PredicateOp.TRAVELED, PredicateOp.REACHED_GOAL}
     view = xml = None
     if params.get("record"):

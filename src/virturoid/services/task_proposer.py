@@ -24,8 +24,14 @@ def _fallback_task(prompt: str, gene) -> TaskSpec:
     # 1) the task the prompt ASKS FOR (verified against morphology downstream — mismatch -> honest infeasible)
     if has("maze"):
         skill, op = "solve_maze", PredicateOp.PATH_FOLLOWED
-    elif has("navigate", "drive to", "go to", "reach the", "patrol", "to the goal"):
-        skill, op = "navigate", PredicateOp.REACHED_GOAL
+    elif has("navigate", "drive to", "go to", "reach the", "patrol", "to the goal", "to the target"):
+        # GO-TO-GOAL intent: pick the skill the body actually HAS — a wheeled base NAVIGATES, a legged body
+        # WALKS there (both establish reached_goal). Was always 'navigate' (mobile-only), so a legged
+        # "walk to the goal" got wrongly rejected as infeasible even though it credibly walks.
+        if kind == "legged":
+            skill, op = "locomote", PredicateOp.REACHED_GOAL
+        else:
+            skill, op = "navigate", PredicateOp.REACHED_GOAL
     elif has("walk", "run", "gait", "locomot", "trot", "gallop", "crawl", "stride"):
         skill, op = "locomote", PredicateOp.TRAVELED
     elif has("spray", "paint", "coat", "cover the"):
