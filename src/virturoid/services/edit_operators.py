@@ -17,6 +17,15 @@ class EditError(Exception):
     """A localized edit could not be applied (bad group / factor / it broke a validity gate). Message teaches."""
 
 
+def _num(value, name, *, cast=float):
+    """Coerce a user-supplied edit arg to a number with a TEACHING error, never a raw ValueError. A tester who
+    passes {factor:'big'} should read 'factor must be a number', not a Python stack-trace string."""
+    try:
+        return cast(value)
+    except (TypeError, ValueError):
+        raise EditError(f"{name} must be a number, got {value!r}")
+
+
 # group name -> substrings that identify its segments (robust across the product's builders; a bespoke LLM gene
 # still names limbs recognizably). "all" matches everything.
 _GROUP_WORDS = {
@@ -79,9 +88,9 @@ def scale_group(gene, *, group: str = "legs", dims: str = "length", factor: floa
     'make it taller' -> scale_group(legs, length, ~1.2). Only the matched segments change; mass/BOM re-derive."""
     if dims not in _DIMS:
         raise EditError(f"dims must be one of {_DIMS}, got '{dims}'")
-    if not (0.2 <= float(factor) <= 5.0):
+    f = _num(factor, "factor")
+    if not (0.2 <= f <= 5.0):
         raise EditError(f"factor {factor} out of the safe range [0.2, 5.0]")
-    f = float(factor)
     g = _clone(gene)
     targets = segments_for_group(g, group)
     if not targets:
@@ -111,12 +120,13 @@ def scale_group(gene, *, group: str = "legs", dims: str = "length", factor: floa
 def set_height(gene, *, target_m: float):
     """Make the robot stand at ~``target_m`` by scaling the LEGS (the height-bearing group). Solves the factor
     from the current standing height, then defers to scale_group so the same gate/diff apply."""
+    tm = _num(target_m, "target_m")
+    if not (0.05 <= tm <= 5.0):
+        raise EditError(f"target height {target_m} m is implausible (expected 0.05-5.0 m)")
     cur = _standing_height(gene)
     if cur <= 1e-3:
         raise EditError("cannot measure the robot's current height to scale toward a target")
-    if not (0.05 <= float(target_m) <= 5.0):
-        raise EditError(f"target height {target_m} m is implausible (expected 0.05-5.0 m)")
-    factor = float(target_m) / cur
+    factor = tm / cur
     legs = segments_for_group(gene, "legs")
     return scale_group(gene, group=("legs" if legs else "all"), dims="length", factor=factor)
 
@@ -144,15 +154,16 @@ def set_material(gene, *, group: str = "all", material: str = "aluminum"):
 def set_leg_count(gene, *, n_pairs: int):
     """STRUCTURAL edit (confirm-gated by the caller): rebuild the body as an N-pair legged creature. This
     changes topology, so it is a bigger edit than a parameter tweak — flagged ``structural`` in the diff."""
-    if not (1 <= int(n_pairs) <= 8):
+    n = _num(n_pairs, "n_pairs", cast=int)
+    if not (1 <= n <= 8):
         raise EditError(f"n_pairs {n_pairs} out of range [1, 8]")
     from virturoid.services.anatomy_compiler import _generic_legged_graph, build_from_anatomy
     old_legs = len({s.name.rsplit("_", 1)[0] for s in segments_for_group(gene, "legs")}) or 0
-    g = build_from_anatomy(_generic_legged_graph(n_pairs=int(n_pairs)))
+    g = build_from_anatomy(_generic_legged_graph(n_pairs=n))
     if g is None:
         raise EditError("could not build a body at that leg count")
     _reground_and_gate(g, material=_dominant_material(gene))
-    return g, {"op": "set_leg_count", "n_pairs": int(n_pairs), "structural": True,
+    return g, {"op": "set_leg_count", "n_pairs": n, "structural": True,
                "note": "topology changed (legs rebuilt); torso/appendage customization not carried over"}
 
 
@@ -162,7 +173,8 @@ def set_payload(gene, *, payload_kg: float = 2.0, girth_scale: bool = True):
     own weight PLUS the payload, so each joint's required torque is scaled by ``(total_mass + payload)/total_mass``;
     re-grounding then selects BIGGER real motors for that torque and the BOM/mass rise honestly (a stronger robot
     costs more + weighs more). This is what turns 'make it lift 10 kg' into a real amendment, not just a wish."""
-    if not (0.1 <= float(payload_kg) <= 50.0):
+    pk = _num(payload_kg, "payload_kg")
+    if not (0.1 <= pk <= 50.0):
         raise EditError(f"payload {payload_kg} kg out of the safe range [0.1, 50.0]; "
                         "for heavier loads redesign with a larger actuator class")
     g = _clone(gene)
@@ -170,7 +182,7 @@ def set_payload(gene, *, payload_kg: float = 2.0, girth_scale: bool = True):
     if not actuated:
         raise EditError("this robot has no actuated joints, so it cannot be amended to carry a payload")
     total_mass = sum(float(s.mass_kg or 0.0) for s in g.segments) or 1.0
-    load_factor = (total_mass + float(payload_kg)) / total_mass
+    load_factor = (total_mass + pk) / total_mass
     changed = []
     for s in actuated:                                          # scale the joint's torque REQUIREMENT (not the last
         req0 = s.torque_req_nm if s.torque_req_nm is not None else abs(s.actuator_torque_nm or 8.0)
@@ -196,7 +208,7 @@ def set_payload(gene, *, payload_kg: float = 2.0, girth_scale: bool = True):
         if req is not None and float(s.actuator_torque_nm or 0.0) + 1e-6 < float(req):
             undersized.append({"segment": s.name, "required_nm": round(float(req), 1),
                                "best_motor_nm": round(float(s.actuator_torque_nm or 0.0), 1)})
-    out = {"op": "set_payload", "payload_kg": float(payload_kg), "load_factor": round(load_factor, 3),
+    out = {"op": "set_payload", "payload_kg": pk, "load_factor": round(load_factor, 3),
            "n_joints_upsized": len(changed), "changed": changed[:8], "total_mass_kg": [mass0, mass1],
            "note": "joint torque raised for the payload -> re-grounding upsized the real motors (mass/cost rose)"}
     if undersized:

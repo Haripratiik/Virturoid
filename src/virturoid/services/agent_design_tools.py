@@ -496,7 +496,11 @@ def run_task(args: dict) -> dict:
     gene = S.get_robot(args.get("robot_id"))
     if gene is None:
         return {"ok": False, "error": f"no robot '{args.get('robot_id')}'; submit_design/create_robot first"}
-    goal = args.get("goal") or (S.robot_meta(args["robot_id"]) or {}).get("prompt", "")
+    raw = args.get("goal")
+    if raw is not None and not str(raw).strip():           # an EXPLICIT empty/blank goal is a mistake, not a default
+        return {"ok": False, "error": "the goal is empty — give a plain-language task, e.g. 'walk to the goal' "
+                                      "or 'pick up the block and place it on the target'"}
+    goal = (str(raw).strip() if raw else "") or (S.robot_meta(args["robot_id"]) or {}).get("prompt", "")
     if not goal:
         return {"ok": False, "error": "provide goal: a plain-language task (e.g. 'navigate to the far corner')"}
     r = evaluate_task(str(goal), gene, llm="auto")             # llm None under NO_INTERNAL_LLM -> heuristic plan
