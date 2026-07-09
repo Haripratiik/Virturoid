@@ -52,6 +52,14 @@ def _link_to_urdf_lines(link_name: str, layout: LinkLayout | None, mesh_prefix: 
     ixx = round(mass * (half * half + length * length / 3.0) / 3.0, 6)
     izz = round(mass * (half * half) * 2.0 / 3.0, 6)
     center_z = round(length / 2.0, 4)
+    # VISUAL geometry: reference a mesh ONLY for the arm's known links (which ship a real STL); ANY other link
+    # (a quad/hexapod/humanoid torso/leg, etc.) gets a SELF-CONTAINED primitive box sized from the layout. The old
+    # code defaulted EVERY unrecognized link to `cad_arm_base.stl`, so every non-arm URDF referenced a nonexistent
+    # arm mesh -> the Studio 3D viewport (URDFLoader) failed on all of them (404s), and the export wasn't portable.
+    if mesh_name is not None:
+        visual_geom = f'<mesh filename="{mesh_prefix}/{mesh_name}" />'
+    else:
+        visual_geom = f'<box size="{round(2 * half, 5)} {round(2 * half, 5)} {round(max(length, 0.01), 5)}" />'
     return [
         f'  <link name="{escape(link_name)}">',
         "    <inertial>",
@@ -60,8 +68,8 @@ def _link_to_urdf_lines(link_name: str, layout: LinkLayout | None, mesh_prefix: 
         f'      <inertia ixx="{ixx}" ixy="0" ixz="0" iyy="{ixx}" iyz="0" izz="{izz}" />',
         "    </inertial>",
         "    <visual>",
-        '      <origin xyz="0 0 0" rpy="0 0 0" />',
-        f'      <geometry><mesh filename="{mesh_prefix}/{mesh_name}" /></geometry>',
+        f'      <origin xyz="0 0 {center_z if mesh_name is None else 0}" rpy="0 0 0" />',
+        f'      <geometry>{visual_geom}</geometry>',
         "    </visual>",
         # Collision is a PRIMITIVE box sized from the real layout (2*half wide, `length` along local z, centered at
         # length/2) -- NOT the visual mesh. This keeps the URDF SELF-CONTAINED: the physics + a mesh-less re-import
@@ -94,7 +102,9 @@ def _joint_to_urdf_lines(joint: RobotJoint, layout: LinkLayout | None) -> list[s
     ]
 
 
-def _mesh_name_for_link(link_name: str) -> str:
+def _mesh_name_for_link(link_name: str) -> str | None:
+    """The reference-arm links that ship a real STL. Returns None for any other link (quad/hexapod/humanoid/...),
+    which then renders as a self-contained primitive box — NEVER a nonexistent `cad_arm_base.stl` fallback."""
     mapping = {
         "base_link": "cad_arm_base.stl",
         "upper_link": "cad_upper_link.stl",
@@ -102,4 +112,4 @@ def _mesh_name_for_link(link_name: str) -> str:
         "wrist_link": "cad_wrist_camera_mount.stl",
         "gripper_link": "cad_gripper_mount.stl",
     }
-    return mapping.get(link_name, "cad_arm_base.stl")
+    return mapping.get(link_name)
