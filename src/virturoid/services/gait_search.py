@@ -57,28 +57,31 @@ def evaluate_gait(gene, params: dict, *, steps: int = 1200) -> dict:
     Fitness is UN-GAMEABLE: forward travel counts only when the body stays upright (height_ratio >= 0.6) and
     survives the full horizon; a fall (survived False / low height) scores negative so it can never win.
     """
+    from virturoid.services.gait_quality import classify
     from virturoid.services.morph_policy import crawl_gait_rollout
     p = _clip(params)
     r = crawl_gait_rollout(gene, steps=steps, freq=p["freq"], hip_amp=p["hip_amp"], knee_amp=p["knee_amp"],
-                           duty=p["duty"], kp=p["kp"], kd=p["kd"])
+                           duty=p["duty"], kp=p["kp"], kd=p["kd"], record_qpos=True)
     if not r.get("finite", True):
         return {"fitness": -10.0, "forward": 0.0, "height_ratio": 0.0, "survived": False,
-                "cadence": 0.0, "support_frac": 0.0, "credible": False}
+                "cadence": 0.0, "support_frac": 0.0, "credible": False, "verdict": "non-finite"}
     fwd = float(r.get("forward", 0.0))
     hr = float(r.get("height_ratio", 0.0))
     cad = float(r.get("cadence", 0.0))
     sup = float(r.get("support_frac", 0.0))
     survived = bool(r.get("survived"))
-    # UN-GAMEABLE: reward forward travel ONLY for a CREDIBLE WALK (real foot-lift cadence + stepping support +
-    # upright), matching verify_gait.classify's bar. A SLIDE (fast but feet barely lift) is heavily discounted so
-    # the search finds a stepping walk that goes far, not a slide that games raw distance.
-    credible = survived and hr >= 0.6 and cad >= 1.0 and sup >= 0.25
+    # UN-GAMEABLE: the fitness uses the SAME verdict as verify_robot (gait_quality.classify) so a gait the search
+    # rewards is one verify will also call CREDIBLE. That means: real cadence + stepping support + upright AND a
+    # LEVEL body (no rearing/pitching lurch that games raw distance). Forward is SIGNED, not abs() — a body that
+    # walks BACKWARD (the hexapod's failure mode) must score LOW, not tie a forward walk.
+    verdict = classify(r)
+    credible = verdict.startswith("CREDIBLE")
     if not survived or hr < 0.5:
         fitness = hr - 1.2                                    # fell -> negative
     else:
-        fitness = abs(fwd) * (1.0 if credible else 0.3)      # discount non-credible (slide/crouch) travel
+        fitness = fwd * (1.0 if credible else 0.3)           # signed forward; non-credible (slide/lurch) discounted
     return {"fitness": fitness, "forward": fwd, "height_ratio": hr, "survived": survived,
-            "cadence": cad, "support_frac": sup, "credible": credible}
+            "cadence": cad, "support_frac": sup, "credible": credible, "verdict": verdict}
 
 
 def search_gait(gene, *, generations: int = 8, pop: int = 24, elite_frac: float = 0.3,
