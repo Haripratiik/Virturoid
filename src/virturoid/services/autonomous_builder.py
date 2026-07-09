@@ -80,7 +80,14 @@ def build_robot_package_from_prompt(
     # which broke episode replay). The gene navigation package is clean -- no URDF (so it auto-plays the
     # Episode like the maze_nav demo) and task_type=navigation. Only manipulators keep the mesh-bearing
     # template writer below.
-    if not selection.species_exact or selection.requested_robot_class == "mobile_base":
+    # AERIAL / AQUATIC prompts MUST also go through the general engine: the requirements classifier is
+    # arm-biased (a 'drone' or 'fish' can score as a manipulator with species_exact=True), which would build an
+    # ARM. compose_robot in the general engine is where the quadcopter (aerial.py) and undulator (aquatic.py)
+    # routing lives, so a drone actually flies and a fish actually swims instead of shipping a mislabelled arm.
+    from virturoid.services.aerial import is_aerial_prompt
+    from virturoid.services.aquatic import is_aquatic_prompt
+    _special_env = is_aerial_prompt(requirements.prompt) or is_aquatic_prompt(requirements.prompt)
+    if _special_env or not selection.species_exact or selection.requested_robot_class == "mobile_base":
         return _build_via_general_engine(requirements, task, selection, output_dir, train)
 
     # The selector already traced the species tree to the nearest *buildable* species

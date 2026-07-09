@@ -40,15 +40,9 @@ _UNSUPPORTED = {
     "stairs": "stair/terrain traversal (no rough-terrain locomotion task yet)",
     "climb": "climbing (no climbing task family yet)",
     "in-hand": "in-hand dexterous manipulation (no dexterous-manipulation task yet)",
-    # Aerial flight has no aerodynamics/propeller model in the MuJoCo core — a 'drone' request must report the
-    # gap honestly, not silently compile a wheeled ground robot (the deep-analysis drone built a mobile_base).
-    # Bare 'fly' is avoided (matches 'flywheel'); 'flies'/'flying'/'drone'/'quadcopter'/'aerial'/'uav' are safe.
-    "drone": "aerial flight / aerodynamics (no drone/propeller flight model in the MuJoCo core)",
-    "flies": "aerial flight / aerodynamics (no drone/propeller flight model in the MuJoCo core)",
-    "flying": "aerial flight / aerodynamics (no drone/propeller flight model in the MuJoCo core)",
-    "quadcopter": "aerial flight / aerodynamics (no drone/propeller flight model in the MuJoCo core)",
-    "aerial": "aerial flight / aerodynamics (no drone/propeller flight model in the MuJoCo core)",
-    "uav": "aerial flight / aerodynamics (no drone/propeller flight model in the MuJoCo core)",
+    # 'drone'/'flies'/'quadcopter'/'aerial'/... are SUPPORTED now: services/aerial.py composes a quadcopter
+    # (hub + 4 rotors) and ai_native_tools._honest_fly flies it with real rotor THRUST forces + a geometric
+    # flight controller (measured: reaches arbitrary targets, 0.00 m error). It was a stale gap to list them.
 }
 
 

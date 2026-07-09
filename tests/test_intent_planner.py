@@ -12,8 +12,11 @@ class HeuristicRoutingTests(unittest.TestCase):
         # navigation AND flag the real gaps (maze task, frog morphology) instead of mis-building.
         plan = plan_build("a frog-like robot to solve and run through a maze", llm=None)
         self.assertEqual(plan.robot_class, "quadruped")        # nearest buildable to a frog
-        self.assertFalse(plan.buildable)                       # honest: we can't run a maze yet
-        self.assertTrue(any("maze" in g for g in plan.gaps))
+        self.assertFalse(plan.buildable)                       # honest: legged navigation isn't wired yet
+        # the maze TASK is supported now (solve_maze); the honest remaining gap is cross-morphology —
+        # navigation is wired for a mobile base, not a legged body (a real gap, flagged not mis-built).
+        self.assertTrue(plan.gaps, "an infeasible plan must carry an honest gap")
+        self.assertTrue(any("navigation" in g or "quadruped" in g for g in plan.gaps), plan.gaps)
 
     def test_sort_blocks_is_buildable_manipulator(self):
         plan = plan_build("sort red and blue blocks into matching bins", llm=None)
@@ -50,7 +53,9 @@ class LLMPlannerTests(unittest.TestCase):
         self.assertEqual(plan.source, "llm")
         self.assertEqual(plan.robot_class, "quadruped")
         self.assertFalse(plan.buildable)                       # registry disposes, not the LLM
-        self.assertTrue(any("maze" in g for g in plan.gaps))
+        # honest gap is cross-morphology (navigation wired for a mobile base, not a legged one), not the maze task
+        self.assertTrue(plan.gaps, "an infeasible plan must carry an honest gap")
+        self.assertTrue(any("navigation" in g or "quadruped" in g for g in plan.gaps), plan.gaps)
 
     def test_bad_llm_output_falls_back_to_heuristic(self):
         from virturoid.services.llm_client import MockLLM

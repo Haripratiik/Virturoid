@@ -548,6 +548,16 @@ def compose_robot(prompt: str, *, llm="auto", reach_m: float | None = None,
     a robot for a WALKING task opts in; a generic build pays no eval cost."""
     gene = _compose_robot_impl(prompt, llm=llm, reach_m=reach_m, payload_kg=payload_kg, plan=plan)
     try:
+        # An AERIAL prompt (drone/quadcopter/...) is a rotorcraft, not a legged/wheeled body: compose a
+        # quadcopter (central hub + 4 rotors + camera pod) that the geometric flight controller actually flies
+        # (see aerial.py / _honest_fly). A 'flying fish' stays aquatic — the undulatory swim tier is a better fit.
+        from virturoid.services.aerial import build_quadcopter, is_aerial_prompt
+        from virturoid.services.aquatic import is_aquatic_prompt as _is_aquatic
+        if is_aerial_prompt(prompt) and not _is_aquatic(prompt):
+            gene = build_quadcopter(prompt)
+    except Exception:  # noqa: BLE001 - aerial routing is value-add; never block a compose
+        pass
+    try:
         # An aquatic prompt (fish/eel/shark/...) is an UNDULATOR, not a legged/quad body. Compose a serial spine
         # (a snake) if the built body branches into legs, then laterally-compress it into a fish cross-section so
         # it generates REAL undulatory thrust (measured 0.06 m round -> 0.25 m flat: DOES NOT SWIM -> SWIMS).
@@ -584,7 +594,9 @@ def compose_robot(prompt: str, *, llm="auto", reach_m: float | None = None,
                         _scale_geo(s_.geometry, f_)
     except Exception:  # noqa: BLE001
         pass
-    if ensure_walkable:                                     # opt-in per-request walkability fallback (default OFF)
+    if ensure_walkable and (gene.robot_class or "") not in ("aerial", "aquatic"):
+        # opt-in per-request walkability fallback — but a drone (aerial) or a fish (aquatic) is NOT a walker;
+        # running the quad-walkability rewrite on one would mangle its purpose-built body.
         try:
             from virturoid.services.anatomy_compiler import ensure_walkable_quad
             gene = ensure_walkable_quad(gene, prompt)

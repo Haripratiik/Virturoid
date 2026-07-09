@@ -88,10 +88,10 @@ def _render_gene(gene, tag: str, *, azimuth: float = 50.0, elevation: float = -1
         return None
 
 
-# T7-lite: swim/fly INTENT words. Virturoid has no fluid/aerial physics tier yet, so a body meant to swim or
-# fly gets routed to a terrestrial body and a LAND verdict — honest to FLAG that the verdict is only a land
-# proxy, never to silently present it as the real thing. The full tier (MuJoCo fluid + rotor/thruster
-# actuators + swim-intent routing) is the larger T7.
+# swim/fly INTENT words. AQUATIC bodies are simulated in water (T7, _honest_swim) and AERIAL bodies are flown as
+# quadcopters (aerial.py, _honest_fly) — both real tiers now. These lists are the fall-through guard: if a
+# swim/fly prompt somehow reaches a LAND verdict, _flag_physics_envelope flags it as a land proxy rather than
+# letting it masquerade as the real capability.
 _AQUATIC_WORDS = ("swim", "swimming", "aquatic", "underwater", "submarine", "eel", "fish", "shark", "whale",
                   "dolphin", "manatee", "narwhal", "seahorse", "jellyfish", "octopus", "squid", "stingray")
 _AERIAL_WORDS = ("fly", "flying", "aerial", "drone", "quadcopter", "helicopter", "hover", "aircraft", "winged")
@@ -105,18 +105,20 @@ def _env_words(prompt: str, words) -> bool:
 
 
 def _flag_physics_envelope(res: dict, prompt: str, kind: str) -> None:
-    """If the prompt implies a swim/fly envelope we don't yet simulate, annotate the verdict honestly instead
-    of letting a land-gait verdict masquerade as the real capability (T7-lite)."""
-    if res.get("kind") == "aquatic":
-        return                                                 # T7: already simulated in water — the swim verdict stands
+    """If the prompt implies a swim/fly envelope but the body fell through to a LAND verdict, annotate it
+    honestly instead of letting a land-gait verdict masquerade as the real capability. AQUATIC bodies are
+    simulated in water (T7) and AERIAL bodies are flown as quadcopters (aerial.py) — when either was actually
+    simulated, ``res['kind']`` is already 'aquatic'/'aerial' and the verdict stands."""
+    if res.get("kind") in ("aquatic", "aerial"):
+        return                                                 # already simulated in its own medium — verdict stands
     env = "aquatic" if _env_words(prompt, _AQUATIC_WORDS) else ("aerial" if _env_words(prompt, _AERIAL_WORDS) else None)
     if env and kind in ("legged", "mobile"):
         res["physics_envelope"] = env
         res["credible_walk"] = False
         res["envelope_note"] = (
-            f"this prompt implies a {env.upper()} body; Virturoid simulates AQUATIC bodies in water (T7) but has "
-            f"no AERIAL tier yet, so this {env} verdict is a LAND-BASED PROXY — treat it as unsupported-envelope." if env == "aerial"
-            else f"this prompt implies an aquatic body; it was simulated in water (see swim_m).")
+            "this prompt implies an AERIAL body; Virturoid flies quadcopters (build a drone and verify it), but "
+            "this body was composed as a terrestrial one, so the verdict above is a LAND-BASED PROXY." if env == "aerial"
+            else "this prompt implies an aquatic body; it was simulated in water (see swim_m).")
 
 
 def _swim_model(gene):
@@ -177,6 +179,81 @@ def _honest_swim(gene, *, steps: int = 2500) -> dict:
     return {"kind": "aquatic", "verdict": verdict, "survived": True, "swim_m": round(swim, 3),
             "n_actuators": int(m.nu),
             "note": "REAL MuJoCo fluid sim (water + neutral buoyancy); thrust is body/geometry-dependent"}
+
+
+def _honest_fly(gene, *, target=(0.0, 0.0, 1.2), steps: int = 2000) -> dict:
+    """The honest FLY verdict — put the quadcopter in the air and drive it with the geometric flight controller
+    (four rotor THRUST forces along body-up; desired-acceleration -> desired-attitude -> rotation-matrix attitude
+    error -> body torque -> rotor allocation). REAL MuJoCo rigid-body dynamics + gravity; the ONLY added physics
+    is the rotor thrust a real quadcopter's motors produce. Like the gait/swim verdicts it never lies: a body
+    that cannot reach and hold its target honestly reads DOES NOT FLY. Attitude torque is inertia-normalized
+    (``I_assembly @ alpha_des``), so the same gains fly any drone size."""
+    import mujoco
+    import numpy as np
+
+    from virturoid.services.aerial import FLY_GAINS
+    from virturoid.services.gene_compiler import compile_gene_to_mjcf
+    try:
+        m = mujoco.MjModel.from_xml_string(compile_gene_to_mjcf(gene, include_floor=True, spawn_z=0.18))
+    except Exception as exc:  # noqa: BLE001
+        return {"kind": "aerial", "verdict": f"could not build flight model ({type(exc).__name__})", "flew_m": 0.0}
+    d = mujoco.MjData(m); mujoco.mj_resetData(m, d); mujoco.mj_forward(m, d)
+    bid, is_free = _base_body_id(m)
+    if not is_free:
+        return {"kind": "aerial", "verdict": "NOT A FLOATING BODY (cannot fly)", "survived": True, "flew_m": 0.0}
+    md = getattr(gene, "metadata", None) or {}
+    offs = md.get("rotor_offsets") or [[0.16, 0.16], [-0.16, 0.16], [-0.16, -0.16], [0.16, -0.16]]
+    L = float(md.get("rotor_L") or max(abs(offs[0][0]), 1e-3))
+    mass = float(sum(m.body_mass)); g = 9.81
+    # assembly rotational inertia (body frame) = the angular block of the free joint's 6x6 mass matrix
+    M = np.zeros((m.nv, m.nv)); mujoco.mj_fullM(m, M, d.qM)
+    adr = int(m.jnt_dofadr[[j for j in range(m.njnt) if m.jnt_type[j] == mujoco.mjtJoint.mjJNT_FREE][0]])
+    I_ang = M[adr + 3:adr + 6, adr + 3:adr + 6].copy()
+    kp = np.array(FLY_GAINS["kp"]); kd = np.array(FLY_GAINS["kd"]); KR = FLY_GAINS["KR"]; KW = FLY_GAINS["KW"]
+    pref = np.array(target, float); tilts, zs, dists = [], [], []
+    for t in range(steps):
+        p = d.qpos[0:3].copy(); v = d.qvel[0:3].copy()
+        R = d.xmat[bid].reshape(3, 3).copy(); omega = d.qvel[adr + 3:adr + 6].copy()
+        a_des = kp * np.clip(pref - p, -FLY_GAINS["vcap"], FLY_GAINS["vcap"]) - kd * v + np.array([0, 0, g])
+        a_des[2] = max(a_des[2], 2.0)                          # keep positive collective (never command < ~0.2 g)
+        b3d = a_des / (np.linalg.norm(a_des) + 1e-9)           # desired body-up (thrust) direction
+        b2d = np.cross(b3d, np.array([1.0, 0.0, 0.0])); b2d /= (np.linalg.norm(b2d) + 1e-9)
+        Rd = np.column_stack([np.cross(b2d, b3d), b2d, b3d])   # desired attitude (yaw fixed to +x heading)
+        eRm = 0.5 * (Rd.T @ R - R.T @ Rd)
+        eR = np.array([eRm[2, 1], eRm[0, 2], eRm[1, 0]])       # vee(attitude error), body frame
+        thrust = mass * float(a_des @ R[:, 2])                 # collective, projected onto the CURRENT body-up
+        tau = I_ang @ (-KR * eR - KW * omega)                  # inertia-normalized attitude torque (body frame)
+        T4 = thrust / 4.0; tr = tau[0] / (4 * L); tp = tau[1] / (4 * L)
+        f = [T4 + tr - tp, T4 + tr + tp, T4 - tr + tp, T4 - tr - tp]   # X-config rotor allocation
+        d.qfrc_applied[:] = 0
+        up = R[:, 2]
+        for i, (ox, oy) in enumerate(offs):
+            pt = d.xpos[bid] + R @ np.array([ox, oy, 0.0])     # rotor world position
+            mujoco.mj_applyFT(m, d, up * max(0.0, float(f[i])), np.zeros(3), pt, bid, d.qfrc_applied)
+        mujoco.mj_step(m, d)
+        if not np.all(np.isfinite(d.qpos)):
+            return {"kind": "aerial", "verdict": f"UNSTABLE (diverged at {t * m.opt.timestep:.1f}s) — DOES NOT FLY",
+                    "survived": False, "flew_m": 0.0}
+        if t % 5 == 0:
+            zs.append(float(p[2])); dists.append(float(np.linalg.norm(pref - p)))
+            roll = np.arctan2(R[2, 1], R[2, 2]); pitch = np.arctan2(-R[2, 0], np.hypot(R[2, 1], R[2, 2]))
+            tilts.append(float(max(abs(roll), abs(pitch))))
+    fp = d.qpos[0:3]
+    dist = float(np.linalg.norm(pref - fp))
+    n = len(zs)
+    airborne = n > 200 and min(zs[n // 4:]) > 0.5              # stayed off the ground for the last 3/4 of the run
+    settled = float(np.mean(dists[-40:])) if len(dists) >= 40 else dist   # held near target at the end
+    max_tilt_deg = float(np.degrees(max(tilts))) if tilts else 0.0
+    reached = airborne and settled < 0.30
+    verdict = (f"FLIES ({dist:.2f} m to target, holds level at {max_tilt_deg:.0f} deg peak bank)" if reached
+               else (f"HOVERS but does not reach target ({settled:.2f} m off)" if airborne
+                     else f"DOES NOT FLY (never sustained altitude, {settled:.2f} m off target)"))
+    return {"kind": "aerial", "verdict": verdict, "survived": bool(airborne),
+            "flew_m": round(float(np.linalg.norm(fp[:2])), 3), "dist_to_target": round(dist, 3),
+            "final_pos": [round(float(x), 3) for x in fp], "target": [round(float(x), 3) for x in pref],
+            "max_tilt_deg": round(max_tilt_deg, 1), "reached_target": bool(reached),
+            "note": "REAL MuJoCo rigid-body + gravity; four rotor thrust forces (a quadcopter's actual actuation), "
+                    "geometric flight controller, inertia-normalized attitude"}
 
 
 def _honest_gait(gene, *, steps: int = 1200, render: bool = False, tag: str = "gait") -> dict:
@@ -532,9 +609,16 @@ def verify_robot(args: dict) -> dict:
             scene_note = (f"composed into scene '{sid}'" if world_xml
                           else f"scene '{sid}' had no obstacles or would not compose — bare floor")
     _prompt = (S.robot_meta(args["robot_id"]) or {}).get("prompt", "")
+    _meta = getattr(gene, "metadata", None) or {}
+    _aerial = bool(_meta.get("rotor_offsets")) or getattr(gene, "robot_class", "") == "aerial"
     _aquatic = _env_words(_prompt, _AQUATIC_WORDS)
     try:
-        if _aquatic and kind in ("legged", "mobile"):
+        if _aerial:
+            # AERIAL tier: a quadcopter is FLOWN with real rotor thrust forces + a geometric flight controller
+            # (aerial.py / _honest_fly) — real MuJoCo rigid-body dynamics + gravity, never a land proxy.
+            res = _honest_fly(gene, steps=int(args.get("steps", 1600 if quick else 2200)))
+            res["credible_walk"] = False
+        elif _aquatic and kind in ("legged", "mobile"):
             # T7: a swim-intent body is SIMULATED IN WATER (real MuJoCo fluid), not given a land proxy.
             res = _honest_swim(gene, steps=int(args.get("steps", 1500 if quick else 2500)))
             res["credible_walk"] = False

@@ -61,13 +61,16 @@ class VerifyByKindTests(unittest.TestCase):
         self.assertFalse(v["credible_walk"])
         self.assertTrue(v["verdict"].startswith("SWIMS") or v["verdict"].startswith("DOES NOT SWIM"))
 
-    def test_aerial_intent_still_flagged_no_aerial_tier(self):
-        # aerial has no physics tier yet -> still honestly flagged as an unsupported land proxy.
+    def test_aerial_intent_is_flown_not_land_proxied(self):
+        # aerial is a REAL tier now: a drone prompt composes a quadcopter that is FLOWN with rotor thrust +
+        # a geometric flight controller (kind=aerial + a flight verdict), NOT flagged as a land proxy.
         rid = self._call("create_robot", {"prompt": "a quadcopter drone"})["robot_id"]
         v = self._call("verify_robot", {"robot_id": rid, "mode": "quick"})
-        self.assertEqual(v.get("physics_envelope"), "aerial")
+        self.assertEqual(v.get("kind"), "aerial")
         self.assertFalse(v["credible_walk"])
-        self.assertIn("proxy", v["envelope_note"].lower())
+        self.assertNotIn("physics_envelope", v)                  # flown in-tier, not an unsupported land proxy
+        self.assertTrue(v["verdict"].startswith("FLIES") or "FLY" in v["verdict"].upper(),
+                        f"expected a flight verdict, got {v['verdict']!r}")
 
 
 if __name__ == "__main__":
