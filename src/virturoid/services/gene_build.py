@@ -310,6 +310,10 @@ def build_gene_package(gene: RobotGene, prompt: str, output_dir: Path, scene_cou
     kind = robot_kind(gene)
     if kind == "legged":
         return _build_legged_package(gene, prompt, output_dir, controller_params)
+    if kind in ("aerial", "aquatic"):
+        # a drone flies / a fish swims — score on that free-motion task, NOT pick-place (which reported a drone
+        # 0% at generic_manipulation because it fell through to the manipulation path with no gripper).
+        return _build_freemotion_package(gene, prompt, output_dir, controller_params)
     if kind == "mobile":
         # A wheeled mobile base navigates — it has no gripper, so it must NOT fall through to the pick-place
         # path. It builds its real floor course (navigation route or maze, chosen from the prompt by the
@@ -655,6 +659,46 @@ def _build_navigation_package(gene: RobotGene, prompt: str, output_dir: Path, co
     _maybe_write_summaries(output_dir)                         # spec sheet + deployment guide (reports/)
     _maybe_write_spec_compliance(output_dir, gene, prompt)     # requested-vs-achieved spec report (§4.8E)
     _emit_mvp_artifacts(gene, output_dir, task_type=task.task_type, package_type="gene_navigation_package")
+    summary["readiness"] = _emit_readiness(gene, output_dir)
+    return summary
+
+
+def _build_freemotion_package(gene: RobotGene, prompt: str, output_dir: Path, controller_params: dict | None) -> dict:
+    """Build + evaluate an AERIAL (flight) or AQUATIC (swim) gene on the free-motion task its morphology implies
+    — a quadcopter flies to waypoints, an undulator swims forward (``task_matched_eval.evaluate_robot`` ->
+    _honest_fly / _honest_swim). No floor course + no pick-place: these bodies move through air/water, so the
+    package must NOT fall through to the manipulation path (which scored a drone 0% at generic_manipulation)."""
+    from virturoid.services.task_matched_eval import evaluate_robot
+    output_dir = Path(output_dir)
+    (output_dir / "robot").mkdir(parents=True, exist_ok=True)
+    _write_genome_and_urdf(gene, output_dir)
+    # a single bare scene (the robot in free space) so the viewer has something to render
+    rel = "simulation/mujoco/scenes/variation/free.xml"
+    (output_dir / rel).parent.mkdir(parents=True, exist_ok=True)
+    (output_dir / rel).write_text(compile_gene_with_scene(gene, []), encoding="utf-8")
+    (output_dir / "simulation" / "mujoco" / "compiled_scene_index.json").write_text(json.dumps(
+        {"id": f"compiled_{gene.id}", "robot_genome_id": gene.id, "backend": "mujoco", "scene_count": 1,
+         "scenes": [{"scene_set_id": f"sceneset_{gene.id}", "scene_id": "free", "purpose": "variation",
+                     "mujoco_xml": rel, "object_count": 0}]}, indent=2), encoding="utf-8")
+    try:
+        res = evaluate_robot(gene, prompt=prompt, controller_params=controller_params)
+        task_type = str(res.get("task") or "flight")
+        success_rate = float(res.get("value", 0.0))
+        detail = res.get("detail", {})
+        status = "attained" if success_rate > 0 else "not_attained"
+    except Exception as exc:  # noqa: BLE001 - eval is best-effort; the compiled scene is still the rendered artifact
+        task_type, success_rate, detail, status = ("flight", 0.0, {"error": str(exc)}, "eval_unavailable")
+    summary = {"task_type": task_type, "species": gene.species, "robot_class": gene.robot_class,
+               "success_rate": round(success_rate, 3), "status": status, "detail": detail}
+    cad = _export_real_cad(gene, output_dir)
+    summary["cad_real"] = bool(cad)
+    summary["cad_part_count"] = (cad or {}).get("part_count", 0)
+    (output_dir / "reports").mkdir(parents=True, exist_ok=True)
+    (output_dir / "reports" / "gene_evaluation_report.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    summary["bom"] = _emit_bom(gene, output_dir, task=prompt)
+    _maybe_write_summaries(output_dir)
+    _maybe_write_spec_compliance(output_dir, gene, prompt)
+    _emit_mvp_artifacts(gene, output_dir, task_type=task_type, package_type="gene_freemotion_package")
     summary["readiness"] = _emit_readiness(gene, output_dir)
     return summary
 

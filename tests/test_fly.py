@@ -113,6 +113,24 @@ class FlightTests(unittest.TestCase):
         self.assertEqual(ev["task"], "flight")
         self.assertGreater(ev["value"], 0.6, f"a working quadcopter reaches most waypoints: {ev}")
 
+    def test_drone_package_is_scored_on_flight_not_manipulation(self):
+        # the build pipeline must score a drone on FLIGHT, not fall through to the manipulation path
+        # (which reported a drone "0% at generic_manipulation" -- it has no gripper).
+        import glob
+        import json
+        import tempfile
+        from pathlib import Path
+
+        from virturoid.services.autonomous_builder import build_robot_package_from_prompt
+        out = Path(tempfile.mkdtemp()) / "drone"
+        build_robot_package_from_prompt("a quadcopter drone that flies to a target", out)
+        rep = glob.glob(str(out) + "/**/gene_evaluation_report.json", recursive=True)
+        self.assertTrue(rep, "a drone build must write an evaluation report")
+        ev = json.loads(Path(rep[0]).read_text())
+        self.assertEqual(ev["task_type"], "flight", f"a drone must be scored on flight: {ev}")
+        self.assertNotIn("manipulation", str(ev.get("task_type", "")))
+        self.assertGreater(ev["success_rate"], 0.6, f"a working quadcopter attains flight: {ev}")
+
     def test_drone_ros2_export_is_flight_honest(self):
         # a jointless airframe must NOT ship a joint-trajectory "ReachController"/"trot" node as if it flies it;
         # the package must document the real deploy path (autopilot + MAVROS) + carry the flight-controller ref.
