@@ -45,6 +45,19 @@ class RestStanceTests(unittest.TestCase):
         self.assertGreater(float(np.abs(q_rest - q_flat).max()), 0.3,
                            "the rest reset must bend the legs (some joint moves well off qpos0)")
 
+    def test_humanoid_reports_standing_not_a_flat_fall(self):
+        # a biped that the multi-leg crawl gait fells must honestly report STANDS (static balance) with dynamic
+        # walking flagged as the learned-control frontier -- not a bare 'FELL' implying it can't balance at all.
+        from virturoid.services import session_state as S
+        from virturoid.services.ai_native_tools import create_robot, verify_robot
+        S.reset()
+        rid = create_robot({"prompt": "a humanoid robot"})["robot_id"]
+        v = verify_robot({"robot_id": rid, "mode": "quick"})
+        self.assertEqual(v.get("gait_source"), "biped_stand")
+        self.assertIn("STANDS", v["verdict"])
+        self.assertIn("frontier", v["verdict"])                 # honestly names the deferred learned-walk frontier
+        self.assertFalse(v.get("credible_walk"))                # never overclaims a walk
+
     def test_a_quad_still_walks(self):
         # the fix must not regress the quad (its rest pose is a valid stance; default walk stays credible)
         from virturoid.services.gait_quality import classify

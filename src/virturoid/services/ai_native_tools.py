@@ -292,6 +292,48 @@ def _honest_serpentine(gene, *, steps: int = 2000, render: bool = False, tag: st
     return out
 
 
+def _honest_biped(gene, *, steps: int = 1500) -> dict | None:
+    """A BIPED (2-legged) body: honestly report whether it STANDS (static balance, PD-holding its stance) vs the
+    multi-leg crawl gait that just FELLS it (that wave gait is for >=4 legs). Returns None if the body isn't a
+    biped or can't even stand (let the fall verdict stand). A humanoid STANDS statically but DYNAMIC bipedal
+    WALKING is a learned-control frontier (a scripted gait can't balance a walking biped) — say exactly that,
+    rather than a flat 'FELL' that implies it can't balance at all."""
+    import mujoco
+    import numpy as np
+
+    from virturoid.services.appendage_map import build_appendage_map
+    from virturoid.services.gene_compiler import compile_gene_to_mjcf, standing_spawn_z
+    m = mujoco.MjModel.from_xml_string(compile_gene_to_mjcf(gene, include_floor=True, spawn_z=standing_spawn_z(gene)))
+    if build_appendage_map(m).n_legs != 2 or m.nu == 0:
+        return None                                              # not a biped -> let the normal gait verdict stand
+    d = mujoco.MjData(m); mujoco.mj_resetData(m, d); mujoco.mj_forward(m, d)
+    z0 = float(d.qpos[2]) or 1.0
+    qref = d.qpos.copy()
+    qadr = [m.jnt_qposadr[int(m.actuator_trnid[u, 0])] for u in range(m.nu)]
+    vadr = [m.jnt_dofadr[int(m.actuator_trnid[u, 0])] for u in range(m.nu)]
+    frc = m.actuator_forcerange[:, 1].copy(); frc[frc <= 0] = 8.0
+    upr_frac = 0
+    for t in range(steps):                                       # PD-hold the standing stance (static balance)
+        for k in range(m.nu):
+            d.ctrl[k] = float(np.clip(80.0 * (qref[qadr[k]] - d.qpos[qadr[k]]) - 4.0 * d.qvel[vadr[k]],
+                                      -frc[k], frc[k]))
+        mujoco.mj_step(m, d)
+        if not np.all(np.isfinite(d.qpos)):
+            break
+        q = d.qpos[3:7]; upr = 1.0 - 2.0 * (float(q[1]) ** 2 + float(q[2]) ** 2)
+        if float(d.qpos[2]) > 0.6 * z0 and upr > 0.7:
+            upr_frac += 1
+    stands = upr_frac > 0.8 * steps
+    if not stands:
+        return None                                              # can't even stand -> the honest FALL verdict stands
+    return {"kind": "legged", "verdict": "STANDS (static balance); dynamic bipedal walking is a learned-control "
+                                         "frontier (a scripted gait can't balance a walking biped — needs a "
+                                         "learned policy / the GPU trainer)",
+            "survived": True, "gait_source": "biped_stand", "forward_m": 0.0, "credible_walk": False,
+            "upright_frac": round(upr_frac / max(1, steps), 3),
+            "note": "biped: static balance holds; the multi-leg crawl wave gait is the wrong controller for 2 legs"}
+
+
 def _honest_gait(gene, *, steps: int = 1200, render: bool = False, tag: str = "gait") -> dict:
     """Run the general scripted gait and return the ANTI-GOODHART verdict (survived+cadence+support+upright+
     forward, forward == actual displacement) — the honesty gate as a tool result, never a raw qpos dump."""
@@ -341,6 +383,16 @@ def _honest_gait(gene, *, steps: int = 1200, render: bool = False, tag: str = "g
            "speed_mps": round(float(r.get("speed", 0)), 3), "cadence": round(float(r.get("cadence", 0)), 1),
            "support_frac": round(float(r.get("support_frac", 0)), 2), "height_ratio": r.get("height_ratio"),
            "roll_max_deg": o.get("roll_max"), "pitch_max_deg": o.get("pitch_max")}
+    # BIPED honesty: the multi-leg crawl wave gait FELLS a 2-legged body (wrong controller). If it's a biped that
+    # STANDS statically, report that + flag dynamic walking as the learned-control frontier — not a flat 'FELL'
+    # implying it can't balance at all. Only runs when the crawl was NOT a credible walk (walkers are unaffected).
+    if not str(out["verdict"]).startswith("CREDIBLE"):
+        try:
+            biped = _honest_biped(gene)
+            if biped is not None:
+                return biped
+        except Exception:  # noqa: BLE001 - the biped-stand check is value-add; keep the gait verdict on any error
+            pass
     # FLYWHEEL SELF-UPDATE: a CREDIBLE walk is a working controller -> bank it so future similar bodies recall it
     # (the compounding loop, now driven by ordinary verify, not just explicit training). Best-effort + keep-best.
     if str(out["verdict"]).startswith("CREDIBLE") and out["survived"]:
