@@ -65,6 +65,18 @@ class FlightTests(unittest.TestCase):
         self.assertIn("FLIES", r["verdict"])
         self.assertLess(r["max_tilt_deg"], 8.0, "a stable hover stays near level")
 
+    def test_default_flight_verdict_requires_lateral_translation(self):
+        # UN-GAMEABLE: the product's DEFAULT flight verdict (verify_robot -> _honest_fly with no target) must require
+        # REAL lateral flight — bank + translate + arrive — not a straight-up hover a non-translating body could fake.
+        # (The old default target was (0,0,1.2), directly overhead: 0 deg bank, 0 m horizontal -> a hover passed it.)
+        from virturoid.services.aerial import build_quadcopter
+        from virturoid.services.ai_native_tools import _honest_fly
+        r = _honest_fly(build_quadcopter("a drone"), steps=1600)          # NO target -> the (now lateral) default
+        self.assertTrue(r["reached_target"], f"the drone must reach the default lateral waypoint: {r}")
+        self.assertGreater(r["flew_m"], 0.8, f"the default verdict must demonstrate real horizontal flight: {r}")
+        self.assertGreater(r["max_tilt_deg"], 4.0, "translating to a lateral waypoint REQUIRES banking, not a hover")
+        self.assertIn("FLIES", r["verdict"])
+
     def test_quadcopter_flies_to_waypoints(self):
         from virturoid.services.aerial import build_quadcopter
         from virturoid.services.ai_native_tools import _honest_fly

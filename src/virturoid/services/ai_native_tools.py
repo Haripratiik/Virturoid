@@ -181,13 +181,17 @@ def _honest_swim(gene, *, steps: int = 2500) -> dict:
             "note": "REAL MuJoCo fluid sim (water + neutral buoyancy); thrust is body/geometry-dependent"}
 
 
-def _honest_fly(gene, *, target=(0.0, 0.0, 1.2), steps: int = 2000) -> dict:
+def _honest_fly(gene, *, target=(1.5, 0.0, 1.2), steps: int = 2000) -> dict:
     """The honest FLY verdict — put the quadcopter in the air and drive it with the geometric flight controller
     (four rotor THRUST forces along body-up; desired-acceleration -> desired-attitude -> rotation-matrix attitude
     error -> body torque -> rotor allocation). REAL MuJoCo rigid-body dynamics + gravity; the ONLY added physics
     is the rotor thrust a real quadcopter's motors produce. Like the gait/swim verdicts it never lies: a body
     that cannot reach and hold its target honestly reads DOES NOT FLY. Attitude torque is inertia-normalized
-    (``I_assembly @ alpha_des``), so the same gains fly any drone size."""
+    (``I_assembly @ alpha_des``), so the same gains fly any drone size.
+
+    The DEFAULT target is a LATERAL waypoint (fly forward 1.5 m + up), so the verdict tests real flight — takeoff,
+    BANK, translate, arrive, hold — not a straight-up hover a non-translating body could fake (un-gameable: a
+    hover-only body reaches ~0 m of a lateral waypoint and honestly reads HOVERS/DOES NOT FLY)."""
     import mujoco
     import numpy as np
 
@@ -245,7 +249,9 @@ def _honest_fly(gene, *, target=(0.0, 0.0, 1.2), steps: int = 2000) -> dict:
     settled = float(np.mean(dists[-40:])) if len(dists) >= 40 else dist   # held near target at the end
     max_tilt_deg = float(np.degrees(max(tilts))) if tilts else 0.0
     reached = airborne and settled < 0.30
-    verdict = (f"FLIES ({dist:.2f} m to target, holds level at {max_tilt_deg:.0f} deg peak bank)" if reached
+    flew = float(np.linalg.norm(fp[:2]))                       # horizontal translation from spawn (un-gameable-by-hover)
+    verdict = (f"FLIES ({flew:.2f} m horizontal to waypoint, arrived {dist:.2f} m off at {max_tilt_deg:.0f} deg bank)"
+               if reached
                else (f"HOVERS but does not reach target ({settled:.2f} m off)" if airborne
                      else f"DOES NOT FLY (never sustained altitude, {settled:.2f} m off target)"))
     return {"kind": "aerial", "verdict": verdict, "survived": bool(airborne),
