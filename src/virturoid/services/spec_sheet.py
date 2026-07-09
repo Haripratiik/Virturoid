@@ -69,7 +69,10 @@ def build_spec_sheet(output_dir) -> dict:
             mt = re.search(r"peak\s+([\d.]+)\s*Nm", line.get("detail", ""))
             if mt:
                 torques.append(float(mt.group(1)))
-    actuator_types = sorted({line["part"] for line in lines if line.get("category") == "actuator"})
+    # propulsion = whatever moves THIS body: joint actuators (arm/legged), drive motors (mobile), rotors (aerial)
+    # — so a drone's spec shows its rotors and a rover's its drive motors, not an empty actuation section.
+    actuator_types = sorted({line["part"] for line in lines
+                             if line.get("category") in ("actuator", "drive_motor", "rotor")})
     sensors = sorted({line["part"] for line in lines
                       if line.get("category") in ("camera", "imu", "lidar", "sensor", "force_torque", "depth")})
     compute = sorted({line["part"] for line in lines if line.get("category") == "compute"})
