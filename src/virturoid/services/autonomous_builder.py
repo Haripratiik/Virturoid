@@ -206,6 +206,14 @@ def _build_via_general_engine(requirements, task, selection, output_dir: Path, t
 
     species = getattr(gene, "species", None) or selection.requested_species
     robot_class = getattr(gene, "robot_class", None) or selection.requested_robot_class
+    # Report the builder HONESTLY. When the selector picked a template of the SAME class as what we built (e.g.
+    # a mobile_base navigation prompt -> the mobile template), keep it. When it was TRACED to a mismatched class
+    # (a quadruped is not buildable-by-template yet, so is_buildable traced it to the ARM), name the general
+    # engine instead of the arm — otherwise the report contradicts its own "real morphology, not an arm fallback"
+    # note. Nothing resolves this id against the catalog (stored + displayed only).
+    _sel = getattr(selection, "selected_template", None)
+    engine_template_id = (_sel.id if _sel is not None and getattr(_sel, "robot_class", None) == robot_class
+                          else f"general_engine.{robot_class}")
     task_type = summary.get("task_type", task.task_type) if isinstance(summary, dict) else task.task_type
     has_scenes = (written_dir / "simulation" / "mujoco" / "compiled_scene_index.json").exists()
 
@@ -227,7 +235,7 @@ def _build_via_general_engine(requirements, task, selection, output_dir: Path, t
     try:
         write_robot_package_contract(
             written_dir, package_type="general_engine_package", robot_class=robot_class, species=species,
-            morphology_template_id=selection.selected_template.id, task_type=task_type,
+            morphology_template_id=engine_template_id, task_type=task_type,
             artifacts=artifacts, training=None,
         )
     except Exception:  # noqa: BLE001
@@ -238,7 +246,7 @@ def _build_via_general_engine(requirements, task, selection, output_dir: Path, t
         prompt=requirements.prompt,
         requirements_id=requirements.id,
         task_type=task_type,
-        selected_morphology_template_id=selection.selected_template.id,
+        selected_morphology_template_id=engine_template_id,
         selected_robot_class=robot_class,
         selected_species=species,
         package_type="general_engine_package",

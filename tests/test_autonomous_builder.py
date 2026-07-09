@@ -65,6 +65,19 @@ class AutonomousBuilderTests(unittest.TestCase):
             self.assertTrue((output_dir / "training" / "training_run_config.json").exists())
             self.assertTrue((output_dir / "reports" / "package_validation_report.json").exists())
 
+    def test_legged_build_reports_general_engine_not_the_arm_it_traced_through(self):
+        # A quadruped isn't buildable-by-template yet, so the selector traces it to the ARM to route it to the
+        # general engine. The reported builder must then name the GENERAL ENGINE, not the arm — otherwise the
+        # package contradicts its own "real morphology, not an arm fallback" note (a tester-confusing mislabel).
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result = build_robot_package_from_prompt(
+                "a quadruped robot dog that walks", Path(tmpdir) / "quad_package")
+            self.assertEqual(result.selected_robot_class, "quadruped")
+            tid = result.selected_morphology_template_id
+            self.assertTrue(tid.startswith("general_engine"), f"legged build must report the engine, got {tid}")
+            self.assertNotIn("arm", tid)
+            self.assertNotIn("manipulator", tid)
+
     def test_generic_builder_routes_navigation_prompt_to_mobile_base_package(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             result = build_robot_package_from_prompt(
