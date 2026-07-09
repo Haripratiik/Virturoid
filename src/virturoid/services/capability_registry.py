@@ -287,6 +287,19 @@ def _run_solve_maze(gene, params):
     return SkillOutcome("solve_maze", ok, est, 1.0 if ok else 0.0, r)
 
 
+def _run_fly(gene, params):
+    """Fly an aerial body (quadcopter) to a target with the geometric flight controller (see ai_native_tools.
+    _honest_fly). A 2-D goal is lifted to a default cruise altitude; success = the drone REACHES + holds the
+    target (un-gameable: airborne + settled)."""
+    from virturoid.services.ai_native_tools import _honest_fly
+    goal = tuple(params.get("goal", (1.2, 0.6, 1.2)))
+    target = goal if len(goal) == 3 else (float(goal[0]), float(goal[1]), float(params.get("altitude", 1.2)))
+    r = _honest_fly(gene, target=target, steps=int(params.get("steps", 2200)))
+    ok = bool(r.get("reached_target"))
+    est = {PredicateOp.REACHED_GOAL} if ok else ({PredicateOp.UPRIGHT} if r.get("survived") else set())
+    return SkillOutcome("fly", ok, est, 1.0 if ok else 0.0, r)
+
+
 REGISTRY: dict = {
     "navigate": SkillSignature("navigate", (), (PredicateOp.REACHED_GOAL, PredicateOp.PATH_FOLLOWED),
                                ("mobile",), _run_navigate, "drive a wheeled base to a goal"),
@@ -300,6 +313,8 @@ REGISTRY: dict = {
                                  ("manipulator",), _run_pick_place, "pick objects and place them into targets"),
     "spray_coverage": SkillSignature("spray_coverage", (), (PredicateOp.SURFACE_COVERED,),
                                      ("spray",), _run_spray, "sweep a nozzle to coat a surface"),
+    "fly": SkillSignature("fly", (), (PredicateOp.REACHED_GOAL, PredicateOp.UPRIGHT),
+                          ("aerial",), _run_fly, "fly a quadcopter to a target with rotor thrust"),
 }
 
 

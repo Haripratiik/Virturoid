@@ -87,6 +87,32 @@ class FlightTests(unittest.TestCase):
         self.assertIn("FL", res["verdict"].upper())            # FLIES or (honestly) does not fly — never a land gait
         self.assertNotIn("physics_envelope", res, "a flown drone is not flagged unsupported-envelope")
 
+    def test_drone_is_classified_aerial_by_structure(self):
+        from virturoid.services.aerial import build_quadcopter
+        from virturoid.services.task_matched_eval import robot_capabilities, robot_kind
+        g = build_quadcopter("a drone")
+        self.assertEqual(robot_kind(g), "aerial", "a rotor-thrust body must classify as aerial, not manipulator")
+        self.assertIn("aerial", robot_capabilities(g))
+
+    def test_run_task_flies_a_drone_to_a_target(self):
+        # the TASK layer: a drone must be able to RUN a flight task (feasible + success), not just verify.
+        from virturoid.services import session_state as S
+        from virturoid.services.agent_design_tools import run_task
+        from virturoid.services.ai_native_tools import create_robot
+        S.reset()
+        rid = create_robot({"prompt": "a quadcopter drone that flies to a target"})["robot_id"]
+        for goal in ("fly to the target", "go to the goal", "hover in place"):
+            r = run_task({"robot_id": rid, "goal": goal})
+            self.assertTrue(r.get("feasible"), f"a drone must be able to attempt '{goal}': {r}")
+            self.assertTrue(r.get("success"), f"a drone must complete '{goal}' (fly skill): {r}")
+
+    def test_evaluate_robot_scores_a_drone_on_flight(self):
+        from virturoid.services.aerial import build_quadcopter
+        from virturoid.services.task_matched_eval import evaluate_robot
+        ev = evaluate_robot(build_quadcopter("a drone"), prompt="a drone")
+        self.assertEqual(ev["task"], "flight")
+        self.assertGreater(ev["value"], 0.6, f"a working quadcopter reaches most waypoints: {ev}")
+
 
 if __name__ == "__main__":
     unittest.main()

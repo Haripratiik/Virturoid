@@ -24,11 +24,15 @@ def _fallback_task(prompt: str, gene) -> TaskSpec:
     # 1) the task the prompt ASKS FOR (verified against morphology downstream — mismatch -> honest infeasible)
     if has("maze"):
         skill, op = "solve_maze", PredicateOp.PATH_FOLLOWED
+    elif has("hover", "take off", "takeoff") or (kind == "aerial" and has("fly", "flies", "flight")):
+        skill, op = "fly", PredicateOp.REACHED_GOAL              # a drone hovers/flies to a target (aerial tier)
     elif has("navigate", "drive to", "go to", "reach the", "patrol", "to the goal", "to the target"):
         # GO-TO-GOAL intent: pick the skill the body actually HAS — a wheeled base NAVIGATES, a legged body
-        # WALKS there (both establish reached_goal). Was always 'navigate' (mobile-only), so a legged
-        # "walk to the goal" got wrongly rejected as infeasible even though it credibly walks.
-        if kind == "legged":
+        # WALKS there, an aerial body FLIES there (all establish reached_goal). Was always 'navigate'
+        # (mobile-only), so a legged "walk to the goal" / a drone "fly to the target" got wrongly rejected.
+        if kind == "aerial":
+            skill, op = "fly", PredicateOp.REACHED_GOAL
+        elif kind == "legged":
             skill, op = "locomote", PredicateOp.REACHED_GOAL
         else:
             skill, op = "navigate", PredicateOp.REACHED_GOAL
@@ -44,6 +48,7 @@ def _fallback_task(prompt: str, gene) -> TaskSpec:
         # 2) no explicit task in the prompt -> the morphology's natural default task
         skill, op = {"mobile": ("navigate", PredicateOp.REACHED_GOAL),
                      "legged": ("locomote", PredicateOp.TRAVELED),
+                     "aerial": ("fly", PredicateOp.REACHED_GOAL),
                      "spray": ("spray_coverage", PredicateOp.SURFACE_COVERED)}.get(
             kind, ("pick_place", PredicateOp.OBJECTS_PLACED))
     return TaskSpec(name=skill, prompt=prompt, steps=[SkillCall("s0", skill, {"prompt": prompt})],
