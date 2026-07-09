@@ -14,10 +14,34 @@ import json
 from pathlib import Path
 
 
+def _aerial_flight_config(genome: dict) -> dict | None:
+    """A quadcopter's ROS2 flight-deploy reference. A drone has NO actuated joints (welded rotors), so the
+    ros2_control joint-trajectory node is inert for it — real flight runs on the onboard autopilot (the Pixhawk
+    in the BOM) commanded over MAVROS position setpoints. This returns the geometric-controller reference +
+    rotor layout so the package documents the ACTUAL deploy path instead of a silently-wrong walker/reach node."""
+    links = [l if isinstance(l, str) else l.get("name", "") for l in genome.get("links", [])]
+    n_rotors = sum(1 for n in links if str(n).startswith("rotor")) or 4
+    try:
+        from virturoid.services.aerial import FLY_GAINS
+        gains = dict(FLY_GAINS)
+    except Exception:  # noqa: BLE001
+        gains = {"kp": [3.0, 3.0, 8.0], "kd": [2.6, 2.6, 5.0], "KR": 533.0, "KW": 65.0, "vcap": 1.2}
+    return {"airframe": "quadcopter", "n_rotors": n_rotors,
+            "autopilot": "PX4/ArduPilot on the Pixhawk (see BOM) — runs the rotor mixing + inner loops",
+            "ros2_interface": "MAVROS offboard: publish geometry_msgs/PoseStamped to "
+                              "/mavros/setpoint_position/local (position waypoints); the autopilot handles thrust",
+            "geometric_controller_reference": gains,
+            "sample_waypoints_xyz": [[0.0, 0.0, 1.2], [1.5, 0.8, 1.4], [-1.2, 0.6, 1.0]],
+            "note": "the joint-trajectory evaluation_node is INERT for this jointless airframe — deploy via MAVROS"}
+
+
 def export_ros2_package(package_dir: Path, package_name: str = "virturoid_robot") -> Path:
     package_dir = Path(package_dir)
     genome = json.loads((package_dir / "robot" / "robot_genome.json").read_text(encoding="utf-8"))
     joints = [j["name"] for j in genome.get("joints", [])]
+    aerial = (genome.get("robot_class") == "aerial"
+              or any(str(l if isinstance(l, str) else l.get("name", "")).startswith("rotor")
+                     for l in genome.get("links", [])))
 
     root = package_dir / "export" / "ros2" / package_name
     (root / package_name).mkdir(parents=True, exist_ok=True)
@@ -64,18 +88,33 @@ def export_ros2_package(package_dir: Path, package_name: str = "virturoid_robot"
         _hardware_interface_yaml(joints, actuator_map), encoding="utf-8")
     (root / package_name / "safety_filter.py").write_text(_SAFETY_FILTER_PY, encoding="utf-8")
     (root / "test" / "test_task_regression.py").write_text(_TEST_PY, encoding="utf-8")
+    # AERIAL: a quadcopter has no actuated joints, so ros2_control joint trajectories are the wrong interface.
+    # Emit the ACTUAL flight-deploy reference (autopilot + MAVROS + the geometric controller) instead of letting
+    # the README claim a walker/reach controller that can't fly it.
+    flight = _aerial_flight_config(genome) if aerial else None
+    if flight is not None:
+        (root / "config" / "flight.yaml").write_text(json.dumps(flight, indent=2), encoding="utf-8")
+    _deploy_md = (
+        f"## Deploy this drone (aerial)\n"
+        f"This airframe is a {flight['airframe']} with {flight['n_rotors']} rotors and NO actuated joints, so the\n"
+        f"ros2_control joint interface below does NOT apply. Flight runs on the onboard autopilot: {flight['autopilot']}.\n"
+        f"Command it from ROS2 via {flight['ros2_interface']}. `config/flight.yaml` carries the geometric-controller\n"
+        f"reference (rotor layout + gains) Virturoid used in sim; the joint `evaluation_node` is inert for this body.\n"
+        if flight is not None else
+        "## Deploy to hardware (§4.7)\n"
+        "`config/ros2_control.yaml` (controller manager) + `config/hardware_interface.yaml` (each joint -> its\n"
+        "real BOM actuator) wire the controller to ros2_control; set `hardware_plugin` to your motor-bus driver\n"
+        "(Dynamixel / ODrive / CAN / EtherCAT). `" + package_name + "/safety_filter.py` clamps every command to\n"
+        "joint + rate limits before a motor sees it. Validate the closed loop in sim first via\n"
+        "`services/sim_ros_bridge` (MuJoCo as virtual hardware behind the same command/state interface).\n")
+    _ctrl_md = (
+        " — a quadcopter: flight deploys via the onboard autopilot (see below), not this joint node.\n\n" if aerial
+        else (f" — runs the exported {'GaitController (trot gait)' if policy_type == 'trot_cpg_gait' else 'ReachController'}.\n\n"
+              if has_controller else " (no controller bundle; node publishes a neutral pose).\n\n"))
     (root / "README.md").write_text(
-        f"# {package_name}\n\nGenerated ROS2 package for `{genome.get('id')}`"
-        + ((f" — runs the exported {'GaitController (trot gait)' if policy_type == 'trot_cpg_gait' else 'ReachController'}.\n\n")
-           if has_controller else " (no controller bundle; node publishes a neutral pose).\n\n")
+        f"# {package_name}\n\nGenerated ROS2 package for `{genome.get('id')}`" + _ctrl_md
         + "```\ncolcon build --packages-select " + package_name + "\nros2 launch " + package_name
-        + " evaluate.launch.py\n```\n\n"
-        + "## Deploy to hardware (§4.7)\n"
-        + "`config/ros2_control.yaml` (controller manager) + `config/hardware_interface.yaml` (each joint -> its\n"
-        + "real BOM actuator) wire the controller to ros2_control; set `hardware_plugin` to your motor-bus driver\n"
-        + "(Dynamixel / ODrive / CAN / EtherCAT). `" + package_name + "/safety_filter.py` clamps every command to\n"
-        + "joint + rate limits before a motor sees it. Validate the closed loop in sim first via\n"
-        + "`services/sim_ros_bridge` (MuJoCo as virtual hardware behind the same command/state interface).\n",
+        + " evaluate.launch.py\n```\n\n" + _deploy_md,
         encoding="utf-8",
     )
     return root

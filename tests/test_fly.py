@@ -113,6 +113,34 @@ class FlightTests(unittest.TestCase):
         self.assertEqual(ev["task"], "flight")
         self.assertGreater(ev["value"], 0.6, f"a working quadcopter reaches most waypoints: {ev}")
 
+    def test_drone_ros2_export_is_flight_honest(self):
+        # a jointless airframe must NOT ship a joint-trajectory "ReachController"/"trot" node as if it flies it;
+        # the package must document the real deploy path (autopilot + MAVROS) + carry the flight-controller ref.
+        import glob
+        import json
+        import tempfile
+        from pathlib import Path
+
+        from virturoid.services.aerial import build_quadcopter
+        from virturoid.services.ros2_exporter import export_ros2_package
+        pkg = Path(tempfile.mkdtemp()) / "pkg"
+        (pkg / "robot").mkdir(parents=True)
+        # write the export-format genome (links/joints) the ros2 exporter reads
+        g = build_quadcopter("a drone")
+        genome = {"id": g.id, "robot_class": "aerial",
+                  "links": [s.name for s in g.segments], "joints": []}
+        (pkg / "robot" / "robot_genome.json").write_text(json.dumps(genome), encoding="utf-8")
+        root = export_ros2_package(pkg, "drone_pkg")
+        fy = glob.glob(str(root) + "/**/flight.yaml", recursive=True)
+        self.assertTrue(fy, "an aerial ROS2 package must carry a flight.yaml (the deploy reference)")
+        flight = json.loads(Path(fy[0]).read_text())
+        self.assertEqual(flight["airframe"], "quadcopter")
+        self.assertEqual(flight["n_rotors"], 4)
+        readme = (root / "README.md").read_text().lower()
+        self.assertNotIn("reachcontroller", readme, "a drone must not claim a reach controller")
+        self.assertNotIn("trot gait", readme, "a drone must not claim a trot gait")
+        self.assertIn("mavros", readme)                        # the real ROS2 flight-deploy interface
+
     def test_drone_bom_has_propulsion_and_a_battery(self):
         # a buildable drone needs its DEFINING parts: a motor+ESC per rotor, a flight controller, a battery
         # (NOT a socketed wall PSU — a flying robot can't be tethered). Rotors are welded, so the joint-driven
