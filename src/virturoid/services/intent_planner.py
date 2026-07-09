@@ -35,7 +35,8 @@ _UNSUPPORTED = {
     "fluid": "fluid/liquid simulation (needs an Isaac/PhysX-class backend)",
     "liquid": "fluid/liquid simulation (needs an Isaac/PhysX-class backend)",
     "pour": "fluid/liquid simulation (needs an Isaac/PhysX-class backend)",
-    "maze": "maze path-planning + locomotion-driven navigation (no maze task family yet)",
+    # 'maze' is SUPPORTED now: services/maze.py (A* over a generated maze) + the solve_maze skill drive a mobile
+    # base through it to the goal (run_task 'solve the maze' -> success). It was a stale under-claim to gap it.
     "stairs": "stair/terrain traversal (no rough-terrain locomotion task yet)",
     "climb": "climbing (no climbing task family yet)",
     "in-hand": "in-hand dexterous manipulation (no dexterous-manipulation task yet)",
