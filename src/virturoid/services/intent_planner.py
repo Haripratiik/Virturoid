@@ -28,10 +28,14 @@ _TASK_CLASS = {  # task family -> the robot class that performs it
 }
 # Physics / capability needs we do NOT have in the MuJoCo core (the honest frontier).
 _UNSUPPORTED = {
-    "cloth": "deformable cloth/fabric simulation (needs an Isaac/PhysX-class backend)",
-    "fold": "deformable cloth/fabric simulation (needs an Isaac/PhysX-class backend)",
-    "iron": "deformable cloth/fabric simulation (needs an Isaac/PhysX-class backend)",
-    "fabric": "deformable cloth/fabric simulation (needs an Isaac/PhysX-class backend)",
+    # MEASURED: MuJoCo 3.9 flexcomp DOES simulate the deformable fabric (an 8x8 cloth grid drapes correctly), so
+    # it is NOT tier-blocked. The open frontier is robust grasp-and-FOLD: a rigid gripper pinching cloth via
+    # contact is finicky (a test lift only peeled a corner) — a reliable connect-constraint grasp + a fold task
+    # + verdict is the scoped next capability, not an Isaac dependency.
+    "cloth": "deformable cloth grasp-and-fold (flexcomp simulates the fabric; robust deformable GRASP is the frontier)",
+    "fold": "deformable cloth grasp-and-fold (flexcomp simulates the fabric; robust deformable GRASP is the frontier)",
+    "iron": "deformable cloth grasp-and-fold (flexcomp simulates the fabric; robust deformable GRASP is the frontier)",
+    "fabric": "deformable cloth grasp-and-fold (flexcomp simulates the fabric; robust deformable GRASP is the frontier)",
     "fluid": "fluid/liquid simulation (needs an Isaac/PhysX-class backend)",
     "liquid": "fluid/liquid simulation (needs an Isaac/PhysX-class backend)",
     "pour": "fluid/liquid simulation (needs an Isaac/PhysX-class backend)",
