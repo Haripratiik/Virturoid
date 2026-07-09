@@ -180,7 +180,7 @@ def _honest_gait(gene, *, steps: int = 1200, render: bool = False, tag: str = "g
     """Run the general scripted gait and return the ANTI-GOODHART verdict (survived+cadence+support+upright+
     forward, forward == actual displacement) — the honesty gate as a tool result, never a raw qpos dump."""
     from virturoid.services.morph_policy import crawl_gait_rollout
-    from scripts.verify_gait import classify, orientation_summary
+    from virturoid.services.gait_quality import classify, orientation_summary
     # FLYWHEEL: use the best banked LEARNED gait for this body's morphology if one exists (recalled by embedding),
     # so the product's legged robots walk with learned control that compounds over builds — else the shipped default.
     gait_params: dict = {}

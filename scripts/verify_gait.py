@@ -24,46 +24,9 @@ def verify_gait(gene, policy, *, steps: int = 1500, frame_every: int = 5, real_a
                                 real_actuator=real_actuator)
 
 
-def orientation_summary(qpos_frames) -> dict:
-    """Max + final roll/pitch/yaw (deg) from the base quaternion trace. The anti-Goodhart signal for a
-    LEGGED body's true failure mode: a trot that loses lateral balance ROLLS over, an over-driven gait
-    PITCH-dives over its front legs, an asymmetric gait YAW-drifts off a straight line. Height alone can't
-    tell these apart (all three end with a low base) — the classifier needs the orientation to name the fall."""
-    import numpy as np
-    if not qpos_frames:
-        return {}
-    R = P = Y = 0.0; rr = pp = yy = 0.0
-    for f in qpos_frames:
-        w, x, y, z = (float(f[3]), float(f[4]), float(f[5]), float(f[6]))
-        rr = np.degrees(np.arctan2(2 * (w * x + y * z), 1 - 2 * (x * x + y * y)))
-        pp = np.degrees(np.arcsin(np.clip(2 * (w * y - z * x), -1, 1)))
-        yy = np.degrees(np.arctan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z)))
-        R = max(R, abs(rr)); P = max(P, abs(pp)); Y = max(Y, abs(yy))
-    return {"roll_max": round(R, 1), "pitch_max": round(P, 1), "yaw_max": round(Y, 1),
-            "roll_final": round(rr, 1), "pitch_final": round(pp, 1), "yaw_final": round(yy, 1)}
-
-
-def classify(r: dict) -> str:
-    """Explicit, honest verdict from the anti-Goodhart metrics + orientation fall-mode."""
-    survived = bool(r.get("survived"))
-    up = float(r.get("upright_frac", 0.0)); hr = float(r.get("height_ratio", 0.0))
-    cad = float(r.get("cadence", 0.0)); sup = float(r.get("support_frac", 0.0))
-    fwd = float(r.get("forward", 0.0))
-    if survived and up >= 0.6 and cad >= 1.0 and sup >= 0.25 and fwd >= 0.3:
-        return "CREDIBLE WALK"
-    # not a credible walk: name the DOMINANT fall mode from the orientation trace (if replayable) so the
-    # verdict is diagnostic, not just "bad" — a roll-over reads as CROUCH by height alone, which misleads.
-    o = orientation_summary(r.get("qpos_frames") or [])
-    if o:
-        modes = [("ROLL-OVER", o["roll_max"]), ("PITCH-DIVE", o["pitch_max"]), ("YAW-DRIFT", o["yaw_max"])]
-        name, val = max(modes, key=lambda t: t[1])
-        if not survived and val >= 45.0:
-            return f"FELL by {name} (roll {o['roll_max']:.0f} / pitch {o['pitch_max']:.0f} / yaw {o['yaw_max']:.0f} deg max)"
-    if up < 0.6 or hr < 0.6:
-        return "CROUCH (low/unstable stance)"
-    if cad < 1.0 or sup < 0.25:
-        return "SLIDE (feet barely lift / no real stepping)"
-    return "FORWARD BUT SHORT / not a credible walk"
+# classify + orientation_summary now live in the PACKAGE so the product (ai_native_tools) never imports scripts/.
+# Re-exported here so this CLI and existing `from scripts.verify_gait import classify` callers keep working.
+from virturoid.services.gait_quality import classify, orientation_summary  # noqa: E402,F401
 
 
 def render_gif(gene, qpos_frames, out_dir: str, tag: str) -> None:
