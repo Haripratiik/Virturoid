@@ -25,6 +25,8 @@ def robot_kind(gene: RobotGene) -> str:
     md = getattr(gene, "metadata", None) or {}
     if (gene.robot_class or "") == "aerial" or md.get("rotor_offsets"):
         return "aerial"                                  # a quadcopter: rotor-thrust driven, no wheels/gripper/legs
+    if (gene.robot_class or "") == "aquatic" or md.get("aquatic"):
+        return "aquatic"                                 # an undulator: a serial spine that swims, not a land walker
     has_wheels = any(getattr(s, "shape", None) == "cylinder" and s.joint_type == "revolute" for s in segs)
     n_revolute = sum(1 for s in segs if s.joint_type == "revolute")
     if ee == "spray_nozzle":
@@ -51,6 +53,8 @@ def robot_capabilities(gene: RobotGene) -> set[str]:
     caps: set[str] = set()
     if (gene.robot_class or "") == "aerial" or md.get("rotor_offsets"):
         caps.add("aerial")
+    if (gene.robot_class or "") == "aquatic" or md.get("aquatic"):
+        caps.add("aquatic")
     if has_wheels:
         caps.add("mobile")
     if ee in ("gripper", "hand"):
@@ -114,6 +118,11 @@ def evaluate_robot(gene: RobotGene, *, prompt: str = "", controller_params: dict
         reached = sum(1 for r in results if r.get("reached_target"))
         return {"task": "flight", "metric": "waypoint_reach_rate", "value": round(reached / len(goals), 3),
                 "detail": {"reached": reached, "goals": len(goals)}}
+
+    if kind == "aquatic":
+        from virturoid.services.ai_native_tools import _honest_swim
+        r = _honest_swim(gene, steps=2000)
+        return {"task": "swim", "metric": "swim_m", "value": float(r.get("swim_m", 0.0)), "detail": r}
 
     if kind == "spray":
         from virturoid.services.spray_coverage import evaluate_spray_coverage

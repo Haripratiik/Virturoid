@@ -63,6 +63,32 @@ class SwimTests(unittest.TestCase):
         self.assertNotEqual(g.robot_class, "aquatic")
         self.assertFalse(any(s.cross_section for s in g.segments))
 
+    def test_fish_is_classified_aquatic_not_legged(self):
+        from virturoid.services.morphology_composer import compose_robot
+        from virturoid.services.task_matched_eval import robot_capabilities, robot_kind
+        g = compose_robot("a fish robot that swims")
+        self.assertEqual(robot_kind(g), "aquatic", "a spine undulator must classify aquatic, not legged")
+        self.assertIn("aquatic", robot_capabilities(g))
+
+    def test_run_task_swims_a_fish(self):
+        # the TASK layer: a fish must RUN a swim task (feasible + success), not route to a failing walk skill
+        from virturoid.services import session_state as S
+        from virturoid.services.agent_design_tools import run_task
+        from virturoid.services.ai_native_tools import create_robot
+        S.reset()
+        rid = create_robot({"prompt": "a fish robot that swims forward"})["robot_id"]
+        for goal in ("swim forward", "swim to the target"):
+            r = run_task({"robot_id": rid, "goal": goal})
+            self.assertTrue(r.get("feasible"), f"a fish must be able to attempt '{goal}': {r}")
+            self.assertTrue(r.get("success"), f"a fish must complete '{goal}' via the swim skill: {r}")
+
+    def test_evaluate_robot_scores_a_fish_on_swim(self):
+        from virturoid.services.morphology_composer import compose_robot
+        from virturoid.services.task_matched_eval import evaluate_robot
+        ev = evaluate_robot(compose_robot("an eel robot"), prompt="an eel")
+        self.assertEqual(ev["task"], "swim")
+        self.assertGreater(ev["value"], 0.15, f"a real undulator swims past the threshold: {ev}")
+
 
 if __name__ == "__main__":
     unittest.main()

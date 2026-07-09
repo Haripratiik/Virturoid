@@ -611,14 +611,15 @@ def verify_robot(args: dict) -> dict:
     _prompt = (S.robot_meta(args["robot_id"]) or {}).get("prompt", "")
     _meta = getattr(gene, "metadata", None) or {}
     _aerial = bool(_meta.get("rotor_offsets")) or getattr(gene, "robot_class", "") == "aerial"
-    _aquatic = _env_words(_prompt, _AQUATIC_WORDS)
+    # aquatic by STRUCTURE (kind) or by swim-intent prompt over a spine body (legged/mobile fallback)
+    _aquatic = kind == "aquatic" or (_env_words(_prompt, _AQUATIC_WORDS) and kind in ("legged", "mobile"))
     try:
         if _aerial:
             # AERIAL tier: a quadcopter is FLOWN with real rotor thrust forces + a geometric flight controller
             # (aerial.py / _honest_fly) — real MuJoCo rigid-body dynamics + gravity, never a land proxy.
             res = _honest_fly(gene, steps=int(args.get("steps", 1600 if quick else 2200)))
             res["credible_walk"] = False
-        elif _aquatic and kind in ("legged", "mobile"):
+        elif _aquatic:
             # T7: a swim-intent body is SIMULATED IN WATER (real MuJoCo fluid), not given a land proxy.
             res = _honest_swim(gene, steps=int(args.get("steps", 1500 if quick else 2500)))
             res["credible_walk"] = False

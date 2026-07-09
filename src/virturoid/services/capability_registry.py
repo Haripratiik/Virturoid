@@ -300,6 +300,18 @@ def _run_fly(gene, params):
     return SkillOutcome("fly", ok, est, 1.0 if ok else 0.0, r)
 
 
+def _run_swim(gene, params):
+    """Swim an aquatic body (undulator) forward in water with the tuned travelling wave (see ai_native_tools.
+    _honest_swim — REAL MuJoCo fluid). Success = credible undulatory thrust (net displacement past a threshold);
+    it establishes TRAVELED, not a precise underwater goal-reach (honest — the swim controller isn't a nav policy)."""
+    from virturoid.services.ai_native_tools import _honest_swim
+    r = _honest_swim(gene, steps=int(params.get("steps", 2000)))
+    swam = float(r.get("swim_m", 0.0))
+    ok = swam >= float(params.get("distance", 0.15))
+    est = {PredicateOp.TRAVELED} if ok else set()
+    return SkillOutcome("swim", ok, est, swam, r)
+
+
 REGISTRY: dict = {
     "navigate": SkillSignature("navigate", (), (PredicateOp.REACHED_GOAL, PredicateOp.PATH_FOLLOWED),
                                ("mobile",), _run_navigate, "drive a wheeled base to a goal"),
@@ -315,6 +327,8 @@ REGISTRY: dict = {
                                      ("spray",), _run_spray, "sweep a nozzle to coat a surface"),
     "fly": SkillSignature("fly", (), (PredicateOp.REACHED_GOAL, PredicateOp.UPRIGHT),
                           ("aerial",), _run_fly, "fly a quadcopter to a target with rotor thrust"),
+    "swim": SkillSignature("swim", (), (PredicateOp.TRAVELED,),
+                           ("aquatic",), _run_swim, "swim an undulator forward in water"),
 }
 
 

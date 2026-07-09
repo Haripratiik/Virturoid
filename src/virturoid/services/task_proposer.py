@@ -26,12 +26,16 @@ def _fallback_task(prompt: str, gene) -> TaskSpec:
         skill, op = "solve_maze", PredicateOp.PATH_FOLLOWED
     elif has("hover", "take off", "takeoff") or (kind == "aerial" and has("fly", "flies", "flight")):
         skill, op = "fly", PredicateOp.REACHED_GOAL              # a drone hovers/flies to a target (aerial tier)
+    elif has("swim", "dive", "submerge") or (kind == "aquatic" and not has("navigate", "go to")):
+        skill, op = "swim", PredicateOp.TRAVELED                 # a fish/eel swims forward (aquatic tier)
     elif has("navigate", "drive to", "go to", "reach the", "patrol", "to the goal", "to the target"):
         # GO-TO-GOAL intent: pick the skill the body actually HAS — a wheeled base NAVIGATES, a legged body
         # WALKS there, an aerial body FLIES there (all establish reached_goal). Was always 'navigate'
         # (mobile-only), so a legged "walk to the goal" / a drone "fly to the target" got wrongly rejected.
         if kind == "aerial":
             skill, op = "fly", PredicateOp.REACHED_GOAL
+        elif kind == "aquatic":
+            skill, op = "swim", PredicateOp.TRAVELED            # a fish swims toward it (no precise underwater goal-reach)
         elif kind == "legged":
             skill, op = "locomote", PredicateOp.REACHED_GOAL
         else:
@@ -49,6 +53,7 @@ def _fallback_task(prompt: str, gene) -> TaskSpec:
         skill, op = {"mobile": ("navigate", PredicateOp.REACHED_GOAL),
                      "legged": ("locomote", PredicateOp.TRAVELED),
                      "aerial": ("fly", PredicateOp.REACHED_GOAL),
+                     "aquatic": ("swim", PredicateOp.TRAVELED),
                      "spray": ("spray_coverage", PredicateOp.SURFACE_COVERED)}.get(
             kind, ("pick_place", PredicateOp.OBJECTS_PLACED))
     return TaskSpec(name=skill, prompt=prompt, steps=[SkillCall("s0", skill, {"prompt": prompt})],
