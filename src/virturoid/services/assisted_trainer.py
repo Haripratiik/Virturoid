@@ -109,6 +109,24 @@ def ai_critic_gait_loop(gene, *, llm=None, rounds: int = 3, iters: int = 35, env
     return {"npz": best_npz, "walking": walking, "rounds": len(history), "weights": weights, "history": history}
 
 
+def _measure_travel(gene, policy, *, steps: int = 2400) -> dict:
+    """Roll ``policy`` out on ``gene`` with the CORRECT controller for its TYPE and return ``{forward, upright}``.
+
+    A recipe/CPG policy (``obs_mean`` or ``cpg`` set — banked GPU policies, recipe-ES policies) MUST be driven by
+    ``recipe_rollout_morph`` (the SAME PD-to-default + CPG-prior rollout + obs-norm it was trained/banked under);
+    the bare-residual ``rollout_morph`` drives it WITHOUT its gait prior so it reads as FALLEN — the exact
+    misrouting ``learn_locomotion.locomotion_episode`` already fixed. Measuring every candidate through the same
+    no-CPG rollout made the assisted loop under-measure banked/GPU recipe policies, so it skipped reuse and
+    retrained needlessly. A plain policy (no recipe metadata) uses ``rollout_morph``."""
+    from virturoid.services.morph_policy import recipe_rollout_morph, rollout_morph
+    if getattr(policy, "obs_mean", None) is not None or getattr(policy, "cpg", None) is not None:
+        r = recipe_rollout_morph(gene, policy, steps=steps)
+        return {"forward": float(r.get("forward", 0.0)),
+                "upright": bool(r.get("survived", False)) or float(r.get("height_ratio", 0.0)) > 0.6}
+    r = rollout_morph(gene, policy, steps=steps)
+    return {"forward": float(r.get("forward", 0.0)), "upright": bool(r.get("upright", False))}
+
+
 def train_assisted(gene, *, target: float = 0.35, models_dir: str = "models", memory_dir: str = "build/memory",
                    max_rounds: int = 3, prefer_gpu: bool = True, workers: int | None = None,
                    progress=None) -> dict:
@@ -120,7 +138,7 @@ def train_assisted(gene, *, target: float = 0.35, models_dir: str = "models", me
     from virturoid.services.learn_locomotion import banked_policy_for, learn_locomotion
     from virturoid.services.memory_db import MemoryDB
     from virturoid.services.morph_graph import encode_robot
-    from virturoid.services.morph_policy import MorphPolicy, rollout_morph
+    from virturoid.services.morph_policy import MorphPolicy
 
     cls = gene.robot_class or "legged"
     workers = _resolve_workers(workers)
@@ -148,7 +166,7 @@ def train_assisted(gene, *, target: float = 0.35, models_dir: str = "models", me
 
     # 2) WARM-START from the banked species policy (the flywheel), and FIRST measure its travel: if it already
     # clears the target, REUSE it with NO training (the cheapest, fastest path — the whole point of the flywheel).
-    travel_of = lambda pol: rollout_morph(gene, pol, steps=2400)  # noqa: E731
+    travel_of = lambda pol: _measure_travel(gene, pol, steps=2400)  # route recipe/cpg vs plain (deploy==measure) # noqa: E731
     warm = banked_policy_for(gene, models_dir=models_dir)
     warm_started = warm is not None
     best_policy, best_travel, best_upright, baseline = None, float("-inf"), False, None
