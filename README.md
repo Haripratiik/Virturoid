@@ -70,6 +70,7 @@ Every body below was generated from a one-line prompt by the same pipeline — n
 - Ingests an existing robot project: drop a folder with a URDF or MJCF model, a bill of materials, CAD meshes, and a plain-English description, and one agent parses all of it into a single editable, simulate-able robot — even when the referenced meshes are missing.
 - Runs and improves your own controller: hand it your control script or policy and it executes it in real physics, then tunes it into a better gait.
 - Exports a controller bundle, a runnable ROS 2 package, and browsable reports.
+- Hands off to NVIDIA Isaac Sim / Isaac Lab: exports an OpenUSD physics articulation (transcribed from the exact model Virturoid simulates, then re-read and validated with OpenUSD — it passes the compliance checker) plus a ready-to-edit Isaac Lab `ArticulationCfg` with real per-joint motor limits, a standalone spawn script, and, for legged robots, a velocity-tracking locomotion environment that subclasses Isaac Lab's own task. Virturoid designs and pre-screens the robot; your Isaac pipeline does the high-fidelity training and sim-to-real.
 
 ## How it works
 

@@ -302,14 +302,15 @@ def evaluate_held(args: dict) -> dict:
             "value": res.get("value"), "scored_gait": (res.get("detail") or {}).get("scored_gait")}
 
 
-_EXPORT_FORMATS = ("mjcf", "cad", "urdf", "ros2", "bom", "spec")
+_EXPORT_FORMATS = ("mjcf", "cad", "urdf", "ros2", "bom", "spec", "usd", "isaac_lab")
 
 
 def export_held(args: dict) -> dict:
     """Export the HELD robot to real, buildable files. ``formats`` (default all): mjcf (runnable sim model) |
     cad (meshes) | urdf (ROS/Gazebo robot description) | ros2 (installable ament_python package) | bom (real
-    sized bill-of-materials: motors/sensors/battery, json+md) | spec (a spec sheet). B3: the whole buildable-
-    robot bundle, not just sim files."""
+    sized bill-of-materials: motors/sensors/battery, json+md) | spec (a spec sheet) | usd (OpenUSD physics for
+    NVIDIA Isaac Sim) | isaac_lab (a full Isaac Lab hand-off: USD + ArticulationCfg + spawn/train scaffolds).
+    B3: the whole buildable-robot bundle, not just sim files. usd/isaac_lab need the ``usd-core`` package."""
     from virturoid.services import session_state as S
     gene = S.get_robot(args["robot_id"])
     if gene is None:
@@ -366,9 +367,52 @@ def export_held(args: dict) -> dict:
                 artifacts["spec"] = str(sp)
         except Exception as exc:  # noqa: BLE001
             artifacts["spec_error"] = f"{type(exc).__name__}: {exc}"
+    if "usd" in fmts:
+        # OpenUSD physics articulation for NVIDIA Isaac Sim (transcribed from the simulated MuJoCo model)
+        try:
+            from virturoid.services.usd_exporter import export_usd
+            um = export_usd(gene, str(out_dir / "robot.usda"))
+            artifacts["usd"] = um["usd_path"]
+        except Exception as exc:  # noqa: BLE001 - usd-core may be absent; degrade honestly
+            artifacts["usd_error"] = f"{type(exc).__name__}: {exc}"
+    if "isaac_lab" in fmts:
+        # a full Isaac Lab hand-off package: USD + ArticulationCfg + spawn/train scaffolds + README
+        try:
+            from virturoid.services.isaac_lab_exporter import export_isaac_lab
+            im = export_isaac_lab(gene, str(out_dir / "isaac_lab"))
+            artifacts["isaac_lab"] = im["files"].get("readme", str(out_dir / "isaac_lab"))
+        except Exception as exc:  # noqa: BLE001
+            artifacts["isaac_lab_error"] = f"{type(exc).__name__}: {exc}"
     real = {k: v for k, v in artifacts.items() if not k.endswith("_error")}
     return {"ok": bool(real), "artifacts": artifacts, "out_dir": str(out_dir),
-            "note": "MJCF runs in sim; URDF/ROS2 deploy; BOM is the real sized parts list; spec is the datasheet"}
+            "note": "MJCF runs in sim; URDF/ROS2 deploy; BOM is the real sized parts list; spec is the datasheet; "
+                    "usd/isaac_lab hand off to NVIDIA Isaac Sim/Lab"}
+
+
+def export_isaac(args: dict) -> dict:
+    """Package the HELD robot for NVIDIA Isaac Sim / Isaac Lab: a physics USD (transcribed from the simulated
+    MuJoCo model + re-read/validated with OpenUSD) plus an ArticulationCfg (real per-joint motor limits), a
+    standalone spawn/smoke script, a velocity-locomotion env (legged) subclassing Isaac Lab's own task, a README,
+    and a manifest. The 'front of funnel -> Isaac back of funnel' hand-off. Needs the ``usd-core`` package."""
+    from virturoid.services import session_state as S
+    gene = S.get_robot(args["robot_id"])
+    if gene is None:
+        return {"ok": False, "error": f"no robot '{args['robot_id']}'"}
+    from virturoid.services.agent_tools import safe_build_path  # H2: confine writes under build/
+    out_dir = safe_build_path(args.get("out_dir"), "agent_exports") / args["robot_id"] / "isaac_lab"
+    try:
+        from virturoid.services.isaac_lab_exporter import export_isaac_lab
+        man = export_isaac_lab(gene, str(out_dir), robot_name=args.get("robot_name"))
+    except ImportError as exc:
+        return {"ok": False, "error": str(exc),
+                "hint": "pip install usd-core (pure-CPU OpenUSD; no GPU/Omniverse needed)"}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+    return {"ok": bool(man.get("validated")), "manifest": man, "files": man["files"],
+            "dof": man["dof"], "base": man["base"], "is_legged": man["is_legged"],
+            "usd_validated": man["validated"], "isaac_lab_target": man["isaac_lab_target"],
+            "note": "USD re-read + frame-consistency validated offline; NOT run in Isaac here (needs RTX/Omniverse) "
+                    "— the README states what to verify in Isaac. Front of funnel; Isaac Lab does the training."}
 
 
 def train_held(args: dict) -> dict:
@@ -535,10 +579,17 @@ AGENT_DESIGN_TOOLS: dict[str, dict] = {
                       "designed/edited, not a recompose.", "heavy": True, "handler": evaluate_held,
                       "parameters": {"type": "object", "required": ["robot_id"], "properties": {
                           "robot_id": {"type": "string"}, "task": {"type": "string"}}}},
-    "export_held": {"description": "Export the HELD robot to real files: MJCF (runnable sim model) + optional CAD "
-                    "meshes. Returns paths.", "heavy": True, "handler": export_held,
+    "export_held": {"description": "Export the HELD robot to real files. formats (default all): mjcf | cad | urdf | "
+                    "ros2 | bom | spec | usd (OpenUSD physics for Isaac Sim) | isaac_lab (full Isaac Lab hand-off). "
+                    "Returns paths.", "heavy": True, "handler": export_held,
                     "parameters": {"type": "object", "required": ["robot_id"], "properties": {
                         "robot_id": {"type": "string"}, "formats": {"type": "array", "items": {"type": "string"}}}}},
+    "export_isaac": {"description": "Package the HELD robot for NVIDIA Isaac Sim / Isaac Lab: a validated physics "
+                     "USD + ArticulationCfg (real motor limits) + spawn/train scaffolds + README. The hand-off so "
+                     "an Isaac/NVIDIA engineer can import it and train. Needs usd-core.", "heavy": True,
+                     "handler": export_isaac, "parameters": {"type": "object", "required": ["robot_id"],
+                     "properties": {"robot_id": {"type": "string"},
+                                    "robot_name": {"type": "string", "description": "name for the generated cfg/files"}}}},
     "train_held": {"description": "Optimize/train a controller for the HELD robot; returns a job_id (poll "
                    "get_job). mode 'gait_search'(CPU, default) or 'gpu_rl'(MJX PPO when the box is up).", "heavy": False,
                    "handler": train_held, "parameters": {"type": "object", "required": ["robot_id"], "properties": {

@@ -23,9 +23,12 @@ web = ["fastapi>=0.110", "uvicorn>=0.27"]
 rl = ["jax>=0.4", "jaxlib>=0.4", "torch>=2.0"]
 # Standalone native desktop app (PySide6).  Install with:  pip install -e ".[desktop]"
 desktop = ["PySide6-Essentials>=6.6", "mujoco>=3.0"]
+# NVIDIA Isaac Sim / Isaac Lab hand-off: OpenUSD physics export. usd-core is the pure-CPU OpenUSD Python binding
+# (no GPU / Omniverse needed) so we can WRITE and VALIDATE the USD anywhere; mujoco supplies the source model.
+isaac = ["usd-core>=25.8", "mujoco>=3.0"]
 # Everything for full local development.
 all = ["mujoco>=3.0", "Pillow>=10.0", "build123d>=0.5", "fastapi>=0.110", "uvicorn>=0.27",
-       "jax>=0.4", "jaxlib>=0.4", "torch>=2.0", "PySide6-Essentials>=6.6"]
+       "jax>=0.4", "jaxlib>=0.4", "torch>=2.0", "PySide6-Essentials>=6.6", "usd-core>=25.8"]
 
 # Console entry points so the CLIs run after `pip install -e .` WITHOUT needing PYTHONPATH=src.
 [project.scripts]
