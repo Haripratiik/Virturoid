@@ -256,6 +256,22 @@ def _honest_fly(gene, *, target=(0.0, 0.0, 1.2), steps: int = 2000) -> dict:
                     "geometric flight controller, inertia-normalized attitude"}
 
 
+def _auto_bank_gait(gene, r, base_params) -> str | None:
+    """FLYWHEEL SELF-UPDATE: bank the working gait a CREDIBLE walk just demonstrated, so the flywheel COMPOUNDS on
+    ordinary build+verify — not only under explicit training or a manual GPU night run (the reason the bank sat
+    empty: nothing on the ordinary path ever wrote to it). bank_gait is keep-best + keyed by morphology, so
+    re-verifying the same body updates ONE skill (a stronger later gait replaces a weaker one), never floods."""
+    from virturoid.services.gait_flywheel import _DEFAULT_GAIT, _DeployResult, bank_gait
+    from virturoid.services.memory_db import DEFAULT_DB_PATH, MemoryDB
+    DEFAULT_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    params = {**_DEFAULT_GAIT, **{k: float(v) for k, v in (base_params or {}).items()}}
+    holder = _DeployResult(params, {"forward": float(r.get("forward", 0.0)),
+                                    "height_ratio": float(r.get("height_ratio", 1.0)),
+                                    "survived": bool(r.get("survived", False))})
+    with MemoryDB(DEFAULT_DB_PATH) as db:
+        return bank_gait(db, gene, holder)
+
+
 def _honest_gait(gene, *, steps: int = 1200, render: bool = False, tag: str = "gait") -> dict:
     """Run the general scripted gait and return the ANTI-GOODHART verdict (survived+cadence+support+upright+
     forward, forward == actual displacement) — the honesty gate as a tool result, never a raw qpos dump."""
@@ -297,6 +313,16 @@ def _honest_gait(gene, *, steps: int = 1200, render: bool = False, tag: str = "g
            "speed_mps": round(float(r.get("speed", 0)), 3), "cadence": round(float(r.get("cadence", 0)), 1),
            "support_frac": round(float(r.get("support_frac", 0)), 2), "height_ratio": r.get("height_ratio"),
            "roll_max_deg": o.get("roll_max"), "pitch_max_deg": o.get("pitch_max")}
+    # FLYWHEEL SELF-UPDATE: a CREDIBLE walk is a working controller -> bank it so future similar bodies recall it
+    # (the compounding loop, now driven by ordinary verify, not just explicit training). Best-effort + keep-best.
+    if str(out["verdict"]).startswith("CREDIBLE") and out["survived"]:
+        try:
+            _base = gait_params or (getattr(gene, "metadata", None) or {}).get("gait_params") or {}
+            banked = _auto_bank_gait(gene, r, _base)
+            if banked:
+                out["flywheel_banked"] = banked
+        except Exception:  # noqa: BLE001 - self-update is an accelerant; never let it break a verdict
+            pass
     if render and r.get("qpos_frames"):
         gif = _render_gait_gif(gene, r["qpos_frames"], tag)
         if gif:
