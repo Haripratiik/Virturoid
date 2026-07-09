@@ -921,8 +921,55 @@ def recipe_rollout_morph(gene, policy: MorphPolicy | None = None, *, steps: int 
     return out
 
 
-def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float = 1.5, hip_amp: float = 0.9,
-                       knee_amp: float = 1.0, duty: float = 0.25, kp: float = 32.0, kd: float = 1.5,
+# (freq, hip_amp, knee_amp) op-points for the per-body gait tune. The quad walks at the DEFAULT (1.5, 0.9, 1.0);
+# a hexapod/octopod needs a bigger stride at a lower freq, and its forward DIRECTION flips with knee lift, so we
+# MEASURE forward per config and pick the best upright, positive-forward one (a sub-second-per-config CPU search).
+_GAIT_TUNE_GRID = [(1.5, 0.9, 1.0), (1.0, 1.3, 0.9), (1.0, 1.7, 0.9), (1.5, 1.3, 0.9),
+                   (1.0, 1.7, 0.6), (1.5, 0.9, 0.9), (2.0, 1.7, 0.9), (1.0, 1.3, 0.6)]
+
+
+def tune_crawl_gait(gene, *, steps: int = 800, grid=None, cache: bool = True) -> dict:
+    """Find an open-loop crawl-gait op-point (freq, hip_amp, knee_amp) that makes THIS body a CREDIBLE WALK, and
+    cache it on ``gene.metadata['gait_params']`` so verify/deploy reuse it. The default (1.5, 0.9, 1.0) is tuned
+    for the quad; a many-leg body needs a different point (bigger stride, lower freq) and its forward DIRECTION is
+    param-sensitive. CACHE-ONLY-IF-CREDIBLE (never regress): we only override the default when a config is a
+    genuine CREDIBLE WALK, and a 2nd rollout must CONFIRM it (the marginal many-leg walk is step-count noisy —
+    a single lucky rollout must not be cached). If nothing is robustly credible, we leave the default untouched
+    and say so honestly (that body needs learn_gait, not a scripted tune). Deterministic; no policy, no GPU."""
+    from virturoid.services.gait_quality import classify
+    grid = grid or _GAIT_TUNE_GRID
+
+    def _eval(f, h, k, n):
+        r = crawl_gait_rollout(gene, steps=n, freq=f, hip_amp=h, knee_amp=k, record_qpos=True)
+        return {"freq": f, "hip_amp": h, "knee_amp": k, "forward": round(float(r.get("forward", 0.0)), 3),
+                "upright_frac": round(float(r.get("upright_frac", 0.0)), 3),
+                "cadence": round(float(r.get("cadence", 0.0)), 2), "verdict": classify(r)}
+
+    best = None
+    for (f, h, k) in grid:
+        cand = _eval(f, h, k, steps)
+        if not cand["verdict"].startswith("CREDIBLE"):
+            continue
+        confirm = _eval(f, h, k, steps + 400)          # CONFIRM the credible walk survives a longer rollout
+        if not confirm["verdict"].startswith("CREDIBLE"):
+            continue
+        cand["forward_confirm"] = confirm["forward"]
+        if best is None or cand["forward"] > best["forward"]:
+            best = cand
+        if (f, h, k) == grid[0]:                        # the DEFAULT is robustly credible (the quad) -> done, cheap
+            break
+    if best is None:                                   # no robustly-credible scripted gait -> keep the default
+        return {"freq": 1.5, "hip_amp": 0.9, "knee_amp": 1.0, "untuned": True,
+                "verdict": "no robustly-credible open-loop crawl for this body (use learn_gait)"}
+    if cache:
+        md = dict(getattr(gene, "metadata", None) or {})
+        md["gait_params"] = {kk: best[kk] for kk in ("freq", "hip_amp", "knee_amp")}
+        gene.metadata = md
+    return best
+
+
+def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float | None = None, hip_amp: float | None = None,
+                       knee_amp: float | None = None, duty: float = 0.25, kp: float = 32.0, kd: float = 1.5,
                        record_qpos: bool = False, frame_every: int = 5) -> dict:
     """STATICALLY-STABLE CRAWL gait for a WIDE-stance quadruped (open-loop, NO policy). Lifts ONE leg at a time
     (the 4 legs at quarter-cycle phases with a LOW-DUTY knee pulse) so 3 feet are ALWAYS planted -> the CoM stays
@@ -934,6 +981,13 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float = 1.5, hip_amp: f
     [[walking-breakthrough-abduction]]). Hip strides fore-aft (world-y); knee lifts; abduction (world-x) held."""
     import mujoco
     import numpy as np
+
+    # per-body tuned gait params (freq/hip_amp/knee_amp) cached by tune_crawl_gait -> a hexapod/octopod gets its
+    # own credible op-point while the quad keeps the proven default. An EXPLICIT kwarg always wins over the cache.
+    _gp = (getattr(gene, "metadata", None) or {}).get("gait_params", {})
+    freq = float(_gp.get("freq", 1.5)) if freq is None else float(freq)
+    hip_amp = float(_gp.get("hip_amp", 0.9)) if hip_amp is None else float(hip_amp)
+    knee_amp = float(_gp.get("knee_amp", 1.0)) if knee_amp is None else float(knee_amp)
 
     from virturoid.services.appendage_map import build_appendage_map
     from virturoid.services.gait_engine import select_duty

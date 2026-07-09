@@ -397,11 +397,21 @@ def create_robot(args: dict) -> dict:
     a compact summary + a render. This is the entry point for a conversational session."""
     from virturoid.services import session_state as S
     from virturoid.services.morphology_composer import compose_robot
+    from virturoid.services.task_matched_eval import robot_kind
     prompt = args["prompt"]
     # Walkable-by-default: a legged body gets a wide walkable stance so it ACTUALLY walks (fanned quad walks
     # ~0.65 m with auto-tune vs ~0.09 m un-fanned). ensure_walkable_quad is a no-op for non-quad morphologies,
     # so manipulators/rovers/etc. are byte-identical.
     gene = compose_robot(prompt, ensure_walkable=bool(args.get("ensure_walkable", True)))
+    # Walk-tune the gait per body: the crawl defaults are quad-tuned, so a hexapod/octopod only creeps (~0.2 m)
+    # out of the box. tune_crawl_gait finds this body's credible op-point and caches it on the gene (the quad
+    # short-circuits on its first, already-credible rollout, so it stays cheap + byte-identical).
+    if robot_kind(gene) == "legged" and args.get("tune_gait", True):
+        try:
+            from virturoid.services.morph_policy import tune_crawl_gait
+            tune_crawl_gait(gene)
+        except Exception:  # noqa: BLE001 - a tune failure must never block the build; defaults still apply
+            pass
     rid = S.put_robot(gene, prompt=prompt)
     out = {"ok": True, **_summary(gene, rid), "prompt": prompt}
     img = _render_gene(gene, rid)
