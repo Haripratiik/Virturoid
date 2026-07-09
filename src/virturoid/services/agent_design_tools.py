@@ -453,14 +453,15 @@ def run_train_gene_job(args: dict, progress=None) -> dict:
         return {"error": "provide 'robot_id' (a held robot) or 'prompt' (to compose one) to train"}
     mode = args.get("mode", "gait_search")
     if mode == "gpu_rl":
-        from virturoid.services.gpu_trainer import gpu_available, train_gene_on_gpu
+        from virturoid.services.gpu_trainer import default_training_recipe, gpu_available, train_gene_on_gpu
         if gpu_available(timeout=20):
-            say("train", "GPU reachable — MJX PPO on the held gene")
+            recipe = default_training_recipe(gene)           # AUTO recipe per body (cpg/adaptive/deploy deltas)
+            say("train", f"GPU reachable — MJX PPO on the held gene (auto recipe: adaptive={recipe['adaptive']}, "
+                         f"cpg={recipe['cpg']})")
             out = Path("build/agent_builds") / rid / "policy.npz"
             out.parent.mkdir(parents=True, exist_ok=True)
             npz = train_gene_on_gpu(gene, out_path=str(out), iters=int(args.get("iters", 200)), envs=512,
-                                    cpg=True, dr=True, real_actuator=True, sphere_feet=True,
-                                    progress=lambda m: say("train", m))
+                                    progress=lambda m: say("train", m), **recipe)
             return {"mode": "gpu_rl", "policy": npz, "trained": bool(npz)}
         say("train", "GPU not reachable — falling back to the CPU gait search")
     # gait_search: the bounded, honesty-gated CPG search on THIS gene (the verified multi-step search)

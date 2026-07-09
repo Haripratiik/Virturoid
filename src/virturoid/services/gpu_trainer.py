@@ -139,6 +139,43 @@ _REWARD_FLAGS = ("prog_w", "clear_w", "swing_w", "slip_w", "alt_w", "smooth_w", 
 #   forward-gate fix; periodic_w = P1 periodic gait-contact reward (plan v4)
 
 
+def default_training_recipe(gene) -> dict:
+    """The AUTOMATIC GPU-training recipe for a body — the product's SINGLE source of truth, so cpg / adaptive
+    gains / the deploy-gap deltas are chosen by the SYSTEM per morphology, NOT hand-toggled differently at each
+    call-site. Enforces the deploy-safe INVARIANT ``phase_obs == cpg``: a gait-phase clock is only ever fed at
+    deploy WITH a CPG source (recipe_rollout_morph gates the clock on cpg_on), so phase_obs WITHOUT cpg silently
+    drops the clock at deploy and the gait drifts out of phase and falls — the deploy gap diagnosed 2026-07-09.
+    Returns the kwargs to splat into ``train_gene_on_gpu(gene, **default_training_recipe(gene))``."""
+    legged = False
+    adaptive = False
+    n_legs = 0
+    try:
+        import mujoco
+
+        from virturoid.services.appendage_map import build_appendage_map
+        from virturoid.services.gene_compiler import compile_gene_to_mjcf
+        from virturoid.services.morph_policy import adaptive_recommended
+        from virturoid.services.task_matched_eval import robot_kind
+        legged = robot_kind(gene) == "legged"                # bodies driven by a leg gait (quad/hexapod/humanoid)
+        if legged:
+            model = mujoco.MjModel.from_xml_string(compile_gene_to_mjcf(gene))
+            adaptive = adaptive_recommended(model)           # inertia-scaled gains auto-gate on for heavy/humanoid
+            n_legs = build_appendage_map(model).n_legs
+    except Exception:  # noqa: BLE001 - recipe selection is best-effort; fall back to the safe legged defaults
+        legged, n_legs = True, 4
+    # the trot-CPG prior fits >=3-leg bodies (measured: a quad/hexapod trains BETTER with it); it does NOT fit a
+    # BIPED (2 legs) — a humanoid trained WITHOUT cpg deployed 0.34 m stable vs 0.16 m with the trot-CPG. So cpg
+    # (and its paired phase clock) is on only for >=3 legs.
+    cpg = bool(legged and n_legs >= 3)
+    return {
+        "cpg": cpg,                                          # trot-CPG gait prior (>=3-leg bodies only)
+        "phase_obs": cpg,                                    # INVARIANT phase_obs==cpg (deploy-safe; see docstring)
+        "adaptive": bool(adaptive),                          # per-joint inertia-scaled gains (auto; humanoid needs it)
+        "dr": True, "contact_dr": True, "sphere_feet": True, "real_actuator": True,   # sim2real + deploy-gap deltas
+        "decimation": 4,                                     # 50 Hz control (train==deploy)
+    }
+
+
 def train_gene_on_gpu(gene, *, out_path: str, iters: int = 80, envs: int = 1024, progress=None,
                       timeout: float = 2400.0, reward_weights: dict | None = None,
                       cpg: bool = False, dr: bool = False, init_npz: str | None = None,

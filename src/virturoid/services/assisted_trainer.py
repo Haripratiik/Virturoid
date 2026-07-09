@@ -43,11 +43,12 @@ def _gpu_train_and_diagnose(gene, weights, *, iters, envs, models_dir, init_npz,
     (cadence/upright/forward from recipe_rollout_morph). Returns (npz_path, diagnosis) or (None, None)."""
     from pathlib import Path as _P
 
-    from virturoid.services.gpu_trainer import train_gene_on_gpu
+    from virturoid.services.gpu_trainer import default_training_recipe, train_gene_on_gpu
     from virturoid.services.morph_policy import MorphPolicy, recipe_rollout_morph
     out = str(_P(models_dir) / f"ai_gait_{gene.robot_class or 'legged'}.npz")
-    npz = train_gene_on_gpu(gene, out_path=out, iters=iters, envs=envs, cpg=True,
-                            reward_weights=weights, init_npz=init_npz, progress=progress)
+    npz = train_gene_on_gpu(gene, out_path=out, iters=iters, envs=envs,   # AUTO recipe per body (cpg/adaptive/deltas)
+                            reward_weights=weights, init_npz=init_npz, progress=progress,
+                            **default_training_recipe(gene))
     if not npz:
         return None, None
     r = recipe_rollout_morph(gene, MorphPolicy.from_npz(npz), steps=900)
