@@ -44,5 +44,26 @@ class UrdfVisualTests(unittest.TestCase):
         self.assertGreater(txt.count("<visual>"), 6)   # torso + 6 legs' worth of links
 
 
+@unittest.skipUnless(_MUJOCO, "gene_to_urdf transcribes the compiled MuJoCo model")
+class GeneUrdfLayoutTests(unittest.TestCase):
+    """The URDF is transcribed from the compiled model, so a legged body's legs SPREAD to their real mounts —
+    not stacked vertically at the torso tip (the arm-centric compute_arm_layout produced a single origin)."""
+
+    def test_hexapod_legs_spread_not_stacked(self):
+        import xml.dom.minidom as minidom
+
+        from virturoid.services.gene_urdf import gene_to_urdf
+        from virturoid.services.morphology_composer import compose_robot
+        urdf = gene_to_urdf(compose_robot("a hexapod robot", ensure_walkable=True))
+        minidom.parseString(urdf)                                   # valid XML
+        origins = re.findall(r'<origin xyz="([^"]+)"', urdf)
+        self.assertGreater(len(set(origins)), 3, "legs must have distinct joint origins, not one stacked value")
+        lateral = [o for o in origins if abs(float(o.split()[1])) > 0.05]
+        self.assertGreaterEqual(len(lateral), 4, "legs must spread laterally (nonzero Y), not stack up +z")
+        self.assertIn("<cylinder", urdf)                           # real limb geometry, not a pile of boxes
+        self.assertNotIn("cad_arm_base", urdf)
+        self.assertEqual(urdf.count("<joint"), urdf.count("</joint>"))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -948,11 +948,18 @@ def _write_genome_and_urdf(gene: RobotGene, output_dir: Path) -> None:
     genome = _gene_to_genome(gene)
     (output_dir / "robot" / "robot_genome.json").write_text(json.dumps(genome, indent=2), encoding="utf-8")
     try:
-        from virturoid.schemas.robot import RobotGenome
-        from virturoid.services.urdf_exporter import write_robot_urdf
-        write_robot_urdf(RobotGenome.from_dict(genome), output_dir)
+        # Correct-for-ANY-body URDF: transcribe the compiled MuJoCo model (legs spread to their real mounts), NOT
+        # the arm-centric compute_arm_layout that stacked every leg vertically at the torso tip. Falls back to the
+        # legacy genome->URDF only if the MuJoCo transcription is unavailable.
+        from virturoid.services.gene_urdf import gene_to_urdf
+        (output_dir / "robot" / "robot.urdf").write_text(gene_to_urdf(gene), encoding="utf-8")
     except Exception:  # noqa: BLE001 - URDF is a nicety; the MJCF replay works without it
-        pass
+        try:
+            from virturoid.schemas.robot import RobotGenome
+            from virturoid.services.urdf_exporter import write_robot_urdf
+            write_robot_urdf(RobotGenome.from_dict(genome), output_dir)
+        except Exception:  # noqa: BLE001
+            pass
     try:
         # Legged robots get a standalone, runnable trot control program (the gene-path control_program.json) AND a
         # software/controller/ bundle. Written BEFORE the ROS2 export so the ROS2 node embeds it and runs the gait.
