@@ -788,6 +788,16 @@ def _fallback_gene(prompt: str, heuristic_spec: dict, *, target_height_m: float 
     g = compose_from_spec(heuristic_spec)
     g.design_source = heuristic_spec.get("design_source", "heuristic")
     g.composition_notes = ["Deterministic requirement-to-morphology fallback used; review the delivered body class before relying on it."]
+    # ROLL-STABILITY: the heuristic parametric quad has a narrow stance and rolls over under any gait (a "large
+    # quadruped robot" fell by roll-over). The composed-quad branch gets ensure_walkable_quad; this late fallback
+    # didn't. force=True adopts the wide fanned stance IFF it materially out-walks the heuristic (evaluate_robot
+    # now scores a roll-over ~0, so the roll-stable fanned body wins). No-op for non-quad heuristic bodies.
+    if (getattr(g, "robot_class", "") or "").lower() == "quadruped":
+        try:
+            from virturoid.services.anatomy_compiler import ensure_walkable_quad
+            g = ensure_walkable_quad(g, prompt, force=True)
+        except Exception:  # noqa: BLE001 - the stance fallback is best-effort; a rolling body beats a crash
+            pass
     return g
 
 

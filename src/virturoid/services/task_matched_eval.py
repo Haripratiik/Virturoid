@@ -99,21 +99,25 @@ def evaluate_robot(gene: RobotGene, *, prompt: str = "", controller_params: dict
         # This keeps the fallback reachable for a backward trot and prevents a
         # lurch in the wrong direction from outranking a genuine crawl.
         forward = float(r["forward_m"]); detail = r; scored_gait = "trot"
+        upright = bool(r.get("upright"))
         # Score the body by the BEST of its AVAILABLE gaits, not one fixed gait: a wide-stance quad that ROLLS
         # under the diagonal trot may WALK under the statically-stable CRAWL (one foot up at a time, 3 planted).
-        # Diagnosis-driven + cheap: only try the crawl when the trot UNDERPERFORMS (the tippy-quad failure), so a
-        # body that trots fine is untouched. This lets per-request generation/co-design DISCOVER the gait that
-        # works for THIS body (a hint the search reaches for) — never a fixed gait forced on every legged robot.
-        if forward < 0.5:
+        # Try the crawl when the trot underperforms OR ROLLED OVER (upright=False) — the tippy-quad failure. This
+        # lets per-request generation/co-design DISCOVER the gait that works for THIS body — never a fixed gait.
+        if forward < 0.5 or not upright:
             try:
                 from virturoid.services.morph_policy import crawl_gait_rollout
                 cr = crawl_gait_rollout(gene, steps=1200)
-                if bool(cr.get("survived")) and float(cr.get("forward", 0.0)) > forward:
-                    forward, detail, scored_gait = round(float(cr["forward"]), 3), cr, "crawl"
+                cr_up = bool(cr.get("survived")) and float(cr.get("height_ratio", 0.0)) > 0.5
+                # an UPRIGHT crawl beats a rolled trot regardless of raw distance; else it must travel further
+                if cr_up and float(cr.get("forward", 0.0)) > (forward if upright else -1e9):
+                    forward, detail, scored_gait, upright = round(float(cr["forward"]), 3), cr, "crawl", True
             except Exception:  # noqa: BLE001 - the crawl is an OPTIONAL alternative gait; never break the eval
                 pass
-        return {"task": "locomotion", "metric": "forward_m", "value": max(0.0, forward),
-                "detail": {**detail, "scored_gait": scored_gait}}
+        # A body that ROLLS OVER / FALLS but drifts forward is NOT walking (F8 gameable-distance gate): score it on
+        # staying upright, so a 0.87 m roll-over reads ~0 and the walkable-stance fallback correctly fires for it.
+        return {"task": "locomotion", "metric": "forward_m", "value": (max(0.0, forward) if upright else 0.0),
+                "detail": {**detail, "scored_gait": scored_gait, "upright": upright}}
 
     if kind == "mobile":
         from virturoid.services.navigation_controller import run_navigation_episode
