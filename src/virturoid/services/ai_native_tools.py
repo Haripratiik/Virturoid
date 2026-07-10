@@ -426,6 +426,13 @@ def _honest_gait(gene, *, steps: int = 1200, render: bool = False, tag: str = "g
                 return biped
         except Exception:  # noqa: BLE001 - the biped-stand check is value-add; keep the gait verdict on any error
             pass
+    # NOTE on flywheel ADAPTATION at verify time: the `adapt_gait` tool warm-starts a short search from the mined
+    # hints to FIT a gait to a body — but on a THIN corpus it can't reliably rescue a far-out-of-distribution body
+    # (a "large quadruped" needs ~2.9 Hz; the hints, from a few near-1.5 Hz walks, seed too far away, so a bounded
+    # search finds a slide, not a credible walk). Wiring it into every failed verify added ~15 s with no reliable
+    # payoff on a cold corpus, so it stays an EXPLICIT tool (adapt_gait) the agent invokes; the quick verify keeps
+    # its honest FELL. As the corpus banks credible walks for diverse bodies, the hints enrich and this earns its
+    # place in the deploy path — the flywheel improving with usage, exactly as intended.
     # FLYWHEEL SELF-UPDATE: a CREDIBLE walk is a working controller -> bank it so future similar bodies recall it
     # (the compounding loop, now driven by ordinary verify, not just explicit training). Best-effort + keep-best.
     if str(out["verdict"]).startswith("CREDIBLE") and out["survived"]:
