@@ -1,35 +1,37 @@
 """Behavioral fingerprint (``z_dyn``) — embed a body by its RESPONSE, not just its shape.
 
-Measured: static geometry ranks CLASS-level gait transfer at ~0.90 but WITHIN-class transfer at ~0.57 (chance) —
-because whether gait (freq, amps) ports to a body is set by DYNAMIC quantities geometry cannot express: the
-body's natural (SLIP/pendular) frequency under its deploy PD, its damping, its stance height (the Froude length),
-and whether its step cadence actually locks to a commanded drive frequency. This module measures exactly those
-with two cheap, deterministic probes that reuse the SAME rollout machinery gaits deploy on (so the fingerprint is
-measured in the frame that matters):
+Measured: static geometry ranks CLASS-level gait transfer at ~0.90 but WITHIN-class transfer near chance —
+because whether gait (freq, amps) ports to a body is set by DYNAMICS geometry cannot express (resonance, mass
+distribution, stance scale — the dynamic-similarity quantities). v1 tried a free-ring probe (release → count
+oscillation peaks); measured on real bodies it was DEGENERATE — the deploy PD (kp=32, kd=1.5) is near-critically
+damped, so most bodies never ring (f_res=0 everywhere). v2 measures resonance the honest way: FORCE the body at
+three standard frequencies through the SAME crawl-gait law gaits deploy on, and read which regime it responds in.
 
-  * Probe 0 — SETTLE/RELEASE: run the crawl-gait rollout with ZERO amplitudes (= pure PD hold at stance) from the
-    spawn drop; the root-height trace rings at the body's effective vertical resonance -> f_res, damping ratio,
-    settled stance height, mass-normalized stiffness.
-  * Probe 3 — REFERENCE BURSTS: two short standard-gait bursts (low/high drive frequency); does the body's
-    measured cadence LOCK to the commanded frequency (the dynamic-similarity signal), how much support/height it
-    keeps, how far it travels per cycle.
+  * SETTLE probe — zero-amplitude gait (= PD hold at stance): settled stance height (the Froude length scale;
+    measured to track leg scale 0.14→0.25→0.49) + spawn-drop depth (compliance).
+  * SWEEP probe — short bursts at f ∈ {1.0, 1.8, 2.6} Hz: forward response per frequency (the body's transfer
+    curve through the actual gait mechanism), which frequency wins (argmax = the resonance analog), support
+    fraction and height retention per frequency, and a UNIT-CORRECT step lock: cadence is foot-liftoffs/sec
+    summed over all feet (morph_policy:897-905), so lock = cadence / (n_feet · f) ≈ 1 when each foot steps once
+    per commanded cycle.
 
-~11 features, CPU MuJoCo, deterministic, a few seconds per body, cached per gene. Consumed by ``body_metric``
-feature spaces ``dyn`` / ``rich_dyn`` (and gated exactly like everything else: adopted only if it PROVABLY beats
-the baseline held-out on physics-verified transfer labels).
+12 features, ~4 short CPU rollouts, deterministic, cached per gene content. Consumed by ``body_metric`` spaces
+``dyn`` / ``rich_dyn`` — and gated like everything else: adopted only if it PROVABLY beats baseline held-out.
 """
 from __future__ import annotations
 
 import hashlib
 import json
-import math
 
+_SWEEP_F = (1.0, 1.8, 2.6)
 DYN_FEATURE_NAMES = (
-    "f_res_hz", "damping_ratio", "stance_h", "k_eff_norm", "settle_drop",
-    "lock_lo", "support_lo", "height_lo", "fwd_lo",
-    "lock_hi", "support_hi", "fwd_hi",
+    "stance_h", "settle_drop",
+    "fwd_f1", "fwd_f2", "fwd_f3",          # forward response at each drive frequency (the transfer curve)
+    "best_f",                              # argmax frequency (normalized position 0/0.5/1) — the resonance analog
+    "fwd_ratio_hi_lo",                     # response asymmetry: >1 likes fast drive, <1 likes slow
+    "lock_f1", "lock_f2", "lock_f3",       # per-foot per-cycle step lock at each frequency (~1 = locked)
+    "support_f2", "height_f2",             # stepping support + height retention at the middle frequency
 )
-_LO_F, _HI_F = 1.2, 2.6          # the two reference drive frequencies (span the banked-gait range)
 _cache: dict[str, list[float]] = {}
 
 
@@ -40,55 +42,43 @@ def _gene_key(gene) -> str:
         return str(id(gene))
 
 
-def _ring_features(zs: list[float], dt: float) -> tuple[float, float, float, float]:
-    """(f_res_hz, damping_ratio, settled_h, drop) from a root-height trace: find the post-drop oscillation peaks;
-    frequency from peak spacing, damping from the log-decrement of successive peak amplitudes."""
-    if len(zs) < 10:
-        return 0.0, 0.0, (zs[-1] if zs else 0.0), 0.0
-    settled = sum(zs[-max(5, len(zs) // 10):]) / max(5, len(zs) // 10)
-    drop = max(0.0, zs[0] - min(zs))
-    # peaks of |z - settled| -> the ringing period; ignore the first samples (spawn transient)
-    dev = [z - settled for z in zs]
-    peaks = []
-    for i in range(2, len(dev) - 2):
-        if abs(dev[i]) >= abs(dev[i - 1]) and abs(dev[i]) > abs(dev[i + 1]) and abs(dev[i]) > 1e-4:
-            if not peaks or i - peaks[-1][0] > 3:
-                peaks.append((i, abs(dev[i])))
-    if len(peaks) < 2:
-        return 0.0, 1.0, settled, drop                            # overdamped: no ring
-    # successive |peaks| are half-periods of the damped oscillation
-    gaps = [(peaks[i + 1][0] - peaks[i][0]) for i in range(len(peaks) - 1)]
-    half_period = (sum(gaps) / len(gaps)) * dt
-    f_res = 1.0 / (2.0 * half_period) if half_period > 1e-9 else 0.0
-    # log-decrement over successive half-cycles -> damping ratio
-    decs = [math.log(max(1e-9, peaks[i][1]) / max(1e-9, peaks[i + 1][1])) for i in range(len(peaks) - 1)]
-    d = max(0.0, sum(decs) / len(decs))                           # per half-cycle
-    zeta = d / math.sqrt(math.pi ** 2 + d * d)
-    return f_res, min(1.0, zeta), settled, drop
+def _n_feet(gene) -> int:
+    """Ground-contact appendages ≈ limbs off the root (the same limb_count the rich embedding uses)."""
+    root = gene.root()
+    if root is None:
+        return 1
+    return max(1, sum(1 for s in gene.segments if s.parent == root.name))
 
 
-def dyn_fingerprint(gene, *, settle_steps: int = 360, burst_steps: int = 420) -> dict:
-    """The named behavioral features for one body (dict). Deterministic; ~3 short CPU rollouts."""
+def dyn_fingerprint(gene, *, settle_steps: int = 300, burst_steps: int = 420) -> dict:
+    """The named behavioral features for one body (dict). Deterministic; ~4 short CPU rollouts."""
     from virturoid.services.morph_policy import crawl_gait_rollout
     out = dict.fromkeys(DYN_FEATURE_NAMES, 0.0)
     try:
-        # Probe 0: zero-amplitude gait = PD hold at stance -> the spawn drop rings at the body's resonance
+        feet = _n_feet(gene)
+        # SETTLE: zero-amplitude gait = PD hold -> stance height (Froude scale) + drop depth (compliance)
         r0 = crawl_gait_rollout(gene, steps=settle_steps, hip_amp=0.0, knee_amp=0.0, record_qpos=True)
         zs = [float(q[2]) for q in (r0.get("qpos_frames") or []) if len(q) > 2]
-        dt = 0.01 * max(1, settle_steps // max(1, len(zs)))       # frame_every spacing in sim time
-        f_res, zeta, h, drop = _ring_features(zs, dt)
-        m = sum(s.mass_kg for s in gene.segments) or 1.0
-        out.update(f_res_hz=round(f_res, 4), damping_ratio=round(zeta, 4), stance_h=round(h, 4),
-                   k_eff_norm=round(math.log1p(m * (2 * math.pi * f_res) ** 2), 4), settle_drop=round(drop, 4))
-        # Probe 3: two reference bursts; cadence LOCK = measured step frequency / commanded frequency
-        for tag, f in (("lo", _LO_F), ("hi", _HI_F)):
+        if zs:
+            tail = zs[-max(5, len(zs) // 10):]
+            out["stance_h"] = round(sum(tail) / len(tail), 4)
+            out["settle_drop"] = round(max(0.0, zs[0] - min(zs)), 4)
+        # SWEEP: forced response at three standard drive frequencies through the deploy gait law
+        fwd = []
+        for i, f in enumerate(_SWEEP_F, start=1):
             rb = crawl_gait_rollout(gene, steps=burst_steps, freq=f)
+            fw = float(rb.get("forward", 0.0))
+            fwd.append(fw)
+            out[f"fwd_f{i}"] = round(fw, 4)
             cad = float(rb.get("cadence", 0.0))
-            out[f"lock_{tag}"] = round(cad / f, 4) if f > 0 else 0.0
-            out[f"support_{tag}"] = round(float(rb.get("support_frac", 0.0)), 4)
-            out[f"fwd_{tag}"] = round(float(rb.get("forward", 0.0)), 4)
-            if tag == "lo":
-                out["height_lo"] = round(float(rb.get("height_ratio", 0.0)), 4)
+            out[f"lock_f{i}"] = round(cad / (feet * f), 4) if f > 0 else 0.0
+            if i == 2:
+                out["support_f2"] = round(float(rb.get("support_frac", 0.0)), 4)
+                out["height_f2"] = round(float(rb.get("height_ratio", 0.0)), 4)
+        best = max(range(len(fwd)), key=lambda k: fwd[k])
+        out["best_f"] = round(best / (len(fwd) - 1), 4)           # 0=slow regime, 1=fast regime
+        lo, hi = fwd[0], fwd[-1]
+        out["fwd_ratio_hi_lo"] = round((hi + 0.05) / (lo + 0.05), 4) if lo > -0.04 else 0.0
     except Exception:  # noqa: BLE001 - a body the probes can't run (fixed-base arm, compile issue) -> zeros
         pass
     return out
