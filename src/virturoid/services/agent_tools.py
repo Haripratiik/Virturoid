@@ -284,6 +284,11 @@ try:
     TOOLS.update(SHAPE_TOOLS)                                # Thesis A: shape-word corpus as runtime grounding
 except Exception:  # noqa: BLE001
     pass
+try:
+    from virturoid.services.gait_hints import GAIT_HINT_TOOLS
+    TOOLS.update(GAIT_HINT_TOOLS)                            # flywheel = auto-mined HINTS + per-body adaptation
+except Exception:  # noqa: BLE001
+    pass
 
 
 # The CONSOLIDATED MCP surface (agent_first_plan.md G-G). Research: Cursor caps ~40 active tools ACROSS all

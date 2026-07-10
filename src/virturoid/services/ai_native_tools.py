@@ -379,15 +379,21 @@ def _honest_gait(gene, *, steps: int = 1200, render: bool = False, tag: str = "g
     gait_params: dict = {}
     gait_source = "default_crawl"
     try:
-        from virturoid.services.gait_flywheel import recall_gait
+        # FLYWHEEL = HINTS, NOT COPY-PASTE. Rather than deploy one banked body's exact params verbatim (a trap on a
+        # slightly-different body), start from the mined HINT REGION — where credible walks CLUSTER across bodies,
+        # auto-derived from data (gait_hints). A quick verify uses this data-driven prior; the ``adapt_gait`` tool
+        # runs the full per-body fit from the same hints. The deploy-select below still guards it vs the default.
+        from virturoid.services.gait_flywheel import _class_of
+        from virturoid.services.gait_hints import mine_gait_hints
         from virturoid.services.memory_db import DEFAULT_DB_PATH, MemoryDB
         if DEFAULT_DB_PATH.exists():
             with MemoryDB(DEFAULT_DB_PATH) as _db:
-                _p = recall_gait(_db, gene)
-            if _p:
+                _h = mine_gait_hints(_db, _class_of(gene))
+            if _h.get("n", 0) >= 2:                              # ≥2 banked walks -> a real mined region to hint from
+                _p = _h["prior"]
                 gait_params = {k: float(_p[k]) for k in ("freq", "hip_amp", "knee_amp", "duty", "kp", "kd")
                                if k in _p}
-                gait_source = "learned_flywheel"
+                gait_source = "flywheel_hint"                    # a data-driven hint region, not a copied policy
     except Exception:  # noqa: BLE001 - the flywheel is an accelerant; a miss just uses the default gait
         gait_params = {}
     r = crawl_gait_rollout(gene, steps=steps, record_qpos=True, **gait_params)
