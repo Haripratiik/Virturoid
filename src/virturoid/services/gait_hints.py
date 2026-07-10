@@ -50,47 +50,75 @@ def _banked_gait_params(db, robot_class: str | None, *, min_success: float) -> l
     return out
 
 
-def mine_gait_hints(db, robot_class: str | None = None, *, min_success: float = 0.4) -> dict:
-    """AUTO-DISCOVER transferable gait hints from the banked credible walks + the lesson store. Returns
-    ``{n, hints, prior, note}``. Every number is derived from data — nothing hardcoded; with <2 walks it says so
-    and falls back to the shipped default as the (honest, un-tuned) prior."""
-    from virturoid.services.gait_flywheel import _DEFAULT_GAIT
-    params = _banked_gait_params(db, robot_class, min_success=min_success)
+def _vector_nearest_gaits(db, gene, *, k: int, min_sim: float) -> list[tuple[dict, float]]:
+    """The banked gaits of the EMBEDDING-NEAREST robots to ``gene`` (cross-body, cross-class), each with its
+    cosine similarity. THIS is the moat: a brand-new morphology finds robots SHAPED like it in the robotics
+    vector space (``embed_body``/GeneGNN latent) and borrows THEIR gait principles — real transfer through a
+    learned/structural embedding, not a class-string match. Empty when nothing is indexed near it."""
+    try:
+        from virturoid.services.gait_flywheel import LOCOMOTION, _gait_params_for_skill
+        from virturoid.services.robotics_vector_memory import RoboticsVectorMemory
+        out = []
+        for hit in RoboticsVectorMemory(db).nearest_skills(gene, LOCOMOTION, k=k, min_sim=min_sim):
+            gp = _gait_params_for_skill(db, str(hit.get("obj_id", "")))
+            if isinstance(gp, dict):
+                out.append((gp, float(hit.get("similarity", 0.5))))
+        return out
+    except Exception:  # noqa: BLE001 - no vector index yet -> caller falls back to the class-string source
+        return []
+
+
+def mine_gait_hints(db, gene=None, robot_class: str | None = None, *, min_success: float = 0.4,
+                    k: int = 8, min_sim: float = 0.2) -> dict:
+    """AUTO-DISCOVER transferable gait hints, borrowed from the EMBEDDING-NEAREST robots. When a ``gene`` is
+    given the source gaits are the vector-nearest banked robots (weighted by morphology similarity — a
+    completely new body borrows from whatever it is SHAPED like, across class labels); otherwise it falls back
+    to class-string filtering. Every number is derived from data — nothing hardcoded; <2 sources -> honest
+    'not enough data' + the shipped default as an un-tuned prior. The hints sharpen as more sims are banked."""
+    from virturoid.services.gait_flywheel import _DEFAULT_GAIT, _class_of
+    src = "vector_nearest"
+    pw = _vector_nearest_gaits(db, gene, k=k, min_sim=min_sim) if gene is not None else []
+    if not pw:                                                    # no vector neighbors -> class-string source
+        cls = robot_class or (_class_of(gene) if gene is not None else None)
+        pw = [(p, 1.0) for p in _banked_gait_params(db, cls, min_success=min_success)]
+        src = "class_match" if cls else "all_banked"
+    params = [p for p, _ in pw]
     hints: list[dict] = []
     prior = dict(_DEFAULT_GAIT)
     bounds: dict[str, tuple[float, float]] = {}
-    if len(params) >= 2:
-        # per-param CREDIBLE REGION (median + IQR): where working gaits actually cluster, for THIS class
-        for k in _PARAM_KEYS:
-            vals = sorted(float(p[k]) for p in params if k in p and isinstance(p[k], (int, float)))
-            if len(vals) >= 2:
-                med = st.median(vals)
-                lo, hi = vals[0], vals[-1]
-                prior[k] = round(med, 4)
-                bounds[k] = (round(lo, 4), round(hi, 4))
-                hints.append({"kind": "param_region", "param": k, "center": round(med, 4),
-                              "range": [round(lo, 4), round(hi, 4)], "support": len(vals),
-                              "note": f"credible walkers cluster {k} near {med:.2f} (from {len(vals)} banked walks)"})
-        # RELATIONAL hint (auto): do credible walks lift the knee more than they swing the hip?
+    if len(pw) >= 2:
+        # per-param region as a SIMILARITY-WEIGHTED center (nearer robots pull the prior harder) + observed range
+        for key in _PARAM_KEYS:
+            vw = [(float(p[key]), w) for p, w in pw if key in p and isinstance(p[key], (int, float))]
+            if len(vw) >= 2:
+                tot = sum(max(0.05, w) for _, w in vw) or 1.0
+                center = sum(v * max(0.05, w) for v, w in vw) / tot
+                vals = sorted(v for v, _ in vw)
+                prior[key] = round(center, 4)
+                bounds[key] = (round(vals[0], 4), round(vals[-1], 4))
+                hints.append({"kind": "param_region", "param": key, "center": round(center, 4),
+                              "range": [round(vals[0], 4), round(vals[-1], 4)], "support": len(vw),
+                              "note": f"nearby walkers cluster {key} near {center:.2f} "
+                                      f"({'similarity-weighted, ' if src == 'vector_nearest' else ''}{len(vw)} robots)"})
         rel = [1 for p in params if float(p.get("knee_amp", 0)) > float(p.get("hip_amp", 0))]
-        if params:
-            frac = len(rel) / len(params)
-            if frac >= 0.7:
-                hints.append({"kind": "relation", "rule": "knee_amp > hip_amp", "support": len(params),
-                              "note": f"{frac:.0%} of credible walks lift the knee MORE than the hip swings — "
-                                      f"a stepping (not sliding) gait; keep knee_amp above hip_amp"})
-    # STRUCTURAL lessons for this class (the existing failure->fix hint store, auto-written on repair)
+        if params and len(rel) / len(params) >= 0.7:
+            hints.append({"kind": "relation", "rule": "knee_amp > hip_amp", "support": len(params),
+                          "note": f"{len(rel) / len(params):.0%} of nearby walkers lift the knee MORE than the "
+                                  f"hip swings — a stepping (not sliding) gait; keep knee_amp above hip_amp"})
+    # STRUCTURAL lessons for the class (the existing failure->fix hint store, auto-written on repair)
     try:
-        for L in db.lessons_for_class(robot_class or "", limit=5):
+        _cls = robot_class or (_class_of(gene) if gene is not None else "")
+        for L in db.lessons_for_class(_cls or "", limit=5):
             hints.append({"kind": "structural", "failure": L.get("failure_code"), "fix": L.get("operator"),
                           "note": (L.get("rationale") or f"on {L.get('failure_code')}, apply {L.get('operator')}")})
     except Exception:  # noqa: BLE001 - lessons are value-add
         pass
-    note = ("hints mined from banked credible walks — they SHARPEN as more sims run"
-            if len(params) >= 2 else
-            "not enough banked walks yet to mine a region — using the shipped default as an un-tuned prior; "
-            "hints appear automatically once ≥2 credible walks are banked for this class")
-    return {"n": len(params), "robot_class": robot_class, "hints": hints, "prior": prior,
+    note = (f"hints borrowed from {len(pw)} "
+            f"{'VECTOR-similar robots (shaped like this one, across class)' if src == 'vector_nearest' else src.replace('_', '-') + ' walks'}"
+            " — they sharpen as more sims run" if len(pw) >= 2 else
+            "not enough banked walks near this body yet — using the shipped default as an un-tuned prior; hints "
+            "appear automatically once >=2 credible walks are banked near it in the robotics embedding")
+    return {"n": len(pw), "source": src, "robot_class": robot_class, "hints": hints, "prior": prior,
             "bounds": bounds, "note": note}
 
 
@@ -105,7 +133,7 @@ def adapt_gait_from_hints(gene, db, *, generations: int = 4, pop: int = 10, step
     result FITTED TO THIS BODY. Two bodies get two different gaits from the same hints — adaptation, not a copy.
     Returns ``{params, walked, forward_m, source, hints, adapted_from_prior}``."""
     from virturoid.services.gait_search import evaluate_gait, search_gait
-    h = mine_gait_hints(db, _class_of(gene))
+    h = mine_gait_hints(db, gene=gene)                            # VECTOR-nearest robots seed the search prior
     prior = hint_prior(h)
     res = search_gait(gene, generations=generations, pop=pop, steps=steps, seed=seed, warm_start=prior)
     r = evaluate_gait(gene, res.best_params, steps=deploy_steps)
@@ -123,8 +151,16 @@ def _flywheel_hints(args: dict) -> dict:
     from virturoid.services.memory_db import DEFAULT_DB_PATH, MemoryDB
     if not DEFAULT_DB_PATH.exists():
         return {"ok": True, "n": 0, "hints": [], "note": "no flywheel memory yet — hints appear as sims run"}
+    gene = None                                                   # a held robot -> VECTOR-nearest hints for its body
+    if args.get("robot_id"):
+        try:
+            from virturoid.services import session_state as S
+            held = S.get_robot(args["robot_id"]) if hasattr(S, "get_robot") else None
+            gene = held.get("gene") if isinstance(held, dict) else (getattr(held, "gene", None) or held)
+        except Exception:  # noqa: BLE001
+            gene = None
     with MemoryDB(DEFAULT_DB_PATH) as db:
-        h = mine_gait_hints(db, args.get("robot_class"))
+        h = mine_gait_hints(db, gene=gene, robot_class=args.get("robot_class"))
     return {"ok": True, **h}
 
 
@@ -147,7 +183,9 @@ GAIT_HINT_TOOLS = {
         "description": "Inspect the flywheel's AUTO-DISCOVERED transferable gait hints for a robot class (the "
                        "param regions credible walks cluster in + relational/structural rules), mined from banked "
                        "sims. These sharpen as more robots are used — nothing is hardcoded.",
-        "parameters": {"type": "object", "properties": {"robot_class": {"type": "string"}}},
+        "parameters": {"type": "object", "properties": {
+            "robot_id": {"type": "string", "description": "a held robot -> hints from its VECTOR-nearest robots"},
+            "robot_class": {"type": "string"}}},
         "handler": _flywheel_hints,
     },
     "adapt_gait": {

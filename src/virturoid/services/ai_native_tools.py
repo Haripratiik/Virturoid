@@ -383,12 +383,11 @@ def _honest_gait(gene, *, steps: int = 1200, render: bool = False, tag: str = "g
         # slightly-different body), start from the mined HINT REGION — where credible walks CLUSTER across bodies,
         # auto-derived from data (gait_hints). A quick verify uses this data-driven prior; the ``adapt_gait`` tool
         # runs the full per-body fit from the same hints. The deploy-select below still guards it vs the default.
-        from virturoid.services.gait_flywheel import _class_of
         from virturoid.services.gait_hints import mine_gait_hints
         from virturoid.services.memory_db import DEFAULT_DB_PATH, MemoryDB
         if DEFAULT_DB_PATH.exists():
             with MemoryDB(DEFAULT_DB_PATH) as _db:
-                _h = mine_gait_hints(_db, _class_of(gene))
+                _h = mine_gait_hints(_db, gene=gene)              # VECTOR-nearest robots seed the deploy hint
             if _h.get("n", 0) >= 2:                              # ≥2 banked walks -> a real mined region to hint from
                 _p = _h["prior"]
                 gait_params = {k: float(_p[k]) for k in ("freq", "hip_amp", "knee_amp", "duty", "kp", "kd")
