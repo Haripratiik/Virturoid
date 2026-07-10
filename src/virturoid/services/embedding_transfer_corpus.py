@@ -21,17 +21,34 @@ from pathlib import Path
 # a deliberately diverse zoo: a strong LEGGED core (where gait-hint retrieval actually happens and today's embedding
 # is blind, cosine 0.91-1.0) + serial/wheeled/arm outliers so the eval also catches "homeless body" retrieval.
 DEFAULT_ZOO: list[tuple[str, str]] = [
+    # a broad QUADRUPED core (reliable gait sources -> a dense, discriminative transfer matrix where borrowing
+    # actually happens) + many-leg / biped / serial / wheeled / arm bodies as targets and outliers. Graduated
+    # sizes/proportions give the transfer matrix FINER-than-class structure for a learned metric to exploit.
+    ("tquad",  "a tiny quadruped robot"),
     ("sdog",   "a small quadruped robot dog"),
+    ("mquad",  "a medium quadruped robot"),
     ("lquad",  "a large heavy quadruped robot"),
+    ("hquad",  "a huge heavy quadruped robot"),
+    ("horse",  "a tall horse quadruped robot with long legs"),
+    ("gecko",  "a small wide gecko lizard robot with four splayed legs"),
+    ("cat",    "an agile cat quadruped robot"),
+    ("turtle", "a squat turtle robot with four short legs"),
+    ("bull",   "a stocky bull quadruped robot"),
     ("hexa",   "a six-legged hexapod robot"),
-    ("octo",   "an octopus robot with eight arms"),
+    ("whexa",  "a wide six-legged hexapod robot"),
+    ("ant",    "a six-legged ant robot"),
+    ("crab",   "a six-legged crab robot"),
     ("spider", "an eight-legged spider robot"),
+    ("wspider","a wide eight-legged spider robot"),
+    ("octo",   "an octopus robot with eight arms"),
     ("cent",   "a many-legged centipede robot"),
+    ("mille",  "a many-legged millipede robot"),
     ("biped",  "a two-legged humanoid robot"),
     ("raptor", "a two-legged raptor dinosaur robot"),
-    ("crab",   "a six-legged crab robot"),
     ("snake",  "a snake robot that slithers"),
+    ("eel",    "an eel robot that swims"),
     ("arm",    "a six-axis robot arm on a table"),
+    ("grip",   "a small tabletop gripper arm"),
     ("rover",  "a four-wheeled rover robot"),
 ]
 

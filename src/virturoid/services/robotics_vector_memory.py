@@ -123,9 +123,15 @@ def embed_task(prompt: str, task_type: str | None = None, robot_class: str | Non
 
 
 def embed_body(gene: RobotGene, latent: list[float] | None = None) -> list[float]:
-    """Body embedding (``z_body``). Defaults to the deterministic morphology feature vector; pass a
-    learned graph latent (e.g. ``GeneGNN.embed(gene)``) to use it instead — same downstream index."""
-    return _l2(list(latent) if latent is not None else embed_gene(gene))
+    """Body embedding (``z_body``). Defaults to the deterministic 29-D morphology vector, optionally reweighted by
+    a LEARNED diagonal transfer metric (``body_metric``) when one is fitted AND proven to beat the baseline on
+    held-out transfer ranking — that reweighting, not unsupervised whitening, is what makes distance predict
+    transfer (measured, not asserted; a null metric is identity so this never regresses). Pass a learned graph
+    latent (``GeneGNN.embed``) to use it instead — same downstream index."""
+    if latent is not None:
+        return _l2(list(latent))
+    from virturoid.services.body_metric import embed_metric
+    return _l2(embed_metric(gene))
 
 
 def embed_skill(task_text: str, gene: RobotGene | None = None, *, success_rate: float | None = None,
