@@ -237,6 +237,21 @@ def _half_xyz(item: SceneObject, fx: float, fy: float, fz: float) -> tuple[float
     return fx, fy, fz
 
 
+# Conventional per-category furniture colors, so a themed room reads as itself (wood shelves, a white fridge, a
+# teal sofa, a green planter) instead of one flat grey. Aesthetic only — physics/footprint are unchanged.
+_FURNITURE_RGBA = {
+    "shelf": "0.55 0.40 0.28 1", "bookshelf": "0.50 0.36 0.24 1", "rack": "0.46 0.48 0.53 1",
+    "pallet": "0.62 0.47 0.30 1", "crate": "0.60 0.45 0.28 1", "workbench": "0.44 0.46 0.52 1",
+    "counter": "0.72 0.68 0.58 1", "island": "0.70 0.66 0.55 1", "fridge": "0.88 0.89 0.91 1",
+    "sofa": "0.28 0.46 0.53 1", "coffee_table": "0.52 0.38 0.26 1", "rug": "0.55 0.32 0.32 1",
+    "bench": "0.50 0.42 0.32 1", "planter": "0.30 0.52 0.34 1",
+}
+
+
+def _furniture_rgba(category: str | None) -> str:
+    return _FURNITURE_RGBA.get((category or "").lower(), "0.5 0.5 0.55 1")
+
+
 def _scene_object_xml(item: SceneObject, floor: bool = False) -> str:
     x, y, _, _, _, yaw = item.pose_xyz_rpy
     name = escape(item.name)
@@ -282,7 +297,7 @@ def _scene_object_xml(item: SceneObject, floor: bool = False) -> str:
         # low crate steers the same and leaves the robot the tallest, clearly-visible thing in the scene.
         hx, hy, hz = _half_xyz(item, h, h, round(min(h, 0.07), 4))
         return (f'    <geom name="{name}" type="box" size="{hx} {hy} {hz}" pos="{x} {y} {round(hz, 4)}" '
-                f'euler="0 0 {round(yaw, 4)}" rgba="0.5 0.5 0.55 1"/>')
+                f'euler="0 0 {round(yaw, 4)}" rgba="{_furniture_rgba(item.category)}"/>')
 
     # ---- tabletop static furniture (conveyor / surface) ----
     if item.object_type in _STATIC_TYPES:
