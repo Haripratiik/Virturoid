@@ -110,8 +110,11 @@ def run_locomotion_episode(model, horizon: int = 2400, settle: int = 400, freq: 
     for s in range(settle):
         drive(s, gait=False)
     p0 = np.array(data.qpos[qadr:qadr + 2])
+    stand_z = float(data.qpos[qadr + 2]) or 1.0          # the body's OWN standing torso height (post-settle)
+    min_tz = stand_z
     for s in range(horizon):
         drive(s, gait=True)
+        min_tz = min(min_tz, float(data.qpos[qadr + 2]))
         if on_step is not None:
             on_step(model, data, s)
         if not np.all(np.isfinite(data.qpos)):
@@ -119,7 +122,11 @@ def run_locomotion_episode(model, horizon: int = 2400, settle: int = 400, freq: 
     p1 = np.array(data.qpos[qadr:qadr + 2])
     torso_z = float(data.qpos[qadr + 2])
     dist = float(np.linalg.norm(p1 - p0))
-    upright = bool(torso_z > 0.12)
+    # UN-GAMEABLE upright: the torso must END near, and never COLLAPSE far below, its OWN standing height — not
+    # merely clear a fixed 0.12 m floor. A humanoid that stands 0.84 m and topples to 0.13 m cleared 0.12 m and was
+    # falsely reported 'upright, walked' (a fall that drifts the base forward is not a walk). Relative to the body's
+    # own height, so it still holds for a naturally-low quadruped/hexapod torso.
+    upright = bool(torso_z > 0.5 * stand_z and min_tz > 0.4 * stand_z)
     # Honest status: an upright body that simply didn't travel far is STALLED (weak/mistuned gait), not fallen.
     # Conflating the two (the old label) hid the real failure mode the deep-analysis dog showed — upright but
     # shuffling in place — behind a 'fell' that implies a balance loss it never had.
