@@ -415,6 +415,10 @@ def compile_gene_with_scene(gene: RobotGene, scene_objects, *, table: bool = Tru
                               physics_only=physics_only).rstrip("\n"),
         *_scene_objects_xml(list(scene_objects)),
         '  </worldbody>',
+        # B1: filter the robot's self-contacts (ancestor↔descendant) in scene/manipulation runs too — the plain
+        # compile path already does this (line ~162), but the scene path omitted it, so a body in a scene solved
+        # spurious impulses against its own structure. Robot↔scene-object + floor contacts stay enabled.
+        _self_collision_excludes_xml(gene).rstrip("\n"),
         _actuator_xml(gene).rstrip("\n") or "  <actuator></actuator>",
         '</mujoco>',
     ]
