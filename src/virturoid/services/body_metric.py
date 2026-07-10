@@ -28,10 +28,16 @@ _TRIED = False
 
 def _features(gene: RobotGene, space: str) -> list[float]:
     from virturoid.services.morphology_embedding import embed_gene, embed_gene_rich
+    if space.startswith("dyn"):                                  # behavioral fingerprint ONLY (probe features)
+        from virturoid.services.behavioral_fingerprint import z_dyn
+        return z_dyn(gene)
     base = embed_gene_rich(gene) if space.startswith("rich") else embed_gene(gene)
     if space.endswith("_wl"):                                    # append the WL topology channel
         from virturoid.services.morph_wl_fingerprint import wl_fingerprint
         base = base + wl_fingerprint(gene)
+    if space.endswith("_dyn"):                                   # append the behavioral (probe) channel — the
+        from virturoid.services.behavioral_fingerprint import z_dyn   # dynamics geometry can't express
+        base = base + z_dyn(gene)
     return base
 
 
