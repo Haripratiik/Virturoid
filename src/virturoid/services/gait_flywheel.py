@@ -57,7 +57,7 @@ def _deploy_sim_config(gene) -> dict:
     return cfg
 
 
-def bank_gait(db, gene, result, *, task: str = LOCOMOTION) -> str | None:
+def bank_gait(db, gene, result, *, task: str = LOCOMOTION, cross_eval: bool = False) -> str | None:
     """Bank a learned gait's PARAMS as a retrievable skill (keyed by class+task+species). Returns the skill_id.
 
     Only banks a DEPLOYABLE result (survived + real forward) — never a fall (honesty: the bank must stay a bank of
@@ -89,9 +89,18 @@ def bank_gait(db, gene, result, *, task: str = LOCOMOTION) -> str | None:
                                                                 embed_skill)
         vm = RoboticsVectorMemory(db)
         vec = embed_skill(f"{task} {cls} {species}", gene, success_rate=success, latent=_body_latent(gene))
-        vm.upsert(SKILL, skill_id, vec, {"robot_class": cls, "task_type": task, "species": species})
+        # the gene rides INLINE in the vector meta so transfer cross-eval can recover the neighbour's BODY
+        # (not just its params) without depending on the species vault being populated
+        vm.upsert(SKILL, skill_id, vec, {"robot_class": cls, "task_type": task, "species": species,
+                                         "gene": gene.to_dict()})
     except Exception:  # noqa: BLE001 - vector indexing is a retrieval accelerant; the DB bank is the source of truth
         pass
+    # TRANSFER LEDGER (opt-in; batch contexts like night-shift): replay this gait on the K nearest banked bodies
+    # and theirs on this one — every verified outcome densifies the ground truth the gated metric learns from,
+    # so the embedding upgrades itself with usage. Bounded (2·K short rollouts); never blocks the hot build path.
+    if cross_eval:
+        from virturoid.services.transfer_ledger import cross_evaluate_on_bank
+        cross_evaluate_on_bank(db, gene, result.best_params, skill_id=skill_id)
     return skill_id
 
 

@@ -164,7 +164,7 @@ def _fit_weights(method, vecs, T, sources, train):
         else _relevance_weights(vecs, T, sources, train)
 
 
-def fit_body_metric(corpus: dict, *, feature_space: str = "rich", whiten: bool = True, method: str = "relevance",
+def fit_body_metric(corpus: dict, *, feature_space: str = "rich", whiten: bool = False, method: str = "relevance",
                     save: bool = False, path: Path | None = None) -> dict:
     """Fit the diagonal transfer metric and MEASURE it leave-one-body-out against the TRUE 29-D baseline (not the
     same-space unweighted vector — the honest bar is 'beat what ships today'). ``proven`` iff held-out weighted
