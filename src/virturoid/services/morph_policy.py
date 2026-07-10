@@ -260,15 +260,22 @@ from functools import lru_cache  # noqa: E402
 
 
 @lru_cache(maxsize=32)
-def _compiled_model_cached(xml: str):
+def _compiled_model_cached(xml: str, solver_iterations: int | None):
     import mujoco
-    return mujoco.MjModel.from_xml_string(xml)
+    model = mujoco.MjModel.from_xml_string(xml)
+    if solver_iterations is not None:
+        model.opt.iterations = int(solver_iterations)
+    return model
 
 
-def compiled_model(xml: str):
+def compiled_model(xml: str, *, solver_iterations: int | None = None):
     """Compile (or reuse) an MjModel for ``xml``. Reused across rollouts of the same body — MjModel is
-    read-only during stepping, so sharing it is safe and bit-identical, just far cheaper than recompiling."""
-    return _compiled_model_cached(xml)
+    read-only during stepping, so sharing it is safe and bit-identical, just far cheaper than recompiling.
+
+    Solver settings are part of the cache key. Callers must request them at compile time instead of mutating a
+    cached model after retrieval, which keeps one rollout's numerical configuration from leaking into another.
+    """
+    return _compiled_model_cached(xml, solver_iterations)
 
 
 def rollout_morph(gene, policy: MorphPolicy | None = None, *, steps: int = 600, alpha: float = 0.6,
@@ -287,11 +294,10 @@ def rollout_morph(gene, policy: MorphPolicy | None = None, *, steps: int = 600, 
 
     if with_ranges and not isinstance(gene, str):
         from virturoid.services.exteroception import read_ranges, with_rangefinders
-        model = compiled_model(with_rangefinders(gene, walls=None, n_rays=n_rays))
+        model = compiled_model(with_rangefinders(gene, walls=None, n_rays=n_rays), solver_iterations=20)
     else:
         with_ranges = False                                  # raw-MJCF imports have no rangefinder ring
-        model = compiled_model(robot_mjcf(gene))
-    model.opt.iterations = 20
+        model = compiled_model(robot_mjcf(gene), solver_iterations=20)
     data = mujoco.MjData(model)
     mujoco.mj_resetData(model, data)
     mujoco.mj_forward(model, data)
@@ -366,7 +372,7 @@ def recipe_obs_normalizer(gene, *, n_pol: int = 4, steps: int = 250, seed0: int 
 
     from virturoid.services.morph_graph import encode_robot
 
-    model = compiled_model(robot_mjcf(gene)); model.opt.iterations = 20
+    model = compiled_model(robot_mjcf(gene), solver_iterations=20)
     graph = encode_robot(model)
     obs = []
     for s in range(n_pol):
@@ -617,7 +623,7 @@ def extract_gait_params(gene) -> dict | None:
 
     from virturoid.services.morph_graph import encode_robot
 
-    model = compiled_model(robot_mjcf(gene)); model.opt.iterations = 20
+    model = compiled_model(robot_mjcf(gene), solver_iterations=20)
     data = mujoco.MjData(model); _reset_to_rest(model, data); mujoco.mj_forward(model, data)
     graph = encode_robot(model)
     if graph.base_jid < 0 or graph.n_tokens == 0:               # fixed-base / no actuators: nothing to walk
@@ -689,11 +695,10 @@ def recipe_rollout_morph(gene, policy: MorphPolicy | None = None, *, steps: int 
             decimation = int(getattr(policy, "decimation", 1) or 1)
         if action_lpf == 0.0:
             action_lpf = float(getattr(policy, "action_lpf", 0.0) or 0.0)
-    model = compiled_model(robot_mjcf(gene))
+    model = compiled_model(robot_mjcf(gene), solver_iterations=20)
     if sphere_feet or model_perturb is not None:             # BOTH transforms mutate the model in place, but
         import copy                                          # compiled_model returns a SHARED lru_cached MjModel —
         model = copy.deepcopy(model)                         # mutating it would corrupt the cache (and DR would
-    model.opt.iterations = 20                                # COMPOUND across rollouts). Copy first when we will mutate.
     if sphere_feet:                                          # T1.4: manifold-invariant sphere feet + feet-only collision
         from virturoid.services.sphere_feet import apply_sphere_feet   # (default off -> untouched -> byte-identical)
         apply_sphere_feet(model)                             # applied on train + deploy compile so contact model matches
@@ -900,9 +905,15 @@ def recipe_rollout_morph(gene, policy: MorphPolicy | None = None, *, steps: int 
     cadence = round(lifts / _T, 2)                                # foot liftoffs per second (0 for a stiff slide)
     upright_frac = round(up_steps / max(1, alive), 3)            # fraction of alive steps upright at stance height
     support_frac = round(support_steps / max(1, alive), 3)      # fraction of alive steps in genuine stepping support
+    # ``speed`` is the requested-horizon average used by reports/selection: a
+    # body that moves briefly then falls cannot advertise a high speed merely
+    # because its denominator stopped early. ``active_speed`` is retained as a
+    # diagnostic for the interval before termination.
+    horizon_speed = forward / max(1, steps) / dt
+    active_speed = forward / max(1, alive) / dt
     out = {"finite": True, "gait": round(R / max(1, steps), 4), "forward": round(forward, 3),
            "height_ratio": round(hr, 3), "alive": alive, "survived": bool(alive >= steps and hr > 0.6),
-           "speed": round(forward / max(1, alive) / dt, 3), "frames": frames or [],
+           "speed": round(horizon_speed, 3), "active_speed": round(active_speed, 3), "frames": frames or [],
            "cadence": cadence, "upright_frac": upright_frac, "support_frac": support_frac,
            "upright_tau": round(tau_up, 3), "n_feet": int(len(feet_idx)),
            "n_tokens": graph.n_tokens, "feature_dim": graph.feature_dim}
@@ -919,6 +930,22 @@ def recipe_rollout_morph(gene, policy: MorphPolicy | None = None, *, steps: int 
         out["qvel"] = np.asarray(qv_trace)                      #   (token order == graph.act_u == BOM joint order)
         out["clamps"] = np.asarray(clamps)                     #   per-joint torque CAPACITY -> sizes the real servo
     return out
+
+
+def rollout_deployed_morph_policy(gene, policy: MorphPolicy, *, steps: int = 900) -> dict:
+    """Evaluate a policy under the controller convention stored in its artifact.
+
+    Recipe/CPG policies carry a PD-to-default gait prior and observation normalization.  Measuring them with
+    the residual-only rollout changes the controller and can falsely report a trained policy as fallen.  Plain
+    policies keep the legacy residual rollout.  The controller tag makes controller selection auditable.
+    """
+    if getattr(policy, "obs_mean", None) is not None or getattr(policy, "cpg", None) is not None:
+        result = dict(recipe_rollout_morph(gene, policy, steps=steps))
+        result["deployment_controller"] = "recipe_cpg"
+        return result
+    result = dict(rollout_morph(gene, policy, steps=steps))
+    result["deployment_controller"] = "residual"
+    return result
 
 
 # (freq, hip_amp, knee_amp) op-points for the per-body gait tune. The quad walks at the DEFAULT (1.5, 0.9, 1.0);
@@ -984,7 +1011,7 @@ def _reset_to_rest(model, data) -> None:
 def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float | None = None, hip_amp: float | None = None,
                        knee_amp: float | None = None, duty: float = 0.25, kp: float = 32.0, kd: float = 1.5,
                        record_qpos: bool = False, frame_every: int = 5, turn_bias: float = 0.0,
-                       steer_fn=None) -> dict:
+                       steer_fn=None, return_control_plan: bool = False) -> dict:
     """STATICALLY-STABLE CRAWL gait for a WIDE-stance quadruped (open-loop, NO policy). Lifts ONE leg at a time
     (the 4 legs at quarter-cycle phases with a LOW-DUTY knee pulse) so 3 feet are ALWAYS planted -> the CoM stays
     inside the support triangle -> it CANNOT roll over. On a FANNED wide-stance body
@@ -1006,7 +1033,7 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float | None = None, hi
     from virturoid.services.appendage_map import build_appendage_map
     from virturoid.services.gait_engine import select_duty
     from virturoid.services.morph_graph import encode_robot
-    model = compiled_model(robot_mjcf(gene)); model.opt.iterations = 20
+    model = compiled_model(robot_mjcf(gene), solver_iterations=20)
     data = mujoco.MjData(model); _reset_to_rest(model, data); mujoco.mj_forward(model, data)
     graph = encode_robot(model)
     if graph.base_jid < 0 or graph.n_tokens == 0:
@@ -1162,7 +1189,70 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float | None = None, hi
             f = _run(phd, fq, min(350, steps), False)["forward"]   # direction/freq probe is straight (turn_bias 0)
             if f > best_fwd:
                 best_fwd, best_phd, best_fq = f, phd, fq
-    return _run(best_phd, best_fq, steps, record_qpos, turn_bias, steer_fn)
+    out = _run(best_phd, best_fq, steps, record_qpos, turn_bias, steer_fn)
+    if return_control_plan:
+        # Freeze the measured direction/frequency probe and the structural leg
+        # map.  Deployment must never repeat a physics probe: this plan is the
+        # exact open-loop target law the rollout just evaluated.
+        joint_names, limits = [], []
+        for u in act_u:
+            jid = int(model.actuator_trnid[int(u), 0])
+            joint_names.append(mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, jid) or f"joint_{jid}")
+            limits.append([float(model.jnt_range[jid][0]), float(model.jnt_range[jid][1])]
+                          if bool(model.jnt_limited[jid]) else [-3.14159265, 3.14159265])
+        # The many-leg gait derives its reference pose after a dynamic settle;
+        # that cannot truthfully be reproduced by a stateless target program.
+        # Do not export it as though it could.  The caller can fall back to the
+        # explicitly-labelled trot starter rather than shipping a mismatched
+        # controller.
+        exportable = len(hip_k) > 0 and len(hip_k) < 10
+        out["control_plan"] = {
+            "exportable": exportable,
+            "reason": None if exportable else "crawl requires a dynamic settled reference pose or has no leg map",
+            "policy_type": "crawl_wave_gait",
+            "joint_names": joint_names,
+            "default_pose": [float(v) for v in q_def],
+            "position_limits": limits,
+            "frequency_hz": float(best_fq),
+            "hip_amp": float(hip_amp),
+            "knee_amp": float(knee_amp),
+            "lift_duty": float(lift_duty),
+            "kp": float(kp),
+            "kd": float(kd),
+            "legs": [{"hip_index": int(hip_k[key]), "knee_index": int(knee_k[key]),
+                      "phase": float(best_phd[key]), "hip_sign": float(hip_sign[key])}
+                     for key in sorted(hip_k)],
+        }
+    return out
+
+
+def extract_crawl_gait_params(gene, *, tune_steps: int = 500, verify_steps: int = 1200) -> dict | None:
+    """Freeze a credible crawl gait into standalone target-controller data.
+
+    This is the export counterpart to :func:`crawl_gait_rollout`: tune/select
+    once in MuJoCo, retain the actual selected wave direction and structural
+    token map, and return it only when the same controller clears the shared
+    credibility gate.  A non-credible crawl is intentionally not exported.
+    """
+    from virturoid.services.gait_quality import classify
+
+    tuned = tune_crawl_gait(gene, steps=tune_steps, cache=True)
+    result = crawl_gait_rollout(
+        gene, steps=verify_steps, freq=tuned["freq"], hip_amp=tuned["hip_amp"],
+        knee_amp=tuned["knee_amp"], return_control_plan=True,
+    )
+    plan = result.get("control_plan") or {}
+    verdict = classify(result)
+    if not plan.get("exportable") or not verdict.startswith("CREDIBLE"):
+        return None
+    return {
+        **plan,
+        "verified_walk": True,
+        "sim_forward_m": round(float(result.get("forward", 0.0)), 3),
+        "sim_verdict": verdict,
+        "sim_cadence_hz": round(float(result.get("cadence", 0.0)), 3),
+        "sim_upright_frac": round(float(result.get("upright_frac", 0.0)), 3),
+    }
 
 
 def legged_steer_to_goal(gene, goal_xy, *, steps: int = 4000, gain: float = 1.6, cap: float = 0.75,
@@ -1201,7 +1291,7 @@ def serpentine_rollout(gene, *, steps: int = 2500, amp: float = 0.6, wavenum: fl
     import numpy as np
 
     from virturoid.services.morph_graph import encode_robot
-    model = compiled_model(robot_mjcf(gene)); model.opt.iterations = 20
+    model = compiled_model(robot_mjcf(gene), solver_iterations=20)
     graph = encode_robot(model)
     if graph.base_jid < 0 or graph.n_tokens == 0 or model.nu == 0:
         return {"finite": True, "survived": True, "forward": 0.0, "planar_m": 0.0,

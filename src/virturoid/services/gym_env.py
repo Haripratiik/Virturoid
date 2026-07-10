@@ -70,8 +70,7 @@ class VirturoidLocomotionEnv(_Base):
         from virturoid.services.morph_policy import compiled_model, robot_mjcf
 
         self._np = np
-        self._model = compiled_model(robot_mjcf(gene))
-        self._model.opt.iterations = 20
+        self._model = compiled_model(robot_mjcf(gene), solver_iterations=20)
         self._graph = encode_robot(self._model)
         self.horizon = int(horizon)
         self.alpha = float(alpha)

@@ -96,8 +96,7 @@ def batched_forward_scores(gene, param_batch, *, steps: int = 220, alpha: float 
     from virturoid.services.morph_graph import encode_robot
     from virturoid.services.morph_policy import compiled_model, robot_mjcf
 
-    model = compiled_model(robot_mjcf(gene))
-    model.opt.iterations = 20
+    model = compiled_model(robot_mjcf(gene), solver_iterations=20)
     graph = encode_robot(model)
     B = len(param_batch)
     if graph.n_tokens == 0:

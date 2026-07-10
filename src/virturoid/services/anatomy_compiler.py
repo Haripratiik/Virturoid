@@ -55,7 +55,7 @@ def _R_to_euler(R):
     return (math.atan2(R[2, 1], R[1, 1]), b, 0.0)
 
 # Roles whose joint is revolute by default (the articulated appendages) — others weld unless the graph says so.
-_ARTICULATED = {"leg_upper", "leg_lower", "arm_upper", "arm_lower", "tail", "wing", "fin", "flipper", "claw", "neck"}
+_ARTICULATED = {"leg_upper", "leg_lower", "arm_upper", "arm_lower", "tail", "wing", "fin", "flipper", "claw", "neck", "tentacle", "trunk"}
 # Roles that hang/extend DOWN by default when the graph doesn't say (legs).
 _DOWN_ROLES = {"leg_upper", "leg_lower", "paw", "foot"}
 
@@ -162,6 +162,11 @@ def _role_geometry(role: str, size: float, girth: float, aspect: str = ""):
         th = max(0.004, 0.09 * w)
         return ({"family": "extrude", "height": round(L, 4), "fillet": round(0.12 * w, 4),
                  "profile": [[-th, -0.5 * w], [th, -0.46 * w], [th, 0.46 * w], [-th, 0.5 * w]]}, L, w)
+    if role in ("tentacle", "trunk", "pseudopod"):
+        # A continuum-like appendage is represented honestly as an articulated
+        # tapered rigid chain.  It is not a walking leg: it keeps its requested
+        # segment count, can curl, and never receives a welded foot pad.
+        return _tapered(L, g, max(0.004, 0.55 * g)), L, g
     if role in ("leg", "arm", "leg_upper", "leg_lower", "arm_upper", "arm_lower", "limb"):
         # a STRAIGHT mechanical link — a flat beam / bracket of constant cross-section (a robot limb segment,
         # think Spot/Go1 leg plates), NOT an organic tapered spindle. Deeper fore-aft (local x), flatter
@@ -172,8 +177,41 @@ def _role_geometry(role: str, size: float, girth: float, aspect: str = ""):
         return ({"family": "extrude", "height": round(L, 4), "fillet": round(0.5 * width, 4),
                  "profile": [[-depth, -width], [0.9 * depth, -width], [0.9 * depth, width], [-depth, width]]},
                 L, g)
-    # anything unknown: a tapered spindle.
-    return _tapered(L, g, g * 0.78), L, g
+    raise ValueError(f"unsupported anatomy role {role!r}; add an explicit compiler role before building it")
+
+
+def _physics_proxy_from_geometry(geometry: dict | None, fallback_shape: str, fallback_radius: float) -> tuple[str, tuple[float, float] | None]:
+    """Select the primitive collider that actually represents a shape program.
+
+    We deliberately keep the fast/MJX-safe primitive vocabulary, but no longer
+    discard authored cross-sections: an extrude/loft becomes a box with its real
+    x/y bounds, while tapered/revolved forms retain the conservative round
+    proxy.  The optional mesh path can add higher visual fidelity; this function
+    is the load-bearing physics/export representation used everywhere.
+    """
+    if not isinstance(geometry, dict):
+        return fallback_shape, None
+    family = str(geometry.get("family") or "").lower()
+    if family == "extrude":
+        profile = geometry.get("profile") or []
+        points = [(float(p[0]), float(p[1])) for p in profile
+                  if isinstance(p, (list, tuple)) and len(p) >= 2]
+        if points:
+            hx = max(abs(x) for x, _ in points)
+            hy = max(abs(y) for _, y in points)
+            if hx > 1e-6 and hy > 1e-6:
+                return "box", (hx, hy)
+    if family == "loft":
+        sections = geometry.get("sections") or []
+        # Loft sections are [z, half_y, half_x].  A conservative box proxy
+        # uses their maximum radial extent rather than a generic square limb.
+        valid = [s for s in sections if isinstance(s, (list, tuple)) and len(s) >= 3]
+        if valid:
+            hx = max(abs(float(s[2])) for s in valid)
+            hy = max(abs(float(s[1])) for s in valid)
+            if hx > 1e-6 and hy > 1e-6:
+                return "box", (hx, hy)
+    return fallback_shape, None
 
 
 def _anchor_on_body(attach: str, half_len: float, half_w: float, height: float, edge: float = 0.6) -> tuple:
@@ -372,15 +410,31 @@ def build_from_anatomy(graph: dict) -> RobotGene:
         geo = _apply_detail(geo, str(root.get("detail") or "vented"), blen, b_girth, float(root.get("chamfer") or 0.0))
     except (TypeError, ValueError):
         pass
+    if isinstance(root.get("geometry"), dict):
+        geo = root["geometry"]
     # half_w MUST be the ACTUAL realized half-width (brad), not b_girth/2: the width cap / aspect can make the
     # real loft narrower or wider than the authored girth, and mirrored limbs are anchored off half_w. Using the
     # authored girth here (the old bug) floated appendages off a capped body — the detach fragility every exotic
     # creature hit in the stress test.
     half_len, half_w, height = b_size / 2.0, brad, blen
     rname = root.get("name") or "body"
-    segs.append(GeneSegment(name=rname, parent=None, shape="box", length_m=blen,
+    root_aspect = str(root.get("aspect") or "").lower()
+    # A round mantle/abdomen must be round in the model that physics and the
+    # URDF exporter consume, not only in the optional CAD description.
+    root_shape = "sphere" if root_aspect in ("round", "bulb", "sac") else "box"
+    proxy_shape, proxy_cs = _physics_proxy_from_geometry(geo, root_shape, brad)
+    # A declared round mantle/abdomen is intentionally a sphere; do not turn
+    # its supporting loft description back into a rectangular proxy.
+    if root_shape != "sphere":
+        root_shape = proxy_shape
+    # The body plan's front/back half-length used to disappear here: every
+    # torso compiled as a square vertical post.  A box torso now carries the
+    # same x/y envelope that anchors and the geometry program use.
+    root_cs = proxy_cs or (half_len, brad)
+    segs.append(GeneSegment(name=rname, parent=None, shape=root_shape, length_m=blen,
                             radius_m=max(brad, 0.06), mass_kg=max(0.4, 6.0 * (b_size * b_girth) ** 0.5),
-                            joint_type=None, geometry=geo, material="shell"))
+                            joint_type=None, cross_section=(root_cs if root_shape == "box" else None),
+                            geometry=geo, material="shell"))
     dims[rname] = {"half_len": half_len, "half_w": half_w, "height": height, "length_m": blen, "role": "body"}
 
     # leaf registry: (part_name, side) -> the segment a CHILD should attach to (the tip of that part's chain
@@ -393,7 +447,7 @@ def build_from_anatomy(graph: dict) -> RobotGene:
     world_R: dict = {rname: np.eye(3)}
     # a CHASSIS box has flat end faces at full half_len, so appendages must root NEAR the edge to emerge; a
     # tapered loft shell tapers inward, so they root further in. (Fixes the tail/neck burying in the chassis.)
-    body_edge = 0.82 if (geo or {}).get("family") == "extrude" else 0.6
+    body_edge = 0.82 if root_shape == "box" else 0.6
 
     def _emit_chain(part, base_name, side):
         sign_y = {"l": 1.0, "r": -1.0, "": 0.0}[side]
@@ -450,7 +504,7 @@ def build_from_anatomy(graph: dict) -> RobotGene:
         prev_world_R = world_R.get(parent_seg, np.eye(3))
         for i in range(n):
             last = i == n - 1
-            is_foot = is_limb and last and n > 1            # terminal segment of a walking limb -> a real foot
+            is_foot = role == "leg" and last and n > 1     # only a walking leg receives a foot
             seg_role = ("foot" if is_foot else role)
             is_wheel = seg_role == "wheel"
             g_i = girth * (0.82 ** i)
@@ -529,13 +583,25 @@ def build_from_anatomy(graph: dict) -> RobotGene:
                 _ja = (float(_loc[0] / _nrm), float(_loc[1] / _nrm), float(_loc[2] / _nrm))
                 if i == 0:
                     _jlo, _jhi = -0.6, 0.6                              # abduction range (Go2-class ~+-0.5 rad)
+            # The crawl-gait controller is calibrated against the deliberately
+            # conservative capsule chain used by the generated walking-leg
+            # family.  Preserve that *dynamics* contract for automatic legs;
+            # an explicitly authored leg shape still becomes its requested
+            # proxy.  Other generated/external extrudes do drive collision.
+            if role == "leg" and not isinstance(part.get("geometry"), dict):
+                proxy_shape, proxy_cs = ("capsule", None)
+            else:
+                proxy_shape, proxy_cs = _physics_proxy_from_geometry(
+                    geo, "cylinder" if is_wheel else "capsule", radius_m,
+                )
             segs.append(GeneSegment(
-                name=seg_name, parent=prev, shape=("cylinder" if is_wheel else "capsule"),
+                name=seg_name, parent=prev, shape=proxy_shape,
                 length_m=length_m, radius_m=max(0.006, radius_m),
                 mass_kg=max(0.02, 1.2 * length_m * radius_m * 30), joint_type=joint_type, joint_axis=_ja,
                 joint_lower=_jlo if joint_type else None, joint_upper=_jhi if joint_type else None,
                 mount_offset=mount_offset, mount_euler=mount_euler,
                 actuator_torque_nm=14.0 if joint_type else None, geometry=geo,
+                cross_section=proxy_cs,
                 material=_role_material(seg_role)))
             dims[seg_name] = {"half_len": length_m / 2, "half_w": radius_m, "height": length_m,
                               "length_m": length_m, "role": seg_role}
@@ -574,7 +640,9 @@ def build_from_anatomy(graph: dict) -> RobotGene:
     _size_actuator_torques(segs)   # size each joint's actuator to the REAL load it bears (not a flat default)
     return RobotGene(id="anatomy_" + (graph.get("name") or robot_class), species=f"{robot_class}.anatomy",
                      robot_class=robot_class, segments=segs, base_mount="free",
-                     end_effector_type="none", metadata={"rest_pose": pose} if pose else {})
+                     end_effector_type="none", design_source="anatomy_graph",
+                     composition_notes=["Compiled directly from the supplied anatomy graph."],
+                     metadata={"rest_pose": pose} if pose else {})
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -584,7 +652,8 @@ def build_from_anatomy(graph: dict) -> RobotGene:
 # "wyvern" all yield the same generic legged body offline, and the LLM anatomy designer (the PRIMARY path)
 # supplies the species-specific anatomy when present. Hard-coding a graph per animal is the overfitting we
 # reject — the software must generalize to creatures nobody enumerated.
-def _generic_legged_graph(*, n_pairs: int, body=0.58, girth=0.13, leg=0.42, tail=0.14, fan=False) -> dict:
+def _generic_legged_graph(*, n_pairs: int, body=0.58, girth=0.13, leg=0.42, tail=0.14, fan=False,
+                          appendage_role: str = "leg", body_aspect: str = "") -> dict:
     """A generic legged skeleton: torso + neck + head + tail + ``n_pairs`` of 3-segment walking legs, spread
     across the longitudinal anchors and fanned outward. Class-general — 2 pairs = quadruped, 3 = hexapod,
     4 = octopod. No species shape baked in; just a credible standing N-legged body.
@@ -595,15 +664,19 @@ def _generic_legged_graph(*, n_pairs: int, body=0.58, girth=0.13, leg=0.42, tail
     widens the spread to ~0.5 m; paired with a CRAWL gait ([[walking-breakthrough-abduction]]) it gives a real
     open-loop upright walk. Default OFF (byte-identical); the hexapod/octopod already fan by default."""
     n = max(1, min(4, n_pairs))
-    parts = [
-        {"name": "torso", "role": "body", "size": body, "girth": girth},
-        {"name": "neck", "role": "neck", "parent": "torso", "attach": "front_top", "aim": "forward_up",
-         "size": 0.22 * body, "girth": 0.42 * girth},
-        {"name": "head", "role": "head", "parent": "neck", "attach": "tip", "aim": "forward",
-         "size": 0.24 * body, "girth": 0.45 * girth},
-        {"name": "tail", "role": "tail", "parent": "torso", "attach": "rear_top", "aim": "back_up",
-         "size": tail, "girth": 0.18 * tail, "joint": "revolute"},
-    ]
+    is_tentacled = appendage_role == "tentacle"
+    parts = [{"name": "mantle" if is_tentacled else "torso", "role": "body", "size": body,
+              "girth": girth, "aspect": body_aspect}]
+    root_name = parts[0]["name"]
+    if not is_tentacled:
+        parts += [
+            {"name": "neck", "role": "neck", "parent": root_name, "attach": "front_top", "aim": "forward_up",
+             "size": 0.22 * body, "girth": 0.42 * girth},
+            {"name": "head", "role": "head", "parent": "neck", "attach": "tip", "aim": "forward",
+             "size": 0.24 * body, "girth": 0.45 * girth},
+            {"name": "tail", "role": "tail", "parent": root_name, "attach": "rear_top", "aim": "back_up",
+             "size": tail, "girth": 0.18 * tail, "joint": "revolute"},
+        ]
     _dn = "down_out" if fan else "down"                     # fan the quad legs OUT for a wide, roll-stable stance
     layouts = {
         1: [("front_bottom", "down")],
@@ -616,10 +689,15 @@ def _generic_legged_graph(*, n_pairs: int, body=0.58, girth=0.13, leg=0.42, tail
         # G7 (gap-closure): Go2-band legs — 4 segments = 3 ACTUATED joints + a welded foot (the old 3-segment
         # legs had only 2 actuated joints; every real quadruped has 3/leg), total length 0.42 m (~thigh+shank
         # 0.2+0.2 like the Go2/Mini-Cheetah class), and a SLENDER girth (aspect >=3:1) instead of 1:1 stubs.
-        parts.append({"name": f"leg{i + 1}", "role": "leg", "parent": "torso", "attach": anchor, "aim": aim,
+        parts.append({"name": f"{appendage_role}{i + 1}", "role": appendage_role, "parent": root_name, "attach": anchor, "aim": aim,
                       "size": leg, "girth": 0.045 * leg, "segments": 4, "symmetry": "left_right",
                       "joint": "revolute"})
-    return {"robot_class": ("biped" if n == 1 else "quadruped"), "name": "creature", "parts": parts}
+    # The public class is intentionally broad for 6/8-legged bodies: downstream
+    # capability lookups understand ``legged`` but a hexapod/octopod must never be
+    # mislabeled as a quadruped and collapsed into its class-specific memory niche.
+    body_class = "legged" if (is_tentacled or n >= 3) else ("biped" if n == 1 else "quadruped")
+    return {"robot_class": body_class,
+            "name": "creature", "parts": parts}
 
 
 # A walker prompt = a named legged MORPHOLOGY (quadruped/hexapod/…) OR locomotion INTENT (walk/trot/gait/…).
@@ -642,21 +720,32 @@ _CREATURE_WORDS = re.compile(
     r"elk|bison|goose)\b")
 
 
-def generic_creature_gene(prompt: str, robot_class: str | None = None):
-    """Offline/no-LLM fallback: a generic, connected QUADRUPED creature via the general compiler — a credible
-    standing body for an ANIMAL prompt instead of the flat parametric slab. Class-general, with NO per-species
-    lookup: 'dog', 'lizard', 'axolotl' all get the same generic quadruped, and the LLM anatomy designer (the
-    PRIMARY path) supplies the species-specific anatomy when present. Returns None for (a) non-creature classes
-    and (b) FUNCTIONAL/CLASS walker prompts ('a quadruped walking robot', 'a hexapod') — those route to the
-    gait-tuned parametric template, which owns arbitrary leg counts."""
+def generic_creature_gene(prompt: str, robot_class: str | None = None, n_legs: int | None = None):
+    """Offline/no-LLM fallback: a generic, connected creature via the general compiler — a credible standing body
+    for an ANIMAL prompt instead of the flat parametric slab. Class-general, with NO per-species lookup: 'dog',
+    'lizard', 'axolotl' all get the same generic body, and the LLM anatomy designer (the PRIMARY path) supplies the
+    species-specific anatomy when present. ``n_legs`` (parsed from the prompt) sizes the skeleton so a T-rex is a
+    2-leg biped and an octopus an 8-leg octopod — the previous fixed 4-leg build was why every off-keyword animal
+    collapsed to the same quadruped. Returns None for (a) non-creature classes and (b) FUNCTIONAL/CLASS walker
+    prompts ('a quadruped walking robot', 'a hexapod') — those route to the gait-tuned parametric template."""
     p = (prompt or "").lower()
     cls = (robot_class or "").lower()
-    if cls in ("manipulator", "mobile_base", "arm", "gripper", "biped", "humanoid"):
+    if cls in ("manipulator", "mobile_base", "arm", "gripper", "humanoid"):
         return None
     if _WALKER_SIGNAL.search(p) and not _CREATURE_WORDS.search(p):
         return None
+    # HONOR the requested appendage plan. An explicit tentacled/radial cue selects a round mantle plus articulated
+    # tentacles; it never routes those appendages through the walking-leg/foot machinery.
+    n_pairs = max(1, min(4, int(n_legs) // 2)) if n_legs else 2
+    tentacled = any(w in p for w in ("octopus", "cephalopod", "tentacle", "tentacled"))
     try:
-        g = build_from_anatomy(_generic_legged_graph(n_pairs=2))
+        g = build_from_anatomy(_generic_legged_graph(
+            n_pairs=n_pairs, appendage_role="tentacle" if tentacled else "leg",
+            body_aspect="round" if tentacled else "",
+        ))
+        if tentacled:
+            g.robot_class = "legged"
+            g.composition_notes = ["Offline structural cue selected a round mantle with articulated tentacles; this is not a walking-leg body."]
         if not g.validate():
             return g
     except Exception:  # noqa: BLE001
@@ -692,8 +781,11 @@ def ensure_walkable_quad(gene, prompt: str = "", *, force: bool = False):
             return gene                                      # (force skips this shortcut but STILL only adopts the
         #                                                      fanned stance below if it beats the original materially)
         src = (getattr(gene, "design_source", None) or "").lower()
-        if src not in ("", "anatomy_generic", "archetype", "heuristic", "generic"):
-            # a bespoke LLM creature: preserve the DESIGN, flag that it can't credibly walk as-is (a hint, not a swap)
+        if not force and src not in ("", "anatomy_generic", "archetype", "heuristic", "generic"):
+            # a bespoke LLM creature (UNFORCED): preserve the DESIGN, flag that it can't credibly walk as-is (a
+            # hint, not a swap). Under force=True (an IMPORT the caller must make simulable — its provenance is
+            # 'unknown', not a design to protect) we fall through to the fanned rebuild+compare below, which STILL
+            # self-protects a genuinely-walking design (it's adopted only when it beats the original materially).
             md = dict(getattr(gene, "metadata", None) or {})
             md["walkability"] = {"credible_walk": False, "distance_m": round(base, 3),
                                  "hint": "widen the stance (fan the legs out) + use the crawl gait"}

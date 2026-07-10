@@ -55,6 +55,30 @@ def _sync_repo(say) -> None:
     _ssh("cd ~/virturoid && tar xzf ~/app_sync.tgz", timeout=90)
 
 
+def _read_complete_npz(read_bytes, *, attempts: int = 4, wait_s: float = 2.0) -> bytes | None:
+    """Read a remote NPZ only after it is both non-trivial and parseable.
+
+    A detached GPU process can disappear from ``pgrep`` a moment before the remote filesystem exposes its final
+    bytes. Treating that short window as a hard training failure silently sends the user to CPU fallback. This
+    bounded retry accepts only a complete NumPy archive, so it fixes the race without accepting corruption.
+    """
+    import io
+    import numpy as np
+
+    n_attempts = max(1, int(attempts))
+    for attempt in range(n_attempts):
+        try:
+            payload = read_bytes()
+            if len(payload) >= 200:
+                np.load(io.BytesIO(payload))
+                return payload
+        except Exception:  # noqa: BLE001 - short/incomplete archive; a bounded retry may see the final flush
+            pass
+        if attempt + 1 < n_attempts:
+            time.sleep(max(0.0, float(wait_s)))
+    return None
+
+
 def _poll_and_fetch(remote_npz: str, out_path: str, *, progress, timeout: float, say,
                     proc_name: str = "mjx_morph_attention", fetch_checkpoints: bool = False) -> str | None:
     deadline = time.time() + timeout
@@ -86,13 +110,11 @@ def _poll_and_fetch(remote_npz: str, out_path: str, *, progress, timeout: float,
         if out.startswith("DONE"):
             break
     say("fetching the trained policy…")
-    npz = _ssh(f"cat ~/virturoid/{remote_npz}", timeout=120).stdout
-    if len(npz) < 200:                                   # no/short file -> training didn't produce one
+    npz = _read_complete_npz(lambda: _ssh(f"cat ~/virturoid/{remote_npz}", timeout=120).stdout)
+    if npz is None:                                      # bounded retries still found no complete file
         return None
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     Path(out_path).write_bytes(npz)
-    import numpy as np
-    np.load(out_path)                                    # validate it loads
     if fetch_checkpoints:
         # also fetch the numbered checkpoints (plan v2 T0.1) to local siblings <out_stem>_it{N}.npz so the caller
         # can DEPLOY-SELECT the best (never trust the final by train-reward -- it can deploy WORSE than an earlier

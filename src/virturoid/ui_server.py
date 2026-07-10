@@ -521,11 +521,25 @@ def _ollama_chat(messages: list[dict], model: str) -> str | None:
         return None
 
 
-def _assistant_complete(messages: list[dict]) -> str | None:
+def _assistant_complete(messages: list[dict], model: str = ASSISTANT_MODEL) -> str | None:
     """Provider-agnostic completion. Add new providers here without touching callers."""
     if ASSISTANT_PROVIDER == "ollama":
-        return _ollama_chat(messages, ASSISTANT_MODEL)
+        return _ollama_chat(messages, model)
     return None
+
+
+def _selected_assistant_model(payload: dict, status: dict) -> str:
+    """Choose an installed local model for one request without mutating global configuration."""
+    requested = str(payload.get("model") or "").strip()
+    available = {str(name) for name in status.get("models") or []}
+    # Accept only a tag returned by the local runtime. This prevents a client from asking Ollama to run an
+    # arbitrary model; clients without the new field retain the configured default.
+    return requested if requested and requested in available else ASSISTANT_MODEL
+
+
+def _assistant_model_available(model: str, status: dict) -> bool:
+    """Match Ollama's optional ``:tag`` suffix the same way the status endpoint does."""
+    return any(str(name).split(":")[0] == model.split(":")[0] for name in status.get("models") or [])
 
 
 def _extract_build_action(text: str) -> dict | None:
@@ -582,13 +596,15 @@ def run_assistant_turn(payload: dict, build_root: Path) -> dict:
             return {"role": "assistant", "content": f"Could not edit: {type(exc).__name__}: {exc}", "action": None}
 
     status = assistant_status()
+    selected_model = _selected_assistant_model(payload, status)
+    selected_available = _assistant_model_available(selected_model, status)
     model_messages = [{"role": "system", "content": _ASSISTANT_SYSTEM_PROMPT}, *(
         {"role": m.get("role", "user"), "content": str(m.get("content") or "")}
         for m in messages
         if m.get("role") in {"user", "assistant"}
     )]
 
-    raw_reply = _assistant_complete(model_messages) if status.get("online") else None
+    raw_reply = _assistant_complete(model_messages, selected_model) if status.get("online") and selected_available else None
     used_model = raw_reply is not None
 
     action = _extract_build_action(raw_reply or "") if used_model else None
@@ -640,7 +656,7 @@ def run_assistant_turn(payload: dict, build_root: Path) -> dict:
         "A local model isn't running, so I'm in deterministic mode. I can still build robots: "
         "tell me what to build (e.g. \"build a tabletop arm that sorts blocks\"). "
         "To enable full conversation, start Ollama and pull a model "
-        f"(current target: {ASSISTANT_MODEL})."
+        f"(current target: {selected_model})."
     )
     return {"role": "assistant", "content": hint, "action": "chat", "model_used": False}
 

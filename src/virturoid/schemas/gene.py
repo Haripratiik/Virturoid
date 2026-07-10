@@ -21,7 +21,7 @@ from dataclasses import dataclass, field, replace
 
 # Joint type -> MJCF joint kind (compiler maps these; "fixed" emits no joint = rigid weld).
 JOINT_TYPES = {"revolute", "prismatic", "fixed"}
-SHAPES = {"capsule", "box", "cylinder"}
+SHAPES = {"capsule", "box", "cylinder", "sphere"}
 BASE_MOUNTS = {"floor", "table", "torso", "free"}  # "free" = a floating base (mobile robots that drive)
 END_EFFECTORS = {"gripper", "suction", "spray_nozzle", "hook", "none"}
 
@@ -65,6 +65,12 @@ class RobotGene:
     parent_species: str | None = None  # the tree node this gene was amended from
     base_mount: str = "table"          # floor | table | torso
     end_effector_type: str = "gripper"
+    # How the body was obtained is product evidence, not an ephemeral Python
+    # attribute.  A fallback must survive serialization and be visible in every
+    # export/UI consumer; otherwise an authored design and a generic substitute
+    # are indistinguishable after the build ends.
+    design_source: str = "unknown"
+    composition_notes: list[str] = field(default_factory=list)
     metadata: dict = field(default_factory=dict)
 
     # ---- tree helpers -------------------------------------------------------
@@ -136,7 +142,10 @@ class RobotGene:
         return {
             "id": self.id, "species": self.species, "robot_class": self.robot_class,
             "parent_species": self.parent_species, "base_mount": self.base_mount,
-            "end_effector_type": self.end_effector_type, "metadata": dict(self.metadata),
+            "end_effector_type": self.end_effector_type,
+            "design_source": self.design_source,
+            "composition_notes": list(self.composition_notes),
+            "metadata": dict(self.metadata),
             "segments": [
                 {"name": s.name, "parent": s.parent, "shape": s.shape, "length_m": s.length_m,
                  "radius_m": s.radius_m, "mass_kg": s.mass_kg, "joint_type": s.joint_type,
@@ -155,7 +164,10 @@ class RobotGene:
         return cls(
             id=d["id"], species=d["species"], robot_class=d["robot_class"],
             parent_species=d.get("parent_species"), base_mount=d.get("base_mount", "table"),
-            end_effector_type=d.get("end_effector_type", "gripper"), metadata=dict(d.get("metadata", {})),
+            end_effector_type=d.get("end_effector_type", "gripper"),
+            design_source=str(d.get("design_source", "unknown")),
+            composition_notes=list(d.get("composition_notes", [])),
+            metadata=dict(d.get("metadata", {})),
             segments=[
                 GeneSegment(
                     name=s["name"], parent=s.get("parent"), shape=s.get("shape", "capsule"),

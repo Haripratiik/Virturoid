@@ -60,6 +60,11 @@ def _link_to_urdf_lines(link_name: str, layout: LinkLayout | None, mesh_prefix: 
         visual_geom = f'<mesh filename="{mesh_prefix}/{mesh_name}" />'
     else:
         visual_geom = f'<box size="{round(2 * half, 5)} {round(2 * half, 5)} {round(max(length, 0.01), 5)}" />'
+    # Genome-only packages do not carry a material table.  Still emit an
+    # explicit, deterministic visual material so URDF consumers do not turn
+    # every non-mesh robot into their default flat grey.
+    lname = link_name.lower()
+    rgba = "0.20 0.26 0.31 1" if any(k in lname for k in ("leg", "arm", "link", "joint")) else "0.36 0.53 0.66 1"
     return [
         f'  <link name="{escape(link_name)}">',
         "    <inertial>",
@@ -70,6 +75,7 @@ def _link_to_urdf_lines(link_name: str, layout: LinkLayout | None, mesh_prefix: 
         "    <visual>",
         f'      <origin xyz="0 0 {center_z if mesh_name is None else 0}" rpy="0 0 0" />',
         f'      <geometry>{visual_geom}</geometry>',
+        f'      <material name="{escape(link_name)}_visual"><color rgba="{rgba}" /></material>',
         "    </visual>",
         # Collision is a PRIMITIVE box sized from the real layout (2*half wide, `length` along local z, centered at
         # length/2) -- NOT the visual mesh. This keeps the URDF SELF-CONTAINED: the physics + a mesh-less re-import

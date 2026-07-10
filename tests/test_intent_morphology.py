@@ -85,6 +85,13 @@ class IntentMorphologyTests(unittest.TestCase):
         self.assertEqual(g.species, "humanoid.anthropometric")
         self.assertEqual(g.validate(), [])
 
+    def test_uncertain_prompt_provenance_survives_composition(self):
+        g = compose_robot("build a blorptron", llm=None)
+        plan = g.metadata["build_plan"]
+        self.assertFalse(plan["buildable"])
+        self.assertEqual(plan["routing_confidence"], "uncertain")
+        self.assertTrue(any("clarification" in note.lower() for note in g.composition_notes))
+
     def test_appendages_attach_flush_and_connected(self):
         # A scorpion = 8 legs + 2 front claws + a 5-segment tail. Every extra part attaches FLUSH (no floats),
         # the body validates, and the appendage DOF is added on top of the legs (8*3 + 2 claws + 5 tail = 31).

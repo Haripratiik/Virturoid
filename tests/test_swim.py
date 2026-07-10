@@ -58,10 +58,19 @@ class SwimTests(unittest.TestCase):
         self.assertGreater(rf, rr + 0.05, f"a flat (fish) body must out-swim the round one: flat={rf} round={rr}")
 
     def test_non_aquatic_body_is_not_reshaped(self):
+        # A land body must not be RESHAPED into an aquatic swimmer (reclassified + flattened into a thin-tall
+        # undulating spine). NOTE: cross_section is now a GENERAL body-shape field — the differentiation stack
+        # uses it for land bodies too (a WIDE torso, square limbs), so "has a cross_section" is no longer the
+        # aquatic marker. The real invariant: not aquatic class, keeps its legs, and NO fish thin-tall flattening.
         from virturoid.services.morphology_composer import compose_robot
         g = compose_robot("a quadruped robot dog that walks")
-        self.assertNotEqual(g.robot_class, "aquatic")
-        self.assertFalse(any(s.cross_section for s in g.segments))
+        self.assertNotEqual(g.robot_class, "aquatic", "a walking dog must not be reclassified aquatic")
+        self.assertGreater(sum(1 for s in g.segments if "leg" in s.name.lower()), 0,
+                           "the land body keeps its legs (not flattened into a swim spine)")
+        for s in g.segments:                                   # no fish anisotropy (thin sideways, tall)
+            if s.cross_section:
+                thin, tall = float(s.cross_section[0]), float(s.cross_section[1])
+                self.assertLess(tall / max(thin, 1e-6), 3.0, "a land body must not be flattened like a fish")
 
     def test_fish_is_classified_aquatic_not_legged(self):
         from virturoid.services.morphology_composer import compose_robot

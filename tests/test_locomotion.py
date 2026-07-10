@@ -8,6 +8,14 @@ _MUJOCO = importlib.util.find_spec("mujoco") is not None
 
 @unittest.skipUnless(_MUJOCO, "MuJoCo not installed.")
 class LocomotionTests(unittest.TestCase):
+    def test_backward_or_sideways_progress_never_certifies_a_forward_walk(self):
+        from virturoid.services.locomotion_controller import locomotion_status
+
+        self.assertEqual(locomotion_status(-0.6, True), "stalled")
+        self.assertEqual(locomotion_status(0.0, True), "stalled")
+        self.assertEqual(locomotion_status(0.11, True), "walked")
+        self.assertEqual(locomotion_status(1.0, False), "fell")
+
     def test_composed_quadruped_walks_forward(self):
         import mujoco
         from virturoid.services.morphology_composer import compose_robot

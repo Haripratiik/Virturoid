@@ -52,13 +52,22 @@ def _gpu_train_and_diagnose(gene, weights, *, iters, envs, models_dir, init_npz,
     if not npz:
         return None, None
     r = recipe_rollout_morph(gene, MorphPolicy.from_npz(npz), steps=900)
-    fwd, cad = float(r.get("forward", 0.0)), float(r.get("cadence", 0.0))
-    diag = {"speed": round(fwd / 18.0, 3), "cadence": cad, "upright": r.get("upright_frac"),
-            "fell": not r.get("survived"), "height_held": r.get("height_ratio"),
-            "walking": bool(r.get("survived") and cad >= 1.0 and fwd > 0.15),
-            "gait_quality": round(fwd, 3),
-            "summary": f"fwd={fwd:.2f}m cadence={cad:.1f}/s upright={r.get('upright_frac')} survived={r.get('survived')}"}
+    diag = _recipe_diagnosis(r)
     return npz, diag
+
+
+def _recipe_diagnosis(rollout: dict) -> dict:
+    """Summarize a recipe rollout without re-deriving its measured physical metrics."""
+    fwd = float(rollout.get("forward", 0.0))
+    cad = float(rollout.get("cadence", 0.0))
+    return {"speed": round(float(rollout.get("speed", 0.0)), 3), "cadence": cad,
+            "upright": rollout.get("upright_frac"),
+            "fell": not rollout.get("survived"), "height_held": rollout.get("height_ratio"),
+            "walking": bool(rollout.get("survived") and cad >= 1.0 and fwd > 0.15),
+            "gait_quality": round(fwd, 3),
+            "summary": (f"fwd={fwd:.2f}m speed={float(rollout.get('speed', 0.0)):.2f}m/s "
+                        f"cadence={cad:.1f}/s upright={rollout.get('upright_frac')} "
+                        f"survived={rollout.get('survived')}")}
 
 
 def ai_critic_gait_loop(gene, *, llm=None, rounds: int = 3, iters: int = 35, envs: int = 1024,
@@ -118,13 +127,44 @@ def _measure_travel(gene, policy, *, steps: int = 2400) -> dict:
     misrouting ``learn_locomotion.locomotion_episode`` already fixed. Measuring every candidate through the same
     no-CPG rollout made the assisted loop under-measure banked/GPU recipe policies, so it skipped reuse and
     retrained needlessly. A plain policy (no recipe metadata) uses ``rollout_morph``."""
-    from virturoid.services.morph_policy import recipe_rollout_morph, rollout_morph
-    if getattr(policy, "obs_mean", None) is not None or getattr(policy, "cpg", None) is not None:
-        r = recipe_rollout_morph(gene, policy, steps=steps)
+    from virturoid.services.morph_policy import rollout_deployed_morph_policy
+    r = rollout_deployed_morph_policy(gene, policy, steps=steps)
+    if r.get("deployment_controller") == "recipe_cpg":
         return {"forward": float(r.get("forward", 0.0)),
                 "upright": bool(r.get("survived", False)) or float(r.get("height_ratio", 0.0)) > 0.6}
-    r = rollout_morph(gene, policy, steps=steps)
     return {"forward": float(r.get("forward", 0.0)), "upright": bool(r.get("upright", False))}
+
+
+def select_best_gpu_checkpoint(gene, final_npz: str, *, measure=None, load_policy=None) -> dict | None:
+    """CPU deploy-select the best available GPU checkpoint, never blindly trusting the final epoch.
+
+    PPO's training reward is not the product's deployment metric, and MJX-to-CPU dynamics can make a late
+    checkpoint regress even while its in-training reward rises.  The final policy remains a candidate, so older
+    GPU runs without numbered checkpoints retain the prior behaviour.
+    """
+    final_path = Path(final_npz)
+    candidates = [final_path, *sorted(final_path.parent.glob(f"{final_path.stem}_it*.npz"))]
+    loader = load_policy
+    if loader is None:
+        from virturoid.services.morph_policy import MorphPolicy
+        loader = MorphPolicy.from_npz
+    measure = measure or (lambda policy: _measure_travel(gene, policy, steps=2400))
+    best = None
+    for path in candidates:
+        if not path.is_file():
+            continue
+        try:
+            policy = loader(str(path))
+            result = measure(policy)
+            forward = float(result.get("forward", float("-inf")))
+            upright = bool(result.get("upright", False))
+        except Exception:  # noqa: BLE001 - one malformed/failing checkpoint must not discard the rest
+            continue
+        candidate = {"path": str(path), "policy": policy, "forward": forward, "upright": upright}
+        # Forward progress is primary; an upright tie-break prevents a near-equal collapsing checkpoint winning.
+        if best is None or (forward, upright) > (best["forward"], best["upright"]):
+            best = candidate
+    return best
 
 
 def train_assisted(gene, *, target: float = 0.35, models_dir: str = "models", memory_dir: str = "build/memory",
@@ -138,7 +178,6 @@ def train_assisted(gene, *, target: float = 0.35, models_dir: str = "models", me
     from virturoid.services.learn_locomotion import banked_policy_for, learn_locomotion
     from virturoid.services.memory_db import MemoryDB
     from virturoid.services.morph_graph import encode_robot
-    from virturoid.services.morph_policy import MorphPolicy
 
     cls = gene.robot_class or "legged"
     workers = _resolve_workers(workers)
@@ -202,15 +241,21 @@ def train_assisted(gene, *, target: float = 0.35, models_dir: str = "models", me
     backend = "reused" if best_travel >= target else "parallel-cpu"
     if prefer_gpu and best_travel < target:
         try:
-            from virturoid.services.gpu_trainer import gpu_available, train_gene_on_gpu
+            from virturoid.services.gpu_trainer import default_training_recipe, gpu_available, train_gene_on_gpu
             if gpu_available(timeout=15):
                 say("GPU healthy — training on MJX (2048 envs)…")
                 out = train_gene_on_gpu(gene, out_path=str(Path(models_dir) / f"gpu_{cls}.npz"),
                                         iters=max(120, budget["generations"] * 4), envs=2048,
-                                        progress=progress, timeout=1200)
+                                        progress=progress, timeout=1200, keep_checkpoints=True,
+                                        **default_training_recipe(gene))
                 if out:
-                    gp = MorphPolicy.from_npz(out)
-                    r = travel_of(gp)
+                    selected = select_best_gpu_checkpoint(gene, out, measure=travel_of)
+                    if selected is None:
+                        raise RuntimeError("GPU trainer returned no CPU-deployable policy checkpoint")
+                    gp = selected["policy"]
+                    r = {"forward": selected["forward"], "upright": selected["upright"]}
+                    if selected["path"] != out:
+                        say(f"GPU deploy-select kept checkpoint {Path(selected['path']).name} over the final epoch")
                     if baseline is None:
                         baseline = float(r["forward"])
                     if float(r["forward"]) > best_travel:

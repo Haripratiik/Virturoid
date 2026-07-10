@@ -11,6 +11,19 @@ position — so it drives any composed quadruped, not a hard-coded one.
 from __future__ import annotations
 
 
+def locomotion_status(forward_m: float, upright: bool, *, min_forward_m: float = 0.1) -> str:
+    """Classify locomotion using signed forward progress.
+
+    Planar distance is useful diagnostics, but cannot certify a walk: a robot
+    that lurches backward half a metre has travelled far while failing the
+    requested forward task.  Keep this small pure helper shared/testable so
+    every caller uses the same anti-gaming boundary.
+    """
+    if not upright:
+        return "fell"
+    return "walked" if float(forward_m) > float(min_forward_m) else "stalled"
+
+
 def run_locomotion_episode(model, horizon: int = 2400, settle: int = 400, freq: float = 0.05,
                            hip_amp: float = 0.4, knee_lift: float = 0.3, stance=(0.2, -0.4),
                            kp: float = 50.0, kd: float = 5.0, on_step=None) -> dict:
@@ -110,6 +123,7 @@ def run_locomotion_episode(model, horizon: int = 2400, settle: int = 400, freq: 
     # Honest status: an upright body that simply didn't travel far is STALLED (weak/mistuned gait), not fallen.
     # Conflating the two (the old label) hid the real failure mode the deep-analysis dog showed — upright but
     # shuffling in place — behind a 'fell' that implies a balance loss it never had.
-    status = "walked" if (dist > 0.1 and upright) else ("stalled" if upright else "fell")
-    return {"distance_m": round(dist, 3), "forward_m": round(float(p1[0] - p0[0]), 3),
+    forward = float(p1[0] - p0[0])
+    status = locomotion_status(forward, upright)
+    return {"distance_m": round(dist, 3), "forward_m": round(forward, 3),
             "upright": upright, "status": status}

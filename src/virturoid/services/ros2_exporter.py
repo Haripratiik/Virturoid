@@ -302,7 +302,7 @@ class EvaluationNode(Node):
             import importlib.util
             spec = importlib.util.spec_from_file_location("vq_controller", _PKG / "controller.py")
             mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
-            cls = mod.GaitController if self.policy_type == "trot_cpg_gait" else mod.ReachController
+            cls = mod.GaitController if self.policy_type in ("trot_cpg_gait", "crawl_wave_gait") else mod.ReachController
             self.controller = cls.from_file(str(_PKG / "policy_params.json"))
             self.joints = self.controller.joint_names
         self.pub = self.create_publisher(JointTrajectory, "/joint_trajectory_controller/joint_trajectory", 10)
@@ -313,7 +313,7 @@ class EvaluationNode(Node):
         msg.joint_names = self.joints
         point = JointTrajectoryPoint()
         if self.controller is not None:
-            if self.policy_type == "trot_cpg_gait":
+            if self.policy_type in ("trot_cpg_gait", "crawl_wave_gait"):
                 targets = self.controller.infer(self.t); self.t += self.dt
             else:
                 target = self.targets[self.i % len(self.targets)]; self.i += 1
@@ -376,7 +376,7 @@ def test_controller_runs_if_present():
         return  # no controller bundle exported with this package
     spec = importlib.util.spec_from_file_location("vq_controller", pkg / "controller.py")
     mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
-    if config.get("policy_type") == "trot_cpg_gait":
+    if config.get("policy_type") in ("trot_cpg_gait", "crawl_wave_gait"):
         controller = mod.GaitController.from_file(str(pkg / "policy_params.json"))
         for t in (0.0, 0.1, 0.25, 0.5):
             out = controller.infer(t)

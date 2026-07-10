@@ -50,6 +50,32 @@ class ExportGaitHonestyTests(unittest.TestCase):
         # a manipulator has no walk to (over)claim -> no gait control program at all
         self.assertIsNone(self._program_for("a robot arm that picks up objects"))
 
+    def test_credible_crawl_is_exported_as_the_runnable_controller(self):
+        import importlib.util
+
+        from virturoid.services.anatomy_compiler import _generic_legged_graph, build_from_anatomy
+        from virturoid.services.gene_build import _write_gait_control_program
+
+        # A fanned crawl body is the canonical credible open-loop gait. The
+        # package must export that wave plan, not fall back to the trot CPG.
+        gene = build_from_anatomy(_generic_legged_graph(n_pairs=2, girth=0.22, fan=True))
+        out = Path(tempfile.mkdtemp())
+        _write_gait_control_program(gene, {"id": gene.id}, out)
+        program = json.loads((out / "software" / "control_program.json").read_text(encoding="utf-8"))
+        self.assertEqual(program["policy_type"], "crawl_wave_gait")
+        self.assertTrue(program["verified_walk"])
+        self.assertIn("CREDIBLE", program["sim_verdict"])
+        self.assertTrue(program["legs"])
+
+        controller_path = out / "software" / "gait_controller.py"
+        spec = importlib.util.spec_from_file_location("exported_crawl", controller_path)
+        mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+        targets = mod.GaitController.from_file(str(out / "software" / "control_program.json")).infer(0.17)
+        self.assertEqual(set(targets), set(program["joint_names"]))
+        for name, limit in zip(program["joint_names"], program["position_limits"]):
+            self.assertGreaterEqual(targets[name], limit[0] - 1e-8)
+            self.assertLessEqual(targets[name], limit[1] + 1e-8)
+
 
 if __name__ == "__main__":
     unittest.main()

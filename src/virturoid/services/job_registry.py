@@ -190,8 +190,12 @@ def _run_autonomous_build(job: dict, build_root: Path) -> dict:
         memory_dir=Path(build_root) / "memory",
         progress=_progress_callback(job),
     )
+    requires_clarification = any(
+        getattr(decision, "stage", "") == "clarify_intent"
+        for decision in getattr(report, "decisions", [])
+    )
     return {
-        "output_name": output_name,
+        "output_name": None if requires_clarification else output_name,
         "package_dir": str(output_dir),
         "robot_class": getattr(report, "robot_class", None),
         "species": getattr(report, "species", None),
@@ -201,6 +205,8 @@ def _run_autonomous_build(job: dict, build_root: Path) -> dict:
         "species_exact": bool(getattr(report, "species_exact", True)),
         "species_note": getattr(report, "species_note", None),
         "memory_reused": bool(getattr(report, "memory_reused", False)),
+        "requires_clarification": requires_clarification,
+        "clarification": (getattr(report, "notes", [""]) or [""])[0] if requires_clarification else None,
     }
 
 

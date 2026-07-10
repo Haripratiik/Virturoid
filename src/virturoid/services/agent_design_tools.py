@@ -13,7 +13,7 @@ from pathlib import Path
 
 # The REAL anatomy-graph vocabulary (extracted from anatomy_compiler.build_from_anatomy), so the schema we
 # teach the agent is accurate, not hallucinated. A part = one body/limb node; symmetry mirrors it to +-y.
-_ROLES = ["body", "neck", "head", "tail", "leg", "arm", "wheel", "wing", "fin", "flipper", "foot", "hand",
+_ROLES = ["body", "neck", "head", "tail", "leg", "arm", "tentacle", "trunk", "wheel", "wing", "fin", "flipper", "foot", "hand",
           "claw", "paw", "ear", "eye", "horn", "antenna", "shell", "beak", "snout"]
 _ROLESET = frozenset(_ROLES)
 _ATTACH = ["front_top", "front_bottom", "front_mid_bottom", "mid_bottom", "rear_mid_bottom", "rear_bottom",
@@ -47,10 +47,49 @@ _EXAMPLE_ROVER = {
          "size": 0.2, "girth": 0.08, "symmetry": "left_right"} for i in range(2)]}   # 2 pairs = 4 wheels at corners
 
 
-def get_design_schema(_args: dict) -> dict:
+def _corpus_grounding(args: dict) -> dict:
+    """Thesis A — RETRIEVAL = RUNTIME GROUNDING. Return the best PHYSICS-VERIFIED shape programs the
+    self-manufactured corpus holds for the roles this design will use, so the agent ADAPTS a proven precedent
+    (that already realizes a valid solid) instead of authoring geometry blind — the RoboMorph anti-mode-collapse
+    point. Roles are taken from ``args['roles']`` or inferred from ``args['robot_class']``. Zero product LLM
+    tokens: the corpus is the DB, retrieval is a lookup. Empty (omitted) until the corpus has banked words."""
+    roles = args.get("roles")
+    if not roles:
+        cls = str(args.get("robot_class") or "").lower()
+        roles = {"quadruped": ["body", "leg", "foot"], "hexapod": ["body", "leg"],
+                 "humanoid": ["body", "leg", "arm"], "biped": ["body", "leg"], "arm": ["arm", "gripper"],
+                 "octopus": ["mantle", "tentacle"]}.get(cls,
+                 ["body", "leg", "arm", "tentacle", "wing", "mantle", "head", "tail"])
+    exemplars: dict = {}
+    try:
+        from virturoid.services.memory_db import DEFAULT_DB_PATH, MemoryDB
+        from virturoid.services.shape_flywheel import recall_shape
+        if not DEFAULT_DB_PATH.exists():
+            return {}
+        with MemoryDB(DEFAULT_DB_PATH) as db:
+            for role in roles:
+                prog = recall_shape(db, str(role).lower())
+                if prog:
+                    exemplars[str(role).lower()] = prog
+    except Exception:  # noqa: BLE001 - grounding is an accelerant; a missing corpus never blocks design
+        return {}
+    if not exemplars:
+        return {}
+    return {"shape_exemplars": exemplars,
+            "note": "PHYSICS-VERIFIED shape programs recalled from the corpus for these roles — drop one into a "
+                    "part's `geometry` field and adapt it, rather than authoring blind. Each already realizes a "
+                    "valid solid (retrieval = runtime grounding).",
+            "source": "shape_flywheel corpus (self-manufactured from prior verified builds)"}
+
+
+def get_design_schema(args: dict) -> dict:
     """The anatomy-graph LANGUAGE the agent authors a robot in: part fields + the roles/attach/aim vocabularies
-    + two worked examples that compile. Call this before submit_design."""
-    return {"ok": True, "format": "anatomy_graph",
+    + two worked examples that compile. Call this before submit_design.
+
+    Thesis A (retrieval = runtime grounding): also returns ``corpus_grounding`` — the best PHYSICS-VERIFIED shape
+    exemplars the self-manufactured corpus holds for the roles this design will use (pass ``roles`` and/or
+    ``robot_class`` to target them) — so the agent adapts a proven precedent, not just the static dimension bands."""
+    schema = {"ok": True, "format": "anatomy_graph",
             "top_level": {"robot_class": "quadruped|hexapod|humanoid|biped|legged", "name": "str", "parts": "[part...]"},
             "part_fields": {
                 "name": "unique str (required)", "role": f"one of {_ROLES} (required)",
@@ -65,8 +104,8 @@ def get_design_schema(_args: dict) -> dict:
                 "symmetry": "'left_right' mirrors the part to a +y/-y PAIR (so one leg entry = two legs)",
                 "joint": "'revolute' to actuate it; omit for a welded/fixed part",
                 "curl": "float; a resting curl spread across a multi-segment part (a curved tail/neck)",
-                "geometry": "OPTIONAL shape program to AUTHOR a single-segment part's own visual shape (T4); "
-                            "physics collider stays the size/girth primitive. See geometry_families."},
+                "geometry": "OPTIONAL shape program to AUTHOR a single-segment part; its build/export approximation "
+                            "is kept with the segment and the high-fidelity mesh path realizes the full shape. See geometry_families."},
             # T4: author arbitrary part geometry (visual). Single-segment parts only; the collider is untouched.
             "geometry_families": {
                 "extrude": "{family:'extrude', profile:[[x,y],...], height} - extrude a 2-D polygon (plates, "
@@ -117,6 +156,10 @@ def get_design_schema(_args: dict) -> dict:
                 "rover": "VERIFIED driver out of the box (torque wheels, ~0.4 m in verify)",
                 "hexapod": "compiles + is structurally correct (6 legs), but the SCRIPTED gait is marginal for "
                            "6+ legs (~0 net) — call train_held to find a credible gait, or expect a weak verdict"}}
+    g = _corpus_grounding(args or {})                          # Thesis A: retrieved verified exemplars for the roles
+    if g:
+        schema["corpus_grounding"] = g
+    return schema
 
 
 # M16 buildable-scale bands (metres). Generous — an elephant leg is ~1.5 m, an industrial arm link ~1.2 m —
@@ -252,7 +295,14 @@ def submit_design(args: dict) -> dict:
     from virturoid.services.ai_native_tools import _render_gene, _summary
     rid = S.put_robot(gene, prompt=f"[submitted:{graph.get('name', 'design')}]", label="submitted")
     _bank_to_flywheel(gene, prompt=f"[agent] {graph.get('name', 'design')}", task="", success_rate=0.0)  # B4 provenance
+    try:                                                       # Thesis A WRITE-side: this design's VERIFIED shape
+        from virturoid.services.shape_flywheel import auto_bank_body_shapes   # words enter the corpus, so the NEXT
+        banked = auto_bank_body_shapes(gene)                   # get_design_schema recalls them (self-manufacture)
+    except Exception:  # noqa: BLE001 - corpus growth is an accelerant, never blocks a valid design
+        banked = []
     out = {"ok": True, **_summary(gene, rid), "name": graph.get("name")}
+    if banked:
+        out["corpus_shape_words"] = len(banked)               # retrieval grounding now has this design's words
     warns = _proportion_warnings(graph)                        # T8: non-blocking proportion advisories
     if warns:
         out["proportion_warnings"] = warns

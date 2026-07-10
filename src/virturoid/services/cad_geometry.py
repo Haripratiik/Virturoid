@@ -43,7 +43,13 @@ def realize_shape(spec: dict):
             for sub in spec.get("parts", []):
                 s = realize_shape(sub)
                 ax, ay, az = sub.get("at", (0.0, 0.0, 0.0))
-                s = s.moved(bd.Location((float(ax) * 1000.0, float(ay) * 1000.0, float(az) * 1000.0)))
+                # per-part ``euler`` (intrinsic xyz, DEGREES) so a sub-shape can be ROTATED, not only translated —
+                # needed for mixed-axis assemblies (a wing's leading-edge spar across the panel, a tentacle's
+                # suckers following the surface). Default (0,0,0) keeps every existing compound byte-identical.
+                rx, ry, rz = sub.get("euler", (0.0, 0.0, 0.0))
+                loc = bd.Location((float(ax) * 1000.0, float(ay) * 1000.0, float(az) * 1000.0),
+                                  (float(rx), float(ry), float(rz)))
+                s = s.moved(loc)
                 if base is None:
                     base = s
                 elif sub.get("subtract"):

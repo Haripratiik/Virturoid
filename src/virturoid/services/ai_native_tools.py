@@ -29,7 +29,9 @@ def _summary(gene, robot_id: str | None = None) -> dict:
            "dof": len(gene.actuated_joints()), "appendages": app,
            "standing_height_m": _standing_height(gene),
            "total_mass_kg": round(sum(s.mass_kg for s in gene.segments), 3),
-           "material": _dominant_material(gene), "end_effector": gene.end_effector_type}
+           "material": _dominant_material(gene), "end_effector": gene.end_effector_type,
+           "design_source": getattr(gene, "design_source", "unknown"),
+           "composition_notes": list(getattr(gene, "composition_notes", []) or [])}
     if robot_id:
         out["robot_id"] = robot_id
     return out

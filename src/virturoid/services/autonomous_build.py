@@ -15,6 +15,7 @@ report that the autonomous task loop is not yet implemented for them.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -56,6 +57,38 @@ def autonomous_build(
 
     output_dir = Path(output_dir)
     emit("start", f"Designing a robot for: {prompt}")
+
+    # Do not let the package builder's own generic fallback turn a completely
+    # unrecognised request into a plausible-but-unrequested robot.  A supported
+    # task can still infer a body class (for example "sort blocks" -> arm); this
+    # branch is only the true no-body/no-task ambiguity reported by the planner.
+    from virturoid.services.intent_planner import plan_build
+    intent = plan_build(prompt, llm=None)
+    if intent.routing_confidence == "uncertain":
+        detail = "; ".join(intent.gaps)
+        report = AutonomyReport(
+            id=f"autonomy_clarify_{hashlib.sha1(prompt.encode('utf-8')).hexdigest()[:12]}",
+            prompt=prompt,
+            requested_robot_class=intent.robot_class,
+            requested_species="unconfirmed",
+            task_type=intent.task_family,
+            target_success_rate=target_success_rate,
+            feasible=False,
+            succeeded=False,
+            decisions=[AutonomyDecision(
+                iteration=0,
+                stage="clarify_intent",
+                action="stopped before generating an unrequested fallback body",
+                detail=detail,
+                success_before=0.0,
+                success_after=0.0,
+            )],
+            notes=[f"No robot package was generated. {detail}"],
+        )
+        emit("needs_clarification", "Need a clearer body plan or task before generating a robot.",
+             {"intent": intent.to_dict()})
+        _write_report(output_dir, report)
+        return report
 
     # Gene-driven build (Phase A): classes that have a gene but no tuned legacy builder
     # (e.g. humanoid) are built+run from their gene — a genuinely distinct robot in real
@@ -921,13 +954,15 @@ def _maybe_gene_build(prompt, output_dir, target, memory_dir, emit, *, train: bo
             ws = "warm-started from a prior legged policy" if morph["warm_started"] else "cold-started (none banked yet)"
             kind = "PERCEPTIVE sense-and-avoid navigation" if morph.get("perceptive") else "locomotion"
             metric = "avoid fitness" if morph.get("perceptive") else "forward fitness"
+            bank_status = (f"banked as '{morph['skill_id']}'" if morph.get("banked")
+                           else f"not banked: {morph.get('bank_verdict', 'insufficient deploy evidence')}")
             report.notes.append(
                 f"Policy flywheel: trained a {kind} MorphPolicy for this legged body ({ws}); {metric} "
-                f"{morph['baseline']:.3f}->{morph['final']:.3f}, banked as '{morph['skill_id']}'.")
+                f"{morph['baseline']:.3f}->{morph['final']:.3f}, {bank_status}.")
             decisions.append(AutonomyDecision(
                 iteration=3, stage="train_morph_policy",
-                action=f"trained + banked a morphology-conditioned {kind} policy (warm-started from memory)",
-                detail=f"{ws}; {metric} {morph['baseline']:.3f}->{morph['final']:.3f}; skill {morph['skill_id']}",
+                action=f"trained a morphology-conditioned {kind} policy and applied the bank credibility gate",
+                detail=f"{ws}; {metric} {morph['baseline']:.3f}->{morph['final']:.3f}; {bank_status}",
                 success_before=0.0, success_after=0.0))
             # Report the BEST controller the autonomous loop produced: a legged body's as-built score uses
             # a scripted gait whose quality is morphology-dependent (a composed quad shuffles ~0 backward; a
@@ -943,13 +978,16 @@ def _maybe_gene_build(prompt, output_dir, target, memory_dir, emit, *, train: bo
                 report.final_success_rate = final = best
                 report.succeeded = bool(best >= target)
                 morph["controller"] = "trained" if ts >= scripted else "scripted"
+                trained_measurement = morph.get("trained_locomotion_controller", "unknown")
                 report.notes.append(
                     f"Locomotion controller: best is the {winner} at {best:.0%} forward success "
-                    f"(scripted {scripted:.0%} vs trained {ts:.0%}). The robot ships the better controller.")
+                    f"(scripted {scripted:.0%} vs trained {ts:.0%}; trained measured as {trained_measurement}). "
+                    "The robot ships the better controller.")
                 decisions.append(AutonomyDecision(
                     iteration=4, stage="evaluate_trained",
                     action="evaluated scripted vs TRAINED locomotion and kept the better controller",
-                    detail=f"scripted {scripted:.3f} vs trained {ts:.3f} -> ship {morph['controller']} ({best:.3f})",
+                    detail=(f"scripted {scripted:.3f} vs trained {ts:.3f} ({trained_measurement}) -> "
+                            f"ship {morph['controller']} ({best:.3f})"),
                     success_before=scripted, success_after=best))
     # Memory: record the run + AUTONOMOUSLY place the (possibly redesigned) gene in the species tree by
     # morphology — classify it as a variant of its nearest relative or detect it as a new species and
@@ -1166,9 +1204,10 @@ def _maybe_train_morph_policy(gene, output_dir, memory_dir, emit, task_type, pro
         # so the report reflects what the product actually achieved (built AND trained). Skipped for nav
         # (its policy is avoid-optimized, not forward-distance).
         if not nav:
-            from virturoid.services.morph_policy import rollout_morph
-            rr = rollout_morph(gene, res["policy"], steps=600)
+            from virturoid.services.morph_policy import rollout_deployed_morph_policy
+            rr = rollout_deployed_morph_policy(gene, res["policy"], steps=600)
             res["trained_locomotion_success"] = round(min(1.0, max(0.0, float(rr.get("forward", 0.0)) / 1.0)), 3)
+            res["trained_locomotion_controller"] = rr.get("deployment_controller")
         return res
     except Exception:  # noqa: BLE001 - policy banking is best-effort
         return None

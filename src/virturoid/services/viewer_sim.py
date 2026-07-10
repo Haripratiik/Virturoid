@@ -11,7 +11,32 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-_GEOM_TYPE = {0: "plane", 2: "sphere", 3: "capsule", 4: "ellipsoid", 5: "cylinder", 6: "box"}
+_GEOM_TYPE = {0: "plane", 2: "sphere", 3: "capsule", 4: "ellipsoid", 5: "cylinder", 6: "box", 7: "mesh"}
+
+
+def _locomotion_replay_model(package_dir: Path) -> tuple[Path | None, dict]:
+    """Return the best visual replay model and public mesh metadata for a package.
+
+    New gene packages carry a detailed model plus portable STL URIs.  Older packages retain the primitive
+    ``robot_only.xml`` fallback, so adding visual fidelity never invalidates an existing export.
+    """
+    visual = package_dir / "simulation" / "robot_visual.xml"
+    index_path = package_dir / "simulation" / "viewer_mesh_index.json"
+    if visual.exists() and index_path.exists():
+        try:
+            index = json.loads(index_path.read_text(encoding="utf-8"))
+            if index.get("model_uri") == "simulation/robot_visual.xml":
+                meshes = index.get("meshes")
+                if isinstance(meshes, dict):
+                    return visual, meshes
+        except Exception:  # noqa: BLE001 - fall back to a valid primitive-only package
+            pass
+    robot_only = package_dir / "simulation" / "robot_only.xml"
+    return (robot_only if robot_only.exists() else None), {}
+
+
+def _package_relative_uri(package_dir: Path, path: Path) -> str:
+    return path.relative_to(package_dir).as_posix()
 
 
 def simulate_episode_for_viewer(package_dir: Path, scene_set_uri: str = "simulation/scene_set.json", scene_index: int = 0) -> dict:
@@ -22,7 +47,9 @@ def simulate_episode_for_viewer(package_dir: Path, scene_set_uri: str = "simulat
     by_scene = {e["scene_id"]: e["mujoco_xml"] for e in compiled.get("scenes", [])}
     scene_set = json.loads((package_dir / scene_set_uri).read_text(encoding="utf-8"))
     scene = scene_set["scenes"][min(scene_index, len(scene_set["scenes"]) - 1)]
-    model = mujoco.MjModel.from_xml_path(str(package_dir / by_scene[scene["id"]]))
+    scene_model_path = package_dir / by_scene[scene["id"]]
+    model = mujoco.MjModel.from_xml_path(str(scene_model_path))
+    replay_model_uri = _package_relative_uri(package_dir, scene_model_path)
 
     geoms = _geom_metadata(model)
     frames: list = []
@@ -35,10 +62,18 @@ def simulate_episode_for_viewer(package_dir: Path, scene_set_uri: str = "simulat
         # A walker replays its GAIT, not a pick/nav script. Replay on the robot's OWN model when the build saved
         # it (simulation/robot_only.xml): the compiled SCENE model reorders geoms/joints, which mismaps the
         # per-joint gait into a lurch, while the bare robot model matches what the gait was trained on -> it walks.
-        robot_only = package_dir / "simulation" / "robot_only.xml"
-        if robot_only.exists():
-            model = mujoco.MjModel.from_xml_path(str(robot_only))
-            geoms = _geom_metadata(model)
+        replay_model, mesh_uris = _locomotion_replay_model(package_dir)
+        if replay_model is not None:
+            try:
+                model = mujoco.MjModel.from_xml_path(str(replay_model))
+                geoms = _geom_metadata(model, mesh_uris)
+                replay_model_uri = _package_relative_uri(package_dir, replay_model)
+            except Exception:  # noqa: BLE001 - an optional visual asset must not break a valid primitive replay
+                robot_only = package_dir / "simulation" / "robot_only.xml"
+                if replay_model != robot_only and robot_only.exists():
+                    model = mujoco.MjModel.from_xml_path(str(robot_only))
+                    geoms = _geom_metadata(model)
+                    replay_model_uri = _package_relative_uri(package_dir, robot_only)
         outcome = _locomotion_episode(model, package_dir, record_frames=frames)
     elif is_navigation:
         from virturoid.services.navigation_controller import run_navigation_episode
@@ -104,6 +139,7 @@ def simulate_episode_for_viewer(package_dir: Path, scene_set_uri: str = "simulat
         "robot": _robot_summary(package_dir),
         "scene": _scene_summary(scene),
         "scene_index": min(scene_index, len(scene_set["scenes"]) - 1),
+        "replay_model_uri": replay_model_uri,
         "scenes": [{"index": i, "id": s["id"], "name": s.get("name", s["id"])}
                    for i, s in enumerate(scene_set["scenes"])],
     }
@@ -211,8 +247,34 @@ def _settle_episode(model, *, record_frames: list, steps: int = 180, frame_every
             break
 
 
+def _camera_for_episode_frame(model, frame, *, padding: float = 2.2) -> tuple[list[float], float]:
+    """Fit an orbit camera to the recorded non-plane geometry in an episode frame.
+
+    Replay assets span a tabletop arm, a floor-scale rover, and a standing walker.  A fixed arm camera makes the
+    latter appear as a tiny off-screen dot; bounds from the actual recorded poses keep the render readable without
+    inventing a separate camera rule for every robot class.
+    """
+    import mujoco
+    import numpy as np
+
+    lows, highs = [], []
+    for geom_id, pose in enumerate(frame):
+        if int(model.geom_type[geom_id]) == int(mujoco.mjtGeom.mjGEOM_PLANE):
+            continue
+        radius = max(0.01, float(model.geom_rbound[geom_id]))
+        pos = np.asarray(pose[:3], dtype=float)
+        lows.append(pos - radius)
+        highs.append(pos + radius)
+    if not lows:
+        return [0.4, 0.0, 0.15], 1.5
+    lo, hi = np.min(np.asarray(lows), axis=0), np.max(np.asarray(highs), axis=0)
+    center = (lo + hi) / 2.0
+    extent = float(np.max(hi - lo))
+    return [float(v) for v in center], max(0.45, float(padding) * extent)
+
+
 def render_episode_frames(package_dir: Path, scene_index: int = 0, width: int = 720, height: int = 540,
-                          azimuth: float = 135.0, elevation: float = -20.0, distance: float = 1.5):
+                          azimuth: float = 135.0, elevation: float = -20.0, distance: float | None = None):
     """Render the recorded episode to a list of RGB numpy frames using MuJoCo's renderer.
 
     Reuses ``simulate_episode_for_viewer`` (which records every geom's world pose per frame) and
@@ -226,18 +288,20 @@ def render_episode_frames(package_dir: Path, scene_index: int = 0, width: int = 
 
     package_dir = Path(package_dir)
     view = simulate_episode_for_viewer(package_dir, scene_index=scene_index)
-    compiled = json.loads((package_dir / "simulation" / "mujoco" / "compiled_scene_index.json").read_text(encoding="utf-8"))
-    by_scene = {e["scene_id"]: e["mujoco_xml"] for e in compiled.get("scenes", [])}
-    robot_only = package_dir / "simulation" / "robot_only.xml"
-    if view.get("task") == "locomotion" and robot_only.exists():
-        model = mujoco.MjModel.from_xml_path(str(robot_only))   # match the model the locomotion episode ran on
-    else:
-        model = mujoco.MjModel.from_xml_path(str(package_dir / by_scene[view["scene_id"]]))
+    # Re-open the exact model that simulated the recorded frames.  This matters for detailed visual meshes:
+    # their extra geoms change the frame array length even though they do not affect collision physics.
+    model_uri = view.get("replay_model_uri")
+    if not model_uri:
+        compiled = json.loads((package_dir / "simulation" / "mujoco" / "compiled_scene_index.json").read_text(encoding="utf-8"))
+        by_scene = {e["scene_id"]: e["mujoco_xml"] for e in compiled.get("scenes", [])}
+        model_uri = by_scene[view["scene_id"]]
+    model = mujoco.MjModel.from_xml_path(str(package_dir / str(model_uri)))
     renderer = mujoco.Renderer(model, height, width)
     data = mujoco.MjData(model)
     cam = mujoco.MjvCamera()
-    cam.lookat[:] = [0.4, 0.0, 0.15]
-    cam.distance, cam.azimuth, cam.elevation = distance, azimuth, elevation
+    lookat, auto_distance = _camera_for_episode_frame(model, view.get("frames", [[]])[0])
+    cam.lookat[:] = lookat
+    cam.distance, cam.azimuth, cam.elevation = (auto_distance if distance is None else distance), azimuth, elevation
     mat = np.zeros(9)
     images = []
     try:
@@ -316,7 +380,7 @@ def _scene_summary(scene: dict) -> dict:
     }
 
 
-def _geom_metadata(model) -> list:
+def _geom_metadata(model, mesh_uris: dict | None = None) -> list:
     import mujoco
     import numpy as np
 
@@ -328,10 +392,15 @@ def _geom_metadata(model) -> list:
         matid = int(model.geom_matid[gid])
         if matid >= 0:
             rgba = [round(float(v), 3) for v in model.mat_rgba[matid]]
-        out.append({
+        item = {
             "name": name,
             "type": _GEOM_TYPE.get(int(model.geom_type[gid]), "box"),
             "size": [round(float(v), 4) for v in model.geom_size[gid]],
             "rgba": rgba,
-        })
+        }
+        mesh = (mesh_uris or {}).get(name)
+        if item["type"] == "mesh" and isinstance(mesh, dict) and isinstance(mesh.get("uri"), str):
+            item["mesh_uri"] = mesh["uri"]
+            item["mesh_scale"] = float(mesh.get("scale", 0.001))
+        out.append(item)
     return out

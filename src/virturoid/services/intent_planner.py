@@ -63,11 +63,14 @@ class BuildPlan:
     gaps: list = field(default_factory=list)   # specific, actionable capability gaps
     reasoning: str = ""
     source: str = "heuristic"              # "llm" | "heuristic"
+    # An arbitrary noun is not a valid reason to quietly choose a default body.
+    # Explicit requests and supported task-inferred routes remain buildable.
+    routing_confidence: str = "explicit"    # explicit | task_inferred | uncertain
 
     def to_dict(self) -> dict:
         return {k: getattr(self, k) for k in (
             "prompt", "robot_class", "task_family", "environment", "morphology", "objects",
-            "action_verbs", "buildable", "gaps", "reasoning", "source")}
+            "action_verbs", "buildable", "gaps", "reasoning", "source", "routing_confidence")}
 
 
 _PLAN_SCHEMA = {
@@ -80,6 +83,7 @@ _PLAN_SCHEMA = {
         "objects": {"type": "array", "items": {"type": "string"}},
         "action_verbs": {"type": "array", "items": {"type": "string"}},
         "reasoning": {"type": "string"},
+        "routing_confidence": {"type": "string", "enum": ["explicit", "task_inferred", "uncertain"]},
     },
     "required": ["robot_class", "task_family", "morphology"],
 }
@@ -90,7 +94,9 @@ _SYSTEM = (
     "pick the NEAREST buildable class (e.g. a frog or hopper is closest to 'quadruped' legged; a rover "
     "is 'mobile_base'). task_family is the canonical task (e.g. pick_place_sort, place_to_target, "
     "grasp_lift, navigation, spray_coverage, locomotion, or a short new name if none fit). 'morphology' "
-    "is a one-line body description. List the action verbs and target objects. Be concise and literal."
+    "is a one-line body description. List the action verbs and target objects. Set routing_confidence to "
+    "'explicit' when the request names a body class, 'task_inferred' when a supported task implies one, or "
+    "'uncertain' when the request does neither. Be concise and literal."
 )
 
 # heuristic keyword routing (capability-aware) — far broader than the composer's lists.
@@ -125,6 +131,10 @@ _TASK_WORDS = {
     "locomotion": ("walk", "hop", "run", "gait", "trot", "crawl"),
     "place_to_target": ("place", "move", "put", "transport", "assemble", "stack"),
 }
+_CLARIFICATION_GAP = (
+    "No recognizable robot body plan or task was found; clarify the body (for example wheels, leg count, arm, "
+    "or humanoid) and intended task before building."
+)
 
 
 def _kw(word: str, text: str) -> bool:
@@ -141,6 +151,7 @@ def _heuristic_plan(prompt: str) -> BuildPlan:
         if any(_kw(w, p) for w in _CLASS_WORDS[cls]):
             robot_class = cls
             break
+    class_cue_found = robot_class is not None
     # G4 composite: an explicitly MOBILE platform asked to grasp/carry is a mobile manipulator — never silently
     # drop either half (the e2e test's 'mobile robot that picks boxes and carries them' built a FIXED arm).
     if robot_class == "mobile_base" and any(_kw(w, p) for w in _CLASS_WORDS["manipulator"]):
@@ -151,6 +162,7 @@ def _heuristic_plan(prompt: str) -> BuildPlan:
         if any(_kw(w, p) for w in words):
             task = fam
             break
+    task_cue_found = task is not None
     if robot_class is None:
         # nothing in the class lists matched. A prompt with a manipulation/navigation TASK verb is an arm/rover;
         # otherwise a bare noun phrase ('a giraffe robot', 'an axolotl') is most likely a LEGGED creature, NOT a
@@ -170,17 +182,26 @@ def _heuristic_plan(prompt: str) -> BuildPlan:
              "mobile_manipulator": "wheeled chassis + grasp arm"}[robot_class]
     if "frog" in p or "hop" in p:
         morph = "legged hopper (frog-like) — nearest buildable: 4-legged walker"
+    routing_confidence = "explicit" if class_cue_found else (
+        "task_inferred" if task_cue_found else "uncertain")
+    initial_gaps = []
+    if routing_confidence == "uncertain":
+        initial_gaps.append(_CLARIFICATION_GAP)
     return BuildPlan(prompt=prompt, robot_class=robot_class, task_family=task, morphology=morph,
                      environment="maze" if "maze" in p else "tabletop",
                      action_verbs=[w for w in ("grasp", "lift", "sort", "place", "navigate", "walk",
                                    "hop", "run", "spray") if w in p],
+                     gaps=initial_gaps, routing_confidence=routing_confidence,
                      reasoning="keyword-routed (no LLM backend)", source="heuristic")
 
 
 def _assess(plan: BuildPlan) -> BuildPlan:
     """Decide feasibility from OUR capability registry — the LLM proposes, the registry disposes."""
     text = f"{plan.prompt} {plan.task_family} {plan.environment} {plan.morphology}".lower()
-    gaps: list[str] = []
+    # Preserve planner-reported ambiguity while adding capability gaps below.
+    gaps: list[str] = list(plan.gaps)
+    if plan.routing_confidence == "uncertain":
+        gaps.append(_CLARIFICATION_GAP)
     for marker, why in _UNSUPPORTED.items():
         if marker in text and why not in gaps:
             gaps.append(why)
@@ -193,7 +214,7 @@ def _assess(plan: BuildPlan) -> BuildPlan:
     if need and need != plan.robot_class:
         gaps.append(f"'{plan.task_family}' is implemented for {need}, not {plan.robot_class} "
                     f"(cross-morphology task wiring missing)")
-    plan.gaps = gaps
+    plan.gaps = list(dict.fromkeys(gaps))
     plan.buildable = not gaps
     return plan
 
@@ -219,7 +240,10 @@ def plan_build(prompt: str, *, llm="auto") -> BuildPlan:
                     morphology=str(raw.get("morphology") or ""),
                     objects=list(raw.get("objects") or []),
                     action_verbs=list(raw.get("action_verbs") or []),
-                    reasoning=str(raw.get("reasoning") or ""), source="llm")
+                    reasoning=str(raw.get("reasoning") or ""), source="llm",
+                    routing_confidence=(str(raw.get("routing_confidence") or "task_inferred")
+                                        if raw.get("routing_confidence") in {"explicit", "task_inferred", "uncertain"}
+                                        else "task_inferred"))
                 return _assess(plan)
         except Exception:  # noqa: BLE001 - any LLM/parse failure falls back, never blocks
             pass

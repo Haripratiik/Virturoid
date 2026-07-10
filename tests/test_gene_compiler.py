@@ -79,6 +79,14 @@ class GeneSerializationTests(unittest.TestCase):
             self.assertEqual([s.name for s in g.segments], [s.name for s in back.segments])
             self.assertEqual(g.segment("forearm").length_m, back.segment("forearm").length_m)
 
+    def test_composition_provenance_roundtrips(self):
+        g = tabletop_arm_gene()
+        g.design_source = "anatomy_generic"
+        g.composition_notes = ["LLM anatomy was unavailable; deterministic general compiler used."]
+        back = RobotGene.from_dict(g.to_dict())
+        self.assertEqual(back.design_source, g.design_source)
+        self.assertEqual(back.composition_notes, g.composition_notes)
+
     def test_species_tree_stores_and_reuses_full_gene(self):
         import tempfile
         from pathlib import Path
@@ -108,6 +116,29 @@ class CompileTests(unittest.TestCase):
         # humanoid has more actuated joints (motors) than the 3-DOF arm
         self.assertGreater(humanoid.count("<motor "), arm.count("<motor "))
 
+    def test_anatomy_shape_proxies_are_present_in_mjcf(self):
+        from virturoid.services.anatomy_compiler import build_from_anatomy
+
+        g = build_from_anatomy({"robot_class": "legged", "parts": [
+            {"name": "torso", "role": "body", "size": 0.6, "girth": 0.16},
+            {"name": "beam", "role": "arm", "parent": "torso", "attach": "front_top", "aim": "forward",
+             "size": 0.24, "girth": 0.05, "joint": "revolute"},
+        ]})
+        xml = compile_gene_to_mjcf(g)
+        self.assertIn('name="torso_geom" type="box"', xml)
+        self.assertIn('name="beam_geom" type="box"', xml)
+
+    def test_kinematic_ancestors_are_excluded_from_self_contact(self):
+        from virturoid.services.morphology_composer import compose_robot
+
+        gene = compose_robot("a six-legged hexapod walking robot", llm=None)
+        xml = compile_gene_to_mjcf(gene)
+        # The upper leg's direct parent is already filtered by MuJoCo, but its
+        # torso grandparent is not.  That explicit exclusion removes the known
+        # torso/leg penetration without turning off world contact.
+        self.assertIn('<exclude body1="torso" body2="leg0_1"/>', xml)
+        self.assertIn('<geom name="floor"', xml)
+
     def test_invalid_gene_refuses_to_compile(self):
         bad = RobotGene(id="b", species="x.y", robot_class="manipulator",
                         segments=[GeneSegment("r", parent=None)])  # no end effector
@@ -128,6 +159,25 @@ class CompileTests(unittest.TestCase):
             self.assertEqual(model.nu, len(gene.actuated_joints()))  # one actuator per actuated joint
             # The end-effector site exists for controllers/graspers.
             self.assertGreaterEqual(mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "ee_site"), 0)
+
+    @unittest.skipUnless(_MUJOCO, "MuJoCo not installed.")
+    def test_hexapod_has_no_initial_internal_contacts(self):
+        import mujoco
+
+        from virturoid.services.morphology_composer import compose_robot
+
+        gene = compose_robot("a six-legged hexapod walking robot", llm=None)
+        model = mujoco.MjModel.from_xml_string(compile_gene_to_mjcf(gene, include_floor=True))
+        data = mujoco.MjData(model)
+        if model.nkey:
+            mujoco.mj_resetDataKeyframe(model, data, 0)
+        mujoco.mj_forward(model, data)
+        internal = []
+        for idx in range(data.ncon):
+            contact = data.contact[idx]
+            if model.geom_bodyid[contact.geom1] and model.geom_bodyid[contact.geom2]:
+                internal.append((model.geom(contact.geom1).name, model.geom(contact.geom2).name))
+        self.assertEqual([], internal)
 
     @unittest.skipUnless(_MUJOCO, "MuJoCo not installed.")
     def test_styling_pass_present_and_physics_neutral(self):

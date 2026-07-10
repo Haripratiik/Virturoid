@@ -3,8 +3,9 @@ import tempfile
 import unittest
 from urllib.request import urlopen
 from pathlib import Path
+from unittest.mock import patch
 
-from virturoid.ui_server import build_ui_html, create_server, run_build_from_payload
+from virturoid.ui_server import build_ui_html, create_server, run_assistant_turn, run_build_from_payload
 
 
 class UiServerTests(unittest.TestCase):
@@ -48,6 +49,22 @@ class UiServerTests(unittest.TestCase):
 
         self.assertIn("Virturoid Local Build Workbench", html)
         self.assertIn("/api/build", html)
+
+    def test_assistant_turn_uses_the_selected_installed_model(self):
+        status = {
+            "provider": "ollama", "model": "llama3.2", "online": True,
+            "models": ["llama3.2", "qwen2.5:7b"], "model_available": True,
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch("virturoid.ui_server.assistant_status", return_value=status), \
+                 patch("virturoid.ui_server._assistant_complete", return_value="Ready to help.") as complete:
+                reply = run_assistant_turn(
+                    {"model": "qwen2.5:7b", "no_build": True,
+                     "messages": [{"role": "user", "content": "What can you do?"}]}, Path(tmpdir))
+
+        self.assertEqual("chat", reply["action"])
+        self.assertTrue(reply["model_used"])
+        self.assertEqual("qwen2.5:7b", complete.call_args.args[1])
 
 
 if __name__ == "__main__":

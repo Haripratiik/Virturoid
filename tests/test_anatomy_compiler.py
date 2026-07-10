@@ -111,11 +111,25 @@ class AnatomyCompilerTests(unittest.TestCase):
         for f in feet:
             self.assertIn(f.parent, seg)                         # parent resolves (no 'unknown parent')
 
-    def test_unknown_role_falls_back_to_a_limb_not_a_crash(self):
+    def test_unknown_role_is_rejected_instead_of_silently_becoming_a_limb(self):
+        with self.assertRaisesRegex(ValueError, "unsupported anatomy role"):
+            build_from_anatomy({"robot_class": "legged", "parts": [
+                {"name": "core", "role": "body", "size": 0.3, "girth": 0.12},
+                {"name": "frobnicator", "role": "zzz_unknown", "parent": "core", "attach": "front", "size": 0.1}]})
+
+    def test_round_body_and_tentacles_keep_their_own_body_plan(self):
         g = build_from_anatomy({"robot_class": "legged", "parts": [
-            {"name": "core", "role": "body", "size": 0.3, "girth": 0.12},
-            {"name": "frobnicator", "role": "zzz_unknown", "parent": "core", "attach": "front", "size": 0.1}]})
-        self.assertEqual(g.validate(), [])                       # unknown role -> generic limb, still valid
+            {"name": "mantle", "role": "body", "aspect": "round", "size": 0.42, "girth": 0.32},
+            {"name": "arm", "role": "tentacle", "parent": "mantle", "attach": "front_bottom",
+             "aim": "down_out", "size": 0.30, "girth": 0.035, "segments": 4,
+             "joint": "revolute", "curl": 1.2, "symmetry": "left_right"},
+        ]})
+        self.assertEqual(g.validate(), [])
+        self.assertEqual(g.root().shape, "sphere")
+        arms = [s for s in g.segments if s.name.startswith("arm_")]
+        self.assertEqual(len(arms), 8)
+        self.assertFalse(any(s.geometry and s.geometry.get("family") == "extrude" for s in arms))
+        self.assertTrue(any(abs(v) > 0 for k, v in g.metadata["rest_pose"].items() if k.startswith("arm_")))
 
     def _legged(self, name, **bodyfields):
         parts = [{"name": "body", "role": "body", "size": 0.3, "girth": 0.3, **bodyfields}]
@@ -132,6 +146,22 @@ class AnatomyCompilerTests(unittest.TestCase):
         flat_root = next(s for s in build_from_anatomy(self._legged("c", aspect="flat")).segments if s.parent is None)
         self.assertGreater(wide_root.radius_m, long_root.radius_m * 1.5)   # cap lifted -> genuinely wider
         self.assertLess(flat_root.length_m, wide_root.length_m)            # flat is shallower (low disc)
+
+    def test_body_and_extruded_limb_dimensions_reach_the_physics_proxy(self):
+        g = build_from_anatomy(self._legged("proxy"))
+        root = g.root()
+        self.assertEqual(root.shape, "box")
+        self.assertIsNotNone(root.cross_section)
+        self.assertGreater(root.cross_section[0], root.cross_section[1], "torso retains its longitudinal envelope")
+        shaped = build_from_anatomy({"robot_class": "legged", "parts": [
+            {"name": "body", "role": "body", "size": 0.4, "girth": 0.12},
+            {"name": "beam", "role": "arm", "parent": "body", "attach": "front_top", "aim": "forward",
+             "size": 0.2, "girth": 0.04, "joint": "revolute"},
+        ]})
+        beam = shaped.segment("beam")
+        self.assertEqual(beam.shape, "box", "extruded beam geometry must not compile as a generic capsule")
+        self.assertIsNotNone(beam.cross_section)
+        self.assertGreater(beam.cross_section[0], beam.cross_section[1])
 
     def test_intermediate_anchors_spread_four_leg_pairs_along_the_body(self):
         g = build_from_anatomy(self._legged("spreadtest"))
@@ -178,6 +208,22 @@ class AnatomyCompilerTests(unittest.TestCase):
         self.assertIsNone(generic_creature_gene("a six-legged hexapod walking robot", "legged"))
         # non-creature / handled-elsewhere classes opt out
         self.assertIsNone(generic_creature_gene("a 6-dof arm", "manipulator"))
+
+    def test_many_legged_fallbacks_are_not_mislabeled_quadrupeds(self):
+        from virturoid.services.anatomy_compiler import _generic_legged_graph
+
+        self.assertEqual("quadruped", _generic_legged_graph(n_pairs=2)["robot_class"])
+        self.assertEqual("legged", _generic_legged_graph(n_pairs=3)["robot_class"])
+        self.assertEqual("legged", _generic_legged_graph(n_pairs=4)["robot_class"])
+
+    def test_offline_tentacled_prompt_is_not_a_dog_with_eight_feet(self):
+        g = generic_creature_gene("an octopus robot with eight tentacles", "legged", n_legs=8)
+        self.assertIsNotNone(g)
+        self.assertEqual(g.root().shape, "sphere")
+        tentacles = [s for s in g.segments if s.name.startswith("tentacle")]
+        self.assertEqual(len(tentacles), 32)  # eight mirrored tentacles, four links each
+        self.assertFalse(any((s.geometry or {}).get("family") == "extrude" for s in tentacles))
+        self.assertEqual(sum(s.joint_type == "revolute" for s in tentacles), 32)
         self.assertIsNone(generic_creature_gene("a humanoid", "humanoid"))
 
     def test_actuators_are_sized_to_load_not_a_flat_constant(self):

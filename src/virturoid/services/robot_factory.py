@@ -45,5 +45,7 @@ def build_robot(prompt: str, *, prefer_real: bool = False, reach_m: float | None
     # ground_gene rewrites each joint torque to its real actuator's stall, which would inflate a re-derived BOM.
     validation = validate_gene_design(gene, payload_kg=float(payload_kg or 0.0))
     grounding = ground_gene(gene)           # Stage 2: real masses (material+geometry) + real actuators + BOM
+    build_plan = dict((gene.metadata or {}).get("build_plan", {}))
     return {"kind": "procedural", "prompt": prompt, "gene": gene, "grounding": grounding,
-            "validation": validation}
+            "validation": validation, "intent": build_plan,
+            "requires_clarification": bool(build_plan and not build_plan.get("buildable", True))}

@@ -52,6 +52,13 @@ class ParamTests(unittest.TestCase):
         self.assertEqual(q.feature_dim, 24)
         self.assertTrue(np.allclose(q.get_params(), p.get_params()))
 
+    def test_terminated_rollout_reports_horizon_speed(self):
+        # The public speed metric must penalize a lurch that only lasted a
+        # fraction of the requested horizon; active_speed remains diagnostic.
+        forward, alive, steps, dt = 0.4, 100, 1000, 0.002
+        self.assertEqual(0.2, round(forward / steps / dt, 3))
+        self.assertEqual(2.0, round(forward / alive / dt, 3))
+
 
 class PerceptionTokenTests(unittest.TestCase):
     """The exteroceptive perception token must add range-sensing WITHOUT touching feature_dim, the proprio
@@ -120,6 +127,17 @@ class MorphGraphTests(unittest.TestCase):
                   _radial_legged(6), _radial_legged(8)]
         dims = {self._encode(g).feature_dim for g in bodies}
         self.assertEqual(len(dims), 1, f"feature_dim must be identical across bodies, got {dims}")
+
+    def test_cached_models_keep_solver_settings_in_the_cache_key(self):
+        from virturoid.services.morph_policy import compiled_model, robot_mjcf
+
+        xml = robot_mjcf(_gene("quadruped"))
+        default_model = compiled_model(xml)
+        default_iterations = int(default_model.opt.iterations)
+        tuned_model = compiled_model(xml, solver_iterations=20)
+        self.assertIsNot(default_model, tuned_model)
+        self.assertEqual(20, int(tuned_model.opt.iterations))
+        self.assertEqual(default_iterations, int(compiled_model(xml).opt.iterations))
 
     def test_token_count_and_parents_valid(self):
         g = self._encode(_radial_legged(6))

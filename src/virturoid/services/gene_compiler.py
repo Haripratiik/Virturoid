@@ -15,7 +15,10 @@ welded to the world at the mount height (table/floor). The end-effector segment 
 
 from __future__ import annotations
 
+import json
 import math
+import os
+from pathlib import Path
 from xml.sax.saxutils import escape
 
 from virturoid.schemas.gene import RobotGene
@@ -124,6 +127,7 @@ def compile_gene_to_mjcf(gene: RobotGene, *, include_floor: bool = True, spawn_z
         base_z = float(spawn_z)
     body_xml = _body_xml(gene, root, pos=(0.0, 0.0, base_z), indent=4, meshes=meshes,
                          show_actuators=show_actuators, sensor_geoms=sensor_geoms, physics_only=physics_only)
+    self_collision_excludes = _self_collision_excludes_xml(gene)
     actuators = _actuator_xml(gene)
     keyframe = _pose_keyframe(gene, base_z)   # render the body in its baked rest stance (if any)
 
@@ -155,10 +159,37 @@ def compile_gene_to_mjcf(gene: RobotGene, *, include_floor: bool = True, spawn_z
         f'{floor}'
         f'{body_xml}'
         '  </worldbody>\n'
+        f'{self_collision_excludes}'
         f'{actuators}'
         f'{keyframe}'
         '</mujoco>\n'
     )
+
+
+def _self_collision_excludes_xml(gene: RobotGene) -> str:
+    """Exclude a link's contact with its structural ancestors, not robot-world contact.
+
+    MuJoCo filters a direct parent/child pair by default, but not a grandchild against its torso ancestor.
+    Anatomy appendages intentionally begin within a mounting shell for a continuous silhouette, so those
+    missed ancestor contacts caused solver impulses from the robot colliding with its own structure.  Sibling
+    limbs and all floor, scene-object, and external-body contacts remain enabled.
+    """
+    parents = {seg.name: seg.parent for seg in gene.segments}
+    pairs: list[tuple[str, str]] = []
+    for seg in gene.segments:
+        ancestor = parents.get(seg.name)
+        while ancestor is not None:
+            pairs.append((ancestor, seg.name))
+            ancestor = parents.get(ancestor)
+    if not pairs:
+        return ""
+    lines = ["  <contact>"]
+    lines.extend(
+        f'    <exclude body1="{escape(ancestor)}" body2="{escape(descendant)}"/>'
+        for ancestor, descendant in pairs
+    )
+    lines.append("  </contact>")
+    return "\n".join(lines) + "\n"
 
 
 def _pose_keyframe(gene: RobotGene, base_z: float) -> str:
@@ -220,6 +251,66 @@ def gene_to_meshed_mjcf(gene: RobotGene, cache_dir: str = "build/_viewmesh", *,
             sensor_geoms = None
     return compile_gene_to_mjcf(gene, include_floor=include_floor, spawn_z=spawn_z, meshes=meshes,
                                 show_actuators=show_actuators, sensor_geoms=sensor_geoms)
+
+
+def write_packaged_visual_mjcf(gene: RobotGene, package_dir: str | Path, *,
+                               model_uri: str = "simulation/robot_visual.xml",
+                               include_floor: bool = True, spawn_z: float | None = None,
+                               task: str = "") -> dict | None:
+    """Write a portable, detailed visual model beside a gene package's physics artifacts.
+
+    Training and task evaluation deliberately use the primitive collider model.  A viewport, on the other
+    hand, needs the same original procedural CAD surfaces that were exported as STEP/STL.  This function bakes
+    those link meshes *inside the package*, writes a MJCF model whose mesh paths are relative to that model,
+    and records the public package URIs consumed by the browser replay.  The package therefore remains usable
+    after being copied or exported; it never points at a machine-local mesh cache.
+
+    It is intentionally fail-open: missing CAD tooling leaves the normal primitive replay intact and returns
+    ``None`` rather than writing a misleading visual-model manifest.
+    """
+    root = Path(package_dir)
+    model_path = root / model_uri
+    asset_dir = model_path.parent / "viewer_assets"
+    try:
+        from virturoid.services.cad_geometry import build_visual_meshes
+
+        absolute_meshes = build_visual_meshes(gene, str(asset_dir), cache=True) or {}
+        if not absolute_meshes:
+            return None
+        model_path.parent.mkdir(parents=True, exist_ok=True)
+        # MuJoCo resolves a mesh filename from the XML's directory.  Store a relative filename in the XML,
+        # but a package-relative URI in the sidecar for Three.js/API consumers.
+        xml_meshes = {
+            name: Path(os.path.relpath(path, start=model_path.parent)).as_posix()
+            for name, path in absolute_meshes.items()
+        }
+        model_path.write_text(
+            compile_gene_to_mjcf(gene, include_floor=include_floor, spawn_z=spawn_z,
+                                  meshes=xml_meshes, show_actuators=True),
+            encoding="utf-8",
+        )
+        mesh_index = {
+            "version": "0.1.0",
+            "model_uri": Path(model_uri).as_posix(),
+            "mesh_scale": 0.001,  # STL coordinates are millimetres; matches the MJCF mesh asset scale.
+            "meshes": {
+                f"{name}_vis": {
+                    "uri": Path(Path(model_uri).parent, asset_dir.name, Path(path).name).as_posix(),
+                    "scale": 0.001,
+                }
+                for name, path in absolute_meshes.items()
+            },
+        }
+        index_path = root / "simulation" / "viewer_mesh_index.json"
+        index_path.parent.mkdir(parents=True, exist_ok=True)
+        index_path.write_text(json.dumps(mesh_index, indent=2), encoding="utf-8")
+        return {
+            "model_uri": mesh_index["model_uri"],
+            "mesh_index_uri": "simulation/viewer_mesh_index.json",
+            "mesh_count": len(mesh_index["meshes"]),
+        }
+    except Exception:  # noqa: BLE001 - visual fidelity must never make the core simulator unusable
+        return None
 
 
 def _lowest_world_z(mj, d) -> float:
@@ -430,7 +521,10 @@ def _geom_xml(seg, pad: str, material: str = "mat_body", meshed: bool = False, p
     # mass are untouched, so dynamics & contacts stay byte-identical to the primitive model. The visible
     # surface is the detailed mesh appended below.
     surf = ' rgba="0 0 0 0" group="3"' if meshed else f' material="{material}"'
-    if seg.shape == "box":
+    if seg.shape == "sphere":
+        coll = (f'{pad}<geom name="{name}" type="sphere" pos="0 0 {seg.radius_m:.5f}" '
+                f'size="{seg.radius_m:.5f}" mass="{seg.mass_kg:.5f}"{surf}/>')
+    elif seg.shape == "box":
         h = seg.length_m / 2.0
         cs = getattr(seg, "cross_section", None)            # laterally-compressed (fish) body if set, else square
         hx, hy = (float(cs[0]), float(cs[1])) if cs else (seg.radius_m, seg.radius_m)
@@ -505,7 +599,7 @@ def _detail_geoms_xml(seg, pad: str, *, suppress_motor: bool = False) -> str:
             parts.append(
                 f'{pad}<geom name="{escape(seg.name)}_boot" type="sphere" pos="0 0 {boot_z:.5f}" '
                 f'size="{boot_r:.5f}" material="mat_rubber"{vis}/>')
-        elif seg.shape in ("capsule", "cylinder") and L > 0.05 and idx == 0:   # top of limb -> shell fairing
+        elif seg.shape in ("capsule", "cylinder", "box") and L > 0.05 and idx == 0:   # top of limb -> shell fairing
             # Only the TOP (hip/thigh) segment gets the accent bodywork, so the segments below stay bare dark and
             # the limb reads two-tone (accent over structure) regardless of how many segments the leg has —
             # fairing every proximal segment turned a 3-segment leg all-accent, losing the structure read.

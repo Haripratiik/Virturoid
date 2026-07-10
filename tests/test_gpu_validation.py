@@ -17,6 +17,19 @@ def test_validator_skips_gracefully_without_a_gpu_box(monkeypatch):
     assert v.main() == 2                       # box unreachable -> graceful skip (exit 2), never a crash
 
 
+def test_remote_policy_read_retries_until_the_npz_flushes():
+    import io
+    import numpy as np
+
+    from virturoid.services.gpu_trainer import _read_complete_npz
+
+    buf = io.BytesIO()
+    np.savez(buf, meta=np.asarray([1, 2]), weights=np.asarray([0.1, 0.2]))
+    responses = iter([b"too-short", buf.getvalue()])
+    payload = _read_complete_npz(lambda: next(responses), attempts=2, wait_s=0)
+    assert payload == buf.getvalue()
+
+
 def test_validator_reports_failure_when_training_returns_no_policy(monkeypatch):
     import validate_gpu_training as v
     import virturoid.services.gpu_trainer as gt

@@ -12,6 +12,17 @@ _MUJOCO = importlib.util.find_spec("mujoco") is not None
 _NPZ = Path(__file__).resolve().parent.parent / "models" / "morph_quad_att.npz"
 
 
+class PolicyCredibilityTests(unittest.TestCase):
+    def test_only_a_credible_recipe_walk_is_bankable(self):
+        from virturoid.services.policy_flywheel import assess_policy_rollout
+
+        credible = {"deployment_controller": "recipe_cpg", "survived": True, "upright_frac": 0.9,
+                    "height_ratio": 0.9, "cadence": 2.0, "support_frac": 0.5, "forward": 0.5}
+        self.assertTrue(assess_policy_rollout(credible)["bankable"])
+        raw = {"deployment_controller": "residual", "forward": 2.0, "upright": True}
+        self.assertFalse(assess_policy_rollout(raw)["bankable"])
+
+
 def _radial(n):
     from virturoid.services.morphology_builder import MorphologyBuilder
     b = MorphologyBuilder("legged", base_mount="free", species=f"r{n}")
@@ -39,9 +50,11 @@ class PolicyFlywheelTests(unittest.TestCase):
             with MemoryDB(Path(td) / "m.db") as db:
                 self.assertIsNone(recall_morph_policy(hexapod, db))         # nothing banked yet
                 res = bank_morph_policy(str(_NPZ), quad, db)
-                self.assertGreater(res["forward"], 0.0)                     # banked policy moves the body
+                self.assertFalse(res["banked"], "a crouching residual policy must not enter the reusable bank")
+                self.assertIn("UNVERIFIED", res["verdict"])
                 pol = recall_morph_policy(hexapod, db)                      # NEW legged build recalls it
-                self.assertIsNotNone(pol)
+                self.assertIsNone(pol, "a rejected policy must not be recalled by a different morphology")
+                return
                 r = rollout_morph(hexapod, pol, steps=400)                  # reused on a DIFFERENT body
                 self.assertGreater(r["forward"], 0.0)                       # the banked policy walks it FORWARD
                 # Zero-shot cross-morphology transfer (a QUAD policy driving a HEXAPOD) crouch-walks: it moves

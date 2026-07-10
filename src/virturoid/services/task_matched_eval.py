@@ -95,21 +95,24 @@ def evaluate_robot(gene: RobotGene, *, prompt: str = "", controller_params: dict
         from virturoid.services.locomotion_controller import run_locomotion_episode
         mj = mujoco.MjModel.from_xml_string(compile_gene_to_mjcf(gene))
         r = run_locomotion_episode(mj)
-        dist = float(r["distance_m"]); detail = r; scored_gait = "trot"
+        # A task score is forward achievement, never unsigned planar travel.
+        # This keeps the fallback reachable for a backward trot and prevents a
+        # lurch in the wrong direction from outranking a genuine crawl.
+        forward = float(r["forward_m"]); detail = r; scored_gait = "trot"
         # Score the body by the BEST of its AVAILABLE gaits, not one fixed gait: a wide-stance quad that ROLLS
         # under the diagonal trot may WALK under the statically-stable CRAWL (one foot up at a time, 3 planted).
         # Diagnosis-driven + cheap: only try the crawl when the trot UNDERPERFORMS (the tippy-quad failure), so a
         # body that trots fine is untouched. This lets per-request generation/co-design DISCOVER the gait that
         # works for THIS body (a hint the search reaches for) — never a fixed gait forced on every legged robot.
-        if dist < 0.5:
+        if forward < 0.5:
             try:
                 from virturoid.services.morph_policy import crawl_gait_rollout
                 cr = crawl_gait_rollout(gene, steps=1200)
-                if bool(cr.get("survived")) and float(cr.get("forward", 0.0)) > dist:
-                    dist, detail, scored_gait = round(float(cr["forward"]), 3), cr, "crawl"
+                if bool(cr.get("survived")) and float(cr.get("forward", 0.0)) > forward:
+                    forward, detail, scored_gait = round(float(cr["forward"]), 3), cr, "crawl"
             except Exception:  # noqa: BLE001 - the crawl is an OPTIONAL alternative gait; never break the eval
                 pass
-        return {"task": "locomotion", "metric": "distance_m", "value": dist,
+        return {"task": "locomotion", "metric": "forward_m", "value": max(0.0, forward),
                 "detail": {**detail, "scored_gait": scored_gait}}
 
     if kind == "mobile":

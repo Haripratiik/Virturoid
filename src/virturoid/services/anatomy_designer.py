@@ -72,7 +72,7 @@ ANATOMY_SYSTEM = (
     "one); chamfer (explicit edge bevel in m). Use these intentionally: a heavy loader's legs = thickness ~1.6 "
     "+ detail 'rugged'; a racing drone's arms = thickness ~0.7 + detail 'smooth'.\n"
     "ROLE vocabulary (reusable across all animals): body, neck, head, snout, jaw, ear, eye, horn, beak, tail, "
-    "leg, arm, paw, foot, hand, wing, fin, flipper, claw, antenna, shell.\n"
+    "leg, arm, tentacle, trunk, paw, foot, hand, wing, fin, flipper, claw, antenna, shell.\n"
     "RULES: exactly ONE root part with role 'body' and no parent. For a normal animal the body is LONG "
     "front-to-back and only modestly wide (never a cube/tower) — for a crab/turtle/ray/octopus set the body's "
     "aspect instead. Use symmetry:left_right for paired limbs (give ONE 'leg' — it becomes both sides; do NOT "

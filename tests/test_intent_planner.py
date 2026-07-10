@@ -39,6 +39,15 @@ class HeuristicRoutingTests(unittest.TestCase):
         self.assertEqual(plan.task_family, "spray_coverage")
         self.assertTrue(plan.buildable, plan.gaps)
 
+    def test_unrecognised_prompt_requires_clarification_not_a_silent_default(self):
+        plan = plan_build("build a blorptron", llm=None)
+        # A nearest class remains available to repair/inspection tools, but it is not
+        # reported as a buildable request until the person specifies their intent.
+        self.assertEqual(plan.routing_confidence, "uncertain")
+        self.assertFalse(plan.buildable)
+        self.assertTrue(any("clarify" in gap.lower() for gap in plan.gaps), plan.gaps)
+        self.assertFalse(plan.to_dict()["buildable"])
+
 
 class LLMPlannerTests(unittest.TestCase):
     def test_llm_proposal_is_used_but_feasibility_is_ours(self):
@@ -64,6 +73,17 @@ class LLMPlannerTests(unittest.TestCase):
         self.assertIsInstance(plan, BuildPlan)
         self.assertEqual(plan.robot_class, "manipulator")      # heuristic recovered it
         self.assertEqual(plan.source, "heuristic")
+
+    def test_uncertain_llm_route_is_also_blocked(self):
+        from virturoid.services.llm_client import MockLLM
+
+        plan = plan_build(
+            "build a blorptron",
+            llm=MockLLM(fixed={"robot_class": "quadruped", "task_family": "locomotion",
+                               "morphology": "generic walker", "routing_confidence": "uncertain"}),
+        )
+        self.assertFalse(plan.buildable)
+        self.assertTrue(any("clarify" in gap.lower() for gap in plan.gaps), plan.gaps)
 
 
 if __name__ == "__main__":

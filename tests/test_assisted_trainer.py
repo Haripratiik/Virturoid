@@ -8,7 +8,9 @@ under-measured banked/GPU recipe policies -> it skipped reuse and retrained need
 """
 import importlib.util
 import os
+import tempfile
 import unittest
+from pathlib import Path
 
 os.environ.setdefault("VIRTUROID_NO_LOCAL_ENV", "1")
 os.environ.setdefault("MUJOCO_GL", "glfw")
@@ -51,6 +53,42 @@ class MeasureTravelRoutingTests(unittest.TestCase):
         m = _measure_travel(g, plain, steps=800)
         self.assertAlmostEqual(m["forward"], float(plainr["forward"]), places=5)
         self.assertEqual(m["upright"], bool(plainr.get("upright")))
+
+    def test_deployed_rollout_marks_which_controller_was_measured(self):
+        from virturoid.services.morph_policy import rollout_deployed_morph_policy
+
+        g, cpg, plain = self._quad_and_policies()
+        self.assertEqual("recipe_cpg", rollout_deployed_morph_policy(g, cpg, steps=300)["deployment_controller"])
+        self.assertEqual("residual", rollout_deployed_morph_policy(g, plain, steps=300)["deployment_controller"])
+
+    def test_recipe_diagnosis_uses_the_rollout_speed_not_a_magic_divisor(self):
+        from virturoid.services.assisted_trainer import _recipe_diagnosis
+
+        diag = _recipe_diagnosis({"forward": 0.9, "speed": 0.5, "cadence": 2.0,
+                                  "upright_frac": 0.95, "height_ratio": 0.9, "survived": True})
+        self.assertEqual(0.5, diag["speed"])
+        self.assertIn("0.50m/s", diag["summary"])
+
+    def test_gpu_deploy_selection_can_keep_an_earlier_checkpoint(self):
+        from virturoid.services.assisted_trainer import select_best_gpu_checkpoint
+
+        with tempfile.TemporaryDirectory() as tmp:
+            final = Path(tmp) / "gpu_quad.npz"
+            early = Path(tmp) / "gpu_quad_it40.npz"
+            final.write_bytes(b"final"); early.write_bytes(b"early")
+
+            selected = select_best_gpu_checkpoint(
+                object(), str(final),
+                load_policy=lambda path: Path(path).name,
+                measure=lambda policy: {
+                    "forward": 0.82 if policy.endswith("it40.npz") else 0.31,
+                    "upright": policy.endswith("it40.npz"),
+                },
+            )
+
+        self.assertIsNotNone(selected)
+        self.assertTrue(selected["path"].endswith("gpu_quad_it40.npz"))
+        self.assertAlmostEqual(0.82, selected["forward"])
 
 
 if __name__ == "__main__":

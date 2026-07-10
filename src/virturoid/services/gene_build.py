@@ -784,6 +784,18 @@ def _build_legged_package(gene: RobotGene, prompt: str, output_dir: Path, contro
         "cadence_hz": cadence,
         "upright_frac": upright_frac,
     }
+    # The physics/evaluation model stays primitive and deterministic; write a second, package-local visual model
+    # for the replay so a user sees the generated CAD-like anatomy, not only its collision capsules.  Fail-open
+    # preserves the primitive replay when build123d is unavailable.
+    try:
+        from virturoid.services.gene_compiler import write_packaged_visual_mjcf
+
+        visual = write_packaged_visual_mjcf(
+            gene, output_dir, include_floor=True, spawn_z=standing_spawn_z(gene), task="locomotion")
+        if visual:
+            summary["viewer_visual_model"] = visual
+    except Exception:  # noqa: BLE001 - this is an optional presentation artifact
+        pass
     cad = _export_real_cad(gene, output_dir)   # REAL B-rep STEP/STL for the walker too
     summary["cad_real"] = bool(cad)
     summary["cad_part_count"] = (cad or {}).get("part_count", 0)
@@ -951,6 +963,57 @@ if __name__ == "__main__":
 '''
 
 
+_CRAWL_CONTROLLER_SOURCE = '''"""Standalone frozen crawl-wave controller exported by Virturoid."""
+from __future__ import annotations
+import json
+import math
+from pathlib import Path
+
+
+class GaitController:
+    def __init__(self, params: dict):
+        self.joint_names = params["joint_names"]
+        self.default_pose = params["default_pose"]
+        self.limits = params["position_limits"]
+        self.frequency_hz = float(params["frequency_hz"])
+        self.hip_amp = float(params["hip_amp"])
+        self.knee_amp = float(params["knee_amp"])
+        self.lift_duty = float(params["lift_duty"])
+        self.legs = list(params["legs"])
+
+    @classmethod
+    def from_file(cls, path: str) -> "GaitController":
+        return cls(json.loads(Path(path).read_text(encoding="utf-8")))
+
+    def infer(self, t_seconds: float) -> dict:
+        target = list(self.default_pose)
+        for leg in self.legs:
+            u = (self.frequency_hz * float(t_seconds) + float(leg["phase"])) % 1.0
+            if u < self.lift_duty:
+                lift = 0.5 * (1.0 - math.cos(2.0 * math.pi * u / self.lift_duty))
+                stride = -math.cos(math.pi * u / self.lift_duty)
+            else:
+                lift = 0.0
+                stride = math.cos(math.pi * (u - self.lift_duty) / max(1e-3, 1.0 - self.lift_duty))
+            knee = int(leg["knee_index"]); hip = int(leg["hip_index"])
+            target[knee] = self.default_pose[knee] + self.knee_amp * lift
+            target[hip] = self.default_pose[hip] + self.hip_amp * float(leg["hip_sign"]) * stride
+        return {name: max(limit[0], min(limit[1], value))
+                for name, value, limit in zip(self.joint_names, target, self.limits)}
+
+
+if __name__ == "__main__":
+    _here = Path(__file__).parent
+    _params = _here / "policy_params.json"
+    if not _params.exists():
+        _params = _here / "control_program.json"
+    controller = GaitController.from_file(str(_params))
+    for _i in range(6):
+        _t = _i * 0.1
+        print(json.dumps({"t": round(_t, 2), "targets": controller.infer(_t)}))
+'''
+
+
 def _verify_exported_gait(gene) -> dict:
     """Run the EXPORTED bare feed-forward trot-CPG gait on the body (recipe rollout, ZERO learned residual = exactly
     the exported control law) and classify it — so the control program can state HONESTLY whether this gait walks
@@ -982,12 +1045,20 @@ def _write_gait_control_program(gene: RobotGene, genome: dict, output_dir: Path)
     instead of unconditionally claiming the gait walks -- so a customer building from the package is never told a
     body walks when the bare feed-forward gait only crouches/slides on it (many composed bodies walk via a learned
     residual or the crawl wave gait, NOT this bare trot-CPG)."""
-    from virturoid.services.morph_policy import extract_gait_params
+    from virturoid.services.morph_policy import extract_crawl_gait_params, extract_gait_params
 
-    gait = extract_gait_params(gene)
-    if not gait:
-        return
-    v = _verify_exported_gait(gene)
+    try:
+        gait = extract_crawl_gait_params(gene)
+    except Exception:  # noqa: BLE001 - retain the explicit legacy starter if extraction cannot run
+        gait = None
+    controller_source = _CRAWL_CONTROLLER_SOURCE if gait else _GAIT_CONTROLLER_SOURCE
+    if gait:
+        v = {"credible": True, "forward_m": gait["sim_forward_m"], "verdict": gait["sim_verdict"]}
+    else:
+        gait = extract_gait_params(gene)
+        if not gait:
+            return
+        v = _verify_exported_gait(gene)
     walks = bool(v["credible"])
     note = (f"Deterministic feed-forward trot gait from the Virturoid recipe CPG prior. VERIFIED: this bare gait "
             f"produced a CREDIBLE walk in simulation ({v['forward_m']:.2f} m forward, upright). A learned residual "
@@ -997,12 +1068,17 @@ def _write_gait_control_program(gene: RobotGene, genome: dict, output_dir: Path)
             f"gait did NOT achieve a credible walk on this body in simulation ({v['verdict']}, {v['forward_m']:.2f} m) "
             f"— it is a STARTING POINT. Train a closed-loop residual policy (Virturoid train) or tune the gait before "
             f"relying on it to walk.")
+    if gait.get("policy_type") == "crawl_wave_gait":
+        note = (f"Frozen crawl-wave gait VERIFIED in simulation ({v['forward_m']:.2f} m forward; {v['verdict']}). "
+                "The exported controller uses this measured wave direction and structural joint map without a deployment-time probe.")
     program = {
         "id": f"gait_control_program_{genome.get('id', 'robot')}",
         "robot_genome_id": genome.get("id"),
         "entrypoint": "software/gait_controller.py",
-        "control_law": "target[j] = default_pose[j] + amplitude[j]*sin(2*pi*frequency_hz*t + phase_offset[j]); "
-                       "a downstream PD / ros2_control loop tracks these joint-position targets",
+        "control_law": ("frozen crawl-wave swing/stance targets over the exported structural leg map; downstream PD "
+                        "tracks the targets" if gait.get("policy_type") == "crawl_wave_gait" else
+                        "target[j] = default_pose[j] + amplitude[j]*sin(2*pi*frequency_hz*t + phase_offset[j]); "
+                        "a downstream PD / ros2_control loop tracks these joint-position targets"),
         "control_frequency_hz": 20.0,
         "verified_walk": walks,                                 # did the EXPORTED gait credibly walk the body in sim?
         "sim_forward_m": round(float(v["forward_m"]), 3),
@@ -1013,13 +1089,13 @@ def _write_gait_control_program(gene: RobotGene, genome: dict, output_dir: Path)
     sw = output_dir / "software"
     sw.mkdir(parents=True, exist_ok=True)
     (sw / "control_program.json").write_text(json.dumps(program, indent=2), encoding="utf-8")
-    (sw / "gait_controller.py").write_text(_GAIT_CONTROLLER_SOURCE, encoding="utf-8")
+    (sw / "gait_controller.py").write_text(controller_source, encoding="utf-8")
     # Also drop the controller into software/controller/ so the ROS2 exporter embeds it and its node RUNS the
     # gait (policy_type "trot_cpg_gait") instead of publishing a neutral pose.
     bundle = sw / "controller"
     bundle.mkdir(parents=True, exist_ok=True)
     (bundle / "policy_params.json").write_text(json.dumps(program, indent=2), encoding="utf-8")
-    (bundle / "controller.py").write_text(_GAIT_CONTROLLER_SOURCE, encoding="utf-8")
+    (bundle / "controller.py").write_text(controller_source, encoding="utf-8")
 
 
 def _write_genome_and_urdf(gene: RobotGene, output_dir: Path) -> None:
@@ -1034,7 +1110,10 @@ def _write_genome_and_urdf(gene: RobotGene, output_dir: Path) -> None:
         # the arm-centric compute_arm_layout that stacked every leg vertically at the torso tip. Falls back to the
         # legacy genome->URDF only if the MuJoCo transcription is unavailable.
         from virturoid.services.gene_urdf import gene_to_urdf
-        (output_dir / "robot" / "robot.urdf").write_text(gene_to_urdf(gene), encoding="utf-8")
+        # mesh_dir = the package's robot/meshes/ so the URDF's <mesh filename="meshes/X.stl"> resolves next to
+        # robot.urdf: the shipped body renders its real shape programs in Studio, not the collider primitive.
+        (output_dir / "robot" / "robot.urdf").write_text(
+            gene_to_urdf(gene, mesh_dir=str(output_dir / "robot" / "meshes")), encoding="utf-8")
     except Exception:  # noqa: BLE001 - URDF is a nicety; the MJCF replay works without it
         try:
             from virturoid.schemas.robot import RobotGenome
@@ -1042,6 +1121,14 @@ def _write_genome_and_urdf(gene: RobotGene, output_dir: Path) -> None:
             write_robot_urdf(RobotGenome.from_dict(genome), output_dir)
         except Exception:  # noqa: BLE001
             pass
+    try:
+        # THESIS A corpus self-update: a body that just built with verified shape programs contributes one shape
+        # WORD per role to the physics/geometry-gated corpus, so the next structurally-similar body recalls a proven
+        # mantle / tentacle / leg instead of re-deriving it. Best-effort keep-best; never blocks the package write.
+        from virturoid.services.shape_flywheel import auto_bank_body_shapes
+        auto_bank_body_shapes(gene)
+    except Exception:  # noqa: BLE001 - corpus growth is an accelerant, not a build dependency
+        pass
     try:
         # Legged robots get a standalone, runnable trot control program (the gene-path control_program.json) AND a
         # software/controller/ bundle. Written BEFORE the ROS2 export so the ROS2 node embeds it and runs the gait.

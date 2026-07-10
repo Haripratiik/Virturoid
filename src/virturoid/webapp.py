@@ -185,6 +185,9 @@ def create_app(workspace: Path) -> FastAPI:
                 "dof": len(gene.actuated_joints()),
                 "valid": not gene.validate(),
                 "design_source": getattr(gene, "design_source", "heuristic"),
+                "composition_notes": list(getattr(gene, "composition_notes", [])),
+                "intent": result.get("intent", {}),
+                "requires_clarification": bool(result.get("requires_clarification", False)),
             },
             "scenes": [],
         }

@@ -10,37 +10,69 @@ scratch. The body design flywheel ([[general-codesign-flywheel]]) improves bodie
 from __future__ import annotations
 
 
+def assess_policy_rollout(rollout: dict) -> dict:
+    """Return whether a deployed policy has enough evidence to enter the reusable skill bank.
+
+    A raw residual rollout can report forward displacement while crouching, falling, or sliding.  Only recipe
+    policy rollouts provide the cadence/support/upright evidence needed for the product's credibility gate;
+    legacy residual-only policies are retained on disk for experiments but are not reusable production skills.
+    """
+    from virturoid.services.gait_quality import classify
+
+    required = {"survived", "upright_frac", "cadence", "support_frac"}
+    forward = float(rollout.get("forward", 0.0))
+    controller = str(rollout.get("deployment_controller") or "unknown")
+    if not required.issubset(rollout) or controller != "recipe_cpg":
+        return {"bankable": False, "verdict": "UNVERIFIED controller (missing recipe gait evidence)",
+                "forward": forward, "controller": controller}
+    verdict = classify(rollout)
+    return {"bankable": verdict == "CREDIBLE WALK", "verdict": verdict,
+            "forward": forward, "controller": controller}
+
+
 def bank_morph_policy(npz_path: str, gene, db, *, task_type: str = "locomotion",
                       skill_id: str | None = None) -> dict:
     """Evaluate a trained MorphPolicy on ``gene`` and bank it as a reusable skill keyed by morphology
-    kind + task. Returns ``{skill_id, forward, upright, params_path}``."""
-    from virturoid.services.morph_policy import MorphPolicy, rollout_morph
+    kind + task only when it is a credible deployed walk."""
+    from virturoid.services.morph_policy import MorphPolicy, rollout_deployed_morph_policy
     from virturoid.services.task_matched_eval import robot_kind
 
     pol = MorphPolicy.from_npz(npz_path)
-    r = rollout_morph(gene, pol, steps=600)
+    r = rollout_deployed_morph_policy(gene, pol, steps=900)
+    assessment = assess_policy_rollout(r)
     kind = robot_kind(gene)
     sid = skill_id or f"morph_{kind}_{task_type}"
+    if not assessment["bankable"]:
+        return {"banked": False, "skill_id": None, "forward": assessment["forward"],
+                "verdict": assessment["verdict"], "controller": assessment["controller"],
+                "params_path": str(npz_path)}
     db.record_skill(sid, kind, task_type, success_rate=float(r["forward"]), params_path=str(npz_path),
                     species=getattr(gene, "species", None), gene_id=gene.id,
                     obs_dim=int(pol.feature_dim), act_dim=int(pol.hidden),
-                    notes=f"attention MorphPolicy (transfers across morphologies); fwd={r['forward']}")
-    return {"skill_id": sid, "forward": float(r["forward"]), "upright": bool(r["upright"]),
-            "params_path": str(npz_path)}
+                    notes=("credible deployed attention MorphPolicy (transfers across morphologies); "
+                           f"fwd={r['forward']}; verdict={assessment['verdict']}"))
+    return {"banked": True, "skill_id": sid, "forward": float(r["forward"]),
+            "verdict": assessment["verdict"], "controller": assessment["controller"], "params_path": str(npz_path)}
 
 
 def recall_morph_policy(gene, db, *, task_type: str = "locomotion"):
     """Retrieve + load the best banked MorphPolicy for this morphology kind + task (warm-start / reuse).
     Returns a loaded ``MorphPolicy`` or ``None`` if nothing is banked. The policy transfers, so a hexapod
     can reuse a quadruped-banked legged policy."""
-    from virturoid.services.morph_policy import MorphPolicy
+    from virturoid.services.morph_policy import MorphPolicy, rollout_deployed_morph_policy
     from virturoid.services.task_matched_eval import robot_kind
 
     sk = db.recall_skill(robot_kind(gene), task_type)
     if not sk or not sk.get("params_path"):
         return None
     try:
-        return MorphPolicy.from_npz(sk["params_path"])
+        policy = MorphPolicy.from_npz(sk["params_path"])
+        # Screen the recalled controller on THIS body before handing it to a
+        # direct replay/warm-start path; a prior's high source-body score is
+        # not evidence of positive transfer.
+        if not assess_policy_rollout(rollout_deployed_morph_policy(gene, policy, steps=900))["bankable"]:
+            return None
+        return policy
     except Exception:  # noqa: BLE001 - a missing/corrupt params file just means cold-start
         return None
 
@@ -86,6 +118,8 @@ def transfer_train_morph(genes, db, *, task_type: str = "locomotion", params_pat
         "policy": policy,
         "history": history,
         "warm_started": init_policy is not None,
+        "banked": bool(banked.get("banked", False)),
+        "bank_verdict": banked.get("verdict"),
         "skill_id": banked.get("skill_id"),
         "params_path": str(params_path),
         "baseline": float(history[0]) if history else 0.0,

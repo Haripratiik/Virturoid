@@ -17,6 +17,19 @@ from xml.sax.saxutils import escape
 _MJ_FREE, _MJ_SLIDE, _MJ_HINGE = 0, 2, 3
 _MJ_SPHERE, _MJ_CAPSULE, _MJ_ELLIPSOID, _MJ_CYLINDER, _MJ_BOX = 2, 3, 4, 5, 6
 
+_MESH_CACHE_DIR = None
+
+
+def _mesh_cache_dir() -> str:
+    """A process-shared cache dir for baked shape-program STLs (content-hash filenames), so an
+    identically-shaped body/segment bakes ONCE per process — a big win for the test suite and a long-running
+    server that rebuilds the same species. Copied into each package so the exported URDF stays self-contained."""
+    global _MESH_CACHE_DIR
+    if _MESH_CACHE_DIR is None:
+        import tempfile
+        _MESH_CACHE_DIR = tempfile.mkdtemp(prefix="virturoid_mesh_cache_")
+    return _MESH_CACHE_DIR
+
 
 def _quat_to_rpy(q) -> tuple[float, float, float]:
     """MuJoCo quat (w, x, y, z) -> URDF roll/pitch/yaw (rad), the ZYX/fixed-axis convention URDF uses."""
@@ -51,8 +64,17 @@ def _geom_visual_xml(model, g) -> tuple[str, str]:
     return geom, origin
 
 
-def gene_to_urdf(gene, *, name: str | None = None) -> str:
-    """Compile ``gene`` to MuJoCo and transcribe it into a self-contained, geometrically-correct URDF string."""
+def gene_to_urdf(gene, *, name: str | None = None, mesh_dir: str | None = None) -> str:
+    """Compile ``gene`` to MuJoCo and transcribe it into a geometrically-correct URDF string.
+
+    VISUAL-MESH BRIDGE (the differentiation fix, ISSUES A2): when ``mesh_dir`` is given AND build123d is
+    available, each segment's SHAPE PROGRAM (``geometry``) is baked to an STL in ``mesh_dir`` and emitted as
+    that link's VISUAL ``<mesh>`` — so the Studio viewport (which loads this URDF) renders the real octopus
+    mantle / tapering tentacle instead of the collider capsule. COLLISION stays the primitive (physics
+    untouched). Falls back to self-contained primitive visuals when ``mesh_dir`` is None or any bake fails —
+    byte-identical to the prior behavior, so a missing build123d never breaks the export."""
+    import os
+
     import mujoco
     import numpy as np
 
@@ -60,6 +82,27 @@ def gene_to_urdf(gene, *, name: str | None = None) -> str:
     model = mujoco.MjModel.from_xml_string(
         compile_gene_to_mjcf(gene, include_floor=False, spawn_z=standing_spawn_z(gene)))
     robot_name = escape(name or getattr(gene, "species", None) or getattr(gene, "id", None) or "virturoid_robot")
+
+    # Bake each segment's shape program to an STL (normalized to the link's [0,length] +z frame — the SAME
+    # convention gene_to_meshed_mjcf uses, so a mesh visual with an IDENTITY origin aligns with the link frame
+    # the URDF already transcribes). Keyed by segment name == MJCF body name. Best-effort.
+    seg_mesh: dict[str, str] = {}
+    if mesh_dir:
+        try:
+            import shutil
+
+            from virturoid.services.cad_geometry import build_visual_meshes
+            # Bake into the process-shared cache (bakes each unique segment shape ONCE), then copy the referenced
+            # STLs next to robot.urdf so the exported package remains self-contained (no external dependency).
+            baked = build_visual_meshes(gene, _mesh_cache_dir())
+            os.makedirs(str(mesh_dir), exist_ok=True)
+            for seg, src in baked.items():
+                dst = os.path.join(str(mesh_dir), os.path.basename(src))
+                if not os.path.exists(dst):
+                    shutil.copyfile(src, dst)
+                seg_mesh[seg] = dst
+        except Exception:  # noqa: BLE001 - no build123d / awkward solid -> primitive visuals below
+            seg_mesh = {}
 
     def bname(b):
         return escape(mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, b) or f"link{b}")
@@ -76,13 +119,21 @@ def gene_to_urdf(gene, *, name: str | None = None) -> str:
         nm = bname(b)
         mass = max(1e-4, float(model.body_mass[b]))
         vis, col = [], []
+        body_rgba = None
         for g in range(model.ngeom):
             if int(model.geom_bodyid[g]) != b:
                 continue
             geom, origin = _geom_visual_xml(model, g)
             if not geom:
                 continue
-            rgba = [float(v) for v in model.geom_rgba[g]]
+            # `geom_rgba` is frequently MuJoCo's neutral default when colour
+            # comes from a named material.  Resolve the material first so the
+            # Studio sees the same palette as the simulated model.
+            matid = int(model.geom_matid[g])
+            rgba = ([float(v) for v in model.mat_rgba[matid]]
+                    if matid >= 0 else [float(v) for v in model.geom_rgba[g]])
+            if body_rgba is None and len(rgba) >= 3:
+                body_rgba = rgba                        # the mesh-visual color = this link's primary geom color
             mat = (f'<material name="{nm}_m{g}"><color rgba="{rgba[0]:.3f} {rgba[1]:.3f} {rgba[2]:.3f} 1" /></material>'
                    if len(rgba) >= 3 else "")
             vis.append(f'    <visual>{origin}<geometry>{geom}</geometry>{mat}</visual>')
@@ -90,6 +141,15 @@ def gene_to_urdf(gene, *, name: str | None = None) -> str:
         if not vis:                                     # a geom-less body still needs a renderable stub
             vis.append('    <visual><geometry><box size="0.02 0.02 0.02" /></geometry></visual>')
             col.append('    <collision><geometry><box size="0.02 0.02 0.02" /></geometry></collision>')
+        # VISUAL-MESH BRIDGE: if this link's segment baked a shape-program STL, the link's VISUAL becomes that
+        # single mesh (identity origin — the STL is already in the link's [0,length] +z frame), while COLLISION
+        # keeps the primitive geoms above (physics untouched). This is what makes an octopus render as an octopus.
+        if nm in seg_mesh:
+            rel = "meshes/" + escape(os.path.basename(seg_mesh[nm]))
+            c = body_rgba or [0.5, 0.55, 0.6]
+            mmat = (f'<material name="{nm}_mesh"><color rgba="{c[0]:.3f} {c[1]:.3f} {c[2]:.3f} 1" /></material>')
+            vis = [f'    <visual><origin xyz="0 0 0" rpy="0 0 0" /><geometry>'
+                   f'<mesh filename="{rel}" scale="0.001 0.001 0.001" /></geometry>{mmat}</visual>']
         # diagonal inertia about the body frame (from the model's body inertia, a safe positive-definite set)
         ine = [float(v) for v in model.body_inertia[b]]
         lines.append(f'  <link name="{nm}">')

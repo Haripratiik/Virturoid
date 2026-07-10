@@ -162,14 +162,24 @@ def compose_from_spec(spec: dict) -> RobotGene:
 
 def _leg_count(prompt: str) -> int:
     """How many legs the user asked for — a PARAMETER of the legged body, not a per-species template.
-    Defaults to 4 (quadruped). hexapod=6, octopod=8, or '6-legged'/'six legs' etc."""
+    Defaults to 4 (quadruped). Biped animals/cues=2, hexapod/insect/crab=6, arachnid/octopod=8, or an explicit
+    '6-legged'/'six legs'/'2 legs' etc. Buildable counts are 2/4/6/8 (the generic body builds legs in pairs)."""
     import re
 
     p = (prompt or "").lower()
-    if any(w in p for w in ("spider", "arachnid", "octopod", "octopus", "eight-legged", "eight legs")):
+    # BIPED cues FIRST, so a two-legged animal (T-rex/raptor/kangaroo/ostrich) or an explicit '2 legs' is not
+    # swept into the 4-leg default. (A generic 'bipedal'/'humanoid'/'android' prompt is routed to the upright
+    # humanoid path upstream; here we catch the ANIMAL bipeds that otherwise silently became quadrupeds.)
+    if any(w in p for w in ("t-rex", "t rex", "tyrannosaur", "raptor", "velociraptor", "kangaroo", "wallaby",
+                            "ostrich", "emu", "two-leg", "two leg", "2-leg", "2 leg", "one-leg", "one leg",
+                            "single leg", "monopod", "unipedal", "biped")):
+        return 2
+    if any(w in p for w in ("spider", "arachnid", "tarantula", "octopod", "octopus", "eight-legged",
+                            "eight legs", "8-legged", "8 legs", "scorpion")):
         return 8                                          # arachnids/octopods have 8 legs
-    if any(w in p for w in ("hexapod", "insect", "ant ", "six-legged", "six legs")):
-        return 6                                          # insects/hexapods have 6
+    if any(w in p for w in ("hexapod", "insect", "ant ", "six-legged", "six legs", "6-legged", "6 legs",
+                            "crab", "crustacean", "beetle", "mantis", "cockroach", "roach")):
+        return 6                                          # insects/hexapods/crabs -> 6 credible walking legs
     for word, k in (("two", 2), ("four", 4), ("six", 6), ("eight", 8)):
         if f"{word}-leg" in p or f"{word} leg" in p:
             return k
@@ -536,6 +546,17 @@ def _intent_validation_issues(gene, req) -> list[str]:
         return []
 
 
+def _attach_plan_provenance(gene: RobotGene, plan) -> RobotGene:
+    """Persist request routing with a generated body across export and storage boundaries."""
+    plan_data = plan.to_dict() if hasattr(plan, "to_dict") else dict(plan)
+    gene.metadata = {**(gene.metadata or {}), "build_plan": plan_data}
+    if not plan_data.get("buildable", True):
+        note = "Request needs clarification or capability work: " + "; ".join(plan_data.get("gaps", []))
+        if note not in gene.composition_notes:
+            gene.composition_notes = [*gene.composition_notes, note]
+    return gene
+
+
 def compose_robot(prompt: str, *, llm="auto", reach_m: float | None = None,
                   payload_kg: float | None = None, plan=None, ensure_walkable: bool = False) -> RobotGene:
     """Compose a robot AND finalize it for the task. Every composition path funnels through here, so the single
@@ -547,6 +568,7 @@ def compose_robot(prompt: str, *, llm="auto", reach_m: float | None = None,
     wide-stance + crawl-gait HINT (per-request, sleek-when-possible, LLM designs preserved). A caller preparing
     a robot for a WALKING task opts in; a generic build pays no eval cost."""
     gene = _compose_robot_impl(prompt, llm=llm, reach_m=reach_m, payload_kg=payload_kg, plan=plan)
+    build_plan = dict((gene.metadata or {}).get("build_plan", {}))
     try:
         # An AERIAL prompt (drone/quadcopter/...) is a rotorcraft, not a legged/wheeled body: compose a
         # quadcopter (central hub + 4 rotors + camera pod) that the geometric flight controller actually flies
@@ -602,6 +624,10 @@ def compose_robot(prompt: str, *, llm="auto", reach_m: float | None = None,
             gene = ensure_walkable_quad(gene, prompt)
         except Exception:  # noqa: BLE001 - best-effort; never block a compose on the walkability check
             pass
+    if build_plan:
+        # Special aerial/aquatic routing may replace the original gene; preserve the
+        # request decision on the final body as well.
+        _attach_plan_provenance(gene, build_plan)
     return gene
 
 
@@ -626,6 +652,10 @@ def _compose_robot_impl(prompt: str, *, llm="auto", reach_m: float | None = None
         # "wyvern", "basilisk") to a manipulator and they'd NEVER reach the anatomy path. The LLM knows an
         # axolotl is an animal; the keyword list only knows the species someone typed in. (llm=None offline.)
         plan = plan_build(prompt, llm=llm)
+
+    def completed(gene: RobotGene) -> RobotGene:
+        return _attach_plan_provenance(gene, plan)
+
     req = build_requirements_from_prompt(prompt, payload_kg=payload_kg, reach_m=reach_m)
     from virturoid.services.spec_parser import parse_target_height_m
     target_height_m = parse_target_height_m(prompt)        # honor "a 1.2 m tall humanoid" even offline (§4.8E)
@@ -656,7 +686,7 @@ def _compose_robot_impl(prompt: str, *, llm="auto", reach_m: float | None = None
                 from virturoid.services.morphology_priors import validate_morphology
                 if validate_morphology(gene).ok:
                     gene.design_source = "anatomy"
-                    return gene
+                    return completed(gene)
         except Exception:  # noqa: BLE001 - any LLM/build/validate failure -> archetype/intent below
             pass
         # The LLM anatomy path can fail (rate-limited / weak model / bad graph). Distinctive exotic SHAPES the
@@ -668,7 +698,8 @@ def _compose_robot_impl(prompt: str, *, llm="auto", reach_m: float | None = None
             arch = novel_archetype_gene(prompt)
             if arch is not None and not arch.validate():
                 arch.design_source = "archetype"
-                return arch
+                arch.composition_notes = ["The authored anatomy did not clear validation; a named deterministic archetype was selected."]
+                return completed(arch)
         except Exception:  # noqa: BLE001
             pass
         try:
@@ -676,7 +707,8 @@ def _compose_robot_impl(prompt: str, *, llm="auto", reach_m: float | None = None
             generic = generic_creature_gene(prompt, plan.robot_class)
             if generic is not None:
                 generic.design_source = "anatomy_generic"
-                return generic
+                generic.composition_notes = ["The authored anatomy was unavailable or did not clear validation; the general deterministic anatomy compiler was used."]
+                return completed(generic)
         except Exception:  # noqa: BLE001
             pass
 
@@ -694,12 +726,12 @@ def _compose_robot_impl(prompt: str, *, llm="auto", reach_m: float | None = None
                 # the intent gain freer structure (compositional appendages) without shipping a degenerate body.
                 fatal = _intent_validation_issues(gene, req)
                 if not fatal:
-                    return gene
+                    return completed(gene)
                 repaired = build_from_intent(
                     propose_intent(prompt, plan, req, llm, errors=fatal), prompt, req)
                 if repaired is not None and not repaired.validate():
-                    return repaired
-                return gene                                   # repair didn't build cleanly -> keep the first
+                    return completed(repaired)
+                return completed(gene)                        # repair didn't build cleanly -> keep the first
         except Exception:  # noqa: BLE001 - any LLM/build failure -> deterministic keyword builder below
             pass
 
@@ -708,7 +740,7 @@ def _compose_robot_impl(prompt: str, *, llm="auto", reach_m: float | None = None
     spec = morphology_from_requirements(req.reach_m, req.payload_kg, prompt=prompt,
                                         environment=req.environment, robot_class=plan.robot_class)
     spec["design_source"] = "heuristic"
-    return _fallback_gene(prompt, spec, target_height_m=target_height_m)
+    return completed(_fallback_gene(prompt, spec, target_height_m=target_height_m))
 
 
 def _fallback_gene(prompt: str, heuristic_spec: dict, *, target_height_m: float | None = None) -> RobotGene:
@@ -727,6 +759,7 @@ def _fallback_gene(prompt: str, heuristic_spec: dict, *, target_height_m: float 
         H = max(0.12, min(0.32, target_height_m / 8.55)) if target_height_m else 0.205
         g = build_anthropometric_humanoid(H)
         g.design_source = "anthropometric"
+        g.composition_notes = ["Deterministic anthropometric humanoid fallback selected from the requested body class."]
         return g
     # Distinctive exotic SHAPES the general compiler can't yet express (legless serpent / radial spider /
     # leaping frog) -> their dedicated builder. EVERY OTHER legged creature -> a CLASS-GENERAL generic
@@ -736,6 +769,7 @@ def _fallback_gene(prompt: str, heuristic_spec: dict, *, target_height_m: float 
     novel = novel_archetype_gene(prompt)
     if novel is not None:
         novel.design_source = "archetype"
+        novel.composition_notes = ["Deterministic archetype selected for a supported specialist body plan."]
         return novel
     try:
         from virturoid.services.anatomy_compiler import generic_creature_gene
@@ -744,14 +778,16 @@ def _fallback_gene(prompt: str, heuristic_spec: dict, *, target_height_m: float 
         # G4 guard: the generic-creature fallback is for LEGGED bodies only. It used to run for ANY class and
         # silently hijack e.g. a mobile_manipulator ('mobile robot that picks boxes') into a quadruped.
         if (_cls or "").lower() in ("quadruped", "legged", "biped"):
-            generic = generic_creature_gene(prompt, _cls)
+            generic = generic_creature_gene(prompt, _cls, n_legs=_leg_count(prompt))
             if generic is not None:
                 generic.design_source = "anatomy_generic"
+                generic.composition_notes = ["No usable anatomy model was available; the general deterministic anatomy compiler was used."]
                 return generic
     except Exception:  # noqa: BLE001
         pass
     g = compose_from_spec(heuristic_spec)
     g.design_source = heuristic_spec.get("design_source", "heuristic")
+    g.composition_notes = ["Deterministic requirement-to-morphology fallback used; review the delivered body class before relying on it."]
     return g
 
 

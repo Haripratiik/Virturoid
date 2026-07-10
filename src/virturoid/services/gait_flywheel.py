@@ -22,6 +22,9 @@ import json
 
 LOCOMOTION = "locomotion"
 _FWD_NORM = 1.5   # metres that maps to success_rate 1.0 (a strong learned quad walk ~1.85 m)
+# A gait prior changes a controller's phase/amplitude targets.  Weak embedding
+# matches are not evidence that those targets fit the new kinematic tree.
+_MIN_GAIT_TRANSFER_SIMILARITY = 0.55
 
 
 def _class_of(gene) -> str:
@@ -33,6 +36,25 @@ def _class_of(gene) -> str:
         return robot_kind(gene)
     except Exception:  # noqa: BLE001
         return "legged"
+
+
+def _deploy_sim_config(gene) -> dict:
+    """The sim config a gait verdict was measured/deployed under, PINNED with the bank (Thesis A / dossier risk
+    #10: a physics verdict is sim-config-RELATIVE). A recalled 'walks 0.65 m' then carries the timestep, gravity
+    and engine it's valid under, so a consumer on a different sim sees the mismatch instead of trusting a stale
+    number. Best-effort: derived from the SAME compiler the deploy uses; falls back to the deploy descriptor."""
+    cfg = {"controller": "crawl_gait", "engine": "mujoco"}
+    try:
+        import mujoco
+
+        from virturoid.services.gene_compiler import compile_gene_to_mjcf, standing_spawn_z
+        m = mujoco.MjModel.from_xml_string(compile_gene_to_mjcf(gene, spawn_z=standing_spawn_z(gene)))
+        cfg["timestep"] = round(float(m.opt.timestep), 6)
+        cfg["gravity_z"] = round(float(m.opt.gravity[2]), 4)
+        cfg["mujoco"] = getattr(mujoco, "__version__", "?")
+    except Exception:  # noqa: BLE001 - the descriptor alone still identifies the deploy controller/engine
+        cfg["mujoco"] = "unknown"
+    return cfg
 
 
 def bank_gait(db, gene, result, *, task: str = LOCOMOTION) -> str | None:
@@ -57,7 +79,8 @@ def bank_gait(db, gene, result, *, task: str = LOCOMOTION) -> str | None:
     db.record_skill(
         skill_id, cls, task, success_rate=success, species=species, gene_id=gene_id,
         base_config={"gait_params": result.best_params, "forward_m": round(result.best_forward, 4),
-                     "height_ratio": round(result.best_height_ratio, 3), "controller": "crawl_gait"},
+                     "height_ratio": round(result.best_height_ratio, 3), "controller": "crawl_gait",
+                     "sim_config": _deploy_sim_config(gene)},
         notes="learned deployable gait (gait_search); base_config.gait_params IS the deploy controller")
     # Index the skill into the vector memory by THIS BODY'S morphology embedding (the robotics tokenization), so a
     # future body recalls it by structural similarity — cross-body, not just an exact class-string match.
@@ -90,7 +113,9 @@ def recall_gait(db, gene, *, task: str = LOCOMOTION) -> dict | None:
     # 1) TOKENIZED retrieval: nearest banked gait skill by body-morphology embedding (z_body ⊕ z_task).
     try:
         from virturoid.services.robotics_vector_memory import RoboticsVectorMemory
-        for hit in RoboticsVectorMemory(db).nearest_skills(gene, task, k=6):
+        for hit in RoboticsVectorMemory(db).nearest_skills(
+            gene, task, k=6, min_sim=_MIN_GAIT_TRANSFER_SIMILARITY,
+        ):
             params = _gait_params_for_skill(db, hit.get("obj_id", ""))
             if params:
                 return params
@@ -98,11 +123,44 @@ def recall_gait(db, gene, *, task: str = LOCOMOTION) -> dict | None:
         pass
     # 2) exact (class, task, species) — the string key (prefers nearest species).
     cls = _class_of(gene)
-    sk = db.recall_skill(cls, task, species=getattr(gene, "species", None) or cls)
-    if sk:
+    species = getattr(gene, "species", None) or cls
+    sk = db.recall_skill(cls, task, species=species)
+    # The SQL fallback has only class/task + species-token ranking, not a
+    # morphology distance.  Without the vector screen, only reuse an exact
+    # species match; a different body can enter through the scored vector path.
+    if sk and (sk.get("species") or cls) == species:
         params = _gait_params_for_skill(db, sk.get("skill_id", ""))
         if params:
             return params
+    return None
+
+
+def _recall_gait_source(db, gene, *, task: str = LOCOMOTION) -> tuple[dict, str] | None:
+    """Recall gait params with the exact skill identifier that supplied them.
+
+    ``recall_gait`` predates the provenance ledger and intentionally exposes only controller parameters to its
+    deploy callers.  The learning path needs the concrete parent skill as well, otherwise it cannot make an
+    auditable warm-start edge.
+    """
+    try:
+        from virturoid.services.robotics_vector_memory import RoboticsVectorMemory
+        for hit in RoboticsVectorMemory(db).nearest_skills(
+            gene, task, k=6, min_sim=_MIN_GAIT_TRANSFER_SIMILARITY,
+        ):
+            skill_id = str(hit.get("obj_id", ""))
+            params = _gait_params_for_skill(db, skill_id)
+            if params:
+                return params, skill_id
+    except Exception:  # noqa: BLE001 - exact lookup remains a valid fallback
+        pass
+    cls = _class_of(gene)
+    species = getattr(gene, "species", None) or cls
+    skill = db.recall_skill(cls, task, species=species)
+    if skill and (skill.get("species") or cls) == species:
+        skill_id = str(skill.get("skill_id", ""))
+        params = _gait_params_for_skill(db, skill_id)
+        if params:
+            return params, skill_id
     return None
 
 
@@ -130,7 +188,8 @@ def learn_gait_flywheel(gene, db, *, generations: int = 10, pop: int = 20, steps
     """
     from virturoid.services.gait_search import evaluate_gait, search_gait
 
-    prior = recall_gait(db, gene)
+    recalled = _recall_gait_source(db, gene)
+    prior, prior_skill_id = recalled if recalled is not None else (None, None)
     res = search_gait(gene, generations=generations, pop=pop, steps=steps, seed=seed,
                       workers=workers, warm_start=prior)
     # DEPLOY-SELECT at the deploy horizon: learned winner vs the shipped default. Bank ONLY a CREDIBLE walk that
@@ -151,16 +210,23 @@ def learn_gait_flywheel(gene, db, *, generations: int = 10, pop: int = 20, steps
         skill_id = bank_gait(db, gene, _DeployResult(res.best_params, learned))   # bank the DEPLOY metrics
 
     compounding_delta = None
+    prior_deploy_forward = None
     if prior is not None and res.prior_transfer_forward is not None:
-        compounding_delta = round(abs(res.best_forward) - abs(res.prior_transfer_forward), 4)
+        # Record a like-for-like deploy metric. The search-horizon warm-start score is useful diagnostics, but it
+        # cannot be subtracted from a deploy-horizon controller result and called a compounding improvement.
+        prior_deploy = evaluate_gait(gene, prior, steps=deploy_steps)
+        prior_deploy_forward = float(prior_deploy["forward"])
+        compounding_delta = round(float(learned["forward"]) - prior_deploy_forward, 4)
         if skill_id is not None:
             try:
                 if vm is None:
                     from virturoid.services.robotics_vector_memory import RoboticsVectorMemory
                     vm = RoboticsVectorMemory(db)
-                vm.record_provenance("skill", skill_id, parent_type="skill", parent_id="gait_prior",
+                vm.record_provenance("skill", skill_id, parent_type="skill", parent_id=prior_skill_id,
                                      kind="gait_warm_start", delta=compounding_delta,
-                                     meta={"prior_transfer_forward": res.prior_transfer_forward,
+                                     meta={"horizon_steps": deploy_steps,
+                                           "prior_search_transfer_forward": res.prior_transfer_forward,
+                                           "prior_deploy_forward": prior_deploy_forward,
                                            "deploy_forward": learned["forward"]})
             except Exception:  # noqa: BLE001 - provenance is best-effort; never fail the learn
                 pass
@@ -174,5 +240,7 @@ def learn_gait_flywheel(gene, db, *, generations: int = 10, pop: int = 20, steps
         "reused_prior": prior is not None,
         "prior_transfer_forward": (round(res.prior_transfer_forward, 4)
                                    if res.prior_transfer_forward is not None else None),
+        "prior_deploy_forward_m": (round(prior_deploy_forward, 4)
+                                    if prior_deploy_forward is not None else None),
         "banked_skill": skill_id, "compounding_delta": compounding_delta, "params": res.best_params,
     }

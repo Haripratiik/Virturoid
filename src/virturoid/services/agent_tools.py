@@ -274,6 +274,16 @@ try:
     TOOLS.update(INPUT_TRAINING_TOOLS)                       # input-ingestion + training-improvement plan tools
 except Exception:  # noqa: BLE001
     pass
+try:
+    from virturoid.services.episode_moments import EPISODE_TOOLS
+    TOOLS.update(EPISODE_TOOLS)                              # Thread C: semantic moment search over episodes
+except Exception:  # noqa: BLE001
+    pass
+try:
+    from virturoid.services.shape_flywheel import SHAPE_TOOLS
+    TOOLS.update(SHAPE_TOOLS)                                # Thesis A: shape-word corpus as runtime grounding
+except Exception:  # noqa: BLE001
+    pass
 
 
 # The CONSOLIDATED MCP surface (agent_first_plan.md G-G). Research: Cursor caps ~40 active tools ACROSS all
