@@ -255,10 +255,45 @@ def _bank_to_flywheel(gene, *, prompt: str, task: str, success_rate: float, sour
         pass
 
 
+def _robotics_grounding(gene) -> dict:
+    """The robotics AI GROUNDING the LLM's design (the whole point of having one): the nearest PHYSICS-VERIFIED
+    prior bodies by the morphology embedding + whether a banked gait is likely to warm-start this body. So the
+    model reasons about its just-authored design against WHAT HAS ACTUALLY WORKED — not blind, and not a
+    deterministic template. High similarity to a verified walker => a gait likely transfers (warm-start); low
+    similarity => expect to train a fresh controller. Best-effort; a missing corpus never blocks the design."""
+    try:
+        from virturoid.services.agent_tools import safe_build_path
+        from virturoid.services.gait_flywheel import recall_gait
+        from virturoid.services.memory_db import MemoryDB
+        from virturoid.services.robotics_vector_memory import BODY, RoboticsVectorMemory
+        mem = safe_build_path(None, "memory") / "virturoid_memory.db"
+        if not mem.exists():
+            return {}
+        with MemoryDB(mem) as db:
+            vm = RoboticsVectorMemory(db)
+            if vm.count(BODY) == 0:
+                vm.index_species_bodies()
+            near = vm.nearest_bodies(gene, k=3, min_sim=0.0)
+            gait = recall_gait(db, gene)
+        top = near[0]["similarity"] if near else 0.0
+        return {
+            "nearest_verified_bodies": [{"body": h.get("obj_id"),
+                                         "similarity": round(float(h.get("similarity", 0)), 3),
+                                         "class": (h.get("meta") or {}).get("robot_class")} for h in near],
+            "warm_start_gait_available": bool(gait),
+            "transfer_outlook": ("a verified precedent is close — a banked gait is likely to warm-start this body"
+                                 if top >= 0.85 and gait else
+                                 "no close verified precedent — expect to TRAIN a fresh controller (train_held)"),
+            "note": "grounded by the robotics embedding on PHYSICS-VERIFIED prior bodies — the moat grounding "
+                    "your design, not a template."}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
 def submit_design(args: dict) -> dict:
     """The agent AUTHORS a robot: compile its anatomy graph, run the validity gates, and HOLD it under a
     robot_id for the rest of the loop (simulate/edit/train/export). No prompt, no internal generator — the
-    external agent is the designer. Returns the id + summary + render, or a teaching error."""
+    external agent is the designer. Returns the id + summary + render + robotics_grounding, or a teaching error."""
     from virturoid.services import session_state as S
     from virturoid.services.anatomy_compiler import build_from_anatomy
     graph = args.get("graph")
@@ -301,6 +336,9 @@ def submit_design(args: dict) -> dict:
     except Exception:  # noqa: BLE001 - corpus growth is an accelerant, never blocks a valid design
         banked = []
     out = {"ok": True, **_summary(gene, rid), "name": graph.get("name")}
+    rg = _robotics_grounding(gene)                             # the robotics AI grounds the LLM's design in verified precedent
+    if rg:
+        out["robotics_grounding"] = rg
     if banked:
         out["corpus_shape_words"] = len(banked)               # retrieval grounding now has this design's words
     warns = _proportion_warnings(graph)                        # T8: non-blocking proportion advisories

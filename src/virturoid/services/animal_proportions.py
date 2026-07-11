@@ -1,11 +1,16 @@
-"""Animal PROPORTION priors (P4) — the shared table that makes distinct animals STRUCTURALLY distinct.
+"""Animal PROPORTION priors (P4) — the OFFLINE-ONLY heuristic for the no-LLM fallback path.
 
-Both legged builders (the anatomy path `_generic_legged_graph` and the `morphology_composer` composed fallback)
-scaled bodies uniformly by size but kept FIXED ratios, so "horse", "gecko", "turtle" composed to identical
-proportions (measured: identical 0.677 gait, embedding cosine 1.0). These per-animal multipliers on leg length /
-stance width / torso length / mass make them distinct — and because the fine-variants experiment showed leg
-length drives the optimal gait (freq 0.8-3.1), the diversity is FUNCTIONAL, not cosmetic. Generic/dog/wolf stay
-1.0 -> byte-identical to the gait-pinned Go1-class baseline. Word-boundary match so 'ox' never hits 'box'.
+IMPORTANT (the honest layering): in strict PRODUCTION the LLM authors proportions — a giraffe's long legs, a
+gecko's splayed short ones come from the MODEL (which knows biology, open-world), grounded by physics + the
+robotics embedding. This deterministic table is NOT that; it is a finite class-template and is reached ONLY on
+the no-LLM heuristic fallback path (VIRTUROID_ALLOW_HEURISTIC_FALLBACK / offline tests), so offline/demo bodies
+aren't all identical. It is subordinate to the LLM, never the diversity solution — the LLM + grounding is.
+
+Both legged fallback builders (the anatomy `_generic_legged_graph` and the `morphology_composer` composed path)
+scaled bodies uniformly by size but kept FIXED ratios, so "horse"/"gecko"/"turtle" composed to identical
+proportions offline (embedding cosine 1.0). These per-animal multipliers on leg length / stance width / torso /
+mass make the OFFLINE bodies distinct. Generic/dog/wolf stay 1.0 -> byte-identical to the gait-pinned baseline.
+Word-boundary match so 'ox' never hits 'box'.
 """
 from __future__ import annotations
 
