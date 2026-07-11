@@ -137,8 +137,15 @@ def embed_body(gene: RobotGene, latent: list[float] | None = None) -> list[float
 def embed_skill(task_text: str, gene: RobotGene | None = None, *, success_rate: float | None = None,
                 latent: list[float] | None = None) -> list[float]:
     """Skill embedding (``z_skill`` = z_body ⊕ z_task ⊕ a small policy fingerprint), fixed-length so
-    every banked skill lives in one comparable sub-space (body block is zeros when the gene is absent)."""
-    body = embed_body(gene, latent) if gene is not None else [0.0] * BODY_DIM
+    every banked skill lives in one comparable sub-space (body block is zeros when the gene is absent).
+
+    The body block here is the DIMENSION-STABLE baseline morphology vector, NOT the metric-aware ``embed_body``:
+    if a learned metric were later adopted it would change ``embed_body``'s dimension, silently desyncing the
+    skill index (a gene-present skill vs a gene-absent zero-block of a different length). Keeping the skill space
+    on the fixed 29-D baseline makes it stable across metric adoptions; the metric improves the BODY sub-space
+    (re-indexed on adoption). Byte-identical today (the metric is gated off, so ``embed_body`` == this)."""
+    body = (_l2(list(latent)) if latent is not None else _l2(embed_gene(gene))) if gene is not None \
+        else [0.0] * BODY_DIM
     task = embed_text(task_text)
     fingerprint = [float(success_rate or 0.0)]
     return _l2(body + task + fingerprint)
@@ -315,7 +322,13 @@ class RoboticsVectorMemory:
         for r in rows:
             if exclude_id is not None and r["obj_id"] == str(exclude_id):
                 continue
-            sim = sum(a * b for a, b in zip(q, json.loads(r["vec"])))  # both normalized -> dot
+            sv = json.loads(r["vec"])
+            # DIM GUARD (Wave 4): never SILENTLY zip-truncate a mismatched vector into a bogus similarity. A
+            # stored vector of a different length is from another embedding version (e.g. the index predates a
+            # metric adoption that changed the dim) — skip it so it triggers a re-index, not a wrong neighbour.
+            if len(sv) != len(q):
+                continue
+            sim = sum(a * b for a, b in zip(q, sv))                    # both normalized -> dot
             if min_sim is not None and sim < min_sim:
                 continue
             scored.append({"obj_id": r["obj_id"], "similarity": round(sim, 6),

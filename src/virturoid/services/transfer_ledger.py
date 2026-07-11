@@ -150,7 +150,20 @@ def ratchet_metric(db, *, min_trials: int = 8) -> dict:
     if corpus is None:
         return {"ok": True, "action": "skipped", "reason": f"ledger too thin (<{min_trials} trials)"}
     bundle = fit_body_metric(corpus, feature_space="rich", whiten=False, method="relevance", save=True)
+    reindexed = False
+    if bundle["proven"]:
+        # adoption CHANGES embed_body's dimension -> the existing body index is now stale (the nearest() dim-guard
+        # would skip every vector). Re-index the BODY sub-space so retrieval works at the new dim immediately.
+        try:
+            import virturoid.services.body_metric as _bm
+            from virturoid.services.robotics_vector_memory import RoboticsVectorMemory
+            _bm._cache = None                                    # force embed_metric to pick up the just-saved bundle
+            _bm._cache_mtime = None
+            RoboticsVectorMemory(db).index_species_bodies()
+            reindexed = True
+        except Exception:  # noqa: BLE001 - re-index is best-effort; the dim-guard keeps retrieval safe meanwhile
+            pass
     return {"ok": True, "action": "adopted" if bundle["proven"] else "kept_baseline",
             "held_out_triplet_acc": bundle["held_out_triplet_acc"],
             "baseline_held_out_triplet_acc": bundle["baseline_held_out_triplet_acc"],
-            "n_bodies": bundle["n_bodies"], "n_trials": corpus["n_trials"]}
+            "n_bodies": bundle["n_bodies"], "n_trials": corpus["n_trials"], "reindexed_bodies": reindexed}
