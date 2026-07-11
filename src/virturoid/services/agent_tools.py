@@ -41,9 +41,17 @@ def _search_memory(args: dict) -> dict:
 
 
 def _design_brain(args: dict) -> dict:
-    """The moat measured: MAP-Elites coverage/QD + provenance compounding for a memory dir."""
+    """The moat measured: MAP-Elites coverage/QD + provenance compounding + the P1-P3 brain layers (transfer
+    ledger, gated-metric state, episodes, per-kind compounding deltas) — every number traceable to a table."""
     from virturoid.services.design_brain import design_brain_summary
-    return design_brain_summary(args.get("memory_dir") or "build/memory")
+    from virturoid.services.flywheel_status import moat_status
+    memdir = args.get("memory_dir") or "build/memory"
+    out = design_brain_summary(memdir)
+    try:
+        out["brain"] = moat_status(memdir).get("brain")
+    except Exception:  # noqa: BLE001 - brain layers are additive; never break the panel
+        out["brain"] = None
+    return out
 
 
 def _describe_robot(args: dict) -> dict:

@@ -33,6 +33,45 @@ def _read_manifest(memory_dir: Path) -> list[dict]:
     return rows
 
 
+def brain_metrics(db) -> dict:
+    """The robotics-AI layers this session added, read straight from their tables/ledgers so the visible status
+    is TRACEABLE, not asserted: the physics-verified transfer ledger, the episode/tip corpora, the gated
+    transfer-metric state, and the per-KIND provenance compounding deltas (gait warm-start vs the honest
+    design-search-gain vs measured warm-vs-cold)."""
+    conn = db.conn if hasattr(db, "conn") else db
+    out = {"transfer_ledger": {"trials": 0, "credible": 0, "bodies": 0}, "episodes": 0, "tips": 0,
+           "provenance_by_kind": {}, "embedding": {}}
+
+    def _q(sql, default=None):
+        try:
+            return conn.execute(sql).fetchone()
+        except Exception:  # noqa: BLE001 - a table may not exist yet
+            return default
+
+    row = _q("SELECT COUNT(*) n, COALESCE(SUM(credible),0) c, COUNT(DISTINCT dst_gene_id) b FROM transfer_trials")
+    if row is not None:
+        out["transfer_ledger"] = {"trials": int(row["n"]), "credible": int(row["c"]), "bodies": int(row["b"])}
+    for otype, key in (("episode", "episodes"), ("tip", "tips")):
+        r = _q(f"SELECT COUNT(*) n FROM vectors WHERE obj_type='{otype}'")
+        out[key] = int(r["n"]) if r is not None else 0
+    try:
+        for r in conn.execute("SELECT kind, COUNT(*) n, AVG(delta) d FROM provenance GROUP BY kind").fetchall():
+            out["provenance_by_kind"][r["kind"]] = {"edges": int(r["n"]),
+                                                    "avg_delta": round(float(r["d"]), 4) if r["d"] is not None else None}
+    except Exception:  # noqa: BLE001
+        pass
+    try:                                                          # the gated embedding metric's state (honest)
+        from virturoid.services.body_metric import _load
+        bundle = _load()
+        out["embedding"] = {"metric_proven": bool(bundle and bundle.get("proven")),
+                            "held_out_triplet_acc": (bundle or {}).get("held_out_triplet_acc"),
+                            "baseline_held_out_triplet_acc": (bundle or {}).get("baseline_held_out_triplet_acc"),
+                            "active": "learned_metric" if (bundle and bundle.get("proven")) else "baseline_29d"}
+    except Exception:  # noqa: BLE001
+        out["embedding"] = {"active": "baseline_29d", "metric_proven": False}
+    return out
+
+
 def moat_status(memory_dir=DEFAULT_MEMORY_DIR) -> dict:
     """Aggregate the persistent flywheel memory into a single compounding-status dict (+ a human summary).
 
@@ -43,6 +82,8 @@ def moat_status(memory_dir=DEFAULT_MEMORY_DIR) -> dict:
     counts = {"runs": 0, "designs": 0, "skills": 0, "lessons": 0, "species_tree": 0}
     species_nodes = 0
     reuse_edges = seeded_builds = 0
+    brain = {"transfer_ledger": {"trials": 0, "credible": 0, "bodies": 0}, "episodes": 0, "tips": 0,
+             "provenance_by_kind": {}, "embedding": {"active": "baseline_29d", "metric_proven": False}}
     try:
         from virturoid.services.memory_db import MemoryDB
 
@@ -57,6 +98,10 @@ def moat_status(memory_dir=DEFAULT_MEMORY_DIR) -> dict:
                     _cs = RoboticsVectorMemory(db).compounding_summary()
                     reuse_edges = int(_cs.get("edges", 0) or 0)
                     seeded_builds = int(_cs.get("seeded_builds", 0) or 0)
+                except Exception:  # noqa: BLE001
+                    pass
+                try:
+                    brain = brain_metrics(db)                  # the P1-P3 brain layers (transfer ledger, metric, …)
                 except Exception:  # noqa: BLE001
                     pass
     except Exception:  # noqa: BLE001 - status must never crash
@@ -104,6 +149,11 @@ def moat_status(memory_dir=DEFAULT_MEMORY_DIR) -> dict:
         + ("COMPOUNDING (prior learning is being reused)." if reused
            else "Accumulating but NOT yet compounding (0 reuse recorded)." if accumulating
            else "Empty flywheel.")
+        + f" Brain: {brain['transfer_ledger']['trials']} verified transfer trials "
+          f"({brain['transfer_ledger']['credible']} credible), {brain['episodes']} episodes, "
+          f"embedding={brain['embedding'].get('active', 'baseline_29d')}"
+        + (" (learned metric ADOPTED — beat baseline held-out)."
+           if brain["embedding"].get("metric_proven") else " (gated: baseline until a metric beats it held-out).")
     )
     return {
         "counts": counts,
@@ -112,5 +162,6 @@ def moat_status(memory_dir=DEFAULT_MEMORY_DIR) -> dict:
         "species_tree_nodes": species_nodes,
         "compounding": bool(reused),
         "accumulating": bool(accumulating),
+        "brain": brain,
         "summary": summary,
     }

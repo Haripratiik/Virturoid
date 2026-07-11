@@ -11,7 +11,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
-from virturoid.services.autonomous_builder import build_robot_package_from_prompt
 
 
 DEFAULT_PROMPT = "Build a tabletop robot arm that sorts red and blue blocks."
@@ -468,19 +467,34 @@ def run_build_from_payload(payload: dict, build_root: Path) -> dict:
     prompt = str(payload.get("prompt") or DEFAULT_PROMPT).strip() or DEFAULT_PROMPT
     output_name = _safe_output_name(str(payload.get("output_name") or _slugify(prompt)))
     output_dir = Path(build_root) / output_name
-    result = build_robot_package_from_prompt(
+    # The Studio build action is AI-first: autonomous_build calls the LLM planner
+    # and grounded morphology path, then physics validates the result.  It must
+    # never silently fall back to the older template package builder.
+    from virturoid.services.autonomous_build import autonomous_build
+
+    report = autonomous_build(
         prompt=prompt,
         output_dir=output_dir,
-        payload_kg=_optional_float(payload.get("payload_kg")),
-        reach_m=_optional_float(payload.get("reach_m")),
-        sensor=payload.get("sensor") or None,
         train=bool(payload.get("train")),
+        memory_dir=Path(build_root) / "memory",
     )
+    result = report.to_dict()
+    # Preserve the legacy console's small result contract while it shares the
+    # same endpoint with Studio.
+    result.update({
+        "selected_robot_class": report.robot_class,
+        "selected_species": report.species,
+        "package_valid": report.feasible,
+        "readiness": {},
+        "output_dir": str(output_dir),
+        "output_name": output_name,
+    })
+    has_package = bool(report.feasible and output_dir.exists())
     return {
-        "result": result.to_dict(),
-        "package_url_prefix": f"/package/{output_name}",
-        "workbench_url": f"/package/{output_name}/reports/workbench.html",
-        "contract_url": f"/package/{output_name}/reports/robot_package_contract.json",
+        "result": result,
+        "package_url_prefix": f"/package/{output_name}" if has_package else None,
+        "workbench_url": f"/package/{output_name}/reports/workbench.html" if has_package else None,
+        "contract_url": f"/package/{output_name}/reports/robot_package_contract.json" if has_package else None,
     }
 
 
@@ -653,9 +667,8 @@ def run_assistant_turn(payload: dict, build_root: Path) -> dict:
 
     # No model and no build intent: a helpful, honest local reply.
     hint = (
-        "A local model isn't running, so I'm in deterministic mode. I can still build robots: "
-        "tell me what to build (e.g. \"build a tabletop arm that sorts blocks\"). "
-        "To enable full conversation, start Ollama and pull a model "
+        "A local model isn't running. AI-first robot design is paused rather than substituting a template body. "
+        "To enable planning and build generation, start Ollama and pull a model "
         f"(current target: {selected_model})."
     )
     return {"role": "assistant", "content": hint, "action": "chat", "model_used": False}
@@ -663,7 +676,11 @@ def run_assistant_turn(payload: dict, build_root: Path) -> dict:
 
 def _summarize_build(build: dict, used_model: bool) -> str:
     result = build.get("result", {})
-    name = str(build.get("package_url_prefix", "")).split("/")[-1]
+    package_prefix = build.get("package_url_prefix")
+    if not package_prefix:
+        detail = "; ".join(result.get("notes") or []) or "The LLM plan did not clear grounding."
+        return f"No package was generated. {detail}"
+    name = str(package_prefix).split("/")[-1]
     valid = "valid" if result.get("package_valid") else "not yet valid"
     readiness = result.get("readiness") or {}
     score = readiness.get("score")
@@ -814,13 +831,23 @@ class _Handler(BaseHTTPRequestHandler):
         builds have populated the archive/provenance (autonomous_build's keystone writes them)."""
         try:
             from virturoid.services.design_brain import design_brain_summary
+            from virturoid.services.flywheel_status import moat_status
         except Exception as exc:  # noqa: BLE001
             return {"archive_coverage": 0, "provenance_edges": 0, "headline": f"unavailable: {exc}"}
-        for cand in (self.root / "memory", self.root, self.root.parent / "memory"):
+
+        def _with_brain(cand):
             s = design_brain_summary(cand)
-            if s.get("archive_coverage") or s.get("provenance_edges"):
+            try:                                             # the P1-P3 brain layers (transfer ledger, gated metric,
+                s["brain"] = moat_status(cand).get("brain")  # episodes, per-kind compounding) — traceable live numbers
+            except Exception:  # noqa: BLE001
+                s["brain"] = None
+            return s
+
+        for cand in (self.root / "memory", self.root, self.root.parent / "memory"):
+            s = _with_brain(cand)
+            if s.get("archive_coverage") or s.get("provenance_edges") or (s.get("brain") or {}).get("episodes"):
                 return s
-        return design_brain_summary(self.root / "memory")   # zeros + headline
+        return _with_brain(self.root / "memory")   # zeros + headline
 
     def _send_session_detail(self, robot_id: str) -> None:
         """GET /api/sessions/<id> -> the held robot's summary + a fresh render URL, so the webapp can
