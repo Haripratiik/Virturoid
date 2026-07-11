@@ -115,28 +115,81 @@ def _gait_params_for_skill(db, skill_id: str) -> dict | None:
     return bc.get("gait_params") if isinstance(bc, dict) and bc.get("controller") == "crawl_gait" else None
 
 
-def recall_gait(db, gene, *, task: str = LOCOMOTION) -> dict | None:
-    """Recall the best banked gait PARAMS for the closest prior body. Embedding (morphology) retrieval FIRST — the
-    robotics tokenization — so a new body finds the gait of the most structurally-similar banked body even across
-    class labels; falls back to the exact (class, task, species) skill match. None if nothing is banked."""
-    # 1) TOKENIZED retrieval: nearest banked gait skill by body-morphology embedding (z_body ⊕ z_task).
+def _leg_count(gene) -> int:
+    """Count WEIGHT-BEARING legs (not all limb chains): a root-child chain with >=2 revolute joints terminating
+    in a welded foot pad. This distinguishes legs from tails/necks/antennae — measured necessary: a 'dog' has 6
+    chains (4 legs + tail + neck) but 4 LEGS, so counting all chains falsely rejected a quad↔quad recall while
+    the leg count (4 vs a hexapod's 6) is exactly the axis the 29-D vector blurs (§3.I2)."""
+    root = gene.root() if hasattr(gene, "root") else None
+    if root is None:
+        return 0
+    legs = 0
+    for child in gene.children_of(root.name):
+        chain = [child]
+        node = child
+        while gene.children_of(node.name):
+            node = gene.children_of(node.name)[0]
+            chain.append(node)
+        n_rev = sum(1 for s in chain if s.joint_type == "revolute")
+        if n_rev >= 2 and chain[-1].joint_type in (None, "fixed"):
+            legs += 1
+    return legs
+
+
+def _structural_recall(db, gene, task: str) -> tuple[dict, str, str] | None:
+    """Embedding retrieval + a HARD STRUCTURAL PRE-FILTER (flywheel_breakthrough_plan §3.I2, measured): at cosine
+    0.98 the 29-D vector blurs leg-count and stance, so a hexapod recalled a quadruped's gait (0.9939) over the
+    real hexapod (0.9291). Two corrections, highest priority first:
+      1. EXACT structural cache — a banked gait for the SAME structural signature (body_key) is a deterministic
+         repeat-build reuse (the floor baseline the plan must beat); return it verbatim.
+      2. LEG-COUNT equality — a candidate whose banked body has a different limb-chain count than the query is
+         rejected (a 4-leg gait must never seed a 6-leg body), before any cosine ranking.
+    Returns (params, skill_id, match_kind ∈ {exact_cache, leg_count, fallback}) or None. Candidates carry their
+    body INLINE in the skill vector meta; a candidate with no inline gene is only a last-resort fallback.
+    """
+    from virturoid.schemas.gene import RobotGene
+    from virturoid.services.heldout_set import body_key
+    q_legs, q_key = _leg_count(gene), body_key(gene)
     try:
         from virturoid.services.robotics_vector_memory import RoboticsVectorMemory
-        for hit in RoboticsVectorMemory(db).nearest_skills(
-            gene, task, k=6, min_sim=_MIN_GAIT_TRANSFER_SIMILARITY,
-        ):
-            params = _gait_params_for_skill(db, hit.get("obj_id", ""))
-            if params:
-                return params
-    except Exception:  # noqa: BLE001 - fall back to the exact string match
-        pass
-    # 2) exact (class, task, species) — the string key (prefers nearest species).
+        hits = RoboticsVectorMemory(db).nearest_skills(gene, task, k=8, min_sim=_MIN_GAIT_TRANSFER_SIMILARITY)
+    except Exception:  # noqa: BLE001
+        hits = []
+    leg_match: tuple | None = None
+    no_gene: tuple | None = None
+    for hit in hits:
+        sid = str(hit.get("obj_id", ""))
+        params = _gait_params_for_skill(db, sid)
+        if not params:
+            continue
+        meta = hit.get("meta") or {}
+        bg = None
+        if isinstance(meta.get("gene"), dict):
+            try:
+                bg = RobotGene.from_dict(meta["gene"])
+            except Exception:  # noqa: BLE001
+                bg = None
+        if bg is not None and body_key(bg) == q_key:
+            return params, sid, "exact_cache"                # deterministic same-body reuse wins outright
+        if bg is None:
+            no_gene = no_gene or (params, sid, "fallback")   # can't verify structure -> last resort
+            continue
+        if _leg_count(bg) == q_legs and leg_match is None:
+            leg_match = (params, sid, "leg_count")           # first (highest-sim) leg-count-consistent match
+    return leg_match or no_gene
+
+
+def recall_gait(db, gene, *, task: str = LOCOMOTION) -> dict | None:
+    """Recall the best banked gait PARAMS for the closest prior body — embedding retrieval with a hard structural
+    pre-filter (exact-structure cache, then leg-count equality — §3.I2), falling back to the exact (class, task,
+    species) skill match. None if nothing structurally-appropriate is banked."""
+    hit = _structural_recall(db, gene, task)
+    if hit is not None:
+        return hit[0]
+    # exact (class, task, species) string key (prefers nearest species) — unchanged fallback.
     cls = _class_of(gene)
     species = getattr(gene, "species", None) or cls
     sk = db.recall_skill(cls, task, species=species)
-    # The SQL fallback has only class/task + species-token ranking, not a
-    # morphology distance.  Without the vector screen, only reuse an exact
-    # species match; a different body can enter through the scored vector path.
     if sk and (sk.get("species") or cls) == species:
         params = _gait_params_for_skill(db, sk.get("skill_id", ""))
         if params:
@@ -151,17 +204,9 @@ def _recall_gait_source(db, gene, *, task: str = LOCOMOTION) -> tuple[dict, str]
     deploy callers.  The learning path needs the concrete parent skill as well, otherwise it cannot make an
     auditable warm-start edge.
     """
-    try:
-        from virturoid.services.robotics_vector_memory import RoboticsVectorMemory
-        for hit in RoboticsVectorMemory(db).nearest_skills(
-            gene, task, k=6, min_sim=_MIN_GAIT_TRANSFER_SIMILARITY,
-        ):
-            skill_id = str(hit.get("obj_id", ""))
-            params = _gait_params_for_skill(db, skill_id)
-            if params:
-                return params, skill_id
-    except Exception:  # noqa: BLE001 - exact lookup remains a valid fallback
-        pass
+    hit = _structural_recall(db, gene, task)                 # same hard structural pre-filter as recall_gait
+    if hit is not None:
+        return hit[0], hit[1]
     cls = _class_of(gene)
     species = getattr(gene, "species", None) or cls
     skill = db.recall_skill(cls, task, species=species)

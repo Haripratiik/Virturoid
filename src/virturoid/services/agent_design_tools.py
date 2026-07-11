@@ -603,7 +603,27 @@ def run_train_gene_job(args: dict, progress=None) -> dict:
     _fwd = float(b.result.get("forward", 0)) if b else 0.0
     _bank_to_flywheel(gene, prompt=f"[agent-trained] {gene.robot_class}", task="locomotion",
                       success_rate=min(1.0, max(0.0, _fwd / 0.5)), source="agent_trained")
-    return {"mode": "gait_search", "solved": rep.solved, "n_evals": rep.n_evals,
+    # FLYWHEEL FIX (flywheel_breakthrough_plan §3.I1): train_held FOUND working gait params but never banked them
+    # as a reusable skill — so a hard-won controller was discarded every run. Bank the winner (verified-only:
+    # solved => it cleared the un-gameable forward+cadence+upright gates) so the NEXT body can recall it.
+    banked_gait_id = None
+    if b and rep.solved and abs(_fwd) >= 0.15:
+        try:
+            import types
+
+            from virturoid.services.agent_tools import safe_build_path
+            from virturoid.services.gait_flywheel import bank_gait
+            from virturoid.services.memory_db import MemoryDB
+            mem = safe_build_path(None, "memory")
+            mem.mkdir(parents=True, exist_ok=True)
+            _r = types.SimpleNamespace(best_survived=True, best_credible=True, best_forward=_fwd,
+                                       best_height_ratio=float(b.result.get("height_ratio", 0.7) or 0.7),
+                                       best_params=b.spec.get("params"))
+            with MemoryDB(mem / "virturoid_memory.db") as _db:
+                banked_gait_id = bank_gait(_db, gene, _r, task="locomotion")
+        except Exception:  # noqa: BLE001 - banking is an accelerant; a train result is still returned
+            banked_gait_id = None
+    return {"mode": "gait_search", "solved": rep.solved, "n_evals": rep.n_evals, "banked_gait": banked_gait_id,
             "best": ({"params": b.spec.get("params"), "forward_m": round(float(b.result.get("forward", 0)), 3),
                       "cadence": round(float(b.result.get("cadence", 0)), 1),
                       "failure_mode": b.artifact.get("failure_mode")} if b else None)}
