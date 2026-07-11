@@ -352,7 +352,7 @@ def evaluate_held(args: dict) -> dict:
             "value": res.get("value"), "scored_gait": (res.get("detail") or {}).get("scored_gait")}
 
 
-_EXPORT_FORMATS = ("mjcf", "cad", "urdf", "ros2", "bom", "spec", "usd", "isaac_lab")
+_EXPORT_FORMATS = ("mjcf", "cad", "urdf", "ros2", "bom", "spec", "usd", "isaac_lab", "certificate")
 
 
 def export_held(args: dict) -> dict:
@@ -433,10 +433,24 @@ def export_held(args: dict) -> dict:
             artifacts["isaac_lab"] = im["files"].get("readme", str(out_dir / "isaac_lab"))
         except Exception as exc:  # noqa: BLE001
             artifacts["isaac_lab_error"] = f"{type(exc).__name__}: {exc}"
+    if "certificate" in fmts:
+        # the moat's honesty, TRAVELLING with the export: a fresh un-gameable physics verdict signed by the same
+        # rollout that deploys (deploy==measure) + the flywheel provenance. "Arrives in Isaac already verified."
+        try:
+            from virturoid.services.ai_native_tools import verify_robot
+            from virturoid.services.verdict_certificate import build_certificate
+            v = verify_robot({"robot_id": args["robot_id"], "mode": "quick"})
+            cert = build_certificate(gene, v, task=task, robot_id=args["robot_id"])
+            (out_dir / "verification_certificate.json").write_text(
+                json.dumps(cert, indent=2, default=str), encoding="utf-8")
+            artifacts["certificate"] = str(out_dir / "verification_certificate.json")
+        except Exception as exc:  # noqa: BLE001 - a certificate failure must never sink the buildable export
+            artifacts["certificate_error"] = f"{type(exc).__name__}: {exc}"
     real = {k: v for k, v in artifacts.items() if not k.endswith("_error")}
     return {"ok": bool(real), "artifacts": artifacts, "out_dir": str(out_dir),
             "note": "MJCF runs in sim; URDF/ROS2 deploy; BOM is the real sized parts list; spec is the datasheet; "
-                    "usd/isaac_lab hand off to NVIDIA Isaac Sim/Lab"}
+                    "usd/isaac_lab hand off to NVIDIA Isaac Sim/Lab; verification_certificate.json is the "
+                    "un-gameable physics verdict that travels with the design"}
 
 
 def export_isaac(args: dict) -> dict:
