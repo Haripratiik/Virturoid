@@ -489,13 +489,19 @@ def export_held(args: dict) -> dict:
         except Exception as exc:  # noqa: BLE001
             artifacts["isaac_lab_error"] = f"{type(exc).__name__}: {exc}"
     if "certificate" in fmts:
-        # the moat's honesty, TRAVELLING with the export: a fresh un-gameable physics verdict signed by the same
-        # rollout that deploys (deploy==measure) + the flywheel provenance. "Arrives in Isaac already verified."
+        # the moat's honesty, TRAVELLING with the export: certificate v2 (WS-E) — the un-gameable verdict PLUS
+        # tiered sim-to-real evidence (model-sanity VOID gate, actuator-fidelity level, per-joint margins, and a
+        # frozen-policy DR sweep with a Clopper-Pearson bound when ``dr_sweep`` is requested). "Arrives in Isaac
+        # already verified" now MEANS something to a hardware team. Margins are cheap (1 rollout); the DR sweep is
+        # opt-in (many rollouts) so the standard export stays fast.
         try:
             from virturoid.services.ai_native_tools import verify_robot
-            from virturoid.services.verdict_certificate import build_certificate
+            from virturoid.services.certificate_v2 import build_certificate_v2
             v = verify_robot({"robot_id": args["robot_id"], "mode": "quick"})
-            cert = build_certificate(gene, v, task=task, robot_id=args["robot_id"])
+            cert = build_certificate_v2(gene, v, task=task, robot_id=args["robot_id"],
+                                        run_margins=bool(args.get("certificate_margins", True)),
+                                        run_dr=bool(args.get("dr_sweep", False)),
+                                        dr_draws=int(args.get("dr_draws", 12)))
             (out_dir / "verification_certificate.json").write_text(
                 json.dumps(cert, indent=2, default=str), encoding="utf-8")
             artifacts["certificate"] = str(out_dir / "verification_certificate.json")
