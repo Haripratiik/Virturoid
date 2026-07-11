@@ -60,7 +60,7 @@ _ARTICULATED = {"leg_upper", "leg_lower", "arm_upper", "arm_lower", "tail", "win
 _DOWN_ROLES = {"leg_upper", "leg_lower", "paw", "foot"}
 
 
-def _role_geometry(role: str, size: float, girth: float, aspect: str = ""):
+def _role_geometry(role: str, size: float, girth: float, aspect: str = "", *, authored: bool = False):
     """Map a role + characteristic size/girth to (geometry_dict, length_m, radius_m). Reusable across ALL
     creatures — the LLM never sees this; it only names the role. Unknown roles fall back to a tapered limb.
     ``aspect`` (body only) overrides the default sleek-barrel proportions for non-mammal body plans."""
@@ -148,9 +148,19 @@ def _role_geometry(role: str, size: float, girth: float, aspect: str = ""):
     if role == "foot":
         # a flat foot PAD: thin vertically, wider than the leg, length along +z (re-aimed FORWARD at the
         # ankle) — the robot stands on real feet flat on the floor, not on a downward-poking stub.
-        Lf = max(0.05, 1.6 * L)
-        w = max(0.03, g * 1.9)
-        th = max(0.012, 0.5 * g)
+        # The 1.6x/1.9x widening is calibrated for AUTO-feet that inherit the slender LEG's girth (~0.02 ->
+        # a sensible 0.04 pad). An EXPLICITLY-AUTHORED foot part carries the MODEL's own dims — multiplying
+        # those double-scales (measured: an LLM foot girth 0.10 realized as a 0.19-radius drum that swallowed
+        # the leg and CROUCHed the walk). Respect authored dims (floors only) — the north star: no silent
+        # rewrite of the model's numbers; buildability floors are the only clamp.
+        if authored:
+            Lf = max(0.05, L)
+            w = max(0.02, g)
+            th = max(0.010, 0.35 * min(g, 0.06))
+        else:
+            Lf = max(0.05, 1.6 * L)
+            w = max(0.03, g * 1.9)
+            th = max(0.012, 0.5 * g)
         return ({"family": "extrude", "height": round(Lf, 4), "fillet": round(0.3 * th, 4),
                  "profile": [[-th, -0.5 * w], [th, -0.45 * w], [th, 0.45 * w], [-th, 0.5 * w]]}, Lf, w)
     if role in ("paw", "hand"):
@@ -515,7 +525,10 @@ def build_from_anatomy(graph: dict) -> RobotGene:
             seg_role = ("foot" if is_foot else role)
             is_wheel = seg_role == "wheel"
             g_i = girth * (0.82 ** i)
-            geo, length_m, radius_m = _role_geometry(seg_role, seg_len * (1.0 if not last or n == 1 else 0.6), g_i)
+            # authored=True when the role "foot" came from the PART itself (the model authored this foot's dims);
+            # an auto-foot promoted from a leg's last segment keeps the leg-girth-calibrated widening.
+            geo, length_m, radius_m = _role_geometry(seg_role, seg_len * (1.0 if not last or n == 1 else 0.6), g_i,
+                                                     authored=(seg_role == role))
             geo = _apply_detail(geo, detail, length_m, g_i, part_chamfer)
             # T4 shape-programs: a part may AUTHOR its own visual geometry (extrude/revolve/tapered/loft +
             # fillet/chamfer/cutouts) — the mesh layer realizes it (cad_geometry.realize_shape, safe capsule

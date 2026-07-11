@@ -10,6 +10,51 @@ stable stance). Pure measurement, no rendering; pair it with a render for the vi
 
 from __future__ import annotations
 
+_TIP_RATIO_MAX = 3.0        # a tip may be up to ~3x its limb's median girth (real feet/paws are 1-2x)
+_TIP_RADIUS_FLOOR = 0.05    # tiny tips never flag (a 0.03 pad on a 0.01 leg is fine at any ratio)
+_GROUND_BAND_FRAC = 0.35    # "ground extremity" = tip sits in the bottom 35% of the body height (not a head)
+
+
+def _oversized_ground_extremities(gene, m, d, z_floor: float, height: float):
+    """Yield (tip_segment, chain_median_radius, ratio) for every terminal limb-tip near the ground whose radius
+    dwarfs its own limb chain. Structural (gene topology) + positional (compiled z) — role-name-free, so it
+    generalizes to any morphology the LLM invents. Best-effort: a body-name lookup miss skips that tip."""
+    try:
+        children: dict[str, int] = {}
+        for s in gene.segments:
+            if s.parent:
+                children[s.parent] = children.get(s.parent, 0) + 1
+        for s in gene.segments:
+            if children.get(s.name):                       # not a terminal segment
+                continue
+            # walk the parent chain collecting the actuated limb radii above this tip
+            chain = []
+            node = s
+            while node is not None and node.parent is not None:
+                node = next((p for p in gene.segments if p.name == node.parent), None)
+                if node is None or node.parent is None:    # stop at the root (the torso is not limb girth)
+                    break
+                if node.joint_type in ("revolute", "prismatic"):
+                    chain.append(float(node.radius_m))
+            if len(chain) < 2:                             # not a real limb (a head on a short neck etc.)
+                continue
+            tip_r = float(s.radius_m)
+            if tip_r < _TIP_RADIUS_FLOOR:
+                continue
+            chain_sorted = sorted(chain)
+            med = chain_sorted[len(chain_sorted) // 2]
+            if med <= 1e-6 or tip_r / med <= _TIP_RATIO_MAX:
+                continue
+            try:                                           # positional guard: only GROUND extremities (not heads)
+                bid = m.body(s.name).id
+                if float(d.xpos[bid][2]) > z_floor + _GROUND_BAND_FRAC * max(height, 1e-6):
+                    continue
+            except (KeyError, ValueError):
+                continue
+            yield s, med, tip_r / med
+    except Exception:  # noqa: BLE001 - the critic is best-effort; a check must never crash the loop
+        return
+
 
 def critique_gene(gene, *, expected: str | None = None) -> dict:
     """Return ``{ok, score, height_m, issues:[{check, severity, detail, value}], measures:{...}}`` for a gene.
@@ -78,10 +123,32 @@ def critique_gene(gene, *, expected: str | None = None) -> dict:
         vols.append(max(v, 1e-9))
     vols = np.array(vols)
     body_vol = float(vols.sum()) or 1.0
-    biggest = float(vols.max()) / body_vol
-    measures["biggest_part_frac"] = round(biggest, 3)
-    if biggest > 0.55:
-        add("part_balance", "high", f"one part is {biggest:.0%} of the body volume — it dominates the silhouette", biggest)
+    # group volumes PER PART (body name), and judge the ROOT torso separately from appendages: measured on our
+    # own verified bodies, a legitimate quadruped's torso is 44-61% of total volume (lynx 61%, elephant 56%) —
+    # a 0.55 blanket cap rejected REAL torsos and exhausted the live LLM repair loop on a phantom defect. The
+    # can-tower failure this check exists for is a root at ~75%+ with vestigial stubs, or any single APPENDAGE
+    # (a drum foot, a giant head) above ~55%.
+    per_body: dict[str, float] = {}
+    for gi, v in zip(keep, vols):
+        try:
+            nm = m.body(int(m.geom_bodyid[gi])).name
+        except Exception:  # noqa: BLE001
+            nm = str(int(m.geom_bodyid[gi]))
+        per_body[nm] = per_body.get(nm, 0.0) + float(v)
+    root_seg = next((s for s in gene.segments if s.parent is None), None)
+    root_name = root_seg.name if root_seg is not None else ""
+    root_frac = per_body.get(root_name, 0.0) / body_vol
+    nonroot = {k: v for k, v in per_body.items() if k != root_name}
+    big_name, big_v = (max(nonroot.items(), key=lambda kv: kv[1]) if nonroot else ("", 0.0))
+    big_frac = big_v / body_vol
+    measures["biggest_part_frac"] = round(max(root_frac, big_frac), 3)
+    measures["root_volume_frac"] = round(root_frac, 3)
+    if root_frac > 0.75:
+        add("part_balance", "high", f"the root body is {root_frac:.0%} of the total volume — the limbs are "
+            f"vestigial stubs on a monolith; grow the appendages or shrink the torso", root_frac)
+    if big_frac > 0.55:
+        add("part_balance", "high", f"appendage '{big_name}' is {big_frac:.0%} of the body volume — one part "
+            f"dominates the silhouette; shrink it relative to the body", big_frac)
 
     # 2) bilateral symmetry in y (limbed bodies should be left/right symmetric)
     if kind in ("humanoid", "biped", "quadruped", "legged"):
@@ -117,6 +184,21 @@ def critique_gene(gene, *, expected: str | None = None) -> dict:
         # feet near the floor
         if lo[2] > 0.06:
             add("ground_contact", "med", f"lowest geom is {lo[2]:.3f} m off the floor — not standing on feet", lo[2])
+
+    # 7) EXTREMITY PROPORTION (fidelity keystone, measured live): a limb's TIP part (foot/paw/hand) must be
+    # proportionate to the limb that carries it. An LLM authored an otherwise-sensible dog whose feet were
+    # 0.19 m-radius boxes on 0.02 m-radius legs — visually four drums that swallowed the legs, and the walk
+    # CROUCHed (fitness -0.22) — and every prior gate (validity, hygiene, part-balance, stance) passed it.
+    # The check is structural + positional: a TERMINAL segment at the BOTTOM of the body (a ground extremity,
+    # not a head) whose radius is >3x the median radius of its own limb chain is flagged HIGH, with a teaching
+    # detail the LLM repair loop consumes.
+    for tip, chain_med, ratio in _oversized_ground_extremities(gene, m, d, lo[2], height):
+        add("extremity_proportion", "high",
+            f"'{tip.name}' (radius {tip.radius_m:.3f} m) is {ratio:.1f}x the girth of the limb carrying it "
+            f"(~{chain_med:.3f} m) — a foot/hand must be comparable to its limb. CONCRETE FIX: author every "
+            f"foot part with girth {max(0.015, chain_med):.3f}-{max(0.02, 2.0 * chain_med):.3f} m (about the "
+            f"leg's own girth; a real robot foot pad is ~0.02-0.05 m), or OMIT foot parts entirely — a leg "
+            f"with segments>=3 receives a proper welded foot pad automatically", round(ratio, 2))
 
     # score: 1.0 minus weighted penalties
     w = {"fatal": 1.0, "high": 0.25, "med": 0.12, "low": 0.05}

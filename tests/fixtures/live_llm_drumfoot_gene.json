@@ -1,0 +1,1924 @@
+{
+  "id": "anatomy_sturdy_four_legged_walking_robot_78a6325c",
+  "species": "quadruped.anatomy",
+  "robot_class": "quadruped",
+  "parent_species": null,
+  "base_mount": "free",
+  "end_effector_type": "none",
+  "design_source": "llm_anatomy_graph",
+  "composition_notes": [
+    "Compiled directly from the supplied anatomy graph."
+  ],
+  "metadata": {
+    "anatomy_graph": true,
+    "mount_bounds": {
+      "main_chassis": {
+        "x": 0.425,
+        "y": 0.136
+      },
+      "short_sensor_neck": {
+        "x": 0.06,
+        "y": 0.0612
+      },
+      "sensor_head": {
+        "x": 0.0782,
+        "y": 0.06882
+      },
+      "comms_antenna": {
+        "x": 0.06,
+        "y": 0.012
+      },
+      "rear_counterbalance_tail": {
+        "x": 0.1,
+        "y": 0.045
+      },
+      "front_power_leg_l_0": {
+        "x": 0.0525,
+        "y": 0.0231
+      },
+      "front_power_leg_l_1": {
+        "x": 0.0525,
+        "y": 0.01894
+      },
+      "front_power_leg_l_2": {
+        "x": 0.0525,
+        "y": 0.01553
+      },
+      "front_power_leg_l_3": {
+        "x": 0.0504,
+        "y": 0.03
+      },
+      "front_power_leg_r_0": {
+        "x": 0.0525,
+        "y": 0.0231
+      },
+      "front_power_leg_r_1": {
+        "x": 0.0525,
+        "y": 0.01894
+      },
+      "front_power_leg_r_2": {
+        "x": 0.0525,
+        "y": 0.01553
+      },
+      "front_power_leg_r_3": {
+        "x": 0.0504,
+        "y": 0.03
+      },
+      "rear_power_leg_l_0": {
+        "x": 0.055,
+        "y": 0.0242
+      },
+      "rear_power_leg_l_1": {
+        "x": 0.055,
+        "y": 0.01984
+      },
+      "rear_power_leg_l_2": {
+        "x": 0.055,
+        "y": 0.01627
+      },
+      "rear_power_leg_l_3": {
+        "x": 0.0528,
+        "y": 0.03
+      },
+      "rear_power_leg_r_0": {
+        "x": 0.055,
+        "y": 0.0242
+      },
+      "rear_power_leg_r_1": {
+        "x": 0.055,
+        "y": 0.01984
+      },
+      "rear_power_leg_r_2": {
+        "x": 0.055,
+        "y": 0.01627
+      },
+      "rear_power_leg_r_3": {
+        "x": 0.0528,
+        "y": 0.03
+      },
+      "front_traction_foot_l": {
+        "x": 0.128,
+        "y": 0.1862
+      },
+      "front_traction_foot_r": {
+        "x": 0.128,
+        "y": 0.1862
+      },
+      "rear_traction_foot_l": {
+        "x": 0.136,
+        "y": 0.20663
+      },
+      "rear_traction_foot_r": {
+        "x": 0.136,
+        "y": 0.20663
+      }
+    },
+    "rest_pose": {
+      "short_sensor_neck_joint": 0.0,
+      "rear_counterbalance_tail_joint": 0.0,
+      "front_power_leg_l_0_joint": 0.0,
+      "front_power_leg_l_1_joint": 0.12,
+      "front_power_leg_l_2_joint": 0.0,
+      "front_power_leg_r_0_joint": 0.0,
+      "front_power_leg_r_1_joint": 0.12,
+      "front_power_leg_r_2_joint": 0.0,
+      "rear_power_leg_l_0_joint": 0.0,
+      "rear_power_leg_l_1_joint": 0.12,
+      "rear_power_leg_l_2_joint": 0.0,
+      "rear_power_leg_r_0_joint": 0.0,
+      "rear_power_leg_r_1_joint": 0.12,
+      "rear_power_leg_r_2_joint": 0.0,
+      "front_traction_foot_l_joint": 0.0,
+      "front_traction_foot_r_joint": 0.0,
+      "rear_traction_foot_l_joint": 0.0,
+      "rear_traction_foot_r_joint": 0.0
+    },
+    "build_plan": {
+      "prompt": "a sturdy four-legged walking robot",
+      "robot_class": "quadruped",
+      "task_family": "locomotion",
+      "concept": "four-legged walking robot",
+      "concept_aliases": [
+        "quadruped",
+        "walking quadruped"
+      ],
+      "environment": "unspecified",
+      "morphology": "Sturdy body supported by four legs for walking locomotion.",
+      "objects": [],
+      "action_verbs": [
+        "walk"
+      ],
+      "buildable": true,
+      "gaps": [],
+      "reasoning": "The request explicitly specifies a four-legged walking body, which maps to the quadruped execution route.",
+      "source": "llm",
+      "routing_confidence": "explicit"
+    },
+    "_actuators_loaded": true,
+    "_mass_materialized": true
+  },
+  "segments": [
+    {
+      "name": "main_chassis",
+      "parent": null,
+      "shape": "box",
+      "length_m": 0.3128,
+      "radius_m": 0.136,
+      "mass_kg": 2.9271146202361127,
+      "joint_type": null,
+      "joint_axis": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "joint_lower": null,
+      "joint_upper": null,
+      "mount_euler": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "mount_offset": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "actuator_torque_nm": null,
+      "torque_req_nm": null,
+      "is_end_effector": false,
+      "cross_section": [
+        0.425,
+        0.136
+      ],
+      "geometry": {
+        "family": "compound",
+        "parts": [
+          {
+            "family": "extrude",
+            "height": 0.3128,
+            "fillet": 0.0272,
+            "profile": [
+              [
+                -0.425,
+                -0.136
+              ],
+              [
+                0.425,
+                -0.136
+              ],
+              [
+                0.425,
+                0.136
+              ],
+              [
+                -0.425,
+                0.136
+              ]
+            ],
+            "chamfer": 0.025,
+            "cutouts": [
+              [
+                -0.1927,
+                0.0,
+                0.1564,
+                0.0408,
+                0.3264,
+                "y"
+              ],
+              [
+                0.0,
+                0.0,
+                0.1564,
+                0.0408,
+                0.3264,
+                "y"
+              ],
+              [
+                0.1927,
+                0.0,
+                0.1564,
+                0.0408,
+                0.3264,
+                "y"
+              ]
+            ]
+          },
+          {
+            "family": "extrude",
+            "height": 0.1314,
+            "fillet": 0.0218,
+            "chamfer": 0.01632,
+            "profile": [
+              [
+                -0.23375,
+                -0.08432
+              ],
+              [
+                0.23375,
+                -0.08432
+              ],
+              [
+                0.23375,
+                0.08432
+              ],
+              [
+                -0.23375,
+                0.08432
+              ]
+            ],
+            "at": [
+              0.0,
+              0.0,
+              0.2502
+            ]
+          }
+        ]
+      },
+      "material": "shell"
+    },
+    {
+      "name": "short_sensor_neck",
+      "parent": "main_chassis",
+      "shape": "capsule",
+      "length_m": 0.12,
+      "radius_m": 0.061200000000000004,
+      "mass_kg": 0.26438399999999995,
+      "joint_type": "revolute",
+      "joint_axis": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "joint_lower": -2.6,
+      "joint_upper": 2.6,
+      "mount_euler": [
+        -0.0,
+        0.9151007005533603,
+        -0.0
+      ],
+      "mount_offset": [
+        0.3485,
+        0.0,
+        -0.09384000000000003
+      ],
+      "actuator_torque_nm": 21.89,
+      "torque_req_nm": null,
+      "is_end_effector": false,
+      "cross_section": null,
+      "geometry": {
+        "family": "tapered",
+        "length": 0.12,
+        "r0": 0.06426,
+        "r1": 0.0563,
+        "chamfer": 0.015
+      },
+      "material": "frame"
+    },
+    {
+      "name": "sensor_head",
+      "parent": "short_sensor_neck",
+      "shape": "box",
+      "length_m": 0.1564,
+      "radius_m": 0.068816,
+      "mass_kg": 0.38746160640000005,
+      "joint_type": null,
+      "joint_axis": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "joint_lower": null,
+      "joint_upper": null,
+      "mount_euler": [
+        -0.0,
+        0.6556956262415363,
+        -0.0
+      ],
+      "mount_offset": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "actuator_torque_nm": null,
+      "torque_req_nm": null,
+      "is_end_effector": false,
+      "cross_section": [
+        0.068816,
+        0.068816
+      ],
+      "geometry": {
+        "family": "extrude",
+        "height": 0.1564,
+        "fillet": 0.0275,
+        "chamfer": 0.015,
+        "profile": [
+          [
+            -0.068816,
+            -0.068816
+          ],
+          [
+            0.068816,
+            -0.0584936
+          ],
+          [
+            0.068816,
+            0.0584936
+          ],
+          [
+            -0.068816,
+            0.068816
+          ]
+        ]
+      },
+      "material": "shell"
+    },
+    {
+      "name": "comms_antenna",
+      "parent": "sensor_head",
+      "shape": "capsule",
+      "length_m": 0.12,
+      "radius_m": 0.012,
+      "mass_kg": 0.05184,
+      "joint_type": null,
+      "joint_axis": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "joint_lower": null,
+      "joint_upper": null,
+      "mount_euler": [
+        0.0,
+        -1.5707963267948966,
+        0.0
+      ],
+      "mount_offset": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "actuator_torque_nm": null,
+      "torque_req_nm": null,
+      "is_end_effector": false,
+      "cross_section": null,
+      "geometry": {
+        "family": "tapered",
+        "length": 0.12,
+        "r0": 0.012,
+        "r1": 0.003,
+        "chamfer": 0.003
+      },
+      "material": "frame"
+    },
+    {
+      "name": "rear_counterbalance_tail",
+      "parent": "main_chassis",
+      "shape": "capsule",
+      "length_m": 0.2,
+      "radius_m": 0.045,
+      "mass_kg": 0.32399999999999995,
+      "joint_type": "revolute",
+      "joint_axis": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "joint_lower": -2.6,
+      "joint_upper": 2.6,
+      "mount_euler": [
+        -0.0,
+        -0.9151007005533603,
+        -3.141592653589793
+      ],
+      "mount_offset": [
+        -0.3485,
+        0.0,
+        -0.09384000000000003
+      ],
+      "actuator_torque_nm": 1.0,
+      "torque_req_nm": null,
+      "is_end_effector": false,
+      "cross_section": null,
+      "geometry": {
+        "family": "tapered",
+        "length": 0.2,
+        "r0": 0.045,
+        "r1": 0.01575,
+        "chamfer": 0.01
+      },
+      "material": "frame"
+    },
+    {
+      "name": "front_power_leg_l_0",
+      "parent": "main_chassis",
+      "shape": "capsule",
+      "length_m": 0.105,
+      "radius_m": 0.0231,
+      "mass_kg": 0.08731799999999999,
+      "joint_type": "revolute",
+      "joint_axis": [
+        0.0,
+        -1.0,
+        0.0
+      ],
+      "joint_lower": -0.6,
+      "joint_upper": 0.6,
+      "mount_euler": [
+        -3.0916342578678506,
+        0.0,
+        1.5707963267948966
+      ],
+      "mount_offset": [
+        0.3485,
+        0.12240000000000001,
+        -0.18768
+      ],
+      "actuator_torque_nm": 37.09,
+      "torque_req_nm": null,
+      "is_end_effector": false,
+      "cross_section": null,
+      "geometry": {
+        "family": "extrude",
+        "height": 0.105,
+        "fillet": 0.0069,
+        "profile": [
+          [
+            -0.0231,
+            -0.013859999999999999
+          ],
+          [
+            0.02079,
+            -0.013859999999999999
+          ],
+          [
+            0.02079,
+            0.013859999999999999
+          ],
+          [
+            -0.0231,
+            0.013859999999999999
+          ]
+        ],
+        "chamfer": 0.02,
+        "cutouts": [
+          [
+            -0.0079,
+            0.0,
+            0.0525,
+            0.0042,
+            0.0333,
+            "y"
+          ],
+          [
+            0.0079,
+            0.0,
+            0.0525,
+            0.0042,
+            0.0333,
+            "y"
+          ]
+        ]
+      },
+      "material": "aluminum"
+    },
+    {
+      "name": "front_power_leg_l_1",
+      "parent": "front_power_leg_l_0",
+      "shape": "capsule",
+      "length_m": 0.105,
+      "radius_m": 0.018941999999999997,
+      "mass_kg": 0.07160075999999999,
+      "joint_type": "revolute",
+      "joint_axis": [
+        -0.9987523388778448,
+        0.0,
+        0.04993761694389223
+      ],
+      "joint_lower": -2.6,
+      "joint_upper": 2.6,
+      "mount_euler": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "mount_offset": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "actuator_torque_nm": 31.3,
+      "torque_req_nm": null,
+      "is_end_effector": false,
+      "cross_section": null,
+      "geometry": {
+        "family": "extrude",
+        "height": 0.105,
+        "fillet": 0.0057,
+        "profile": [
+          [
+            -0.018941999999999997,
+            -0.011365199999999997
+          ],
+          [
+            0.0170478,
+            -0.011365199999999997
+          ],
+          [
+            0.0170478,
+            0.011365199999999997
+          ],
+          [
+            -0.018941999999999997,
+            0.011365199999999997
+          ]
+        ],
+        "chamfer": 0.02,
+        "cutouts": [
+          [
+            -0.0064,
+            0.0,
+            0.0525,
+            0.004,
+            0.0273,
+            "y"
+          ],
+          [
+            0.0064,
+            0.0,
+            0.0525,
+            0.004,
+            0.0273,
+            "y"
+          ]
+        ]
+      },
+      "material": "aluminum"
+    },
+    {
+      "name": "front_power_leg_l_2",
+      "parent": "front_power_leg_l_1",
+      "shape": "capsule",
+      "length_m": 0.105,
+      "radius_m": 0.015532439999999996,
+      "mass_kg": 0.058712623199999994,
+      "joint_type": "revolute",
+      "joint_axis": [
+        -0.9987523388778448,
+        0.0,
+        0.04993761694389223
+      ],
+      "joint_lower": -2.6,
+      "joint_upper": 2.6,
+      "mount_euler": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "mount_offset": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "actuator_torque_nm": 25.5,
+      "torque_req_nm": null,
+      "is_end_effector": false,
+      "cross_section": null,
+      "geometry": {
+        "family": "extrude",
+        "height": 0.105,
+        "fillet": 0.0047,
+        "profile": [
+          [
+            -0.015532439999999996,
+            -0.009319463999999998
+          ],
+          [
+            0.013979195999999998,
+            -0.009319463999999998
+          ],
+          [
+            0.013979195999999998,
+            0.009319463999999998
+          ],
+          [
+            -0.015532439999999996,
+            0.009319463999999998
+          ]
+        ],
+        "chamfer": 0.02,
+        "cutouts": [
+          [
+            -0.0053,
+            0.0,
+            0.0525,
+            0.004,
+            0.0224,
+            "y"
+          ],
+          [
+            0.0053,
+            0.0,
+            0.0525,
+            0.004,
+            0.0224,
+            "y"
+          ]
+        ]
+      },
+      "material": "aluminum"
+    },
+    {
+      "name": "front_power_leg_l_3",
+      "parent": "front_power_leg_l_2",
+      "shape": "capsule",
+      "length_m": 0.1008,
+      "radius_m": 0.03,
+      "mass_kg": 0.10886399999999999,
+      "joint_type": null,
+      "joint_axis": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "joint_lower": null,
+      "joint_upper": null,
+      "mount_euler": [
+        1.5707963267948966,
+        0.0,
+        1.5208379310729538
+      ],
+      "mount_offset": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "actuator_torque_nm": null,
+      "torque_req_nm": null,
+      "is_end_effector": false,
+      "cross_section": null,
+      "geometry": {
+        "family": "extrude",
+        "height": 0.1008,
+        "fillet": 0.0036,
+        "profile": [
+          [
+            -0.012,
+            -0.015
+          ],
+          [
+            0.012,
+            -0.0135
+          ],
+          [
+            0.012,
+            0.0135
+          ],
+          [
+            -0.012,
+            0.015
+          ]
+        ],
+        "chamfer": 0.02,
+        "cutouts": [
+          [
+            0.0,
+            -0.0051,
+            0.0504,
+            0.004,
+            0.0288,
+            "x"
+          ],
+          [
+            0.0,
+            0.0051,
+            0.0504,
+            0.004,
+            0.0288,
+            "x"
+          ]
+        ]
+      },
+      "material": "rubber"
+    },
+    {
+      "name": "front_power_leg_r_0",
+      "parent": "main_chassis",
+      "shape": "capsule",
+      "length_m": 0.105,
+      "radius_m": 0.0231,
+      "mass_kg": 0.08731799999999999,
+      "joint_type": "revolute",
+      "joint_axis": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "joint_lower": -0.6,
+      "joint_upper": 0.6,
+      "mount_euler": [
+        3.0916342578678506,
+        0.0,
+        -1.5707963267948966
+      ],
+      "mount_offset": [
+        0.3485,
+        -0.12240000000000001,
+        -0.18768
+      ],
+      "actuator_torque_nm": 37.09,
+      "torque_req_nm": null,
+      "is_end_effector": false,
+      "cross_section": null,
+      "geometry": {
+        "family": "extrude",
+        "height": 0.105,
+        "fillet": 0.0069,
+        "profile": [
+          [
+            -0.0231,
+            -0.013859999999999999
+          ],
+          [
+            0.02079,
+            -0.013859999999999999
+          ],
+          [
+            0.02079,
+            0.013859999999999999
+          ],
+          [
+            -0.0231,
+            0.013859999999999999
+          ]
+        ],
+        "chamfer": 0.02,
+        "cutouts": [
+          [
+            -0.0079,
+            0.0,
+            0.0525,
+            0.0042,
+            0.0333,
+            "y"
+          ],
+          [
+            0.0079,
+            0.0,
+            0.0525,
+            0.0042,
+            0.0333,
+            "y"
+          ]
+        ]
+      },
+      "material": "aluminum"
+    },
+    {
+      "name": "front_power_leg_r_1",
+      "parent": "front_power_leg_r_0",
+      "shape": "capsule",
+      "length_m": 0.105,
+      "radius_m": 0.018941999999999997,
+      "mass_kg": 0.07160075999999999,
+      "joint_type": "revolute",
+      "joint_axis": [
+        0.9987523388778448,
+        0.0,
+        -0.04993761694389223
+      ],
+      "joint_lower": -2.6,
+      "joint_upper": 2.6,
+      "mount_euler": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "mount_offset": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "actuator_torque_nm": 31.3,
+      "torque_req_nm": null,
+      "is_end_effector": false,
+      "cross_section": null,
+      "geometry": {
+        "family": "extrude",
+        "height": 0.105,
+        "fillet": 0.0057,
+        "profile": [
+          [
+            -0.018941999999999997,
+            -0.011365199999999997
+          ],
+          [
+            0.0170478,
+            -0.011365199999999997
+          ],
+          [
+            0.0170478,
+            0.011365199999999997
+          ],
+          [
+            -0.018941999999999997,
+            0.011365199999999997
+          ]
+        ],
+        "chamfer": 0.02,
+        "cutouts": [
+          [
+            -0.0064,
+            0.0,
+            0.0525,
+            0.004,
+            0.0273,
+            "y"
+          ],
+          [
+            0.0064,
+            0.0,
+            0.0525,
+            0.004,
+            0.0273,
+            "y"
+          ]
+        ]
+      },
+      "material": "aluminum"
+    },
+    {
+      "name": "front_power_leg_r_2",
+      "parent": "front_power_leg_r_1",
+      "shape": "capsule",
+      "length_m": 0.105,
+      "radius_m": 0.015532439999999996,
+      "mass_kg": 0.058712623199999994,
+      "joint_type": "revolute",
+      "joint_axis": [
+        0.9987523388778448,
+        0.0,
+        -0.04993761694389223
+      ],
+      "joint_lower": -2.6,
+      "joint_upper": 2.6,
+      "mount_euler": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "mount_offset": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "actuator_torque_nm": 25.5,
+      "torque_req_nm": null,
+      "is_end_effector": false,
+      "cross_section": null,
+      "geometry": {
+        "family": "extrude",
+        "height": 0.105,
+        "fillet": 0.0047,
+        "profile": [
+          [
+            -0.015532439999999996,
+            -0.009319463999999998
+          ],
+          [
+            0.013979195999999998,
+            -0.009319463999999998
+          ],
+          [
+            0.013979195999999998,
+            0.009319463999999998
+          ],
+          [
+            -0.015532439999999996,
+            0.009319463999999998
+          ]
+        ],
+        "chamfer": 0.02,
+        "cutouts": [
+          [
+            -0.0053,
+            0.0,
+            0.0525,
+            0.004,
+            0.0224,
+            "y"
+          ],
+          [
+            0.0053,
+            0.0,
+            0.0525,
+            0.004,
+            0.0224,
+            "y"
+          ]
+        ]
+      },
+      "material": "aluminum"
+    },
+    {
+      "name": "front_power_leg_r_3",
+      "parent": "front_power_leg_r_2",
+      "shape": "capsule",
+      "length_m": 0.1008,
+      "radius_m": 0.03,
+      "mass_kg": 0.10886399999999999,
+      "joint_type": null,
+      "joint_axis": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "joint_lower": null,
+      "joint_upper": null,
+      "mount_euler": [
+        -1.5707963267948966,
+        0.0,
+        -1.5208379310729538
+      ],
+      "mount_offset": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "actuator_torque_nm": null,
+      "torque_req_nm": null,
+      "is_end_effector": false,
+      "cross_section": null,
+      "geometry": {
+        "family": "extrude",
+        "height": 0.1008,
+        "fillet": 0.0036,
+        "profile": [
+          [
+            -0.012,
+            -0.015
+          ],
+          [
+            0.012,
+            -0.0135
+          ],
+          [
+            0.012,
+            0.0135
+          ],
+          [
+            -0.012,
+            0.015
+          ]
+        ],
+        "chamfer": 0.02,
+        "cutouts": [
+          [
+            0.0,
+            -0.0051,
+            0.0504,
+            0.004,
+            0.0288,
+            "x"
+          ],
+          [
+            0.0,
+            0.0051,
+            0.0504,
+            0.004,
+            0.0288,
+            "x"
+          ]
+        ]
+      },
+      "material": "rubber"
+    },
+    {
+      "name": "rear_power_leg_l_0",
+      "parent": "main_chassis",
+      "shape": "capsule",
+      "length_m": 0.11,
+      "radius_m": 0.0242,
+      "mass_kg": 0.095832,
+      "joint_type": "revolute",
+      "joint_axis": [
+        0.0,
+        -1.0,
+        0.0
+      ],
+      "joint_lower": -0.6,
+      "joint_upper": 0.6,
+      "mount_euler": [
+        -3.0916342578678506,
+        0.0,
+        1.5707963267948966
+      ],
+      "mount_offset": [
+        -0.3485,
+        0.12240000000000001,
+        -0.18768
+      ],
+      "actuator_torque_nm": 39.07,
+      "torque_req_nm": null,
+      "is_end_effector": false,
+      "cross_section": null,
+      "geometry": {
+        "family": "extrude",
+        "height": 0.11,
+        "fillet": 0.0073,
+        "profile": [
+          [
+            -0.0242,
+            -0.014519999999999998
+          ],
+          [
+            0.02178,
+            -0.014519999999999998
+          ],
+          [
+            0.02178,
+            0.014519999999999998
+          ],
+          [
+            -0.0242,
+            0.014519999999999998
+          ]
+        ],
+        "chamfer": 0.02,
+        "cutouts": [
+          [
+            -0.0082,
+            0.0,
+            0.055,
+            0.0044,
+            0.0348,
+            "y"
+          ],
+          [
+            0.0082,
+            0.0,
+            0.055,
+            0.0044,
+            0.0348,
+            "y"
+          ]
+        ]
+      },
+      "material": "aluminum"
+    },
+    {
+      "name": "rear_power_leg_l_1",
+      "parent": "rear_power_leg_l_0",
+      "shape": "capsule",
+      "length_m": 0.11,
+      "radius_m": 0.019843999999999997,
+      "mass_kg": 0.07858224,
+      "joint_type": "revolute",
+      "joint_axis": [
+        -0.9987523388778448,
+        0.0,
+        0.04993761694389223
+      ],
+      "joint_lower": -2.6,
+      "joint_upper": 2.6,
+      "mount_euler": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "mount_offset": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "actuator_torque_nm": 33.0,
+      "torque_req_nm": null,
+      "is_end_effector": false,
+      "cross_section": null,
+      "geometry": {
+        "family": "extrude",
+        "height": 0.11,
+        "fillet": 0.006,
+        "profile": [
+          [
+            -0.019843999999999997,
+            -0.011906399999999998
+          ],
+          [
+            0.017859599999999996,
+            -0.011906399999999998
+          ],
+          [
+            0.017859599999999996,
+            0.011906399999999998
+          ],
+          [
+            -0.019843999999999997,
+            0.011906399999999998
+          ]
+        ],
+        "chamfer": 0.02,
+        "cutouts": [
+          [
+            -0.0067,
+            0.0,
+            0.055,
+            0.004,
+            0.0286,
+            "y"
+          ],
+          [
+            0.0067,
+            0.0,
+            0.055,
+            0.004,
+            0.0286,
+            "y"
+          ]
+        ]
+      },
+      "material": "aluminum"
+    },
+    {
+      "name": "rear_power_leg_l_2",
+      "parent": "rear_power_leg_l_1",
+      "shape": "capsule",
+      "length_m": 0.11,
+      "radius_m": 0.016272079999999998,
+      "mass_kg": 0.0644374368,
+      "joint_type": "revolute",
+      "joint_axis": [
+        -0.9987523388778448,
+        0.0,
+        0.04993761694389223
+      ],
+      "joint_lower": -2.6,
+      "joint_upper": 2.6,
+      "mount_euler": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "mount_offset": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "actuator_torque_nm": 26.92,
+      "torque_req_nm": null,
+      "is_end_effector": false,
+      "cross_section": null,
+      "geometry": {
+        "family": "extrude",
+        "height": 0.11,
+        "fillet": 0.0049,
+        "profile": [
+          [
+            -0.016272079999999998,
+            -0.009763247999999999
+          ],
+          [
+            0.014644871999999998,
+            -0.009763247999999999
+          ],
+          [
+            0.014644871999999998,
+            0.009763247999999999
+          ],
+          [
+            -0.016272079999999998,
+            0.009763247999999999
+          ]
+        ],
+        "chamfer": 0.02,
+        "cutouts": [
+          [
+            -0.0055,
+            0.0,
+            0.055,
+            0.004,
+            0.0234,
+            "y"
+          ],
+          [
+            0.0055,
+            0.0,
+            0.055,
+            0.004,
+            0.0234,
+            "y"
+          ]
+        ]
+      },
+      "material": "aluminum"
+    },
+    {
+      "name": "rear_power_leg_l_3",
+      "parent": "rear_power_leg_l_2",
+      "shape": "capsule",
+      "length_m": 0.10560000000000001,
+      "radius_m": 0.03,
+      "mass_kg": 0.114048,
+      "joint_type": null,
+      "joint_axis": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "joint_lower": null,
+      "joint_upper": null,
+      "mount_euler": [
+        1.5707963267948966,
+        0.0,
+        1.5208379310729538
+      ],
+      "mount_offset": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "actuator_torque_nm": null,
+      "torque_req_nm": null,
+      "is_end_effector": false,
+      "cross_section": null,
+      "geometry": {
+        "family": "extrude",
+        "height": 0.1056,
+        "fillet": 0.0036,
+        "profile": [
+          [
+            -0.012,
+            -0.015
+          ],
+          [
+            0.012,
+            -0.0135
+          ],
+          [
+            0.012,
+            0.0135
+          ],
+          [
+            -0.012,
+            0.015
+          ]
+        ],
+        "chamfer": 0.02,
+        "cutouts": [
+          [
+            0.0,
+            -0.0051,
+            0.0528,
+            0.004,
+            0.0288,
+            "x"
+          ],
+          [
+            0.0,
+            0.0051,
+            0.0528,
+            0.004,
+            0.0288,
+            "x"
+          ]
+        ]
+      },
+      "material": "rubber"
+    },
+    {
+      "name": "rear_power_leg_r_0",
+      "parent": "main_chassis",
+      "shape": "capsule",
+      "length_m": 0.11,
+      "radius_m": 0.0242,
+      "mass_kg": 0.095832,
+      "joint_type": "revolute",
+      "joint_axis": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "joint_lower": -0.6,
+      "joint_upper": 0.6,
+      "mount_euler": [
+        3.0916342578678506,
+        0.0,
+        -1.5707963267948966
+      ],
+      "mount_offset": [
+        -0.3485,
+        -0.12240000000000001,
+        -0.18768
+      ],
+      "actuator_torque_nm": 39.07,
+      "torque_req_nm": null,
+      "is_end_effector": false,
+      "cross_section": null,
+      "geometry": {
+        "family": "extrude",
+        "height": 0.11,
+        "fillet": 0.0073,
+        "profile": [
+          [
+            -0.0242,
+            -0.014519999999999998
+          ],
+          [
+            0.02178,
+            -0.014519999999999998
+          ],
+          [
+            0.02178,
+            0.014519999999999998
+          ],
+          [
+            -0.0242,
+            0.014519999999999998
+          ]
+        ],
+        "chamfer": 0.02,
+        "cutouts": [
+          [
+            -0.0082,
+            0.0,
+            0.055,
+            0.0044,
+            0.0348,
+            "y"
+          ],
+          [
+            0.0082,
+            0.0,
+            0.055,
+            0.0044,
+            0.0348,
+            "y"
+          ]
+        ]
+      },
+      "material": "aluminum"
+    },
+    {
+      "name": "rear_power_leg_r_1",
+      "parent": "rear_power_leg_r_0",
+      "shape": "capsule",
+      "length_m": 0.11,
+      "radius_m": 0.019843999999999997,
+      "mass_kg": 0.07858224,
+      "joint_type": "revolute",
+      "joint_axis": [
+        0.9987523388778448,
+        0.0,
+        -0.04993761694389223
+      ],
+      "joint_lower": -2.6,
+      "joint_upper": 2.6,
+      "mount_euler": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "mount_offset": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "actuator_torque_nm": 33.0,
+      "torque_req_nm": null,
+      "is_end_effector": false,
+      "cross_section": null,
+      "geometry": {
+        "family": "extrude",
+        "height": 0.11,
+        "fillet": 0.006,
+        "profile": [
+          [
+            -0.019843999999999997,
+            -0.011906399999999998
+          ],
+          [
+            0.017859599999999996,
+            -0.011906399999999998
+          ],
+          [
+            0.017859599999999996,
+            0.011906399999999998
+          ],
+          [
+            -0.019843999999999997,
+            0.011906399999999998
+          ]
+        ],
+        "chamfer": 0.02,
+        "cutouts": [
+          [
+            -0.0067,
+            0.0,
+            0.055,
+            0.004,
+            0.0286,
+            "y"
+          ],
+          [
+            0.0067,
+            0.0,
+            0.055,
+            0.004,
+            0.0286,
+            "y"
+          ]
+        ]
+      },
+      "material": "aluminum"
+    },
+    {
+      "name": "rear_power_leg_r_2",
+      "parent": "rear_power_leg_r_1",
+      "shape": "capsule",
+      "length_m": 0.11,
+      "radius_m": 0.016272079999999998,
+      "mass_kg": 0.0644374368,
+      "joint_type": "revolute",
+      "joint_axis": [
+        0.9987523388778448,
+        0.0,
+        -0.04993761694389223
+      ],
+      "joint_lower": -2.6,
+      "joint_upper": 2.6,
+      "mount_euler": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "mount_offset": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "actuator_torque_nm": 26.92,
+      "torque_req_nm": null,
+      "is_end_effector": false,
+      "cross_section": null,
+      "geometry": {
+        "family": "extrude",
+        "height": 0.11,
+        "fillet": 0.0049,
+        "profile": [
+          [
+            -0.016272079999999998,
+            -0.009763247999999999
+          ],
+          [
+            0.014644871999999998,
+            -0.009763247999999999
+          ],
+          [
+            0.014644871999999998,
+            0.009763247999999999
+          ],
+          [
+            -0.016272079999999998,
+            0.009763247999999999
+          ]
+        ],
+        "chamfer": 0.02,
+        "cutouts": [
+          [
+            -0.0055,
+            0.0,
+            0.055,
+            0.004,
+            0.0234,
+            "y"
+          ],
+          [
+            0.0055,
+            0.0,
+            0.055,
+            0.004,
+            0.0234,
+            "y"
+          ]
+        ]
+      },
+      "material": "aluminum"
+    },
+    {
+      "name": "rear_power_leg_r_3",
+      "parent": "rear_power_leg_r_2",
+      "shape": "capsule",
+      "length_m": 0.10560000000000001,
+      "radius_m": 0.03,
+      "mass_kg": 0.114048,
+      "joint_type": null,
+      "joint_axis": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "joint_lower": null,
+      "joint_upper": null,
+      "mount_euler": [
+        -1.5707963267948966,
+        0.0,
+        -1.5208379310729538
+      ],
+      "mount_offset": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "actuator_torque_nm": null,
+      "torque_req_nm": null,
+      "is_end_effector": false,
+      "cross_section": null,
+      "geometry": {
+        "family": "extrude",
+        "height": 0.1056,
+        "fillet": 0.0036,
+        "profile": [
+          [
+            -0.012,
+            -0.015
+          ],
+          [
+            0.012,
+            -0.0135
+          ],
+          [
+            0.012,
+            0.0135
+          ],
+          [
+            -0.012,
+            0.015
+          ]
+        ],
+        "chamfer": 0.02,
+        "cutouts": [
+          [
+            0.0,
+            -0.0051,
+            0.0528,
+            0.004,
+            0.0288,
+            "x"
+          ],
+          [
+            0.0,
+            0.0051,
+            0.0528,
+            0.004,
+            0.0288,
+            "x"
+          ]
+        ]
+      },
+      "material": "rubber"
+    },
+    {
+      "name": "front_traction_foot_l",
+      "parent": "front_power_leg_l_3",
+      "shape": "box",
+      "length_m": 0.256,
+      "radius_m": 0.1862,
+      "mass_kg": 1.7160191999999999,
+      "joint_type": "revolute",
+      "joint_axis": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "joint_lower": -2.6,
+      "joint_upper": 2.6,
+      "mount_euler": [
+        -0.058755822715722696,
+        0.4861853922521982,
+        -0.0
+      ],
+      "mount_offset": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "actuator_torque_nm": 2.8,
+      "torque_req_nm": null,
+      "is_end_effector": false,
+      "cross_section": [
+        0.049,
+        0.0931
+      ],
+      "geometry": {
+        "family": "extrude",
+        "height": 0.256,
+        "fillet": 0.0147,
+        "profile": [
+          [
+            -0.049,
+            -0.0931
+          ],
+          [
+            0.049,
+            -0.08379
+          ],
+          [
+            0.049,
+            0.08379
+          ],
+          [
+            -0.049,
+            0.0931
+          ]
+        ],
+        "chamfer": 0.012,
+        "cutouts": [
+          [
+            0.0,
+            -0.0317,
+            0.128,
+            0.0147,
+            0.1176,
+            "x"
+          ],
+          [
+            0.0,
+            0.0317,
+            0.128,
+            0.0147,
+            0.1176,
+            "x"
+          ]
+        ]
+      },
+      "material": "rubber"
+    },
+    {
+      "name": "front_traction_foot_r",
+      "parent": "front_power_leg_r_3",
+      "shape": "box",
+      "length_m": 0.256,
+      "radius_m": 0.1862,
+      "mass_kg": 1.7160191999999999,
+      "joint_type": "revolute",
+      "joint_axis": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "joint_lower": -2.6,
+      "joint_upper": 2.6,
+      "mount_euler": [
+        0.058755822715722696,
+        0.4861853922521982,
+        -0.0
+      ],
+      "mount_offset": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "actuator_torque_nm": 2.8,
+      "torque_req_nm": null,
+      "is_end_effector": false,
+      "cross_section": [
+        0.049,
+        0.0931
+      ],
+      "geometry": {
+        "family": "extrude",
+        "height": 0.256,
+        "fillet": 0.0147,
+        "profile": [
+          [
+            -0.049,
+            -0.0931
+          ],
+          [
+            0.049,
+            -0.08379
+          ],
+          [
+            0.049,
+            0.08379
+          ],
+          [
+            -0.049,
+            0.0931
+          ]
+        ],
+        "chamfer": 0.012,
+        "cutouts": [
+          [
+            0.0,
+            -0.0317,
+            0.128,
+            0.0147,
+            0.1176,
+            "x"
+          ],
+          [
+            0.0,
+            0.0317,
+            0.128,
+            0.0147,
+            0.1176,
+            "x"
+          ]
+        ]
+      },
+      "material": "rubber"
+    },
+    {
+      "name": "rear_traction_foot_l",
+      "parent": "rear_power_leg_l_3",
+      "shape": "box",
+      "length_m": 0.272,
+      "radius_m": 0.206625,
+      "mass_kg": 2.023272,
+      "joint_type": "revolute",
+      "joint_axis": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "joint_lower": -2.6,
+      "joint_upper": 2.6,
+      "mount_euler": [
+        -0.058755822715722696,
+        0.4861853922521982,
+        -0.0
+      ],
+      "mount_offset": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "actuator_torque_nm": 3.51,
+      "torque_req_nm": null,
+      "is_end_effector": false,
+      "cross_section": [
+        0.054375,
+        0.1033125
+      ],
+      "geometry": {
+        "family": "extrude",
+        "height": 0.272,
+        "fillet": 0.0163,
+        "profile": [
+          [
+            -0.054375,
+            -0.1033125
+          ],
+          [
+            0.054375,
+            -0.09298125
+          ],
+          [
+            0.054375,
+            0.09298125
+          ],
+          [
+            -0.054375,
+            0.1033125
+          ]
+        ],
+        "chamfer": 0.012,
+        "cutouts": [
+          [
+            0.0,
+            -0.0351,
+            0.136,
+            0.0163,
+            0.1305,
+            "x"
+          ],
+          [
+            0.0,
+            0.0351,
+            0.136,
+            0.0163,
+            0.1305,
+            "x"
+          ]
+        ]
+      },
+      "material": "rubber"
+    },
+    {
+      "name": "rear_traction_foot_r",
+      "parent": "rear_power_leg_r_3",
+      "shape": "box",
+      "length_m": 0.272,
+      "radius_m": 0.206625,
+      "mass_kg": 2.023272,
+      "joint_type": "revolute",
+      "joint_axis": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "joint_lower": -2.6,
+      "joint_upper": 2.6,
+      "mount_euler": [
+        0.058755822715722696,
+        0.4861853922521982,
+        -0.0
+      ],
+      "mount_offset": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "actuator_torque_nm": 3.51,
+      "torque_req_nm": null,
+      "is_end_effector": true,
+      "cross_section": [
+        0.054375,
+        0.1033125
+      ],
+      "geometry": {
+        "family": "extrude",
+        "height": 0.272,
+        "fillet": 0.0163,
+        "profile": [
+          [
+            -0.054375,
+            -0.1033125
+          ],
+          [
+            0.054375,
+            -0.09298125
+          ],
+          [
+            0.054375,
+            0.09298125
+          ],
+          [
+            -0.054375,
+            0.1033125
+          ]
+        ],
+        "chamfer": 0.012,
+        "cutouts": [
+          [
+            0.0,
+            -0.0351,
+            0.136,
+            0.0163,
+            0.1305,
+            "x"
+          ],
+          [
+            0.0,
+            0.0351,
+            0.136,
+            0.0163,
+            0.1305,
+            "x"
+          ]
+        ]
+      },
+      "material": "rubber"
+    }
+  ]
+}
