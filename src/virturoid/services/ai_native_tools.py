@@ -668,6 +668,14 @@ def create_robot(args: dict) -> dict:
             pass
     rid = S.put_robot(gene, prompt=prompt)
     out = {"ok": True, **_summary(gene, rid), "prompt": prompt}
+    try:                                                       # WS-G: the robotics AI grounds a novel concept in
+        from virturoid.services.agent_tools import safe_build_path   # the nearest VERIFIED concepts (advisory
+        from virturoid.services.concept_grounding import ground_concept   # similarity, never a silent route)
+        cg = ground_concept(safe_build_path(None, "memory"), prompt, query_gene=gene)
+        if not cg.get("routed") and cg.get("grounding"):
+            out["concept_grounding"] = cg
+    except Exception:  # noqa: BLE001 - grounding is value-add; never blocks a build
+        pass
     img = _render_gene(gene, rid)
     if img:
         out["artifacts"] = [img]

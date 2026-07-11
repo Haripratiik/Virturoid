@@ -69,7 +69,33 @@ def brain_metrics(db) -> dict:
                             "active": "learned_metric" if (bundle and bundle.get("proven")) else "baseline_29d"}
     except Exception:  # noqa: BLE001
         out["embedding"] = {"active": "baseline_29d", "metric_proven": False}
+    try:                                                          # WS-G: concept memory lifecycle (traceable)
+        from virturoid.services.concept_grounding import concept_summary
+        out["concepts"] = concept_summary(db)
+    except Exception:  # noqa: BLE001
+        out["concepts"] = {"total": 0, "verified": 0}
     return out
+
+
+def corpus_factory_status(memory_dir) -> dict:
+    """WS-H dashboard: read the corpus-factory manifest so the Brain panel shows the moat GROWING — cumulative
+    ANNECS, nights run, corpus size, class balance. Traceable to the manifest file; empty (honest) if none."""
+    path = Path(memory_dir) / "corpus_factory.json"
+    if not path.exists():
+        return {"nights": 0, "cumulative_annecs": 0, "corpus_size": 0, "class_balance": {}}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return {"nights": 0, "cumulative_annecs": 0, "corpus_size": 0, "class_balance": {}}
+    admitted = data.get("admitted", [])
+    balance: dict[str, int] = {}
+    for a in admitted:
+        niche = a.get("niche") or []
+        kind = niche[0] if niche else "?"
+        balance[kind] = balance.get(kind, 0) + 1
+    return {"nights": int(data.get("nights", 0)), "cumulative_annecs": int(data.get("cumulative_annecs", 0)),
+            "corpus_size": len(admitted), "class_balance": balance,
+            "rejected_totals": data.get("rejected_totals", {})}
 
 
 def moat_status(memory_dir=DEFAULT_MEMORY_DIR) -> dict:
@@ -155,6 +181,7 @@ def moat_status(memory_dir=DEFAULT_MEMORY_DIR) -> dict:
         + (" (learned metric ADOPTED — beat baseline held-out)."
            if brain["embedding"].get("metric_proven") else " (gated: baseline until a metric beats it held-out).")
     )
+    factory = corpus_factory_status(memory_dir)                    # WS-H: the corpus factory's growth dashboard
     return {
         "counts": counts,
         "skills": skills,
@@ -163,5 +190,7 @@ def moat_status(memory_dir=DEFAULT_MEMORY_DIR) -> dict:
         "compounding": bool(reused),
         "accumulating": bool(accumulating),
         "brain": brain,
-        "summary": summary,
+        "corpus_factory": factory,
+        "summary": summary + (f" Factory: {factory['cumulative_annecs']} verified bodies across "
+                              f"{factory['nights']} nights." if factory["nights"] else ""),
     }
