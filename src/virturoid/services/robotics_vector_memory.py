@@ -509,13 +509,17 @@ class RoboticsVectorMemory:
         return added
 
     def recall_knowledge(self, gene: RobotGene, task_type: str | None = None, *,
-                         failure_code: str | None = None, k: int = 3, refresh: bool = True) -> dict:
+                         failure_code: str | None = None, k: int = 3, refresh: bool = True,
+                         behavior_features: dict | None = None) -> dict:
         """The **recall organ**: retrieve prior tips + lessons + skills for THIS body, keyed by its
         morphology embedding — so an LLM role reasons with "what worked on bodies like this", not blind.
 
-        Returns ``{"tips":[...], "lessons":[...], "skills":[...]}``, each ``[{obj_id, similarity, meta}]``.
-        ``refresh`` re-indexes the (append-mostly) tip/lesson spaces + populates body/skill spaces if empty,
-        so a fresh caller gets correct results without a separate indexing step.
+        Returns ``{"tips":[...], "lessons":[...], "skills":[...], "episodes":[...]}``, each
+        ``[{obj_id, similarity, meta}]``. ``behavior_features`` (a just-run rollout's cadence/upright/forward/…)
+        adds the EPISODE channel — bodies that *behaved* like this — the 4th sub-space that was indexed on every
+        build but had no reader (an observability gap). Honest scope: episode neighbours are behavioural CONTEXT,
+        not a fine-transfer predictor (measured: within-class control transfer is near chance short of running it).
+        ``refresh`` re-indexes the append-mostly tip/lesson spaces + populates body/skill spaces if empty.
         """
         if refresh:
             self.index_tips()
@@ -531,6 +535,7 @@ class RoboticsVectorMemory:
             "tips": self.nearest(TIP, zb, k=k),
             "lessons": self.nearest(LESSON, lesson_q, k=k),
             "skills": self.nearest_skills(gene, task_type or "", robot_class=gene.robot_class, k=k),
+            "episodes": (self.nearest_episodes(behavior_features, k=k) if behavior_features else []),
         }
 
     def index_episode(self, obj_id: str, features: dict, meta: dict | None = None) -> None:

@@ -284,6 +284,24 @@ def _auto_bank_gait(gene, r, base_params) -> str | None:
         return bank_gait(db, gene, holder)
 
 
+def _record_gait_lesson(gene, failure_code: str, operator: str, *, improvement: float,
+                        root_cause: str | None = None) -> None:
+    """LESSON WRITE on the common LOCOMOTION path (which the reasoned-redesign lesson writer skips, leaving the
+    lessons store dead). A deploy-select disagreement IS a physics-verified failure->fix: the banked hint didn't
+    transfer to THIS body, and ``operator`` is what fixed it. Keyed by class, idempotent keep-best, so it becomes
+    grounding for the next similar body (surfaced by ``gait_hints.mine_gait_hints`` via ``lessons_for_class``)."""
+    try:
+        from virturoid.services.gait_flywheel import _class_of
+        from virturoid.services.memory_db import DEFAULT_DB_PATH, MemoryDB
+        DEFAULT_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with MemoryDB(DEFAULT_DB_PATH) as db:
+            db.record_lesson(_class_of(gene), failure_code, operator, task_type="locomotion",
+                             improvement=round(float(improvement), 4), root_cause=root_cause,
+                             source_gene=getattr(gene, "id", None))
+    except Exception:  # noqa: BLE001 - lessons are an accelerant; never break a verdict to write one
+        pass
+
+
 def _honest_serpentine(gene, *, steps: int = 2000, render: bool = False, tag: str = "serpentine") -> dict:
     """The honest LAND-SERPENTINE verdict for a LIMBLESS serial spine (a snake): a lateral travelling wave down
     the spine crawls it forward against ground friction (morph_policy.serpentine_rollout). A snake has no legs,
@@ -407,6 +425,11 @@ def _honest_gait(gene, *, steps: int = 1200, render: bool = False, tag: str = "g
         better_def = (cred_def and not cred_r) or (
             cred_def == cred_r and abs(float(r_def.get("forward", 0))) > abs(float(r.get("forward", 0))))
         if better_def:
+            # the banked hint underperformed the default ON THIS BODY -> a verified failure->fix lesson (the
+            # locomotion path's only lesson source; feeds mine_gait_hints for the next similar body)
+            _record_gait_lesson(gene, "banked_gait_underperformed", "deploy_default_crawl",
+                                improvement=abs(float(r_def.get("forward", 0))) - abs(float(r.get("forward", 0))),
+                                root_cause=f"recalled '{gait_source}' gait slid/underperformed the shipped default")
             r, gait_source = r_def, "default_crawl"
     o = orientation_summary(r.get("qpos_frames") or [])
     out = {"kind": "legged", "verdict": classify(r), "survived": bool(r.get("survived")),

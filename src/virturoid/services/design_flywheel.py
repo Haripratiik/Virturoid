@@ -15,7 +15,8 @@ import json
 
 def co_design_with_memory(gene, prompt: str, db, *, iterations: int = 3, population: int = 6,
                           seed: int = 0, best_response: bool = False, archive_path=None,
-                          br_samples: int = 3, br_iters: int = 1, br_steps: int = 400) -> dict:
+                          br_samples: int = 3, br_iters: int = 1, br_steps: int = 400,
+                          measure_delta: bool = False) -> dict:
     """Warm-start general co-design from the best banked design for this (class, task), run it, and bank
     the result. Returns the co-design result plus ``warm_started`` + ``prior_best``.
 
@@ -48,18 +49,38 @@ def co_design_with_memory(gene, prompt: str, db, *, iterations: int = 3, populat
     r["warm_started"] = isinstance(warm, dict)
     r["prior_best"] = (prior or {}).get("success_rate")
     r["provenance_delta"] = None
+    r["warmstart_vs_cold"] = None
     if r["warm_started"]:
-        # The compounding proof: record what seeded this build + the measured improvement over it.
+        # The compounding proof — done HONESTLY. `best - baseline` is the search's gain over its OWN start, NOT
+        # the warm-start's contribution (measured: it averages ~0.008, because a warm-started search barely moves
+        # off the prior best it began at — recording that as a "warm_start" delta over-claims value). The TRUE
+        # warm-start contribution is warm_best - COLD_best (same budget, no prior). We measure that only when
+        # `measure_delta` is set (it doubles the co-design cost), and otherwise record the gain under an HONEST
+        # kind that does not imply warm-vs-cold value. Fixes ISSUES E5/E6.
         try:
             vm = db.vector_memory()
             if vm is not None:
                 child = getattr(gene, "species", None) or f"{cls}.{task}"
                 parent = (prior or {}).get("species") or f"{cls}.{task}.prior"
-                delta = round(float(r["best_value"]) - float(r["baseline_value"]), 4)
-                vm.record_provenance("design", str(child), parent_type="design", parent_id=str(parent),
-                                     kind="warm_start", delta=delta,
-                                     meta={"robot_class": cls, "task": task, "prompt": prompt})
-                r["provenance_delta"] = delta
+                search_gain = round(float(r["best_value"]) - float(r["baseline_value"]), 4)
+                if measure_delta:
+                    cold = co_design_general(gene, prompt, iterations=iterations, population=population,
+                                             seed=seed, warm_start=None, best_response=best_response,
+                                             br_samples=br_samples, br_iters=br_iters, br_steps=br_steps)
+                    delta = round(float(r["best_value"]) - float(cold["best_value"]), 4)
+                    r["warmstart_vs_cold"] = delta
+                    r["cold_value"] = float(cold["best_value"])
+                    vm.record_provenance("design", str(child), parent_type="design", parent_id=str(parent),
+                                         kind="warm_start", delta=delta,
+                                         meta={"robot_class": cls, "task": task, "prompt": prompt,
+                                               "measured": "warm_vs_cold", "cold_value": float(cold["best_value"])})
+                    r["provenance_delta"] = delta
+                else:
+                    vm.record_provenance("design", str(child), parent_type="design", parent_id=str(parent),
+                                         kind="design_search_gain", delta=search_gain,
+                                         meta={"robot_class": cls, "task": task, "prompt": prompt,
+                                               "note": "search gain over own baseline; NOT warm-vs-cold"})
+                    r["provenance_delta"] = search_gain
         except Exception:  # noqa: BLE001 - provenance is observability; never break the flywheel
             pass
     # Curator: illuminate the MAP-Elites archive with this build (best body + its follower), so the

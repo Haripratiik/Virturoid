@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 
 from virturoid.fixtures.components import curated_component_library
@@ -48,6 +49,7 @@ def autonomous_build(
     memory_dir: Path = DEFAULT_MEMORY_DIR,
     max_rounds: int = 3,
     progress=None,
+    allow_heuristic_fallback: bool | None = None,
 ) -> AutonomyReport:
     from virturoid.services.mujoco_runner import mujoco_available
 
@@ -63,8 +65,43 @@ def autonomous_build(
     # task can still infer a body class (for example "sort blocks" -> arm); this
     # branch is only the true no-body/no-task ambiguity reported by the planner.
     from virturoid.services.intent_planner import plan_build
-    intent = plan_build(prompt, llm=None)
-    if intent.routing_confidence == "uncertain":
+    if allow_heuristic_fallback is None:
+        allow_heuristic_fallback = os.environ.get("VIRTUROID_ALLOW_HEURISTIC_FALLBACK", "0") == "1"
+    intent = plan_build(
+        prompt,
+        llm=None if allow_heuristic_fallback else "auto",
+        require_llm=not allow_heuristic_fallback,
+    )
+    concept_record = None
+    try:
+        from virturoid.services.concept_memory import observe_request, recall_verified_route
+
+        concept_record = observe_request(
+            memory_dir, intent.concept, prompt,
+            aliases=getattr(intent, "concept_aliases", []),
+        )
+        recalled = recall_verified_route(
+            memory_dir, intent.concept,
+            aliases=getattr(intent, "concept_aliases", []),
+        )
+        # A previous, target-attaining build is the only evidence allowed to
+        # turn an otherwise underspecified concept back into an execution route.
+        # Candidate or merely evaluated concepts remain clarification requests.
+        if intent.routing_confidence in {"novel", "uncertain"} and recalled:
+            intent.robot_class = str(recalled["execution_family"])
+            intent.task_family = str(recalled.get("task_type") or intent.task_family)
+            intent.routing_confidence = "task_inferred"
+            intent.buildable = True
+            intent.gaps = [g for g in intent.gaps if "clarify" not in g.lower()]
+            emit("concept_recalled", "Recalled a verified route for this previously built concept.",
+                 {"concept": intent.concept, "execution_family": intent.robot_class,
+                  "task_type": intent.task_family, "species": recalled.get("species_pattern")})
+    except Exception:  # noqa: BLE001 - concept memory is additive, never a build blocker
+        concept_record = None
+
+    if intent.routing_confidence in {"novel", "uncertain", "llm_unavailable"} or (
+        not allow_heuristic_fallback and not intent.buildable
+    ):
         detail = "; ".join(intent.gaps)
         report = AutonomyReport(
             id=f"autonomy_clarify_{hashlib.sha1(prompt.encode('utf-8')).hexdigest()[:12]}",
@@ -83,9 +120,15 @@ def autonomous_build(
                 success_before=0.0,
                 success_after=0.0,
             )],
-            notes=[f"No robot package was generated. {detail}"],
+            notes=[f"No robot package was generated. {detail}"] + (
+                [f"Concept memory: recorded candidate '{intent.concept}' for future evidence-backed learning."]
+                if concept_record else []
+            ),
         )
-        emit("needs_clarification", "Need a clearer body plan or task before generating a robot.",
+        blocked = ("An LLM planner is required for autonomous design; configure a supported LLM backend."
+                   if intent.routing_confidence == "llm_unavailable"
+                   else "Need a clearer body plan or task before generating a robot.")
+        emit("needs_clarification", blocked,
              {"intent": intent.to_dict()})
         _write_report(output_dir, report)
         return report
@@ -94,7 +137,37 @@ def autonomous_build(
     # (e.g. humanoid) are built+run from their gene — a genuinely distinct robot in real
     # physics — instead of tracing to the tabletop arm. The manipulator/mobile_base keep
     # their tuned legacy pipelines (higher success).
-    gene_report = _maybe_gene_build(prompt, output_dir, target_success_rate, memory_dir, emit, train=train)
+    try:
+        gene_report = _maybe_gene_build(
+            prompt, output_dir, target_success_rate, memory_dir, emit, train=train,
+            concept_label=intent.concept, concept_aliases=getattr(intent, "concept_aliases", []), intent=intent,
+            strict_llm=not allow_heuristic_fallback,
+        )
+    except Exception as exc:  # noqa: BLE001 - fail closed before any legacy/template builder can run
+        from virturoid.services.morphology_composer import LLMDesignUnavailable
+
+        if not isinstance(exc, LLMDesignUnavailable):
+            raise
+        report = AutonomyReport(
+            id=f"autonomy_llm_grounding_{hashlib.sha1(prompt.encode('utf-8')).hexdigest()[:12]}",
+            prompt=prompt,
+            requested_robot_class=intent.robot_class,
+            requested_species="unconfirmed",
+            task_type=intent.task_family,
+            target_success_rate=target_success_rate,
+            feasible=False,
+            succeeded=False,
+            decisions=[AutonomyDecision(
+                iteration=0,
+                stage="llm_grounding",
+                action="rejected an ungrounded LLM design instead of substituting a template robot",
+                detail=str(exc), success_before=0.0, success_after=0.0,
+            )],
+            notes=[f"No robot package was generated. {exc}"],
+        )
+        _write_report(output_dir, report)
+        emit("llm_grounding_failed", str(exc), {"intent": intent.to_dict()})
+        return report
     if gene_report is not None:
         return gene_report
 
@@ -680,7 +753,9 @@ def _maybe_keystone_codesign(gene, prompt, memory_dir, emit):
         return gene, None, None
 
 
-def _maybe_gene_build(prompt, output_dir, target, memory_dir, emit, *, train: bool = False) -> AutonomyReport | None:
+def _maybe_gene_build(prompt, output_dir, target, memory_dir, emit, *, train: bool = False,
+                      concept_label: str = "", concept_aliases: list[str] | None = None,
+                      intent=None, strict_llm: bool = False) -> AutonomyReport | None:
     """Build+run a robot from its gene for gene-only classes (e.g. humanoid). None otherwise.
 
     Produces a viewer-replayable package and an honest AutonomyReport. Success may be modest
@@ -688,13 +763,13 @@ def _maybe_gene_build(prompt, output_dir, target, memory_dir, emit, *, train: bo
     """
     from virturoid.services.morphology_selector import _explicit_class
 
-    requested_class = _explicit_class((prompt or "").lower())
+    requested_class = getattr(intent, "robot_class", None) or _explicit_class((prompt or "").lower())
     # G4: the composite detector lives in the intent planner (mobile word + grasp verb = mobile_manipulator);
     # _explicit_class predates it and returns a single class, which silently dropped the mobile half of
     # 'a mobile robot that picks boxes and carries them'. Prefer the planner's class when it says composite.
     try:
         from virturoid.services.intent_planner import plan_build
-        _plan_cls = plan_build(prompt, llm=None).robot_class
+        _plan_cls = getattr(intent, "robot_class", None) or plan_build(prompt, llm=None).robot_class
         if _plan_cls == "mobile_manipulator":
             requested_class = "mobile_manipulator"
     except Exception:  # noqa: BLE001
@@ -702,7 +777,7 @@ def _maybe_gene_build(prompt, output_dir, target, memory_dir, emit, *, train: bo
     # The tuned legacy arm pipeline only SCORES the colour-sort task -- stack / place-on-shelf / push read 0% there.
     # Route those (with the gene-only walking classes) through the general gene path so they actually run + evaluate.
     nonsort_manip = _prompt_task_type(prompt) in _NONSORT_MANIP_TASKS
-    if requested_class not in _GENE_ONLY_CLASSES and not nonsort_manip:
+    if requested_class not in _GENE_ONLY_CLASSES and not nonsort_manip and not strict_llm:
         return None
     # Design the body INTELLIGENTLY: compose_robot routes a creature prompt through the LLM ANATOMY compiler
     # (the LLM describes the animal's anatomy; a general compiler builds it) — so "a dog" becomes a dog, not a
@@ -715,19 +790,25 @@ def _maybe_gene_build(prompt, output_dir, target, memory_dir, emit, *, train: bo
             # force the composite body plan: the live LLM's classifier tends to answer the TASK class
             # ('manipulator') and silently drops the requested mobile platform; the composite is explicit intent.
             from virturoid.services.intent_planner import plan_build as _pb
-            gene = compose_robot(prompt, plan=_pb(prompt, llm=None))
+            gene = compose_robot(prompt, plan=(intent or _pb(prompt, llm=None)), strict_llm=strict_llm)
         else:
-            gene = compose_robot(prompt)
-    except Exception:  # noqa: BLE001 - any design failure -> fixture gene, then legacy path
+            gene = compose_robot(prompt, plan=intent, strict_llm=strict_llm)
+    except Exception as exc:  # noqa: BLE001 - production must not silently choose a fixture body
+        if strict_llm:
+            from virturoid.services.morphology_composer import LLMDesignUnavailable
+            raise LLMDesignUnavailable(str(exc)) from exc
         gene = None
     if gene is None:
+        if strict_llm:
+            from virturoid.services.morphology_composer import LLMDesignUnavailable
+            raise LLMDesignUnavailable("LLM design did not yield a buildable RobotGene; no fixture body was substituted.")
         from virturoid.fixtures.gene_library import gene_for_class
         gene = gene_for_class(requested_class, prompt=prompt)
     if gene is None:
         return None  # declared class with no gene yet -> fall through to legacy/foundation path
     # A non-sort task that didn't actually compose a manipulator (e.g. an ambiguous 'push' on a mobile base)
     # belongs on its own class's path, not the arm gene path.
-    if requested_class not in _GENE_ONLY_CLASSES:
+    if requested_class not in _GENE_ONLY_CLASSES and not strict_llm:
         if getattr(gene, "robot_class", None) != "manipulator":
             return None
         requested_class = "manipulator"   # flywheel reuse lookup + honest reporting of this arm gene build
@@ -741,7 +822,10 @@ def _maybe_gene_build(prompt, output_dir, target, memory_dir, emit, *, train: bo
         from virturoid.services.memory_db import MemoryDB
         with MemoryDB(Path(memory_dir) / "virturoid_memory.db") as _db:
             stored = _db.find_gene_for_class(requested_class)
-        if stored:
+        # An AI-first recipe is the newly proposed body. Replacing it with a
+        # same-niche class cache would silently collapse a new concept back to an
+        # older robot, so cache amendment is an explicit offline compatibility path.
+        if stored and not strict_llm:
             candidate = RobotGene.from_dict(stored)
             # Reuse a banked body ONLY when it shares the COMPOSED body's morphology NICHE — so a distinct
             # prompt (a six-legged, niche (6,8,3), vs the banked quad, (3,6,3)) keeps its own composed body and
@@ -760,12 +844,20 @@ def _maybe_gene_build(prompt, output_dir, target, memory_dir, emit, *, train: bo
 
     from virturoid.services.mujoco_runner import mujoco_available
     if not mujoco_available():
+        if strict_llm:
+            from virturoid.services.morphology_composer import LLMDesignUnavailable
+            raise LLMDesignUnavailable("MuJoCo is unavailable, so the LLM design cannot be physics-grounded.")
         return None  # let the legacy path produce the validated foundation package
 
     # Keystone (Pillar 1): a LEGGED body is chosen by its best-response controller (trainability) and the
     # design archive is illuminated + a provenance edge recorded — the body co-design step the live legged
     # path lacked. Non-legged / disabled -> gene unchanged. Best-effort.
-    gene, keystone_follower, keystone_res = _maybe_keystone_codesign(gene, prompt, memory_dir, emit)
+    if strict_llm:
+        # Physics evaluates the model-authored gene, but an optimizer must not rewrite
+        # its morphology behind the LLM's back in the production generative path.
+        keystone_follower, keystone_res = None, None
+    else:
+        gene, keystone_follower, keystone_res = _maybe_keystone_codesign(gene, prompt, memory_dir, emit)
 
     from virturoid.services.compute_provenance import RealComputeMeter
     from virturoid.services.gene_build import build_gene_package
@@ -802,7 +894,9 @@ def _maybe_gene_build(prompt, output_dir, target, memory_dir, emit, *, train: bo
             with MemoryDB(Path(memory_dir) / "virturoid_memory.db") as _edb:
                 RoboticsVectorMemory(_edb).index_episode(
                     str(gene.id), _feats,
-                    {"robot_class": gene.robot_class, "task_type": task_type, "status": summary.get("status")})
+                    {"robot_class": gene.robot_class, "task_type": task_type, "status": summary.get("status"),
+                     "species": gene.species, "success_rate": round(final, 3),
+                     "forward_m": round(float(summary.get("forward_m", summary.get("distance_m", 0.0)) or 0.0), 3)})
     except Exception:  # noqa: BLE001 - episode indexing is observability; never break a build
         pass
 
@@ -845,6 +939,17 @@ def _maybe_gene_build(prompt, output_dir, target, memory_dir, emit, *, train: bo
                                  else "ran real pick-and-place on the gene-built robot"),
                          detail=f"success={final}", success_before=0.0, success_after=final),
     ]
+    if getattr(intent, "source", "") == "llm":
+        decisions.insert(0, AutonomyDecision(
+            iteration=0,
+            stage="llm_design",
+            action="used an LLM to identify the open-ended concept and propose the robot body plan",
+            detail=(f"concept={getattr(intent, 'concept', '') or 'unspecified'}; "
+                    f"execution_route={requested_class}; task={task_type}; "
+                    "schema and physics gates ground the proposal"),
+            success_before=0.0,
+            success_after=0.0,
+        ))
     if keystone_res is not None:   # the keystone body-selection step ran (legged) -> surface it honestly
         fl = keystone_follower or {}
         decisions.insert(1, AutonomyDecision(
@@ -1006,6 +1111,24 @@ def _maybe_gene_build(prompt, output_dir, target, memory_dir, emit, *, train: bo
                 + (f" (variant; morphology distance {placement['distance']:.2f})" if placement["action"] == "classified"
                    else f" — a new species under {placement['parent']!r} by morphology.")
             )
+            # The species tree learns morphology directly.  The concept ledger
+            # keeps the user-facing name alongside that evidence, and promotes it
+            # only when this run actually clears the requested success target.
+            if concept_label:
+                concept = db.promote_concept(
+                    concept_label,
+                    execution_family=gene.robot_class,
+                    task_type=task_type,
+                    species_pattern=placement["species_pattern"],
+                    success_rate=final,
+                    target_success_rate=target,
+                    aliases=concept_aliases,
+                )
+                if concept:
+                    report.notes.append(
+                        f"Concept memory: '{concept['label']}' is now {concept['state']} "
+                        f"from {len(concept.get('evidence') or [])} physics-backed evaluation(s)."
+                    )
             # Write-back (Phase 4): on a VERIFIED pass, bank a retrievable tip keyed to this species so the
             # next similar build recalls what worked (the flywheel turning). Verified-only + idempotent.
             if final >= target:
