@@ -177,7 +177,11 @@ def _role_geometry(role: str, size: float, girth: float, aspect: str = ""):
         return ({"family": "extrude", "height": round(L, 4), "fillet": round(0.5 * width, 4),
                  "profile": [[-depth, -width], [0.9 * depth, -width], [0.9 * depth, width], [-depth, width]]},
                 L, g)
-    raise ValueError(f"unsupported anatomy role {role!r}; add an explicit compiler role before building it")
+    # Open-world graph vocabulary: an LLM may name a mechanical module "joint",
+    # "battery_pod", or a future concept we have never enumerated. It is still a
+    # connected physical part, so realize it as a conservative tapered module
+    # instead of rejecting the entire novel body for a missing display role.
+    return _tapered(L, g, max(0.004, 0.65 * g)), L, g
 
 
 def _physics_proxy_from_geometry(geometry: dict | None, fallback_shape: str, fallback_radius: float) -> tuple[str, tuple[float, float] | None]:
@@ -389,6 +393,9 @@ def build_from_anatomy(graph: dict) -> RobotGene:
     a root part (parent null / role 'body') is required. ``symmetry: left_right`` mirrors a part to ±y."""
     parts = list(graph.get("parts") or [])
     robot_class = str(graph.get("robot_class") or "quadruped")
+    base_mount = str(graph.get("base_mount") or "free").lower()
+    if base_mount not in {"table", "floor", "free"}:
+        base_mount = "free"
     by_name = {p.get("name"): p for p in parts if p.get("name")}
     # root = explicit null-parent, else the first 'body' role, else the first part.
     root = next((p for p in parts if not p.get("parent")), None) or \
@@ -632,17 +639,69 @@ def build_from_anatomy(graph: dict) -> RobotGene:
         else:
             _emit_chain(part, nm, "")
 
-    # exactly one end effector (schema requires it): pick a distal-ish welded part, else the last segment.
+    # The LLM selects a TASK TOOL in the graph; this generic compiler attaches
+    # its physical mechanism at the nominated distal part. Tool choice remains
+    # semantic/open-world, while the collision-safe fingers are grounding.
+    ee_spec = graph.get("end_effector") if isinstance(graph.get("end_effector"), dict) else {}
+    ee_kind = str(ee_spec.get("kind") or "none").lower()
+    ee_parent = str(ee_spec.get("parent") or "")
+    ee_target = (leaf.get((ee_parent, "")) if ee_parent else None) or \
+        next((s.name for s in reversed(segs) if s.parent is not None), segs[-1].name)
+    end_effector_type = "none"
+    if ee_kind in {"gripper", "hand"}:
+        span = max(0.03, min(0.30, float(ee_spec.get("span") or 0.10)))
+        fingers = 2 if ee_kind == "gripper" else max(3, min(5, int(ee_spec.get("fingers") or 3)))
+        for s in segs:
+            if s.name == ee_target:
+                s.is_end_effector = True
+        if fingers == 2:
+            positions = [(span / 2, (0.0, -1.0, 0.0)), (-span / 2, (0.0, 1.0, 0.0))]
+        else:
+            positions = [
+                (span * math.cos(2 * math.pi * i / fingers) / 2,
+                 span * math.sin(2 * math.pi * i / fingers) / 2)
+                for i in range(fingers)
+            ]
+            positions = [((x, y), (-x, -y, 0.0)) for x, y in positions]
+        for i, item in enumerate(positions):
+            if fingers == 2:
+                offset, axis = item
+                mount = (0.0, offset, 0.0)
+            else:
+                mount, axis = item
+            ax_norm = math.sqrt(sum(float(v) ** 2 for v in axis)) or 1.0
+            axis = tuple(float(v) / ax_norm for v in axis)
+            segs.append(GeneSegment(
+                name=f"tool_finger_{i}", parent=ee_target, shape="box", length_m=0.06,
+                radius_m=0.012, mass_kg=0.03, joint_type="prismatic", joint_axis=axis,
+                joint_lower=0.0, joint_upper=0.045, mount_offset=mount,
+                actuator_torque_nm=8.0, material="metal"))
+        end_effector_type = "gripper"
+    elif ee_kind in {"suction", "spray", "hook"}:
+        for s in segs:
+            s.is_end_effector = s.name == ee_target
+        end_effector_type = {"suction": "suction", "spray": "spray_nozzle", "hook": "hook"}[ee_kind]
+
+    # Exactly one end effector is required by the schema: absent a task tool,
+    # mark a distal structural part without pretending it can grasp.
     if not any(s.is_end_effector for s in segs):
         ee = next((s for s in reversed(segs) if s.parent is not None), segs[-1])
         ee.is_end_effector = True
 
     _size_actuator_torques(segs)   # size each joint's actuator to the REAL load it bears (not a flat default)
+    mount_bounds = {
+        name: {"x": round(float(d.get("half_len", 0.0)), 5),
+               "y": round(float(d.get("half_w", 0.0)), 5)}
+        for name, d in dims.items()
+    }
+    metadata = {"anatomy_graph": True, "mount_bounds": mount_bounds}
+    if pose:
+        metadata["rest_pose"] = pose
     return RobotGene(id="anatomy_" + (graph.get("name") or robot_class), species=f"{robot_class}.anatomy",
-                     robot_class=robot_class, segments=segs, base_mount="free",
-                     end_effector_type="none", design_source="anatomy_graph",
+                     robot_class=robot_class, segments=segs, base_mount=base_mount,
+                     end_effector_type=end_effector_type, design_source="anatomy_graph",
                      composition_notes=["Compiled directly from the supplied anatomy graph."],
-                     metadata={"rest_pose": pose} if pose else {})
+                     metadata=metadata)
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -738,10 +797,16 @@ def generic_creature_gene(prompt: str, robot_class: str | None = None, n_legs: i
     # tentacles; it never routes those appendages through the walking-leg/foot machinery.
     n_pairs = max(1, min(4, int(n_legs) // 2)) if n_legs else 2
     tentacled = any(w in p for w in ("octopus", "cephalopod", "tentacle", "tentacled"))
+    # P4: animal PROPORTION priors so a horse (long legs), a gecko (short splayed legs) and a turtle (short wide)
+    # stop composing to one generic skeleton. 1.0 for generic/dog -> the fixed defaults (byte-identical baseline).
+    from virturoid.services.animal_proportions import animal_proportions
+    prop = animal_proportions(p)
     try:
         g = build_from_anatomy(_generic_legged_graph(
             n_pairs=n_pairs, appendage_role="tentacle" if tentacled else "leg",
             body_aspect="round" if tentacled else "",
+            leg=round(0.42 * prop["leg"], 4), body=round(0.58 * prop["torso"], 4),
+            girth=round(0.13 * (prop["mass"] ** (1.0 / 3.0)), 4), fan=(prop["stance"] > 1.2),
         ))
         if tentacled:
             g.robot_class = "legged"

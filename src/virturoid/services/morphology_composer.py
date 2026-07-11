@@ -16,6 +16,10 @@ import math
 from virturoid.schemas.gene import RobotGene
 from virturoid.services.morphology_builder import MorphologyBuilder
 
+
+class LLMDesignUnavailable(RuntimeError):
+    """The AI-first design path could not obtain a grounded LLM proposal."""
+
 _GRASP_WORDS = ("grasp", "grip", "pick", "sort", "manipulat", "lift", "place", "assemble")
 _MOBILE_WORDS = ("mobile", "drive", "navigate", "deliver", "rover", "wheel", "transport", "patrol")
 _LEGGED_WORDS = ("quadruped", "legged", "four legs", "four-legged", "walk on legs", "walking robot",
@@ -157,6 +161,8 @@ def compose_from_spec(spec: dict) -> RobotGene:
     # instead of standing on four straight-down posts.
     if spec.get("rest_pose"):
         gene.metadata = {**(getattr(gene, "metadata", None) or {}), "rest_pose": dict(spec["rest_pose"])}
+    if spec.get("design_source"):
+        gene.design_source = str(spec["design_source"])
     return gene
 
 
@@ -273,27 +279,33 @@ def morphology_from_requirements(reach_m: float, payload_kg: float, *, prompt: s
         elif scale_m:
             s = max(0.5, min(2.5, float(scale_m) / 0.45))
         sm, st = s ** 3, s ** 2
+        # P4: animal proportion priors (leg length / stance width / torso length / mass) — 1.0 for generic/dog so
+        # the gait-pinned baseline is byte-identical; a horse gets long legs, a gecko short splayed legs, etc.
+        from virturoid.services.animal_proportions import animal_proportions
+        prop = animal_proportions(p)
+        lp, wp, tp, mp = prop["leg"], prop["stance"], prop["torso"], prop["mass"]
+        _tl, _cl = 0.12 * s * lp, 0.12 * s * lp            # thigh / calf link length (the gait-determining lever)
         # Real-quadruped leg topology (matches a Go1-class baseline): 3 actuated DOF per leg —
         # hip ABDUCTION (roll about body x) + hip PITCH (thigh) + KNEE (shin) — then a welded foot.
         qleg = [{"length": 0.025 * s, "axis": (1, 0, 0), "torque": round(14.0 * st, 2), "radius": 0.032 * s,
                  "mass": 0.15 * sm, "lower": -0.7, "upper": 0.7,
                  "geometry": _role("quad_hip", 0.025 * s, 0.032 * s)},                       # hip abduction (roll)
-                {"length": 0.12 * s, "axis": (0, 1, 0), "torque": round(16.0 * st, 2), "radius": 0.035 * s,
-                 "mass": 0.3 * sm, "geometry": _role("quad_thigh", 0.12 * s, 0.035 * s)},     # thigh
-                {"length": 0.12 * s, "axis": (0, 1, 0), "torque": round(12.0 * st, 2), "radius": 0.030 * s,
-                 "mass": 0.3 * sm, "geometry": _role("quad_calf", 0.12 * s, 0.030 * s)},      # calf (shin)
+                {"length": _tl, "axis": (0, 1, 0), "torque": round(16.0 * st, 2), "radius": 0.035 * s,
+                 "mass": 0.3 * sm * mp, "geometry": _role("quad_thigh", _tl, 0.035 * s)},     # thigh
+                {"length": _cl, "axis": (0, 1, 0), "torque": round(12.0 * st, 2), "radius": 0.030 * s,
+                 "mass": 0.3 * sm * mp, "geometry": _role("quad_calf", _cl, 0.030 * s)},      # calf (shin)
                 {"length": 0.05 * s, "axis": (0, 1, 0), "torque": round(6.0 * st, 2), "radius": 0.038 * s,
-                 "mass": 0.3 * sm, "joint": "fixed", "shape": "box",
+                 "mass": 0.3 * sm * mp, "joint": "fixed", "shape": "box",
                  "geometry": {"family": "extrude", "height": 0.05 * s,
                               "profile": [[-0.045 * s, -0.022 * s], [0.045 * s, -0.022 * s],
                                           [0.045 * s, 0.022 * s], [-0.045 * s, 0.022 * s]],
                               "fillet": 0.006 * s}}]                                          # foot pad
         if per_side == 2:
-            xs = [0.12 * s, -0.12 * s]                    # exact legacy quadruped layout at s=1 (gait-stable)
+            xs = [round(0.12 * s * tp, 4), round(-0.12 * s * tp, 4)]   # torso length prior (dachshund long, etc.)
         else:                                             # spread legs evenly front→back along the body
-            span = 0.14 * s
+            span = 0.14 * s * tp
             xs = [round(span - i * (2 * span / (per_side - 1)), 3) for i in range(per_side)]
-        sy_mount = 0.13 * s
+        sy_mount = round(0.13 * s * wp, 4)                # stance width prior (gecko splayed, horse narrow)
         mounts = [(x, sy) for x in xs for sy in (sy_mount, -sy_mount)]   # left + right of each x station
         torso_r = round((0.16 + 0.02 * (per_side - 2)) * s, 3)  # widen the torso for more leg pairs
         cls = "quadruped" if n == 4 else "legged"
@@ -446,6 +458,7 @@ def _morphology_quality_issues(gene) -> list[str]:
     problems (fed back to the LLM to repair); empty means the body is acceptable. Templates all pass this gate."""
     issues: list[str] = _articulation_issues(gene)
     seg = {s.name: s for s in gene.segments}
+    mount_bounds = ((getattr(gene, "metadata", None) or {}).get("mount_bounds") or {})
     for s in gene.segments:
         if s.parent is None or s.joint_type == "prismatic":   # root + gripper jaws (bridged) are exempt
             continue
@@ -453,12 +466,19 @@ def _morphology_quality_issues(gene) -> list[str]:
         if p is None:
             continue
         mo = getattr(s, "mount_offset", (0.0, 0.0, 0.0))
-        lateral = max(abs(mo[0]), abs(mo[1]))
-        if lateral - float(p.radius_m) > 0.02:                # >2 cm beyond the parent surface = a float
+        # Graph-authored torsos have a front/rear extent as well as a lateral
+        # radius. A semantic front/rear mount is valid inside that envelope;
+        # raw recipes without bounds retain the conservative radial check.
+        bounds = mount_bounds.get(p.name) if isinstance(mount_bounds, dict) else None
+        x_limit = float(bounds.get("x", p.radius_m)) if isinstance(bounds, dict) else float(p.radius_m)
+        y_limit = float(bounds.get("y", p.radius_m)) if isinstance(bounds, dict) else float(p.radius_m)
+        outside_x = abs(float(mo[0])) - x_limit
+        outside_y = abs(float(mo[1])) - y_limit
+        if max(outside_x, outside_y) > 0.02:                  # >2 cm beyond the parent surface = a float
+            envelope = f"x limit {x_limit:.3f} m, y limit {y_limit:.3f} m"
             issues.append(
-                f"segment '{s.name}' mounts {lateral:.3f} m to the side of parent '{s.parent}', whose "
-                f"surface is only {p.radius_m:.3f} m wide — it floats in empty space. Reduce its "
-                f"mount_offset x/y to <= the parent's radius so the limb attaches to the body.")
+                f"segment '{s.name}' mounts outside parent '{s.parent}' attachment envelope ({envelope}), "
+                "it floats in empty space. Reduce its mount offset or add a connecting link.")
     if len(gene.segments) < 4:
         issues.append("the body has too few parts (<4) — add limb segments and/or a head so it is a real machine.")
     if (gene.robot_class or "").lower() in {"humanoid", "biped", "quadruped", "legged"}:
@@ -501,24 +521,34 @@ def _pose_quality_issues(gene) -> list[str]:
 
 def propose_morphology_spec(prompt: str, *, reach_m: float | None = None, payload_kg: float | None = None,
                             environment: str | None = None, llm=None, robot_class: str | None = None,
-                            repair_tries: int = 2) -> dict:
+                            repair_tries: int = 2, require_llm: bool = False,
+                            validator=None) -> dict:
     """Propose a block recipe. With an ``llm`` the LLM DESIGNS the body over the constrained menu (any class,
     P2 — the gate that forced templates for humanoid/quadruped/etc is gone) under a proposer→verify→REPAIR
     loop: each proposal is composed (kinematic/schema validity) and quality-gated (connection + non-
     degeneracy); problems are fed back to the LLM to fix, up to ``repair_tries`` times. Any persistent failure
     (or no backend) falls back to the deterministic template — so a bad/declined LLM proposal never ships a
-    broken body. ``robot_class`` (from the build planner) steers the template fallback + hints the LLM."""
-    heuristic = morphology_from_requirements(reach_m or 0.65, payload_kg or 0.25, prompt=prompt,
-                                             environment=environment, robot_class=robot_class)
-    heuristic["design_source"] = "heuristic"
-    if llm is None:
+    broken body. In ``require_llm`` mode it raises instead: production must not replace an ungrounded LLM body
+    with a template. ``validator`` adds caller-specific grounding checks whose findings are fed back for repair.
+    ``robot_class`` is only a planner hint; the recipe's class is open-ended."""
+    def heuristic_fallback() -> dict:
+        heuristic = morphology_from_requirements(reach_m or 0.65, payload_kg or 0.25, prompt=prompt,
+                                                 environment=environment, robot_class=robot_class)
+        heuristic["design_source"] = "heuristic"
         return heuristic
+
+    if llm is None:
+        if require_llm:
+            raise LLMDesignUnavailable("Morphology LLM is not configured or reachable; no template body was substituted.")
+        return heuristic_fallback()
     errors: list[str] | None = None
     for _ in range(max(1, repair_tries + 1)):
         try:
             raw = _llm_spec(prompt, reach_m, payload_kg, llm, robot_class=robot_class, errors=errors)
             gene = compose_from_spec(raw)                 # verifier: realize + validate the kinematic tree
             quality = _morphology_quality_issues(gene) + _pose_quality_issues(gene)   # connection + rest-pose
+            if validator is not None:
+                quality += list(validator(gene) or [])     # task/load grounding; failures drive another LLM repair
             try:                                          # + the geometric PROPORTION critic (render->verify)
                 from virturoid.services.anatomy_critic import critique_gene
                 quality += [i["detail"] for i in critique_gene(gene)["issues"]
@@ -532,7 +562,10 @@ def propose_morphology_spec(prompt: str, *, reach_m: float | None = None, payloa
             return raw
         except Exception as e:  # noqa: BLE001 - unbuildable/declined proposal -> repair, then template fallback
             errors = [f"the recipe failed to build ({e}); return a corrected, buildable JSON recipe."]
-    return heuristic
+    if require_llm:
+        detail = "; ".join(errors or ["the model did not return a usable morphology recipe"])
+        raise LLMDesignUnavailable("LLM morphology recipe did not clear grounding: " + detail)
+    return heuristic_fallback()
 
 
 def _intent_validation_issues(gene, req) -> list[str]:
@@ -544,6 +577,45 @@ def _intent_validation_issues(gene, req) -> list[str]:
         return [f["detail"] for f in report["risk_flags"] if f["severity"] in ("fatal", "high")]
     except Exception:  # noqa: BLE001
         return []
+
+
+def _ground_anatomy_graph(prompt: str, plan, req, llm, *, repair_tries: int = 2) -> RobotGene:
+    """Let an LLM author an open-world anatomy graph, then repair from grounded evidence.
+
+    The graph contains semantic parts, topology, mounting intent, and task tool;
+    the compiler solves coordinates and collision-safe mechanisms generically. This
+    is deliberately not a taxonomy/template selector: an unknown class or module
+    is preserved in the graph and realized through the same building rules.
+    """
+    from virturoid.services.anatomy_compiler import build_from_anatomy
+    from virturoid.services.anatomy_designer import propose_anatomy
+
+    errors: list[str] | None = None
+    for _ in range(max(1, repair_tries + 1)):
+        try:
+            graph = propose_anatomy(prompt, plan, req, llm, errors=errors)
+            gene = build_from_anatomy(graph)
+            issues = list(gene.validate())
+            issues += _morphology_quality_issues(gene)
+            issues += _pose_quality_issues(gene)
+            issues += _intent_validation_issues(gene, req)
+            try:
+                from virturoid.services.anatomy_critic import critique_gene
+
+                issues += [i["detail"] for i in critique_gene(gene)["issues"]
+                           if i["severity"] in ("high", "fatal")]
+            except Exception:  # noqa: BLE001 - optional visual/physics critic
+                pass
+            issues = list(dict.fromkeys(str(issue) for issue in issues if issue))
+            if not issues:
+                gene.design_source = "llm_anatomy_graph"
+                return gene
+            errors = issues
+        except Exception as exc:  # noqa: BLE001 - feed build errors back to the model, never a template
+            errors = [f"the anatomy graph did not compile: {exc}"]
+    raise LLMDesignUnavailable(
+        "LLM anatomy graph did not clear grounding: " + "; ".join((errors or [])[:6])
+    )
 
 
 def _attach_plan_provenance(gene: RobotGene, plan) -> RobotGene:
@@ -558,7 +630,8 @@ def _attach_plan_provenance(gene: RobotGene, plan) -> RobotGene:
 
 
 def compose_robot(prompt: str, *, llm="auto", reach_m: float | None = None,
-                  payload_kg: float | None = None, plan=None, ensure_walkable: bool = False) -> RobotGene:
+                  payload_kg: float | None = None, plan=None, ensure_walkable: bool = False,
+                  strict_llm: bool = False) -> RobotGene:
     """Compose a robot AND finalize it for the task. Every composition path funnels through here, so the single
     ``finalize_for_task`` step (task-adaptive materials + skeleton thickness) is applied to whatever body was
     built — once, before sim/export — keeping the design, physics, and BOM in agreement.
@@ -567,7 +640,8 @@ def compose_robot(prompt: str, *, llm="auto", reach_m: float | None = None,
     diagnosis-driven quadruped walkability fallback: if the built quad ROLLS OVER, reach for the fanned
     wide-stance + crawl-gait HINT (per-request, sleek-when-possible, LLM designs preserved). A caller preparing
     a robot for a WALKING task opts in; a generic build pays no eval cost."""
-    gene = _compose_robot_impl(prompt, llm=llm, reach_m=reach_m, payload_kg=payload_kg, plan=plan)
+    gene = _compose_robot_impl(prompt, llm=llm, reach_m=reach_m, payload_kg=payload_kg, plan=plan,
+                               strict_llm=strict_llm)
     build_plan = dict((gene.metadata or {}).get("build_plan", {}))
     try:
         # An AERIAL prompt (drone/quadcopter/...) is a rotorcraft, not a legged/wheeled body: compose a
@@ -575,7 +649,7 @@ def compose_robot(prompt: str, *, llm="auto", reach_m: float | None = None,
         # (see aerial.py / _honest_fly). A 'flying fish' stays aquatic — the undulatory swim tier is a better fit.
         from virturoid.services.aerial import build_quadcopter, is_aerial_prompt
         from virturoid.services.aquatic import is_aquatic_prompt as _is_aquatic
-        if is_aerial_prompt(prompt) and not _is_aquatic(prompt):
+        if not strict_llm and is_aerial_prompt(prompt) and not _is_aquatic(prompt):
             gene = build_quadcopter(prompt)
     except Exception:  # noqa: BLE001 - aerial routing is value-add; never block a compose
         pass
@@ -584,7 +658,7 @@ def compose_robot(prompt: str, *, llm="auto", reach_m: float | None = None,
         # (a snake) if the built body branches into legs, then laterally-compress it into a fish cross-section so
         # it generates REAL undulatory thrust (measured 0.06 m round -> 0.25 m flat: DOES NOT SWIM -> SWIMS).
         from virturoid.services.aquatic import _is_serial_spine, ensure_aquatic_body, is_aquatic_prompt
-        if is_aquatic_prompt(prompt):
+        if not strict_llm and is_aquatic_prompt(prompt):
             if not _is_serial_spine(gene):
                 gene = _compose_robot_impl("a snake robot", llm=None)
             ensure_aquatic_body(gene)
@@ -603,7 +677,7 @@ def compose_robot(prompt: str, *, llm="auto", reach_m: float | None = None,
         # D3a: cap at /4.5 (aspect 2.25), NOT /4.4 (aspect exactly 2.2, which round(,5) nudges UP past the gate's
         # strict `< 2.2` — the T4 seed3 experiment caught a clamped leg failing its own gate by 4e-4). /4.5 lands
         # strictly INSIDE the band so a clamp output always passes the check that motivated it.
-        if (gene.robot_class or "").lower() in ("quadruped", "legged"):
+        if not strict_llm and (gene.robot_class or "").lower() in ("quadruped", "legged"):
             from virturoid.services.bom_builder import _scale_geo
             for s_ in gene.segments:
                 n_ = (s_.name or "").lower()
@@ -616,7 +690,7 @@ def compose_robot(prompt: str, *, llm="auto", reach_m: float | None = None,
                         _scale_geo(s_.geometry, f_)
     except Exception:  # noqa: BLE001
         pass
-    if ensure_walkable and (gene.robot_class or "") not in ("aerial", "aquatic"):
+    if ensure_walkable and not strict_llm and (gene.robot_class or "") not in ("aerial", "aquatic"):
         # opt-in per-request walkability fallback — but a drone (aerial) or a fish (aquatic) is NOT a walker;
         # running the quad-walkability rewrite on one would mangle its purpose-built body.
         try:
@@ -632,7 +706,7 @@ def compose_robot(prompt: str, *, llm="auto", reach_m: float | None = None,
 
 
 def _compose_robot_impl(prompt: str, *, llm="auto", reach_m: float | None = None,
-                        payload_kg: float | None = None, plan=None) -> RobotGene:
+                        payload_kg: float | None = None, plan=None, strict_llm: bool = False) -> RobotGene:
     """Parse requirements from the prompt, compose a robot from blocks, and return the validated gene.
 
     The general path: the **LLM designs the body** over the building blocks (``_llm_spec`` — any kinematic
@@ -646,18 +720,28 @@ def _compose_robot_impl(prompt: str, *, llm="auto", reach_m: float | None = None
     if llm == "auto":
         from virturoid.services.llm_client import get_llm
         llm = get_llm("morphology")        # the configured backend (OpenAI gpt-5.2, or the local PC model)
+    if strict_llm and llm is None:
+        raise LLMDesignUnavailable("Morphology LLM is not configured or reachable; no template body was substituted.")
     if plan is None:
         # Classify WITH the LLM when one is available: the class gate below decides whether the general anatomy
         # designer runs, so a keyword-only plan would misroute every un-enumerated creature ("axolotl",
         # "wyvern", "basilisk") to a manipulator and they'd NEVER reach the anatomy path. The LLM knows an
         # axolotl is an animal; the keyword list only knows the species someone typed in. (llm=None offline.)
-        plan = plan_build(prompt, llm=llm)
+        plan = plan_build(prompt, llm=llm, require_llm=strict_llm)
 
     def completed(gene: RobotGene) -> RobotGene:
         return _attach_plan_provenance(gene, plan)
 
     req = build_requirements_from_prompt(prompt, payload_kg=payload_kg, reach_m=reach_m)
     from virturoid.services.spec_parser import parse_target_height_m
+
+    if strict_llm:
+        # The production path is an open-world ANATOMY GRAPH, not a raw
+        # coordinate dump or a finite class template. The model names parts,
+        # topology, attachment intent, and a task tool; the generic compiler
+        # grounds those choices in connected geometry and returns precise
+        # simulator evidence for LLM repair.
+        return completed(_ground_anatomy_graph(prompt, plan, req, llm))
     target_height_m = parse_target_height_m(prompt)        # honor "a 1.2 m tall humanoid" even offline (§4.8E)
 
     # DESIGN-INTENT COMPILER (general + reliable): with an LLM, it DESIGNS the BODY PLAN — class, scale, how
@@ -693,24 +777,25 @@ def _compose_robot_impl(prompt: str, *, llm="auto", reach_m: float | None = None
         # general compiler can't yet express (a legless serpent, an 8-radial spider, a leaping frog) have a
         # dedicated builder; EVERYTHING ELSE legged falls to a CLASS-GENERAL generic creature (NOT a per-species
         # lookup) so the body is connected and standing, never a flat slab. The LLM supplies the species.
-        try:
-            from virturoid.services.novel_anatomy import novel_archetype_gene
-            arch = novel_archetype_gene(prompt)
-            if arch is not None and not arch.validate():
-                arch.design_source = "archetype"
-                arch.composition_notes = ["The authored anatomy did not clear validation; a named deterministic archetype was selected."]
-                return completed(arch)
-        except Exception:  # noqa: BLE001
-            pass
-        try:
-            from virturoid.services.anatomy_compiler import generic_creature_gene
-            generic = generic_creature_gene(prompt, plan.robot_class)
-            if generic is not None:
-                generic.design_source = "anatomy_generic"
-                generic.composition_notes = ["The authored anatomy was unavailable or did not clear validation; the general deterministic anatomy compiler was used."]
-                return completed(generic)
-        except Exception:  # noqa: BLE001
-            pass
+        if not strict_llm:
+            try:
+                from virturoid.services.novel_anatomy import novel_archetype_gene
+                arch = novel_archetype_gene(prompt)
+                if arch is not None and not arch.validate():
+                    arch.design_source = "archetype"
+                    arch.composition_notes = ["The authored anatomy did not clear validation; a named deterministic archetype was selected."]
+                    return completed(arch)
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                from virturoid.services.anatomy_compiler import generic_creature_gene
+                generic = generic_creature_gene(prompt, plan.robot_class)
+                if generic is not None:
+                    generic.design_source = "anatomy_generic"
+                    generic.composition_notes = ["The authored anatomy was unavailable or did not clear validation; the general deterministic anatomy compiler was used."]
+                    return completed(generic)
+            except Exception:  # noqa: BLE001
+                pass
 
     if llm is not None and (plan.robot_class or "").lower() != "mobile_manipulator":
         # (the composite goes straight to its deterministic chassis+wheels+arm spec below: the live LLM designer
@@ -730,10 +815,24 @@ def _compose_robot_impl(prompt: str, *, llm="auto", reach_m: float | None = None
                 repaired = build_from_intent(
                     propose_intent(prompt, plan, req, llm, errors=fatal), prompt, req)
                 if repaired is not None and not repaired.validate():
-                    return completed(repaired)
+                    repaired_fatal = _intent_validation_issues(repaired, req)
+                    if not repaired_fatal:
+                        return completed(repaired)
+                    if strict_llm:
+                        raise LLMDesignUnavailable(
+                            "LLM repair proposal still failed grounding: " + "; ".join(repaired_fatal[:4])
+                        )
+                if strict_llm:
+                    raise LLMDesignUnavailable(
+                        "LLM repair proposal did not produce a grounded body: " + "; ".join(fatal[:4])
+                    )
                 return completed(gene)                        # repair didn't build cleanly -> keep the first
-        except Exception:  # noqa: BLE001 - any LLM/build failure -> deterministic keyword builder below
-            pass
+        except Exception as exc:  # noqa: BLE001 - strict mode must not choose a template
+            if strict_llm:
+                raise LLMDesignUnavailable(f"LLM morphology proposal did not clear grounding: {exc}") from exc
+
+    if strict_llm:
+        raise LLMDesignUnavailable("LLM morphology proposal did not produce a grounded buildable body.")
 
     # Offline (no LLM) OR the intent path failed: the deterministic, keyword-routed ORIGINAL builder — the same
     # credible templates, just selected by keywords instead of by the LLM. Quality never regresses.
@@ -803,7 +902,8 @@ def _fallback_gene(prompt: str, heuristic_spec: dict, *, target_height_m: float 
 
 def compose_working_robot(prompt: str, *, llm=None, reach_m: float | None = None,
                           payload_kg: float | None = None, iterations: int = 4, population: int = 8,
-                          scene_count: int = 4, seed: int = 0, best_response: bool | None = None) -> dict:
+                          scene_count: int = 4, seed: int = 0, best_response: bool | None = None,
+                          strict_llm: bool = False) -> dict:
     """Compose a robot from blocks AND co-design it into a WORKING one (the full autonomous path).
 
     Composes a gene (``compose_robot``), then co-designs it for ITS task — generalized across
@@ -815,7 +915,7 @@ def compose_working_robot(prompt: str, *, llm=None, reach_m: float | None = None
     """
     from virturoid.services.task_matched_eval import robot_kind
 
-    gene = compose_robot(prompt, llm=llm, reach_m=reach_m, payload_kg=payload_kg)
+    gene = compose_robot(prompt, llm=llm, reach_m=reach_m, payload_kg=payload_kg, strict_llm=strict_llm)
     kind = robot_kind(gene)
     if kind == "manipulator":
         from virturoid.services.gene_codesign import co_optimize_gene
