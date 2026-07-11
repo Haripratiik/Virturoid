@@ -80,7 +80,10 @@ class KnowledgeRecallTests(unittest.TestCase):
             vm = RoboticsVectorMemory(db)
             # refresh=True (default) indexes everything on the fly -> a cold caller gets full recall
             know = vm.recall_knowledge(tabletop_arm_gene(), "grasp", failure_code="reach_limited")
-            self.assertEqual(set(know), {"tips", "lessons", "skills"})
+            # P2: the episode channel joins the bundle (empty without behaviour features; a reader for the
+            # previously-unread episode sub-space)
+            self.assertEqual(set(know), {"tips", "lessons", "skills", "episodes"})
+            self.assertEqual(know["episodes"], [])              # no behaviour features passed -> honest empty
             self.assertTrue(know["tips"] and know["lessons"] and know["skills"])
             self.assertEqual(know["skills"][0]["obj_id"], "grasp.arm")
 
