@@ -697,7 +697,17 @@ def build_from_anatomy(graph: dict) -> RobotGene:
     metadata = {"anatomy_graph": True, "mount_bounds": mount_bounds}
     if pose:
         metadata["rest_pose"] = pose
-    return RobotGene(id="anatomy_" + (graph.get("name") or robot_class), species=f"{robot_class}.anatomy",
+    # STRUCTURAL identity: append a short deterministic signature of the actual morphology so bodies that DIFFER
+    # (a horse's long legs vs a dog's) get DISTINCT ids — otherwise every anatomy quad collapsed to
+    # 'anatomy_creature', banking to ONE skill (keep-best) so the flywheel/transfer-ledger couldn't tell them
+    # apart or compound across them. This is deterministic GROUNDING (identity from structure), not a design choice.
+    import hashlib
+    _n = len(segs)
+    _dof = sum(1 for s in segs if s.joint_type in ("revolute", "prismatic"))
+    _tl = round(sum(s.length_m for s in segs), 3)          # captures the P4 leg-length diversity
+    _sig = hashlib.md5(f"{robot_class}:{_n}:{_dof}:{_tl}".encode("utf-8")).hexdigest()[:8]
+    return RobotGene(id="anatomy_" + (graph.get("name") or robot_class) + "_" + _sig,
+                     species=f"{robot_class}.anatomy",
                      robot_class=robot_class, segments=segs, base_mount=base_mount,
                      end_effector_type=end_effector_type, design_source="anatomy_graph",
                      composition_notes=["Compiled directly from the supplied anatomy graph."],

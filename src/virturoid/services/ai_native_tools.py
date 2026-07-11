@@ -281,7 +281,13 @@ def _auto_bank_gait(gene, r, base_params) -> str | None:
                                     "survived": bool(r.get("survived", False)),
                                     "credible": classify(r).startswith("CREDIBLE")})
     with MemoryDB(DEFAULT_DB_PATH) as db:
-        return bank_gait(db, gene, holder)
+        # GROW THE TRANSFER LEDGER (P3) from real usage: when enabled, banking a credible walk also cross-evaluates
+        # it on the K nearest banked bodies (2K bounded rollouts), so the physics-verified transfer corpus the gated
+        # metric learns from accrues from ordinary builds. Off by default (keeps quick verify fast); a batch/night
+        # run or deliberate build sets VIRTUROID_GROW_TRANSFER_LEDGER=1 so the moat compounds without slowing iteration.
+        import os
+        return bank_gait(db, gene, holder,
+                         cross_eval=os.environ.get("VIRTUROID_GROW_TRANSFER_LEDGER", "0") == "1")
 
 
 def _record_gait_lesson(gene, failure_code: str, operator: str, *, improvement: float,
