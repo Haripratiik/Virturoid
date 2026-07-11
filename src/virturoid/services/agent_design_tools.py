@@ -159,6 +159,13 @@ def get_design_schema(args: dict) -> dict:
     g = _corpus_grounding(args or {})                          # Thesis A: retrieved verified exemplars for the roles
     if g:
         schema["corpus_grounding"] = g
+    try:                                                       # WS-B.2: if a DRAFT graph is supplied, add the
+        from virturoid.services.exemplar_retrieval import exemplar_grounding   # query-specific nearest VERIFIED
+        eg = exemplar_grounding(args or {})                    # bodies (scores omitted — mode-collapse guard)
+        if eg:
+            schema.update(eg)
+    except Exception:  # noqa: BLE001 - retrieval grounding is value-add; never blocks the schema
+        pass
     return schema
 
 
@@ -344,6 +351,16 @@ def submit_design(args: dict) -> dict:
     warns = _proportion_warnings(graph)                        # T8: non-blocking proportion advisories
     if warns:
         out["proportion_warnings"] = warns
+    try:                                                       # WS-B.4: surface EVERY compiler coercion of the
+        from virturoid.services.coercion_audit import detect_coercions   # authored graph — no silent rewrites
+        coer = detect_coercions(graph)
+        if coer:
+            out["coercions"] = coer
+            out["coercions_note"] = ("the compiler clamped/defaulted these fields of your design (buildability / "
+                                     "omitted-field defaults) — surfaced so nothing is changed silently; author "
+                                     "them explicitly to keep full control")
+    except Exception:  # noqa: BLE001 - the audit is grounding value-add; a valid design never blocks on it
+        pass
     img = _render_gene(gene, rid)
     if img:
         out["artifacts"] = [img]

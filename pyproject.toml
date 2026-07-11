@@ -12,6 +12,9 @@ requires-python = ">=3.10"
 dependencies = ["numpy>=1.24"]
 
 [project.optional-dependencies]
+# Test runner kept separate from the optional robotics engines so the pure schema,
+# planning, and memory gates remain fast and cross-platform.
+test = ["pytest>=8"]
 # Physics simulation + evaluation + real CAD export (the standard build path: MuJoCo is the engine, build123d
 # gives real B-rep STEP/STL so a build emits real CAD, not placeholders).
 sim = ["mujoco>=3.0", "Pillow>=10.0", "build123d>=0.5"]
@@ -46,3 +49,6 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
+markers = [
+    "slow: physics-heavy or long-running tests (Design-Bench verdict gate, corpus-factory night, DR sweeps)",
+]

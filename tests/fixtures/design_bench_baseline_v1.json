@@ -1,0 +1,17 @@
+{
+  "note": "Design-Bench v1 baseline (offline heuristic cassette). The regression gate asserts current >= these minus tolerance. Re-record via scripts/design_bench.py --record when the battery/composer changes.",
+  "battery_version": "v1",
+  "model": "offline_heuristic_v1",
+  "schema_valid@1": 1.0,
+  "compile@1": 1.0,
+  "verdict@1": 0.65,
+  "diversity_unique_ratio": 0.5,
+  "spec_faithfulness": 0.5,
+  "by_family": {
+    "animal": 0.0,
+    "vehicle": 1.0,
+    "arm": 0.75,
+    "hybrid": 1.0,
+    "novel": 1.0
+  }
+}
