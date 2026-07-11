@@ -334,6 +334,9 @@ def submit_design(args: dict) -> dict:
         ground_gene(gene, material=str(args.get("material") or "aluminum"), fill=0.25)
     except Exception:  # noqa: BLE001 - grounding is value-add; a valid gene is still usable
         pass
+    # NB (flywheel_breakthrough §3.M/§5d): in-place stance_repair was tried on this path and REVERTED — 0/5
+    # measured product walk-rate lift (dominant failure is fore-aft LURCH, not lateral roll-over). Module kept
+    # for the factory verify-build only.
     from virturoid.services.ai_native_tools import _render_gene, _summary
     rid = S.put_robot(gene, prompt=f"[submitted:{graph.get('name', 'design')}]", label="submitted")
     _bank_to_flywheel(gene, prompt=f"[agent] {graph.get('name', 'design')}", task="", success_rate=0.0)  # B4 provenance

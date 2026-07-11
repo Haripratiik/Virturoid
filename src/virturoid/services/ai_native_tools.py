@@ -661,6 +661,10 @@ def create_robot(args: dict) -> dict:
     # out of the box. tune_crawl_gait finds this body's credible op-point and caches it on the gene (the quad
     # short-circuits on its first, already-credible rollout, so it stays cheap + byte-identical).
     if robot_kind(gene) == "legged" and args.get("tune_gait", True):
+        # NB (flywheel_breakthrough_plan §3.M / §5d): in-place stance_repair was TRIED here and REVERTED — measured
+        # 0/5 product-path walk-rate lift (composer already fans offline; the dominant failure is fore-aft LURCH,
+        # not lateral roll-over, which lateral splay cannot fix). stance_repair.py is kept for the factory
+        # verify-build (default-gait gate), not the hot path.
         try:
             from virturoid.services.morph_policy import tune_crawl_gait
             tune_crawl_gait(gene)
