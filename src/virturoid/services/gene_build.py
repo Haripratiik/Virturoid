@@ -757,17 +757,20 @@ def _build_legged_package(gene: RobotGene, prompt: str, output_dir: Path, contro
     # so every un-banked composed walker (six-legged, a fresh quad) read 'fell'/0.0 here while the viewport walked it
     # on the bare CPG -- the headline contradicted the 3D replay. A genuinely unstable anatomy body still reads 'fell'.
     use_pol = pol if (pol is not None and getattr(pol, "obs_mean", None) is not None) else None
-    rr = recipe_rollout_morph(gene, use_pol, steps=900)
+    rr = recipe_rollout_morph(gene, use_pol, steps=900, record_qpos=True)   # qpos -> classify's ROLL/PITCH gate
     forward_m = float(rr.get("forward", 0.0))
     cadence = float(rr.get("cadence", 0.0)); upright_frac = float(rr.get("upright_frac", 0.0))
     n_feet = int(rr.get("n_feet", 0))
-    # HONEST 'walked' gate (anti-Goodhart): genuine forward distance AND sustained-tall posture AND a real stepping
-    # cadence -- so an upright SLIDE (cadence 0) or a forward TOPPLE does not certify as a walk. The upright
-    # threshold is 0.5 (not 0.6): a wide/low stance (six-legged, sprawled) walks fine at ~0.55 upright-fraction and
-    # the cadence + forward requirements already reject a slide (cadence 0) and a topple (no sustained cadence).
+    # HONEST 'walked' gate (v7-A3, master_plan_v7 §3): the build HEADLINE now shares the product's ONE un-gameable
+    # verdict -- classify() -- for legged bodies, so it cannot contradict verify_robot / the viewport. classify
+    # requires survived + upright + cadence + genuine stepping SUPPORT + forward AND a LEVEL body (roll<35/pitch<20):
+    # this is what closes the gap the old gate left OPEN -- a forward PITCH-DIVE lurch cleared forward+upright+cadence
+    # and falsely certified 'walked'. A non-legged body (n_feet<2, e.g. a wheeled deck) keeps the raw forward gate.
+    from virturoid.services.gait_quality import classify
+    gait_verdict = classify(rr)
+    walked = (gait_verdict.startswith("CREDIBLE") if n_feet >= 2
+              else forward_m > _WALK_MIN_FORWARD_M and upright_frac >= 0.5)
     upright = upright_frac >= 0.5
-    stepping = cadence >= 1.0 or n_feet < 2                          # a legged body must lift feet; non-legged skip
-    walked = forward_m > _WALK_MIN_FORWARD_M and upright and stepping
     status = "walked" if walked else ("upright" if upright_frac >= 0.5 else "fell")
     distance_m = abs(forward_m)
     # success_rate is GATED on genuinely walking — a slide/topple earns 0, not partial credit for raw displacement.
@@ -783,6 +786,7 @@ def _build_legged_package(gene: RobotGene, prompt: str, output_dir: Path, contro
         "status": status,
         "cadence_hz": cadence,
         "upright_frac": upright_frac,
+        "gait_verdict": gait_verdict,               # v7-A3: the un-gameable classify() verdict behind `status`
     }
     # The physics/evaluation model stays primitive and deterministic; write a second, package-local visual model
     # for the replay so a user sees the generated CAD-like anatomy, not only its collision capsules.  Fail-open

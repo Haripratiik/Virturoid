@@ -3,11 +3,25 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
+
+import numpy as np
 
 from virturoid.fixtures.gene_library import humanoid_upper_body_gene, tabletop_arm_gene
 from virturoid.services.gene_compiler import compile_gene_with_scene
 
 _MUJOCO = importlib.util.find_spec("mujoco") is not None
+
+
+def _lurch_rollout(pitch_deg):
+    """A rollout that clears forward+upright+cadence+support but PITCHES over — the exact Goodhart the old
+    gate missed. classify() reads the base quaternion (qpos[3:7]) for the roll/pitch orientation gate."""
+    import math
+    half = math.radians(pitch_deg) / 2.0
+    quat = np.array([0.0, 0.0, 0.5, math.cos(half), 0.0, math.sin(half), 0.0])   # xyz + (w,x,y,z) pitch about y
+    return {"survived": True, "forward": 0.8, "upright_frac": 0.9, "height_ratio": 0.9, "cadence": 2.5,
+            "support_frac": 0.6, "n_feet": 4, "alive": 900, "speed": 0.3, "finite": True,
+            "qpos_frames": [quat] * 4}
 
 
 @unittest.skipUnless(_MUJOCO, "MuJoCo not installed.")
@@ -79,6 +93,26 @@ class GeneBuildTests(unittest.TestCase):
             scene_set = json.loads(ss.read_text(encoding="utf-8"))
             self.assertEqual("locomotion", scene_set.get("purpose"))
             self.assertEqual([], scene_set["scenes"][0].get("objects"))
+
+    def test_legged_headline_uses_ungameable_classify_verdict(self):
+        """v7-A3: the build HEADLINE shares classify() for legged bodies — a forward PITCH-DIVE lurch (which the
+        old forward+upright+cadence gate certified as 'walked') no longer reads 'walked', and a clean level walk
+        with the same scalars does. Locks the headline to the same un-gameable verdict verify_robot uses."""
+        from virturoid.fixtures.gene_library import quadruped_gene
+        from virturoid.services.gene_build import build_gene_package
+
+        for pitch, expect_walked in ((45.0, False), (3.0, True)):     # lurch rejected; clean level walk accepted
+            with tempfile.TemporaryDirectory() as tmp, \
+                 mock.patch("virturoid.services.morph_policy.recipe_rollout_morph",
+                            return_value=_lurch_rollout(pitch)), \
+                 mock.patch("virturoid.services.learn_locomotion.banked_policy_for", return_value=None):
+                summary = build_gene_package(quadruped_gene(), "a quadruped that walks forward", Path(tmp) / "p")
+            self.assertIn("gait_verdict", summary)                     # the classify() string is surfaced
+            self.assertEqual(expect_walked, summary["status"] == "walked",
+                             f"pitch {pitch}: status={summary['status']} verdict={summary['gait_verdict']}")
+            if not expect_walked:
+                self.assertEqual(0.0, summary["success_rate"])         # a lurch earns no locomotion credit
+                self.assertIn("LURCH", summary["gait_verdict"].upper())
 
 
 if __name__ == "__main__":
