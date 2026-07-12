@@ -65,7 +65,16 @@ def rollout_cpu_mujoco(gene_or_xml, ctrl_seq, *, record_every: int = 5) -> dict:
 
 def rollout_mjx(gene_or_xml, ctrl_seq, *, batch: int = 1, record_every: int = 5) -> dict:
     """Replay ``ctrl_seq`` on MJX (single-env or batched). Guarded: raises ParityBackendUnavailable when MJX isn't
-    importable (this CPU box) — it runs on the GPU box, where this leg exercises the exact CPU/GPU comparison."""
+    importable (this CPU box) — it runs on the GPU box, where this leg exercises the exact CPU/GPU comparison.
+
+    TWO things here are load-bearing for a valid parity verdict, and both were wrong in the first cut:
+    1. **``lax.scan``, not a host loop.** Stepping ``mjx.step`` un-jitted in a Python ``for`` re-dispatches the whole
+       engine every iteration — 300 steps of a contact body never returns inside an SSH window (the diagnosed
+       "timeout"). ``scan`` compiles the step ONCE and runs the whole trajectory on-device.
+    2. **Record qpos AFTER the step**, exactly like ``rollout_cpu_mujoco`` (step → record). The first cut returned
+       the PRE-step qpos, so a bit-identical engine would still read one step out of phase vs CPU and trip the
+       state-divergence check with a *spurious* non-parity. CPU/CPU never caught it (same convention both sides);
+       the first real CPU-vs-MJX run would have. Keep these two recordings byte-aligned or the harness lies."""
     try:
         import jax
         import jax.numpy as jnp
@@ -76,21 +85,22 @@ def rollout_mjx(gene_or_xml, ctrl_seq, *, batch: int = 1, record_every: int = 5)
     import numpy as np
     m = mujoco.MjModel.from_xml_string(_xml_for(gene_or_xml))
     mx = mjx.put_model(m)
-    dx = mjx.make_data(mx)
+    dx0 = mjx.make_data(mx)
     seq = jnp.asarray(np.asarray(ctrl_seq, float))
     nu = m.nu
 
     def step(dx, u):
         dx = dx.replace(ctrl=u[:nu])
-        return mjx.step(mx, dx), dx.qpos
-    traj = []
-    for i in range(len(ctrl_seq)):
-        dx, qpos = step(dx, seq[i])
-        if i % record_every == 0:
-            traj.append(np.asarray(qpos, float))
-    fwd = float(np.asarray(dx.qpos, float)[0]) if m.nq >= 1 else 0.0
+        dx = mjx.step(mx, dx)          # advance FIRST...
+        return dx, dx.qpos             # ...then emit the POST-step qpos (matches the CPU convention)
+
+    final_dx, all_qpos = jax.lax.scan(step, dx0, seq)   # all_qpos: [n_steps, nq], one compile
+    all_qpos = np.asarray(all_qpos, float)
+    traj = all_qpos[::record_every] if all_qpos.shape[0] else all_qpos            # same indices CPU records
+    last = all_qpos[-1] if all_qpos.shape[0] else np.asarray(final_dx.qpos, float)
+    fwd = float(last[0]) if m.nq >= 1 else 0.0
     return {"backend": f"mjx_{'batch' if batch > 1 else 'single'}", "qpos_traj": np.array(traj),
-            "forward": fwd, "nu": nu, "n_steps": len(ctrl_seq), "finite": bool(np.all(np.isfinite(dx.qpos)))}
+            "forward": fwd, "nu": nu, "n_steps": len(ctrl_seq), "finite": bool(np.all(np.isfinite(last)))}
 
 
 BACKENDS = {"cpu_mujoco": rollout_cpu_mujoco,
