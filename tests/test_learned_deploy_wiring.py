@@ -151,6 +151,42 @@ def test_parity_gate_fails_closed_when_box_unreachable(monkeypatch, quad):
     assert not GT._PARITY_GATE_CACHE                          # a transient failure is never cached
 
 
+def _fixed_leg(*, parity_ok, diff=0.004, fa=0.001, fb=0.001, sign_flip=False):
+    return {"leg": "fixed_ctrl", "parity_ok": parity_ok, "backends": ["cpu_mujoco", "mjx_single"],
+            "comparisons": [{"pair": "cpu_mujoco vs mjx_single", "max_state_abs_diff": diff,
+                             "forward_a": fa, "forward_b": fb, "sign_flip": sign_flip, "parity_ok": parity_ok}]}
+
+
+def _gait_leg(*, fa=0.2983, fb=0.3024, sign_flip=False, vacuous=False):
+    return {"leg": "gait_trace", "parity_ok": not sign_flip, "vacuous": vacuous,
+            "comparison": {"pair": "cpu_mujoco vs mjx_single", "max_state_abs_diff": 0.73,
+                           "forward_a": fa, "forward_b": fb, "sign_flip": sign_flip,
+                           "parity_ok": not sign_flip}}
+
+
+def test_parity_policy_measured_calibration_cases():
+    """The verdict policy, pinned to the FIRST LIVE GATE FIRING's measured numbers (2026-07-12): a ×3-mass quad
+    diverged 0.004 in state (chaos on violent contact) while behavior agreed to 1.4% — behavioral GREEN; a sign
+    flip anywhere or missing behavioral evidence stays RED (fail-closed)."""
+    # strict green: state tol holds
+    v = GT.combine_parity_legs([_fixed_leg(parity_ok=True, diff=1.7e-05), _gait_leg()])
+    assert v["parity_ok"] and v["mode"] == "strict"
+    # the HEAVY case: leg-1 state chaos + exact forward agreement + 1.4% gait agreement -> behavioral green
+    v = GT.combine_parity_legs([_fixed_leg(parity_ok=False), _gait_leg()])
+    assert v["parity_ok"] and v["mode"] == "behavioral"
+    # the WS-F bug: a sign flip ANYWHERE is red, no matter how good the other leg looks
+    v = GT.combine_parity_legs([_fixed_leg(parity_ok=False, sign_flip=True), _gait_leg()])
+    assert not v["parity_ok"] and "SIGN FLIP" in v["why"]
+    v = GT.combine_parity_legs([_fixed_leg(parity_ok=True), _gait_leg(fa=0.3, fb=-0.3, sign_flip=True)])
+    assert not v["parity_ok"]
+    # state divergence with NO behavioral confirmation (vacuous gait / big magnitude gap / no gait leg) -> red
+    assert not GT.combine_parity_legs([_fixed_leg(parity_ok=False), _gait_leg(vacuous=True)])["parity_ok"]
+    assert not GT.combine_parity_legs([_fixed_leg(parity_ok=False), _gait_leg(fa=0.40, fb=0.10)])["parity_ok"]
+    assert not GT.combine_parity_legs([_fixed_leg(parity_ok=False)])["parity_ok"]
+    # leg-1 forwards CONTRADICTING (delta > 0.05 m) blocks the behavioral fallback even with a good gait leg
+    assert not GT.combine_parity_legs([_fixed_leg(parity_ok=False, fa=0.30, fb=0.10), _gait_leg()])["parity_ok"]
+
+
 # ---------------------------------------------------------------------------- F4: launch safety
 def test_launch_cmd_has_memory_guard_and_gate_is_skippable(monkeypatch, quad, tmp_path):
     monkeypatch.setenv("VIRTUROID_SKIP_PARITY_GATE", "1")

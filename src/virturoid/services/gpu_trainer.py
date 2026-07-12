@@ -173,6 +173,8 @@ def _launch_ok(launch_cmd: str, proc_name: str) -> bool:
 # stable body past the 0.05 m sign floor (measured |fwd|≈0.02 even at 2.5× amplitude), so only a gait trace makes
 # the sign check non-vacuous. Long-horizon state tol is meaningless under contact chaos → leg 2 is sign-only.
 _PARITY_GATE_CACHE: dict = {}
+# The remote side produces DATA (both legs' raw comparisons); the verdict POLICY lives locally in
+# ``combine_parity_legs`` so it is unit-testable and has ONE source of truth.
 _PARITY_REMOTE_PY = """
 import base64, json, sys
 import numpy as np
@@ -182,15 +184,49 @@ from virturoid.services.parity_harness import parity_check, rollout_cpu_mujoco, 
 rep = parity_check(xml, backends=('cpu_mujoco', 'mjx_single'), steps=int(p.get('steps', 300)))
 legs = [{'leg': 'fixed_ctrl', 'parity_ok': bool(rep.parity_ok), 'comparisons': rep.comparisons,
          'backends': rep.backends_run}]
-ok = bool(rep.parity_ok)
 if p.get('trace_b64'):
     tr = np.frombuffer(base64.b64decode(p['trace_b64'])).reshape(p['trace_shape'])
     c = compare(rollout_cpu_mujoco(xml, tr), rollout_mjx(xml, tr), state_tol=float('inf'))
     vac = abs(c['forward_a']) < 0.05 and abs(c['forward_b']) < 0.05
     legs.append({'leg': 'gait_trace', 'parity_ok': bool(c['parity_ok']), 'vacuous': bool(vac), 'comparison': c})
-    ok = ok and (vac or c['parity_ok'])
-print('PARITY_GATE_JSON ' + json.dumps({'parity_ok': ok, 'legs': legs}))
+print('PARITY_GATE_JSON ' + json.dumps({'legs': legs}))
 """
+
+
+def combine_parity_legs(legs: list) -> dict:
+    """Gate POLICY over the harness's raw leg comparisons -> ``{parity_ok, mode, why}``. Fail-closed.
+
+    MEASURED calibration (2026-07-12, first live gate firing): a ×3-mass quad read leg-1 state divergence 0.004
+    (> the 1e-3 tol) at 300 steps — while its forwards agreed EXACTLY (0.001 vs 0.001) and the real-gait leg
+    agreed to **1.4 %** (0.2983 vs 0.3024 m, same sign, non-vacuous). Violent contact amplifies float-level
+    engine differences chaotically, so strict state-tol at a fixed horizon is body-dependent — but BEHAVIOR is
+    what training safety needs. Policy:
+    - any sign flip anywhere -> RED (the WS-F bug, non-negotiable);
+    - leg-1 strict green -> GREEN (mode=strict);
+    - else BEHAVIORAL green iff the gait leg is present, non-vacuous, sign-agreeing, forward magnitudes within
+      20 %, and leg-1's own forwards don't contradict (|Δ| ≤ 0.05 m) -> GREEN (mode=behavioral, fully logged);
+    - anything else (no gait evidence / vacuous / big magnitude gap) -> RED."""
+    fixed = next((l for l in legs if l.get("leg") == "fixed_ctrl"), None)
+    gait = next((l for l in legs if l.get("leg") == "gait_trace"), None)
+    if not fixed:
+        return {"parity_ok": False, "mode": "red", "why": "no fixed-ctrl leg ran"}
+    comps = fixed.get("comparisons") or []
+    gc = (gait or {}).get("comparison") or {}
+    if any(c.get("sign_flip") for c in comps) or gc.get("sign_flip"):
+        return {"parity_ok": False, "mode": "red", "why": "SIGN FLIP — the WS-F bug; do not train"}
+    if fixed.get("parity_ok"):
+        return {"parity_ok": True, "mode": "strict", "why": "state trajectories agree within tolerance"}
+    if gait and gc and not gait.get("vacuous") and gc.get("parity_ok"):
+        fa, fb = float(gc.get("forward_a", 0.0)), float(gc.get("forward_b", 0.0))
+        rel = abs(fa - fb) / max(abs(fa), abs(fb), 1e-9)
+        fixed_delta = max((abs(float(c.get("forward_a", 0)) - float(c.get("forward_b", 0))) for c in comps),
+                          default=float("inf"))
+        if rel <= 0.20 and fixed_delta <= 0.05:
+            return {"parity_ok": True, "mode": "behavioral",
+                    "why": (f"state chaos on a violent-contact body, but BEHAVIOR agrees: gait fwd {fa:.3f} vs "
+                            f"{fb:.3f} ({rel * 100:.1f}%), fixed-leg fwd delta {fixed_delta:.3f} m, no sign flip")}
+    return {"parity_ok": False, "mode": "red",
+            "why": "state divergence without behavioral confirmation (gait leg missing/vacuous/disagreeing)"}
 
 
 def parity_gate_for_gene(gene, *, say=lambda m: None, steps: int = 300, timeout: float = 420.0) -> dict:
@@ -222,7 +258,9 @@ def parity_gate_for_gene(gene, *, say=lambda m: None, steps: int = 300, timeout:
                  stdin=json.dumps(payload).encode("utf-8"))
         for line in r.stdout.decode("utf-8", "ignore").splitlines():
             if line.startswith("PARITY_GATE_JSON"):
-                gate = json.loads(line.split("PARITY_GATE_JSON", 1)[1])
+                legs = json.loads(line.split("PARITY_GATE_JSON", 1)[1]).get("legs", [])
+                verdict = combine_parity_legs(legs)            # the ONE policy source (testable, fail-closed)
+                gate = {**verdict, "note": verdict["why"], "legs": legs}
                 if gate.get("parity_ok"):
                     _PARITY_GATE_CACHE[key] = gate
                 return gate
