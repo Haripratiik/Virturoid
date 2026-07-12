@@ -281,6 +281,36 @@ def run_factory_night(propose_fn, *, config: FactoryConfig | None = None, manife
     return res
 
 
+def held_out_aware(propose_fn, *, max_resample: int = 4):
+    """Wrap a proposer so a night's proposal budget is not WASTED on bodies the held-out guard will trivially
+    reject. MEASURED 2026-07-12 (v7-C1): a live-gpt-5.5 night admitted 1/30 with rejected={held_out: 25} — the
+    LLM designs bodies that land in reserved niches (extra limbs → many_limb, aquatic/aerial, wheel-leg hybrid),
+    burning 25 of 30 slots before any real gate ran. On a held-out proposal this resamples up to ``max_resample``
+    times and yields the first non-held-out body.
+
+    This NEVER weakens the leak guard: the gate stack's held-out check stays authoritative (a held-out body that
+    slips through after exhausted resamples is still rejected there). The wrapper only stops the budget bleeding —
+    exactly the 'smart proposer targets thin niches' the factory was designed for (avoiding reserved niches is
+    part of being smart). Pure w.r.t. the guard; needs no corpus access."""
+    from virturoid.services.heldout_set import is_held_out
+
+    def wrapped(context):
+        proposed = propose_fn(context)
+        tries = 0
+        while proposed is not None and tries < max_resample:
+            gene, prompt = (proposed if isinstance(proposed, tuple) else (proposed, None))
+            try:
+                held = is_held_out(gene, prompt=prompt)
+            except Exception:  # noqa: BLE001 - an unclassifiable body is not our reason to resample
+                return proposed
+            if not held:
+                return proposed
+            proposed = propose_fn(context)                    # this slot fell in a reserved niche -> try again
+            tries += 1
+        return proposed                                       # first non-held-out, or None (bank done), or last try
+    return wrapped
+
+
 def default_bank_fn(gene, result: dict, memory_dir) -> None:
     """The minimal banking that makes an admitted body part of the retrievable corpus: upsert it into the BODY
     vector sub-space (buildable=True) so exemplar_retrieval / novelty / nearest_bodies see it, + provenance."""

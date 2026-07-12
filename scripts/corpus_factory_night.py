@@ -58,11 +58,13 @@ def main() -> None:
     args = ap.parse_args()
 
     from virturoid.services.corpus_factory import (FactoryConfig, default_bank_fn, gait_search_verify,
-                                                   run_factory_night)
+                                                   held_out_aware, run_factory_night)
     mem = Path(args.memory)
     mem.mkdir(parents=True, exist_ok=True)
     cfg = FactoryConfig(max_bodies=args.bodies, grow_ledger=args.grow_ledger)
-    res = run_factory_night(_offline_proposer(args.strict_llm), config=cfg,
+    # v7-C1: wrap the proposer so held-out-niche bodies (the measured live-LLM waste, 25/30) don't burn the budget
+    proposer = held_out_aware(_offline_proposer(args.strict_llm))
+    res = run_factory_night(proposer, config=cfg,
                             manifest_path=args.manifest or (mem / "corpus_factory.json"),
                             memory_dir=mem, bank_fn=default_bank_fn,
                             verify_fn=(gait_search_verify if args.deep_verify else None))

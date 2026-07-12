@@ -61,6 +61,33 @@ def test_gate_stack_admits_novel_credible_and_rejects_the_rest(tmp_path):
     assert res.coverage["total_bodies"] == 2             # exactly the two admitted bodies in the corpus
 
 
+def test_held_out_aware_proposer_saves_the_budget(tmp_path):
+    """v7-C1: the held-out-aware wrapper resamples past reserved-niche bodies (the measured live-LLM waste,
+    25/30) so the proposal budget reaches admittable bodies — without ever weakening the gate."""
+    # a raw proposer that mostly yields held-out aquatic bodies, with one clean legged body buried in it
+    queue = [_aquatic(), _aquatic(), _legged(4, "GOOD"), _aquatic()]
+    it = iter(queue)
+    raw = lambda ctx: next(it, None)
+    wrapped = CF.held_out_aware(raw, max_resample=4)
+    got = wrapped({})                                          # must skip the two aquatic bodies -> the legged one
+    gene = got[0] if isinstance(got, tuple) else got
+    from virturoid.services.heldout_set import is_held_out, body_key
+    assert not is_held_out(gene) and body_key(gene) == body_key(_legged(4, "GOOD"))
+    # bank-exhausted -> None (never loops forever); an all-held-out bank yields the last (gate still rejects it)
+    assert CF.held_out_aware(lambda ctx: None)({}) is None
+    allheld = iter([_aquatic(), _aquatic()])
+    out = CF.held_out_aware(lambda ctx: next(allheld, None), max_resample=1)({})
+    assert out is None or is_held_out(out[0] if isinstance(out, tuple) else out)   # gate stays authoritative
+
+    # end-to-end: the wrapper lifts admits when the raw proposer wastes slots on held-out bodies
+    q2 = [_aquatic(), _legged(4, "A"), _aquatic(), _legged(5, "B"), _aquatic()]
+    it2 = iter(q2)
+    res = CF.run_factory_night(CF.held_out_aware(lambda ctx: next(it2, None)),
+                               config=CF.FactoryConfig(max_bodies=2),   # only 2 slots — both must land real bodies
+                               manifest_path=tmp_path / "c.json", verify_fn=_fake_verify({"A", "B"}))
+    assert len(res.admitted) == 2 and res.rejected.get("held_out", 0) == 0   # no slot wasted on a held-out body
+
+
 def test_checkpoint_persists_and_resumes(tmp_path):
     mp = tmp_path / "corpus.json"
     it1 = iter([_legged(4, "A")])
