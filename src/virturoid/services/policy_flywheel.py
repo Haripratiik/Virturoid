@@ -55,26 +55,32 @@ def bank_morph_policy(npz_path: str, gene, db, *, task_type: str = "locomotion",
             "verdict": assessment["verdict"], "controller": assessment["controller"], "params_path": str(npz_path)}
 
 
-def recall_morph_policy(gene, db, *, task_type: str = "locomotion"):
+def recall_morph_policy(gene, db, *, task_type: str = "locomotion", with_rollout: bool = False):
     """Retrieve + load the best banked MorphPolicy for this morphology kind + task (warm-start / reuse).
     Returns a loaded ``MorphPolicy`` or ``None`` if nothing is banked. The policy transfers, so a hexapod
-    can reuse a quadruped-banked legged policy."""
+    can reuse a quadruped-banked legged policy.
+
+    ``with_rollout=True`` returns ``(policy, screen_rollout)`` instead — the credibility screen already runs a
+    full deployed rollout on THIS body (with qpos frames, v7-F2), so the product verdict path (v7-F1) can judge
+    the exact evidence it was screened on without paying a second rollout. ``(None, None)`` when nothing recalls."""
     from virturoid.services.morph_policy import MorphPolicy, rollout_deployed_morph_policy
     from virturoid.services.task_matched_eval import robot_kind
 
+    miss = (None, None) if with_rollout else None
     sk = db.recall_skill(robot_kind(gene), task_type)
     if not sk or not sk.get("params_path"):
-        return None
+        return miss
     try:
         policy = MorphPolicy.from_npz(sk["params_path"])
         # Screen the recalled controller on THIS body before handing it to a
         # direct replay/warm-start path; a prior's high source-body score is
         # not evidence of positive transfer.
-        if not assess_policy_rollout(rollout_deployed_morph_policy(gene, policy, steps=900))["bankable"]:
-            return None
-        return policy
+        r = rollout_deployed_morph_policy(gene, policy, steps=900)
+        if not assess_policy_rollout(r)["bankable"]:
+            return miss
+        return (policy, r) if with_rollout else policy
     except Exception:  # noqa: BLE001 - a missing/corrupt params file just means cold-start
-        return None
+        return miss
 
 
 def _feature_dim_for(gene) -> int:

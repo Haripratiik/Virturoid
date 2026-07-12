@@ -85,6 +85,7 @@ def _poll_and_fetch(remote_npz: str, out_path: str, *, progress, timeout: float,
     started = time.time()
     misses = 0
     last_iter = None
+    completed = False
     # The first iteration includes the one-off MJX/XLA kernel compile (~1-2 min) and emits no log line, so
     # tell the user that up front  -  otherwise the UI looks frozen during the compile.
     say("compiling on the GPU — the first iteration takes ~1-2 min, then it trains live…")
@@ -108,7 +109,16 @@ def _poll_and_fetch(remote_npz: str, out_path: str, *, progress, timeout: float,
             # still compiling (no iter line yet): heartbeat so the user sees it's alive, not hung
             say(f"compiling on the GPU — {int(time.time() - started)}s elapsed (first iteration coming up)…")
         if out.startswith("DONE"):
+            completed = True
             break
+    if not completed:
+        # v7-F4: a deadline-exceeded trainer must not keep running detached — it pins GPU memory (the measured
+        # ~9 GB leak) and shadows the NEXT launch's pgrep/log. Kill it explicitly; best-effort (box may be down).
+        say("training did not finish inside the deadline — stopping the remote trainer (frees GPU memory)…")
+        try:
+            _ssh(f"pkill -f '[{proc_name[0]}]{proc_name[1:]}'", timeout=30)
+        except Exception:  # noqa: BLE001
+            pass
     say("fetching the trained policy…")
     npz = _read_complete_npz(lambda: _ssh(f"cat ~/virturoid/{remote_npz}", timeout=120).stdout)
     if npz is None:                                      # bounded retries still found no complete file
@@ -152,6 +162,74 @@ def _launch_ok(launch_cmd: str, proc_name: str) -> bool:
         return b"RUN" in _ssh(f"pgrep -f '[{proc_name[0]}]{proc_name[1:]}' >/dev/null && echo RUN || echo NO", timeout=25).stdout
     except Exception:  # noqa: BLE001
         return False
+
+
+# v7-F3 (master_plan_v7 §1): the WS-F.1 parity precondition as an ENFORCED launch gate. The historical deploy
+# disaster was a policy trained on a stack whose engines disagreed (+0.535 m CPU vs −0.138 m MJX — the sign
+# flip); the harness existed but nothing CALLED it before spending compute. This runs the REAL comparison ON THE
+# BOX (both engines, identical control bytes) and refuses to train on red. Two legs: (1) fixed control, strict
+# state tolerance — catches numeric/model mismatch; (2) a REAL walking controller's recorded torques
+# (``crawl_gait_rollout(record_ctrl=True)``) checked for the forward SIGN — random sinusoids cannot displace a
+# stable body past the 0.05 m sign floor (measured |fwd|≈0.02 even at 2.5× amplitude), so only a gait trace makes
+# the sign check non-vacuous. Long-horizon state tol is meaningless under contact chaos → leg 2 is sign-only.
+_PARITY_GATE_CACHE: dict = {}
+_PARITY_REMOTE_PY = """
+import base64, json, sys
+import numpy as np
+p = json.load(sys.stdin)
+xml = base64.b64decode(p['xml_b64']).decode()
+from virturoid.services.parity_harness import parity_check, rollout_cpu_mujoco, rollout_mjx, compare
+rep = parity_check(xml, backends=('cpu_mujoco', 'mjx_single'), steps=int(p.get('steps', 300)))
+legs = [{'leg': 'fixed_ctrl', 'parity_ok': bool(rep.parity_ok), 'comparisons': rep.comparisons,
+         'backends': rep.backends_run}]
+ok = bool(rep.parity_ok)
+if p.get('trace_b64'):
+    tr = np.frombuffer(base64.b64decode(p['trace_b64'])).reshape(p['trace_shape'])
+    c = compare(rollout_cpu_mujoco(xml, tr), rollout_mjx(xml, tr), state_tol=float('inf'))
+    vac = abs(c['forward_a']) < 0.05 and abs(c['forward_b']) < 0.05
+    legs.append({'leg': 'gait_trace', 'parity_ok': bool(c['parity_ok']), 'vacuous': bool(vac), 'comparison': c})
+    ok = ok and (vac or c['parity_ok'])
+print('PARITY_GATE_JSON ' + json.dumps({'parity_ok': ok, 'legs': legs}))
+"""
+
+
+def parity_gate_for_gene(gene, *, say=lambda m: None, steps: int = 300, timeout: float = 420.0) -> dict:
+    """Run the CPU-vs-MJX parity check for ``gene`` ON THE GPU BOX; return ``{"parity_ok": bool, "legs": [...]}``.
+    A green result is cached per compiled-XML hash for the process (a training night retraining the same body
+    pays the ~60-90 s gate once); a red/unreachable result is NEVER cached (transient failures may clear).
+    Requires the repo already synced to the box (``_sync_repo``) so the box runs the same harness bytes."""
+    import base64
+    import hashlib
+
+    from virturoid.services.gene_compiler import compile_gene_to_mjcf, standing_spawn_z
+    xml = compile_gene_to_mjcf(gene, include_floor=True, spawn_z=standing_spawn_z(gene))
+    key = hashlib.sha256(xml.encode()).hexdigest()[:16]
+    if key in _PARITY_GATE_CACHE:
+        return _PARITY_GATE_CACHE[key]
+    payload: dict = {"xml_b64": base64.b64encode(xml.encode()).decode(), "steps": int(steps)}
+    try:                                                     # the non-vacuous leg: a real walking controller's bytes
+        from virturoid.services.morph_policy import crawl_gait_rollout
+        import numpy as np
+        tr = crawl_gait_rollout(gene, steps=600, record_ctrl=True).get("ctrl_trace")
+        if tr is not None and len(tr) >= 50:
+            trace = np.asarray(tr, dtype=np.float64)
+            payload["trace_b64"] = base64.b64encode(trace.tobytes()).decode()
+            payload["trace_shape"] = list(trace.shape)
+    except Exception:  # noqa: BLE001 - a body with no crawl gait still gets the strict fixed-ctrl leg
+        pass
+    try:
+        r = _ssh(f'cd ~/virturoid && PYTHONPATH=src {_PY} -c "{_PARITY_REMOTE_PY}"', timeout=timeout,
+                 stdin=json.dumps(payload).encode("utf-8"))
+        for line in r.stdout.decode("utf-8", "ignore").splitlines():
+            if line.startswith("PARITY_GATE_JSON"):
+                gate = json.loads(line.split("PARITY_GATE_JSON", 1)[1])
+                if gate.get("parity_ok"):
+                    _PARITY_GATE_CACHE[key] = gate
+                return gate
+        return {"parity_ok": False, "note": "gate produced no verdict (remote error) — refusing to train blind",
+                "stderr_tail": r.stderr.decode("utf-8", "ignore")[-400:]}
+    except Exception as exc:  # noqa: BLE001 - unreachable box: fail CLOSED (never train unverified)
+        return {"parity_ok": False, "note": f"parity gate unreachable ({type(exc).__name__}) — refusing to train blind"}
 
 
 # reward-shaping flags the MJX trainer accepts (gait_critic's bounded design space -> trainer CLI flags).
@@ -218,6 +296,16 @@ def train_gene_on_gpu(gene, *, out_path: str, iters: int = 80, envs: int = 1024,
             progress(m)
     try:
         _sync_repo(say)
+        # v7-F3: the WS-F parity precondition is ENFORCED, not advisory — never spend GPU compute on a stack
+        # where the engines disagree (the historical sign flip trained a policy that deployed BACKWARD).
+        # VIRTUROID_SKIP_PARITY_GATE=1 is the explicit test/emergency escape hatch, never a default.
+        if os.environ.get("VIRTUROID_SKIP_PARITY_GATE") != "1":
+            say("parity gate: verifying CPU MuJoCo == MJX on the box (identical control bytes)…")
+            gate = parity_gate_for_gene(gene, say=say)
+            if not gate.get("parity_ok"):
+                say(f"PARITY GATE RED — refusing to train: {gate.get('note') or gate.get('legs')}")
+                return None                                  # caller falls back to CPU (deploy==train there)
+            say("parity gate GREEN — engines agree; training may spend.")
         _ssh("cat > ~/app_gene.json", timeout=60, stdin=json.dumps(gene.to_dict()).encode("utf-8"))
         extra = " --cpg" if cpg else ""
         extra += " --dr" if dr else ""
@@ -262,7 +350,10 @@ def train_gene_on_gpu(gene, *, out_path: str, iters: int = 80, envs: int = 1024,
             if k in _REWARD_FLAGS:
                 extra += f" --{k.replace('_', '-')} {float(v)}"
         say(f"launching MJX PPO on the GPU ({iters} iters{', critic-tuned reward' if reward_weights else ''})…")
-        launch = (f"cd ~/virturoid && rm -f runs/app_gene.npz; PYTHONPATH=src XLA_FLAGS='--xla_gpu_autotune_level=0' setsid {_PY} "
+        # v7-F4: MEM_FRACTION caps XLA's arena so a killed/leaked trainer can't pin the whole 12 GB (the measured
+        # ~9 GB leak-on-kill); previously this guard lived only in the nightshift ops track, not interactive runs.
+        launch = (f"cd ~/virturoid && rm -f runs/app_gene.npz; PYTHONPATH=src XLA_FLAGS='--xla_gpu_autotune_level=0' "
+                  f"XLA_PYTHON_CLIENT_MEM_FRACTION=.85 setsid {_PY} "
                   f"scripts/mjx_morph_attention.py --gene-json ~/app_gene.json --iters {iters} --envs {envs} "
                   f"--save runs/app_gene.npz{extra} </dev/null >~/app_train.log 2>&1 & echo LAUNCHED")
         if not _launch_ok(launch, "mjx_morph_attention"):

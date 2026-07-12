@@ -932,18 +932,23 @@ def recipe_rollout_morph(gene, policy: MorphPolicy | None = None, *, steps: int 
     return out
 
 
-def rollout_deployed_morph_policy(gene, policy: MorphPolicy, *, steps: int = 900) -> dict:
+def rollout_deployed_morph_policy(gene, policy: MorphPolicy, *, steps: int = 900,
+                                  record_qpos: bool = True) -> dict:
     """Evaluate a policy under the controller convention stored in its artifact.
 
     Recipe/CPG policies carry a PD-to-default gait prior and observation normalization.  Measuring them with
     the residual-only rollout changes the controller and can falsely report a trained policy as fallen.  Plain
     policies keep the legacy residual rollout.  The controller tag makes controller selection auditable.
-    """
+
+    ``record_qpos`` defaults ON (v7-F2): without the qpos trace, ``gait_quality.classify()`` silently SKIPS its
+    ROLL/PITCH gate — so a learned policy that rolled over could read CREDIBLE while the scripted gaits (which
+    always record) get the full bar. Deploy/banking/recall screens must judge learned == scripted; the tiny
+    per-5-step qpos copy is the price of an un-gameable verdict."""
     if getattr(policy, "obs_mean", None) is not None or getattr(policy, "cpg", None) is not None:
-        result = dict(recipe_rollout_morph(gene, policy, steps=steps))
+        result = dict(recipe_rollout_morph(gene, policy, steps=steps, record_qpos=record_qpos))
         result["deployment_controller"] = "recipe_cpg"
         return result
-    result = dict(rollout_morph(gene, policy, steps=steps))
+    result = dict(rollout_morph(gene, policy, steps=steps))    # residual legacy: never bankable (no gait evidence)
     result["deployment_controller"] = "residual"
     return result
 
@@ -1019,7 +1024,8 @@ def _reset_to_rest(model, data) -> None:
 def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float | None = None, hip_amp: float | None = None,
                        knee_amp: float | None = None, duty: float = 0.25, kp: float | None = None,
                        kd: float | None = None, record_qpos: bool = False, frame_every: int = 5,
-                       turn_bias: float = 0.0, steer_fn=None, return_control_plan: bool = False) -> dict:
+                       turn_bias: float = 0.0, steer_fn=None, return_control_plan: bool = False,
+                       record_ctrl: bool = False) -> dict:
     """STATICALLY-STABLE CRAWL gait for a WIDE-stance quadruped (open-loop, NO policy). Lifts ONE leg at a time
     (the 4 legs at quarter-cycle phases with a LOW-DUTY knee pulse) so 3 feet are ALWAYS planted -> the CoM stays
     inside the support triangle -> it CANNOT roll over. On a FANNED wide-stance body
@@ -1121,8 +1127,10 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float | None = None, hi
         q = d.qpos[bq + 3:bq + 7]
         return float(np.arctan2(2 * (q[0] * q[3] + q[1] * q[2]), 1 - 2 * (q[2] ** 2 + q[3] ** 2)))
 
-    def _run(ph_of: dict, freq_: float, nsteps: int, record: bool, turn_bias_: float = 0.0, steer_fn_=None):
+    def _run(ph_of: dict, freq_: float, nsteps: int, record: bool, turn_bias_: float = 0.0, steer_fn_=None,
+             rec_ctrl: bool = False):
         d = mujoco.MjData(model); _reset_to_rest(model, d); mujoco.mj_forward(model, d)
+        ctrl_rows = [] if rec_ctrl else None                  # v7-F3: the applied ctrl bytes, for parity replay
         _qref, _z0 = q_def, z0
         if len(hip_k) >= 10:                                   # MANY-LEG: settle to the NATURAL stance pose and
             for _ in range(150):                              # hold/measure from THAT (the baked q_def let a long
@@ -1160,6 +1168,8 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float | None = None, hi
                 qv = float(d.qvel[vadr[k]])
                 tau = kp * (tgt[k] - float(d.qpos[qadr[k]])) - kd * qv
                 d.ctrl[act_u[k]] = float(np.clip(tau, -clamps[k], clamps[k]))
+            if rec_ctrl:                                      # the exact torques that drive THIS step (parity leg:
+                ctrl_rows.append(np.array(d.ctrl, dtype=float))  # replay these bytes into both engines, v7-F3)
             mujoco.mj_step(model, d)
             if not np.all(np.isfinite(d.qpos)):
                 alive = t; break
@@ -1186,6 +1196,8 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float | None = None, hi
                "gait": "crawl", "n_tokens": graph.n_tokens}
         if record:
             res["qpos_frames"] = frames or []
+        if rec_ctrl:
+            res["ctrl_trace"] = np.asarray(ctrl_rows) if ctrl_rows else np.zeros((0, int(model.nu)))
         return res
 
     # AUTO-TUNE (general, MEASURED — no per-body hardcoded params): the gait's net travel is body-sensitive in
@@ -1194,14 +1206,14 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float | None = None, hi
     # The reported forward is the HONEST signed displacement of the chosen run (a body that can't walk stays
     # near 0, never masked). This is the scripted PRIOR; the learned residual (GEN-8) refines it further.
     if not hip_k:
-        return _run(ph_fwd, freq, steps, record_qpos, turn_bias, steer_fn)
+        return _run(ph_fwd, freq, steps, record_qpos, turn_bias, steer_fn, rec_ctrl=record_ctrl)
     best_phd, best_fq, best_fwd = ph_fwd, freq, -1e9
     for phd in (ph_fwd, ph_rev):
         for fq in (freq, freq * 1.7):
             f = _run(phd, fq, min(350, steps), False)["forward"]   # direction/freq probe is straight (turn_bias 0)
             if f > best_fwd:
                 best_fwd, best_phd, best_fq = f, phd, fq
-    out = _run(best_phd, best_fq, steps, record_qpos, turn_bias, steer_fn)
+    out = _run(best_phd, best_fq, steps, record_qpos, turn_bias, steer_fn, rec_ctrl=record_ctrl)
     if return_control_plan:
         # Freeze the measured direction/frequency probe and the structural leg
         # map.  Deployment must never repeat a physics probe: this plan is the

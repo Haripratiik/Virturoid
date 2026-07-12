@@ -385,6 +385,37 @@ def _honest_biped(gene, *, steps: int = 1500) -> dict | None:
             "note": "biped: static balance holds; the multi-leg crawl wave gait is the wrong controller for 2 legs"}
 
 
+def _learned_gait_attempt(gene) -> dict | None:
+    """v7-F1 (master_plan_v7 §1): deploy the best banked LEARNED MorphPolicy for this body and judge it under the
+    SAME un-gameable bar as the scripted gait — ``classify()`` including the ROLL/PITCH gate (the recall screen
+    records qpos frames, v7-F2). This is the missing product half of the deploy gap: trained policies were banked
+    by ``train_gene_on_gpu``/``transfer_train_morph`` but the verdict path only ever ran the scripted crawl, so
+    training quality was invisible to the product. Returns ``{"out": verdict_dict, "rollout": r}`` when a banked
+    policy is credible ON THIS BODY, else ``None`` (nothing banked / not credible here / no DB)."""
+    from virturoid.services.gait_quality import classify, orientation_summary
+    from virturoid.services.memory_db import DEFAULT_DB_PATH, MemoryDB
+    from virturoid.services.policy_flywheel import recall_morph_policy
+    if not DEFAULT_DB_PATH.exists():
+        return None
+    with MemoryDB(DEFAULT_DB_PATH) as db:
+        policy, r = recall_morph_policy(gene, db, with_rollout=True)   # screens credibility on THIS body
+    if policy is None or not r:
+        return None
+    verdict = classify(r)
+    if not verdict.startswith("CREDIBLE"):                    # the screen and the verdict share one bar; belt+braces
+        return None
+    o = orientation_summary(r.get("qpos_frames") or [])
+    out = {"kind": "legged", "verdict": verdict, "survived": bool(r.get("survived")),
+           "gait_source": "learned_policy",
+           "forward_m": round(float(r.get("forward", 0)), 3),
+           "speed_mps": round(float(r.get("speed", 0)), 3), "cadence": round(float(r.get("cadence", 0)), 1),
+           "support_frac": round(float(r.get("support_frac", 0)), 2), "height_ratio": r.get("height_ratio"),
+           "roll_max_deg": o.get("roll_max"), "pitch_max_deg": o.get("pitch_max"),
+           "note": "walked by a banked LEARNED MorphPolicy (flywheel skill) — the scripted gait was not credible "
+                   "on this body"}
+    return {"out": out, "rollout": r}
+
+
 def _honest_gait(gene, *, steps: int = 1200, render: bool = False, tag: str = "gait") -> dict:
     """Run the general scripted gait and return the ANTI-GOODHART verdict (survived+cadence+support+upright+
     forward, forward == actual displacement) — the honesty gate as a tool result, never a raw qpos dump."""
@@ -444,6 +475,17 @@ def _honest_gait(gene, *, steps: int = 1200, render: bool = False, tag: str = "g
            "speed_mps": round(float(r.get("speed", 0)), 3), "cadence": round(float(r.get("cadence", 0)), 1),
            "support_frac": round(float(r.get("support_frac", 0)), 2), "height_ratio": r.get("height_ratio"),
            "roll_max_deg": o.get("roll_max"), "pitch_max_deg": o.get("pitch_max")}
+    # v7-F1 LEARNED-CONTROL DEPLOY: when the scripted gait is NOT credible, this body may still walk with a banked
+    # LEARNED policy — the product verdict must use the robot's BEST controller, not only the scripted prior.
+    # Never-regress by construction: the learned rollout must itself be classify()-CREDIBLE (same bar, roll/pitch
+    # included) or the scripted verdict stands; a credible scripted walk skips this entirely (cheap fast path).
+    if not str(out["verdict"]).startswith("CREDIBLE"):
+        try:
+            learned = _learned_gait_attempt(gene)
+            if learned is not None:
+                out, r = learned["out"], learned["rollout"]   # adopt the learned walk (+ its frames for the render)
+        except Exception:  # noqa: BLE001 - learned recall is an accelerant; the scripted verdict stands on any error
+            pass
     # BIPED honesty: the multi-leg crawl wave gait FELLS a 2-legged body (wrong controller). If it's a biped that
     # STANDS statically, report that + flag dynamic walking as the learned-control frontier — not a flat 'FELL'
     # implying it can't balance at all. Only runs when the crawl was NOT a credible walk (walkers are unaffected).
@@ -463,7 +505,9 @@ def _honest_gait(gene, *, steps: int = 1200, render: bool = False, tag: str = "g
     # place in the deploy path — the flywheel improving with usage, exactly as intended.
     # FLYWHEEL SELF-UPDATE: a CREDIBLE walk is a working controller -> bank it so future similar bodies recall it
     # (the compounding loop, now driven by ordinary verify, not just explicit training). Best-effort + keep-best.
-    if str(out["verdict"]).startswith("CREDIBLE") and out["survived"]:
+    # A LEARNED-policy walk is excluded: it is ALREADY banked as a policy skill, and banking its rollout under
+    # crawl-gait params would poison the gait corpus with params that never produced that rollout (v7-F1).
+    if str(out["verdict"]).startswith("CREDIBLE") and out["survived"] and out.get("gait_source") != "learned_policy":
         try:
             _base = gait_params or (getattr(gene, "metadata", None) or {}).get("gait_params") or {}
             banked = _auto_bank_gait(gene, r, _base)
