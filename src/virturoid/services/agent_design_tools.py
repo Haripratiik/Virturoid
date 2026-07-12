@@ -243,21 +243,30 @@ def _check_scale(graph: dict) -> str | None:
     return None
 
 
-def _bank_to_flywheel(gene, *, prompt: str, task: str, success_rate: float, source: str = "agent") -> None:
+def _bank_to_flywheel(gene, *, prompt: str, task: str, success_rate: float | None,
+                      source: str = "agent") -> None:
     """B4: write an agent-authored design/outcome into the design flywheel (memory_db + species memory) so
     recall_knowledge / nearest_bodies / search_memory surface the agent's OWN prior work — the moat compounds
-    from exactly the usage the pivot created. Best-effort: memory is value-add, never blocks the design loop."""
+    from exactly the usage the pivot created. Best-effort: memory is value-add, never blocks the design loop.
+
+    ``success_rate=None`` = HONEST "not yet evaluated" (v7-C2, master_plan_v7 §2): submit-time was hardcoding
+    ``0.0``, which recorded a fake MEASURED FAILURE for every submitted design (measured: 1441 placeholder-zero
+    rows vs 51 real) — poisoning any success-ranked retrieval. An unevaluated design now records provenance with
+    a NULL rate + NULL succeeded, and it never enters the species best-of ledger (that ledger is for MEASURED
+    outcomes only). Real rates keep flowing from the train/eval paths unchanged."""
     try:
         from virturoid.services.agent_tools import safe_build_path
         from virturoid.services.memory_db import MemoryDB
         from virturoid.services.task_matched_eval import robot_kind
         mem_dir = safe_build_path(None, "memory")
         mem_dir.mkdir(parents=True, exist_ok=True)
+        unevaluated = success_rate is None
         with MemoryDB(mem_dir / "virturoid_memory.db") as db:
             db.record_run(prompt=prompt or f"[{source}] {gene.robot_class}", robot_class=gene.robot_class,
                           task_type=task or robot_kind(gene), converged_design=gene.to_dict(),
-                          success_rate=float(success_rate), species=gene.robot_class,
-                          succeeded=success_rate >= 0.5, design_source=source)
+                          success_rate=None if unevaluated else float(success_rate),
+                          species=None if unevaluated else gene.robot_class,
+                          succeeded=None if unevaluated else bool(success_rate >= 0.5), design_source=source)
     except Exception:  # noqa: BLE001
         pass
 
@@ -339,7 +348,8 @@ def submit_design(args: dict) -> dict:
     # for the factory verify-build only.
     from virturoid.services.ai_native_tools import _render_gene, _summary
     rid = S.put_robot(gene, prompt=f"[submitted:{graph.get('name', 'design')}]", label="submitted")
-    _bank_to_flywheel(gene, prompt=f"[agent] {graph.get('name', 'design')}", task="", success_rate=0.0)  # B4 provenance
+    # B4 provenance; success_rate=None = "not yet evaluated" (v7-C2) — NEVER a fake measured-0.0 failure
+    _bank_to_flywheel(gene, prompt=f"[agent] {graph.get('name', 'design')}", task="", success_rate=None)
     try:                                                       # Thesis A WRITE-side: this design's VERIFIED shape
         from virturoid.services.shape_flywheel import auto_bank_body_shapes   # words enter the corpus, so the NEXT
         banked = auto_bank_body_shapes(gene)                   # get_design_schema recalls them (self-manufacture)

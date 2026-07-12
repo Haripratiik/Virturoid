@@ -47,6 +47,25 @@ class FlywheelWriteBackTests(unittest.TestCase):
         # after banking, the species index has at least the agent's body (or an honest empty note, never a crash)
         self.assertTrue("bodies" in nb or "note" in nb)
 
+    def test_submitted_design_is_unevaluated_not_a_fake_failure(self):
+        """v7-C2 (master_plan_v7 §2): a submitted, never-simulated design records success_rate NULL /
+        succeeded NULL — not the hardcoded measured-0.0 failure that poisoned 1441 rows and ranked every
+        agent design as a failure — and it never enters the species best-of ledger (measured outcomes only)."""
+        import sqlite3
+        sch = self._call("get_design_schema")
+        self._call("submit_design", {"graph": sch["examples"]["quadruped"]})
+        db = sqlite3.connect(os.path.join(self._tmp, "build", "memory", "virturoid_memory.db"))
+        try:
+            row = db.execute("SELECT success_rate, succeeded FROM runs WHERE design_source='agent' "
+                             "ORDER BY id DESC LIMIT 1").fetchone()
+            self.assertIsNotNone(row, "submit_design must still bank the provenance row")
+            self.assertIsNone(row[0], "an unevaluated design must NOT carry a fake 0.0 success_rate")
+            self.assertIsNone(row[1], "an unevaluated design must NOT read as a measured succeeded=False")
+            n_species = db.execute("SELECT COUNT(*) FROM species").fetchone()[0]
+        finally:
+            db.close()
+        self.assertEqual(n_species, 0, "an unevaluated submit must not enter the species best-of ledger")
+
 
 if __name__ == "__main__":
     unittest.main()
