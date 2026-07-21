@@ -28,7 +28,9 @@ class LocomotionTests(unittest.TestCase):
         # Real-quadruped accuracy (Go1-class): 4 legs x (abduction + thigh + shin + foot) = 16 segments,
         # 3 actuated joints/leg (foot welded) = 12 DOF — matching a real quadruped baseline, not 8.
         self.assertEqual(sum(1 for s in g.segments if "leg" in s.name), 16)
-        self.assertEqual(len(g.actuated_joints()), 12)
+        # LEG DOF only -- the body also articulates a neck and tail, which are not part of the Go1-class
+        # leg-DOF baseline this asserts (measured total: 14 = 12 leg + neck + tail).
+        self.assertEqual(len([s for s in g.actuated_joints() if s.name.startswith("leg")]), 12)
         mj = mujoco.MjModel.from_xml_string(compile_gene_to_mjcf(g))
         r = run_locomotion_episode(mj)
         self.assertTrue(r["upright"])                             # legs point down -> it stands
@@ -39,12 +41,17 @@ class LocomotionTests(unittest.TestCase):
         # "build whatever I want from scratch": a hexapod gets 6 legs (leg count is a PARAMETER), not the
         # 4-leg quadruped template — while the quadruped stays exactly 4 legs / 8 DOF.
         from virturoid.services.morphology_composer import compose_robot
+        # Count LEG DOF, not total DOF: the composer now also articulates a neck and tail on quadrupeds (richer
+        # anatomy), so a whole-body count measures "how much extra anatomy exists", not the parametric property
+        # this test is about. Measured: quad = 12 leg joints + neck + tail = 14 actuated.
+        def leg_dof(g):
+            return len([s for s in g.actuated_joints() if s.name.startswith("leg")])
         h = compose_robot("a six-legged hexapod walking robot")
         leg_groups = {s.name.split("_")[0] for s in h.segments if s.name.startswith("leg")}
         self.assertEqual(len(leg_groups), 6)                  # 6 distinct legs
-        self.assertEqual(len(h.actuated_joints()), 18)        # 6 legs x 3 actuated joints (abduction+hip+knee)
+        self.assertEqual(leg_dof(h), 18)                      # 6 legs x 3 actuated joints (abduction+hip+knee)
         q = compose_robot("a quadruped walking robot")
-        self.assertEqual(len(q.actuated_joints()), 12)        # quadruped = 4 legs x 3 DOF
+        self.assertEqual(leg_dof(q), 12)                      # quadruped = 4 legs x 3 DOF (neck/tail excluded)
 
     def test_free_bodies_spawn_standing_not_ejected(self):
         # The spawn-height fix: free bodies spawn on their feet, not penetrating the floor. With the old fixed
