@@ -74,7 +74,15 @@ build/*
 !build/ui_verify/
 build/ui_verify/*
 !build/ui_verify/build_a_dog_robot_that_walks/
-!build/ui_verify/build_a_mobile_base_that_delivers_parts_indoors/
 !build/ui_verify/hexapod_walk/
+!build/ui_verify/humanoid/
 !build/ui_verify/arm_sort/
 build/ui_verify/*/cad/
+# datasets/ holds synthetic observation dumps with very long generated names; combined with a deep
+# clone prefix they cross Windows' 260-char MAX_PATH and the clone CHECKOUT FAILS (measured). The
+# viewport never reads them (robot/*.json, reports/*.json, simulation/mujoco/*.xml only).
+build/ui_verify/*/datasets/
+# regression/revision scene sweeps carry prompt-derived filenames ~157 chars; the demo needs only the
+# primary scenes, and shorter paths keep the clone safe on Windows from any workspace depth.
+build/ui_verify/*/simulation/mujoco/scenes/revision/
+build/ui_verify/*/simulation/mujoco/scenes/variation/
