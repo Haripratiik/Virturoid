@@ -49,6 +49,34 @@ def test_llm_unavailable_replans_offline_instead_of_giving_up(monkeypatch):
     assert calls[1]["llm"] is None                           # re-planned with the offline heuristic composer
 
 
+def test_an_explicit_strict_caller_is_never_overridden(monkeypatch):
+    """allow_heuristic_fallback=False is a caller DEMANDING refusal-over-substitution (the architecture's
+    no-silent-template-substitution guarantee). None means only "no preference". Conflating them -- which the
+    first cut of this fallback did -- silently breaks that guarantee, so it is pinned here."""
+    monkeypatch.setenv("VIRTUROID_ALLOW_HEURISTIC_FALLBACK", "0")
+    calls = []
+
+    class _Intent:
+        routing_confidence = "llm_unavailable"; concept = "x"; concept_aliases = []
+        robot_class = "quadruped"; task_family = "locomotion"; buildable = False
+        gaps = ["LLM planner is not configured or reachable"]
+
+        def to_dict(self):                                   # the clarify branch serialises the intent
+            return {"routing_confidence": self.routing_confidence, "concept": self.concept,
+                    "robot_class": self.robot_class, "task_family": self.task_family, "gaps": list(self.gaps)}
+
+    def fake_plan_build(prompt, llm=None, require_llm=False):
+        calls.append(require_llm)
+        return _Intent()
+
+    monkeypatch.setattr("virturoid.services.intent_planner.plan_build", fake_plan_build)
+    rep = AB.autonomous_build("build a blorptron robot", output_dir="build/pt_strict_probe",
+                              allow_heuristic_fallback=False)          # EXPLICIT strictness
+    assert len(calls) == 1                                             # no offline re-plan was attempted
+    assert rep.feasible is False and rep.decisions[0].stage == "clarify_intent"
+    assert not any("OFFLINE" in (n or "") for n in (rep.notes or []))
+
+
 def test_offline_note_is_re_persisted_not_just_held_in_memory(tmp_path, monkeypatch):
     """The gene route WRITES its report before returning, so stamping the note must also re-write it — otherwise
     the provenance exists only in memory and reports/autonomy_report.json silently omits how the body was

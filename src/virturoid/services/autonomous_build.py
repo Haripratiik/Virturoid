@@ -65,6 +65,11 @@ def autonomous_build(
     # task can still infer a body class (for example "sort blocks" -> arm); this
     # branch is only the true no-body/no-task ambiguity reported by the planner.
     from virturoid.services.intent_planner import plan_build
+    # An EXPLICIT False is a caller DEMANDING strictness ("refuse rather than substitute anything the LLM did not
+    # design") -- distinct from None, which merely means "no preference, use the configured default". The offline
+    # fallback below must honour the former; conflating them would silently break the no-template-substitution
+    # guarantee for callers that deliberately opted into it.
+    explicit_strict = allow_heuristic_fallback is False
     if allow_heuristic_fallback is None:
         allow_heuristic_fallback = os.environ.get("VIRTUROID_ALLOW_HEURISTIC_FALLBACK", "0") == "1"
     intent = plan_build(
@@ -106,7 +111,7 @@ def autonomous_build(
     # an LLM backend would add. A genuinely ambiguous prompt still falls through to clarification below, because
     # the re-planned intent has to stand on its own.
     offline_fallback = False
-    if intent.routing_confidence == "llm_unavailable" and not allow_heuristic_fallback:
+    if intent.routing_confidence == "llm_unavailable" and not allow_heuristic_fallback and not explicit_strict:
         allow_heuristic_fallback = True
         offline_fallback = True
         intent = plan_build(prompt, llm=None, require_llm=False)
