@@ -1,0 +1,15 @@
+{
+  "id": "compiled_humanoid_anthropometric",
+  "robot_genome_id": "humanoid_anthropometric",
+  "backend": "mujoco",
+  "scene_count": 1,
+  "scenes": [
+    {
+      "scene_set_id": "sceneset_humanoid_anthropometric",
+      "scene_id": "locomotion_humanoid_anthropometric",
+      "purpose": "locomotion",
+      "mujoco_xml": "simulation/mujoco/scenes/locomotion/humanoid_anthropometric.xml",
+      "object_count": 0
+    }
+  ]
+}

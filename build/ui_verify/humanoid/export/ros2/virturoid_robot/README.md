@@ -1,6 +1,6 @@
 # virturoid_robot
 
-Generated ROS2 package for `genome_built_mobile_base_5seg` (no controller bundle; node publishes a neutral pose).
+Generated ROS2 package for `genome_humanoid_anthropometric` — runs the exported GaitController (trot gait).
 
 ```
 colcon build --packages-select virturoid_robot

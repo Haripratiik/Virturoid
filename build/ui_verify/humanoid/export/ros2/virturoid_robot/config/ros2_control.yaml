@@ -9,9 +9,13 @@ controller_manager:
 joint_trajectory_controller:
   ros__parameters:
     joints:
-      - wheel_0_joint
-      - wheel_1_joint
-      - wheel_2_joint
-      - wheel_3_joint
+      - l_uparm_joint
+      - l_forearm_joint
+      - r_uparm_joint
+      - r_forearm_joint
+      - l_thigh_joint
+      - l_shin_joint
+      - r_thigh_joint
+      - r_shin_joint
     command_interfaces: [position]
     state_interfaces: [position, velocity]

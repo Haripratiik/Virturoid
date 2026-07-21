@@ -1,0 +1,86 @@
+{
+  "id": "gait_control_program_genome_humanoid_anthropometric",
+  "robot_genome_id": "genome_humanoid_anthropometric",
+  "entrypoint": "software/gait_controller.py",
+  "control_law": "target[j] = default_pose[j] + amplitude[j]*sin(2*pi*frequency_hz*t + phase_offset[j]); a downstream PD / ros2_control loop tracks these joint-position targets",
+  "control_frequency_hz": 20.0,
+  "policy_type": "trot_cpg_gait",
+  "joint_names": [
+    "l_uparm_joint",
+    "l_forearm_joint",
+    "r_uparm_joint",
+    "r_forearm_joint",
+    "l_thigh_joint",
+    "l_shin_joint",
+    "r_thigh_joint",
+    "r_shin_joint"
+  ],
+  "default_pose": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+  ],
+  "amplitude": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.6,
+    0.8,
+    0.6,
+    0.8
+  ],
+  "phase_offset": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    1.5708,
+    3.141592653589793,
+    4.712392653589793
+  ],
+  "frequency_hz": 1.5,
+  "position_limits": [
+    [
+      -3.0,
+      3.0
+    ],
+    [
+      -2.6,
+      0.0
+    ],
+    [
+      -3.0,
+      3.0
+    ],
+    [
+      -2.6,
+      0.0
+    ],
+    [
+      -2.2,
+      2.2
+    ],
+    [
+      0.0,
+      2.4
+    ],
+    [
+      -2.2,
+      2.2
+    ],
+    [
+      0.0,
+      2.4
+    ]
+  ],
+  "notes": [
+    "Deterministic feed-forward trot gait extracted from the Virturoid recipe CPG prior; a learned residual policy (morph_policy npz) refines it, but the bare gait already walks."
+  ]
+}

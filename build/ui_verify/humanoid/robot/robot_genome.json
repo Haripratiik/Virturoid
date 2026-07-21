@@ -1,0 +1,77 @@
+{
+  "id": "genome_humanoid_anthropometric",
+  "name": "humanoid.anthropometric",
+  "species": "humanoid.anthropometric",
+  "robot_class": "humanoid",
+  "links": [
+    "torso",
+    "neck",
+    "head",
+    "l_uparm",
+    "l_forearm",
+    "l_hand",
+    "r_uparm",
+    "r_forearm",
+    "r_hand",
+    "l_thigh",
+    "l_shin",
+    "l_foot",
+    "r_thigh",
+    "r_shin",
+    "r_foot"
+  ],
+  "joints": [
+    {
+      "name": "l_uparm_joint",
+      "joint_type": "revolute",
+      "parent_link": "torso",
+      "child_link": "l_uparm"
+    },
+    {
+      "name": "l_forearm_joint",
+      "joint_type": "revolute",
+      "parent_link": "l_uparm",
+      "child_link": "l_forearm"
+    },
+    {
+      "name": "r_uparm_joint",
+      "joint_type": "revolute",
+      "parent_link": "torso",
+      "child_link": "r_uparm"
+    },
+    {
+      "name": "r_forearm_joint",
+      "joint_type": "revolute",
+      "parent_link": "r_uparm",
+      "child_link": "r_forearm"
+    },
+    {
+      "name": "l_thigh_joint",
+      "joint_type": "revolute",
+      "parent_link": "torso",
+      "child_link": "l_thigh"
+    },
+    {
+      "name": "l_shin_joint",
+      "joint_type": "revolute",
+      "parent_link": "l_thigh",
+      "child_link": "l_shin"
+    },
+    {
+      "name": "r_thigh_joint",
+      "joint_type": "revolute",
+      "parent_link": "torso",
+      "child_link": "r_thigh"
+    },
+    {
+      "name": "r_shin_joint",
+      "joint_type": "revolute",
+      "parent_link": "r_thigh",
+      "child_link": "r_shin"
+    }
+  ],
+  "end_effectors": [
+    "r_hand"
+  ],
+  "source": "gene_compiler"
+}

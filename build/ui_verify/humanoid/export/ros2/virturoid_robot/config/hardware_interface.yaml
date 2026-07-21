@@ -3,19 +3,35 @@
 hardware:
   hardware_plugin: "REPLACE_WITH_YOUR_DRIVER  # e.g. dynamixel_hardware/DynamixelHardware"
 joints:
-  wheel_0_joint:
+  l_uparm_joint:
     actuator: "GENERIC position actuator (set from the BOM)"
     command_interface: position
     state_interfaces: [position, velocity]
-  wheel_1_joint:
+  l_forearm_joint:
     actuator: "GENERIC position actuator (set from the BOM)"
     command_interface: position
     state_interfaces: [position, velocity]
-  wheel_2_joint:
+  r_uparm_joint:
     actuator: "GENERIC position actuator (set from the BOM)"
     command_interface: position
     state_interfaces: [position, velocity]
-  wheel_3_joint:
+  r_forearm_joint:
+    actuator: "GENERIC position actuator (set from the BOM)"
+    command_interface: position
+    state_interfaces: [position, velocity]
+  l_thigh_joint:
+    actuator: "GENERIC position actuator (set from the BOM)"
+    command_interface: position
+    state_interfaces: [position, velocity]
+  l_shin_joint:
+    actuator: "GENERIC position actuator (set from the BOM)"
+    command_interface: position
+    state_interfaces: [position, velocity]
+  r_thigh_joint:
+    actuator: "GENERIC position actuator (set from the BOM)"
+    command_interface: position
+    state_interfaces: [position, velocity]
+  r_shin_joint:
     actuator: "GENERIC position actuator (set from the BOM)"
     command_interface: position
     state_interfaces: [position, velocity]
