@@ -60,9 +60,29 @@ def _pose_manipulator_for_render(m, d, gene) -> None:
         ai += 1
 
 
+def _select_mujoco_gl() -> str:
+    """Choose a MuJoCo GL backend that can actually render HERE, and record the choice in MUJOCO_GL.
+
+    This used to hardcode ``setdefault("glfw")``. glfw needs a display, so on a HEADLESS Linux box -- exactly
+    where a robotics engineer evaluates this, and where the GPU trainer runs -- every render silently failed and
+    the gallery/verdict images just went missing. An explicit MUJOCO_GL always wins (that contract is unchanged);
+    otherwise prefer glfw when a display exists, else EGL (GPU, headless), else OSMesa (software).
+    """
+    import os
+    import sys
+    if os.environ.get("MUJOCO_GL"):
+        return os.environ["MUJOCO_GL"]                       # caller/CI knows best -- never override
+    if sys.platform.startswith(("win", "darwin")) or os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"):
+        backend = "glfw"
+    else:
+        backend = "egl" if os.path.exists("/dev/dri") or os.environ.get("NVIDIA_VISIBLE_DEVICES") else "osmesa"
+    os.environ["MUJOCO_GL"] = backend
+    return backend
+
+
 def _render_gene(gene, tag: str, *, azimuth: float = 50.0, elevation: float = -16.0) -> str | None:
     import os
-    os.environ.setdefault("MUJOCO_GL", "glfw")
+    _select_mujoco_gl()
     try:
         import mujoco
         import PIL.Image
@@ -676,7 +696,7 @@ def _honest_grasp(gene) -> dict | None:
 
 def _render_gait_gif(gene, qpos_frames, tag: str) -> str | None:
     import os
-    os.environ.setdefault("MUJOCO_GL", "glfw")
+    _select_mujoco_gl()                                      # headless-safe backend (see _select_mujoco_gl)
     try:
         import mujoco
         import PIL.Image

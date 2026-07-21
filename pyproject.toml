@@ -30,8 +30,13 @@ desktop = ["PySide6-Essentials>=6.6", "mujoco>=3.0"]
 # (no GPU / Omniverse needed) so we can WRITE and VALIDATE the USD anywhere; mujoco supplies the source model.
 isaac = ["usd-core>=25.8", "mujoco>=3.0"]
 # Everything for full local development.
+# LLM design backends. The product runs fully OFFLINE without these (default VIRTUROID_LLM_BACKEND=off), but the
+# documented "a language model authors the anatomy" flow imports them lazily -- so without this extra, setting
+# VIRTUROID_LLM_BACKEND=openai|claude|local on a fresh install raised a bare ModuleNotFoundError.
+llm = ["openai>=1.30", "anthropic>=0.34", "requests>=2.31"]
 all = ["mujoco>=3.0", "Pillow>=10.0", "build123d>=0.5", "fastapi>=0.110", "uvicorn>=0.27",
-       "jax>=0.4", "jaxlib>=0.4", "torch>=2.0", "PySide6-Essentials>=6.6", "usd-core>=25.8"]
+       "jax>=0.4", "jaxlib>=0.4", "torch>=2.0", "PySide6-Essentials>=6.6", "usd-core>=25.8",
+       "openai>=1.30", "anthropic>=0.34", "requests>=2.31"]
 
 # Console entry points so the CLIs run after `pip install -e .` WITHOUT needing PYTHONPATH=src.
 [project.scripts]

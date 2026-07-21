@@ -15,14 +15,26 @@ _MUJOCO = importlib.util.find_spec("mujoco") is not None
 class RoutingTests(unittest.TestCase):
     def test_locomotion_intent_routes_to_a_walkable_body(self):
         # "walk forward" used to build the STUNTED generic anatomy quad (huge body, stub legs — unwalkable).
-        # Locomotion INTENT must route to the gait-tuned parametric walker (12-DOF, with hip-abduction joints).
+        # Locomotion INTENT must route to a body that ACTUALLY WALKS.
+        # This asserted species == "quadruped.composed" as a proxy for "walkable". That proxy went stale: the
+        # anatomy route now produces a credible walker too (measured: quadruped.anatomy, 20 segments,
+        # CREDIBLE WALK 0.501 m), so the string check failed while the capability it stands for was fine.
+        # Assert the CAPABILITY instead — that is what the test is named for, and it cannot go stale.
+        from virturoid.services.morph_policy import crawl_gait_rollout
         from virturoid.services.morphology_composer import compose_robot
         for prompt in ("walk forward across the floor", "make a robot walk forward", "a robot that crawls"):
             g = compose_robot(prompt, llm=None)
             self.assertEqual(g.robot_class, "quadruped", prompt)
-            self.assertEqual(g.species, "quadruped.composed", prompt)        # the walkable body, not .anatomy
-            axes = {tuple(round(a, 1) for a in (s.joint_axis or (0, 0, 0))) for s in g.actuated_joints()}
-            self.assertIn((1.0, 0.0, 0.0), axes, "a walkable quad needs hip-abduction (roll) joints")
+            # Abduction authority, checked frame-ROBUSTLY: the anatomy compiler expresses each leg's axes in that
+            # segment's LOCAL frame, so an angled leg's abduction axis reads e.g. (0.8, 0, -0.5) rather than the
+            # exact world (1,0,0) this used to demand. Same physical joint; assert the dominant lateral (roll)
+            # component instead of one hard-coded vector.
+            axes = [tuple(float(a) for a in (s.joint_axis or (0, 0, 0))) for s in g.actuated_joints()]
+            self.assertTrue(any(abs(a[0]) >= 0.5 for a in axes),
+                            f"{prompt}: a walkable quad needs hip-abduction (roll) authority, axes={axes}")
+            r = crawl_gait_rollout(g, steps=600)
+            self.assertGreater(float(r.get("forward", 0.0)), 0.15,
+                               f"{prompt}: locomotion intent must yield a body that travels, got {r.get('forward')}")
 
     def test_animal_prompts_still_get_the_anatomy_creature(self):
         # the routing widening must NOT hijack animal prompts — "a dog" is still a credible anatomy creature.

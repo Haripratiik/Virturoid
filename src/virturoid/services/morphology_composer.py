@@ -22,6 +22,18 @@ class LLMDesignUnavailable(RuntimeError):
 
 _GRASP_WORDS = ("grasp", "grip", "pick", "sort", "manipulat", "lift", "place", "assemble")
 _MOBILE_WORDS = ("mobile", "drive", "navigate", "deliver", "rover", "wheel", "transport", "patrol")
+# Word/digit counts that qualify a WHEEL noun, so "two-wheeled" builds two wheels. Deliberately narrow: the
+# number must sit next to wheel/wheeled, otherwise "a robot that carries two boxes" would resize the drivetrain.
+_WHEEL_NUM_WORDS = {"two": 2, "three": 3, "four": 4, "six": 6, "eight": 8,
+                    "2": 2, "3": 3, "4": 4, "6": 6, "8": 8}
+
+
+def _wheel_count_from_prompt(prompt: str) -> int | None:
+    """Wheel count requested in the prompt ("two-wheeled", "6 wheel", "four wheeled"), else None."""
+    import re
+    p = (prompt or "").lower()
+    m = re.search(r"\b(two|three|four|six|eight|[23468])[\s\-]*wheel", p)
+    return _WHEEL_NUM_WORDS.get(m.group(1)) if m else None
 _LEGGED_WORDS = ("quadruped", "legged", "four legs", "four-legged", "walk on legs", "walking robot",
                  "dog robot", "hexapod", "octopod", "six legs", "six-legged", "eight legs", "eight-legged",
                  "spider", "arachnid", "tarantula", "insect", "ant ", "crawler", "crab", "crustacean",
@@ -366,16 +378,27 @@ def morphology_from_requirements(reach_m: float, payload_kg: float, *, prompt: s
                            for i, (sx, sy) in enumerate([(0.16, 0.19), (0.16, -0.19),
                                                           (-0.16, 0.19), (-0.16, -0.19)])],
                 "end_effector": {"kind": "gripper", "span": 0.10}}
-    if robot_class == "mobile_base":                      # a driven base: a FREE-floating 4-wheel rover
-        # flat wide chassis (box geom = radius,radius,length/2 -> 0.36 sq x 0.08 tall); wheels at the
-        # four bottom corners (mount_offset z = -length puts them at the chassis underside) are the
-        # ground contact, so applying wheel torque drives it.
+    if robot_class == "mobile_base":                      # a driven base: a FREE-floating wheeled rover
+        # flat wide chassis (box geom = radius,radius,length/2 -> 0.36 sq x 0.08 tall); wheels sit at the
+        # chassis underside (mount_offset z = -length) so they are the ground contact and wheel torque drives it.
+        # WHEEL COUNT COMES FROM THE PROMPT: "a two-wheeled delivery robot" used to build the same 4-wheel rover
+        # as "a four-wheeled rover" -- an obvious miss to anyone reading the request. n/2 wheels per side, spread
+        # along the chassis; a 2-wheeled base additionally gets a passive CASTER, because a differential-drive
+        # body with only two contact points tips over (real ones all carry a caster) -- the layout has to be
+        # physically honest, not just the requested number.
+        n = _wheel_count_from_prompt(p) or 4
+        per_side = max(1, n // 2)
+        xs = [0.0] if per_side == 1 else [
+            round(-0.13 + i * (0.26 / (per_side - 1)), 3) for i in range(per_side)]
+        wheels = [{"name": f"wheel_{i}", "parent": "chassis", "radius": 0.06, "thickness": 0.04,
+                   "mount_offset": (x, sy, -0.08), "torque": 8.0}
+                  for i, (x, sy) in enumerate([(x, sy) for x in xs for sy in (0.15, -0.15)])]
+        if n == 2:                                        # passive caster: support, not drive (near-zero torque)
+            wheels.append({"name": "caster", "parent": "chassis", "radius": 0.035, "thickness": 0.03,
+                           "mount_offset": (0.15, 0.0, -0.105), "torque": 0.05})
         return {"robot_class": "mobile_base", "base_mount": "free", "species": "mobile_base.composed",
                 "base": {"name": "chassis", "shape": "box", "length": 0.08, "radius": 0.18, "mass": 3.0},
-                "wheels": [{"name": f"wheel_{i}", "parent": "chassis", "radius": 0.06, "thickness": 0.04,
-                            "mount_offset": (sx, sy, -0.08), "torque": 8.0}
-                           for i, (sx, sy) in enumerate([(0.13, 0.15), (0.13, -0.15),
-                                                          (-0.13, 0.15), (-0.13, -0.15)])],
+                "wheels": wheels,
                 "end_effector": {"kind": "none"}}
 
     reach = max(0.2, float(reach_m or 0.65))
