@@ -601,8 +601,20 @@ def build_from_anatomy(graph: dict) -> RobotGene:
                 _loc = seg_world_R.T @ _w
                 _nrm = float(np.linalg.norm(_loc)) or 1.0
                 _ja = (float(_loc[0] / _nrm), float(_loc[1] / _nrm), float(_loc[2] / _nrm))
+                # ANATOMICAL per-role ranges. Only abduction was limited; hip-pitch and knee inherited the +-2.6
+                # catch-all, i.e. a knee free to hyperextend ~149 deg -- physically impossible and the first thing
+                # a reviewer spots in the XML. Bounds are MEASURED from this body's own walking excursion
+                # (aggregated over ALL legs so left/right mirrors are covered: abduction +-0.08, hip pitch
+                # -0.51..+0.90, knee -0.06..+0.49) and set to contain it with margin, so they are honest anatomy
+                # that cannot clamp the gait. Knee keeps ~11 deg of slack below zero rather than a hard 0 floor,
+                # because the measured motion dips slightly negative. Cf. Unitree Go2 (Menagerie): calf is
+                # likewise flexion-only (-2.72..-0.84).
                 if i == 0:
                     _jlo, _jhi = -0.6, 0.6                              # abduction range (Go2-class ~+-0.5 rad)
+                elif i == 1:
+                    _jlo, _jhi = -1.4, 1.6                              # hip pitch: fore/aft stride
+                else:
+                    _jlo, _jhi = -0.2, 2.4                              # knee/ankle: flexion, no hyperextension
             # The crawl-gait controller is calibrated against the deliberately
             # conservative capsule chain used by the generated walking-leg
             # family.  Preserve that *dynamics* contract for automatic legs;

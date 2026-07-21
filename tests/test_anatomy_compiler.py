@@ -44,6 +44,15 @@ class AnatomyCompilerTests(unittest.TestCase):
         self.assertGreaterEqual(len(g.actuated_joints()), 8)
         self.assertEqual(g.robot_class, "quadruped")
 
+    def test_semantic_front_and_rear_mounts_do_not_trip_the_floating_limb_gate(self):
+        # A long body legitimately has front/rear attachment points farther than its
+        # radial width. The quality gate must use the compiler's longitudinal bounds,
+        # not mistake this valid anatomy for disconnected geometry.
+        from virturoid.services.morphology_composer import _morphology_quality_issues
+
+        issues = _morphology_quality_issues(build_from_anatomy(DOG))
+        self.assertFalse(any("floats in empty space" in issue for issue in issues), issues)
+
     def test_oversized_head_is_capped_to_the_torso(self):
         # R3 proportion band: an LLM graph proposing a head as big as the whole robot must be capped by the
         # compiler so it reads as a sensor head, not a "second body" (the #1 toy tell the styling pass exposed).
@@ -111,11 +120,24 @@ class AnatomyCompilerTests(unittest.TestCase):
         for f in feet:
             self.assertIn(f.parent, seg)                         # parent resolves (no 'unknown parent')
 
-    def test_unknown_role_is_rejected_instead_of_silently_becoming_a_limb(self):
-        with self.assertRaisesRegex(ValueError, "unsupported anatomy role"):
-            build_from_anatomy({"robot_class": "legged", "parts": [
-                {"name": "core", "role": "body", "size": 0.3, "girth": 0.12},
-                {"name": "frobnicator", "role": "zzz_unknown", "parent": "core", "attach": "front", "size": 0.1}]})
+    def test_unknown_role_remains_a_connected_open_world_module(self):
+        g = build_from_anatomy({"robot_class": "legged", "parts": [
+            {"name": "core", "role": "body", "size": 0.3, "girth": 0.12},
+            {"name": "frobnicator", "role": "zzz_unknown", "parent": "core", "attach": "front", "size": 0.1}]})
+        self.assertEqual([], g.validate())
+        self.assertIsNotNone(g.segment("frobnicator"))
+
+    def test_graph_selected_gripper_is_realized_at_the_named_distal_part(self):
+        g = build_from_anatomy({"robot_class": "custom_sorter", "parts": [
+            {"name": "chassis", "role": "body", "size": 0.35, "girth": 0.12},
+            {"name": "arm", "role": "arm", "parent": "chassis", "attach": "front_top",
+             "aim": "forward", "size": 0.25, "joint": "revolute"},
+        ], "base_mount": "table", "end_effector": {"kind": "gripper", "parent": "arm", "span": 0.08}})
+        self.assertEqual("table", g.base_mount)
+        self.assertEqual("gripper", g.end_effector_type)
+        self.assertTrue(next(s for s in g.segments if s.name == "arm").is_end_effector)
+        self.assertEqual(2, sum(s.name.startswith("tool_finger_") for s in g.segments))
+        self.assertEqual([], g.validate())
 
     def test_round_body_and_tentacles_keep_their_own_body_plan(self):
         g = build_from_anatomy({"robot_class": "legged", "parts": [

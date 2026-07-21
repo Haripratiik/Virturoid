@@ -31,12 +31,23 @@ _PART = {
     },
     "required": ["name", "role"],
 }
+_END_EFFECTOR = {
+    "type": "object",
+    "properties": {
+        "kind": {"type": "string", "enum": ["gripper", "hand", "suction", "spray", "hook", "none"]},
+        "parent": {"type": "string"},
+        "span": {"type": "number"},
+        "fingers": {"type": "integer"},
+    },
+}
 ANATOMY_SCHEMA = {
     "type": "object",
     "properties": {
         "robot_class": {"type": "string"},
         "name": {"type": "string"},
+        "base_mount": {"type": "string", "enum": ["table", "floor", "free"]},
         "parts": {"type": "array", "items": _PART},
+        "end_effector": _END_EFFECTOR,
     },
     "required": ["robot_class", "parts"],
 }
@@ -73,6 +84,10 @@ ANATOMY_SYSTEM = (
     "+ detail 'rugged'; a racing drone's arms = thickness ~0.7 + detail 'smooth'.\n"
     "ROLE vocabulary (reusable across all animals): body, neck, head, snout, jaw, ear, eye, horn, beak, tail, "
     "leg, arm, tentacle, trunk, paw, foot, hand, wing, fin, flipper, claw, antenna, shell.\n"
+    "For a task that must grasp, sort, or place objects, also provide end_effector: {kind:'gripper' or 'hand', "
+    "parent:'the distal arm part', span:0.10}. For spraying use kind:'spray'; otherwise use kind:'none'.\n"
+    "Choose base_mount:'table' for a fixed tabletop arm, 'floor' for a fixed floor machine, or 'free' for a "
+    "mobile, legged, flying, or swimming body.\n"
     "RULES: exactly ONE root part with role 'body' and no parent. For a normal animal the body is LONG "
     "front-to-back and only modestly wide (never a cube/tower) — for a crab/turtle/ray/octopus set the body's "
     "aspect instead. Use symmetry:left_right for paired limbs (give ONE 'leg' — it becomes both sides; do NOT "
@@ -82,6 +97,11 @@ ANATOMY_SYSTEM = (
     "fans them outward with forward_down_out / down_out / back_down_out. Keep appendage sizes SMALLER than the "
     "body. Adapt the proportions to the animal (a bird has wings+beak; a horse longer legs; a lizard a long "
     "tail + low stance).\n"
+    "PROPORTIONS (metres, measured on real robots): a foot/paw is SMALL — its girth ~= the leg's own girth "
+    "(0.02-0.05 m), NEVER wider than the leg above it (a fat foot renders as a drum that swallows the leg and "
+    "breaks the walk). A leg with segments>=3 already receives a proper welded foot pad automatically, so "
+    "separate foot parts are optional. No single part may approach half the total body volume — nothing may "
+    "dominate the silhouette.\n"
     "Follow this EXACT structure (this is a ROBOT dog — note: a sensor head, NO snout/ears, a short stabilising "
     "neck, an antenna; ADAPT roles/sizes for the requested robot, do not copy blindly):\n"
     "{\"robot_class\":\"quadruped\",\"name\":\"dog\",\"parts\":[\n"
@@ -96,12 +116,16 @@ ANATOMY_SYSTEM = (
 )
 
 
-def propose_anatomy(prompt: str, plan, req, llm) -> dict:
+def propose_anatomy(prompt: str, plan, req, llm, *, errors: list[str] | None = None) -> dict:
     """Ask the LLM for a creature's anatomy graph; normalize/clamp it so the compiler always gets a sane graph.
     Raises on a hard LLM/parse failure (the caller falls back to the coarse intent / keyword builders)."""
     user = (f"Creature / robot requested: {prompt}\n"
             f"(nearest robot_class from the planner: {getattr(plan, 'robot_class', 'quadruped')}). "
             f"Describe its full anatomy as the JSON graph.")
+    if errors:
+        user += ("\nYour PREVIOUS anatomy graph was rejected by geometry or physics grounding for:\n- "
+                 + "\n- ".join(errors[:8])
+                 + "\nReturn a corrected anatomy graph; keep the requested concept rather than substituting another robot.")
     raw = llm.complete_json(ANATOMY_SYSTEM, user, ANATOMY_SCHEMA, max_tokens=1600) or {}
     parts_in = raw.get("parts") or []
     parts: list[dict] = []
@@ -138,8 +162,24 @@ def propose_anatomy(prompt: str, plan, req, llm) -> dict:
     if parts and not any(not p["parent"] for p in parts):
         root = next((p for p in parts if p["role"] == "body"), parts[0])
         root["parent"] = None
+    ee_raw = raw.get("end_effector") if isinstance(raw.get("end_effector"), dict) else {}
+    kind = str(ee_raw.get("kind") or "none").lower()
+    if kind not in {"gripper", "hand", "suction", "spray", "hook", "none"}:
+        kind = "none"
+    parent = str(ee_raw.get("parent") or "").strip()
+    names = {p["name"] for p in parts}
+    if parent not in names:
+        parent = parts[-1]["name"] if parts else ""
+    base_mount = str(raw.get("base_mount") or "free").lower()
+    if base_mount not in {"table", "floor", "free"}:
+        base_mount = "free"
     return {"robot_class": str(raw.get("robot_class") or getattr(plan, "robot_class", "quadruped")),
-            "name": str(raw.get("name") or "creature"), "parts": parts, "source": "llm_anatomy"}
+            "name": str(raw.get("name") or "creature"), "base_mount": base_mount, "parts": parts,
+            "end_effector": {"kind": kind, "parent": parent,
+                             "span": _clamp(ee_raw.get("span"), 0.03, 0.30, 0.10),
+                             "fingers": int(max(2, min(5, _clamp(ee_raw.get("fingers"), 2, 5, 3)))),
+            },
+            "source": "llm_anatomy"}
 
 
 def _clamp(v, lo, hi, default):

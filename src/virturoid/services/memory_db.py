@@ -146,11 +146,30 @@ CREATE TABLE IF NOT EXISTS species_tree (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS concepts (
+    -- Open-world user concepts are intentionally separate from robot_class.
+    -- ``robot_class`` remains an internal execution family; a concept is a
+    -- user/model supplied category that can be arbitrary and earns its route
+    -- only through build evidence.
+    concept_id TEXT PRIMARY KEY,
+    label TEXT NOT NULL,
+    aliases TEXT NOT NULL DEFAULT '[]',
+    examples TEXT NOT NULL DEFAULT '[]',
+    state TEXT NOT NULL DEFAULT 'candidate', -- candidate | evaluated | verified
+    execution_family TEXT,
+    task_type TEXT,
+    species_pattern TEXT,
+    evidence TEXT NOT NULL DEFAULT '[]',
+    observations INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_runs_class_task ON runs(robot_class, task_type);
 CREATE INDEX IF NOT EXISTS idx_failures_class_task ON failures(robot_class, task_type);
 CREATE INDEX IF NOT EXISTS idx_species_parent ON species_tree(parent_species);
 CREATE INDEX IF NOT EXISTS idx_lessons_class_code ON lessons(robot_class, failure_code);
 CREATE INDEX IF NOT EXISTS idx_skills_class_task ON skills(robot_class, task_type);
+CREATE INDEX IF NOT EXISTS idx_concepts_label ON concepts(label);
 """
 
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
@@ -168,6 +187,12 @@ def _jaccard(a: set[str], b: set[str]) -> float:
     if not a or not b:
         return 0.0
     return len(a & b) / len(a | b)
+
+
+def _concept_id(label: str) -> str:
+    """Stable local key for an arbitrary user concept (not a controlled enum)."""
+    words = re.findall(r"[a-z0-9]+", (label or "").lower())[:8]
+    return "-".join(words)
 
 
 class MemoryDB:
@@ -451,6 +476,112 @@ class MemoryDB:
              success_rate, _now()),
         )
         self.conn.commit()
+
+    # ----------------------------------------------------------------- open-world concepts
+    def observe_concept(self, label: str, prompt: str, *, aliases: list[str] | None = None) -> dict | None:
+        """Remember an arbitrary requested robot concept before deciding it is buildable.
+
+        Observation never grants a simulator route.  It is merely the open-set
+        discovery step; ``promote_concept`` adds execution evidence after a real
+        package/evaluation run.  This prevents a novel name from being silently
+        collapsed into an existing class while keeping first encounters useful.
+        """
+        label = " ".join((label or "").lower().split()).strip()
+        concept_id = _concept_id(label)
+        if not concept_id:
+            return None
+        submitted_aliases = [label]
+        for alias in aliases or []:
+            normalized = " ".join(str(alias or "").lower().split()).strip()
+            if normalized and normalized not in submitted_aliases:
+                submitted_aliases.append(normalized)
+        now = _now()
+        row = self.conn.execute("SELECT * FROM concepts WHERE concept_id=?", (concept_id,)).fetchone()
+        if row is None:
+            # Synonyms are proposed by the LLM; matching is deliberately exact
+            # after normalisation, never a fuzzy automatic merge of two concepts.
+            wanted = set(submitted_aliases)
+            for candidate in self.conn.execute("SELECT * FROM concepts").fetchall():
+                if wanted.intersection(_json_list(candidate["aliases"])):
+                    row = candidate
+                    concept_id = str(candidate["concept_id"])
+                    break
+        if row is None:
+            self.conn.execute(
+                """INSERT INTO concepts (concept_id, label, aliases, examples, state, observations, created_at, updated_at)
+                   VALUES (?,?,?,?,?,?,?,?)""",
+                (concept_id, label, json.dumps(submitted_aliases[:12]), json.dumps([prompt][:3]), "candidate", 1, now, now),
+            )
+        else:
+            aliases = _json_list(row["aliases"])
+            examples = _json_list(row["examples"])
+            for alias in submitted_aliases:
+                if alias not in aliases:
+                    aliases.append(alias)
+            if prompt and prompt not in examples:
+                examples.append(prompt)
+            self.conn.execute(
+                """UPDATE concepts SET aliases=?, examples=?, observations=observations+1, updated_at=?
+                   WHERE concept_id=?""",
+                (json.dumps(aliases[:12]), json.dumps(examples[-3:]), now, concept_id),
+            )
+        self.conn.commit()
+        return self.concept(concept_id)
+
+    def concept(self, concept_id: str) -> dict | None:
+        row = self.conn.execute("SELECT * FROM concepts WHERE concept_id=?", (concept_id,)).fetchone()
+        return _concept_to_dict(row) if row else None
+
+    def concept_for_alias(self, label: str) -> dict | None:
+        """Find a concept by its canonical label or an LLM-proposed exact alias."""
+        normalized = " ".join((label or "").lower().split()).strip()
+        if not normalized:
+            return None
+        exact = self.concept(_concept_id(normalized))
+        if exact is not None:
+            return exact
+        for row in self.conn.execute("SELECT * FROM concepts").fetchall():
+            if normalized in _json_list(row["aliases"]):
+                return _concept_to_dict(row)
+        return None
+
+    def promote_concept(self, label: str, *, execution_family: str, task_type: str,
+                        species_pattern: str | None, success_rate: float,
+                        target_success_rate: float, aliases: list[str] | None = None) -> dict | None:
+        """Attach reproducible build evidence to a previously observed concept.
+
+        A concept becomes ``verified`` only when the autonomous success target was
+        met.  A compiled/evaluated failure is retained as ``evaluated`` evidence,
+        useful for diagnosis but never reused automatically as a trusted route.
+        """
+        record = self.observe_concept(label, "", aliases=aliases)
+        if record is None:
+            return None
+        concept_id = record["concept_id"]
+        evidence = list(record.get("evidence") or [])
+        # A caller may request target=0 merely to collect diagnostics.  That is
+        # never sufficient evidence to teach a later autonomous route.
+        verification_floor = max(0.01, float(target_success_rate))
+        verified = float(success_rate) >= verification_floor
+        evidence.append({
+            "execution_family": execution_family,
+            "task_type": task_type,
+            "species_pattern": species_pattern,
+            "success_rate": round(float(success_rate), 4),
+            "target_success_rate": round(float(target_success_rate), 4),
+            "verification_floor": round(verification_floor, 4),
+            "verified": verified,
+            "recorded_at": _now(),
+        })
+        was_verified = record.get("state") == "verified"
+        state = "verified" if was_verified or verified else "evaluated"
+        self.conn.execute(
+            """UPDATE concepts SET state=?, execution_family=?, task_type=?, species_pattern=?, evidence=?, updated_at=?
+               WHERE concept_id=?""",
+            (state, execution_family, task_type, species_pattern, json.dumps(evidence[-20:]), _now(), concept_id),
+        )
+        self.conn.commit()
+        return self.concept(concept_id)
 
     def upsert_species_node(self, species_pattern: str, *, parent_species: str | None = None,
                            robot_class: str | None = None, morphology_tags: list | None = None,
@@ -761,7 +892,22 @@ class MemoryDB:
         def n(table: str) -> int:
             return int(self.conn.execute(f"SELECT COUNT(*) AS c FROM {table}").fetchone()["c"])
 
-        return {t: n(t) for t in ("runs", "designs", "failures", "transfers", "species", "species_tree", "lessons", "skills")}
+        return {t: n(t) for t in ("runs", "designs", "failures", "transfers", "species", "species_tree", "concepts", "lessons", "skills")}
+
+
+def _json_list(raw) -> list:
+    try:
+        value = json.loads(raw) if isinstance(raw, str) else raw
+    except (TypeError, json.JSONDecodeError):
+        value = []
+    return list(value) if isinstance(value, list) else []
+
+
+def _concept_to_dict(row: sqlite3.Row) -> dict:
+    data = dict(row)
+    for key in ("aliases", "examples", "evidence"):
+        data[key] = _json_list(data.get(key))
+    return data
 
 
 def _get(obj, key):

@@ -266,6 +266,7 @@ class LocalLLMOllamaTests(unittest.TestCase):
         def fake_post(url, headers=None, json=None, timeout=None):
             captured["url"] = url
             captured["json"] = json
+            captured["timeout"] = timeout
             return self._fake_response('{"forearm_mm": 340}')
 
         fake_requests = mock.Mock()
@@ -279,6 +280,23 @@ class LocalLLMOllamaTests(unittest.TestCase):
         self.assertEqual({"type": "json_object"}, captured["json"]["response_format"])
         # Schema is injected into the system prompt so the shape survives json_object mode.
         self.assertIn("JSON Schema", captured["json"]["messages"][0]["content"])
+        self.assertEqual((3.05, 120.0), captured["timeout"])
+
+    def test_zero_read_timeout_allows_a_long_local_generation(self):
+        captured = {}
+
+        def fake_post(url, headers=None, json=None, timeout=None):
+            captured["timeout"] = timeout
+            return self._fake_response('{"ok": true}')
+
+        fake_requests = mock.Mock()
+        fake_requests.post.side_effect = fake_post
+        with mock.patch.dict("os.environ", {"VIRTUROID_LOCAL_LLM_READ_TIMEOUT_S": "0"}):
+            with mock.patch.dict("sys.modules", {"requests": fake_requests}):
+                LocalLLM("http://pc:11434/v1", "nemotron-3-nano").complete_json(
+                    "sys", "user", {"type": "object"}
+                )
+        self.assertEqual((3.05, None), captured["timeout"])
 
     def test_json_schema_mode_for_vllm(self):
         captured = {}

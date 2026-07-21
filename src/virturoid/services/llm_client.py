@@ -340,15 +340,27 @@ class LocalLLM:
         # (connect, read) timeout: a DEAD/unreachable host (e.g. a stale local-LLM IP in .env) fails the CONNECT
         # in ~3s and degrades to the deterministic offline path, instead of freezing the app for the full 120s
         # read window — which on a demo machine reads as a hang/crash.
+        # Keep connection failures quick while allowing an explicit unlimited read
+        # deadline for long local morphology generations (timeout value 0).
+        read_timeout_s = _local_llm_read_timeout_s()
         resp = requests.post(
             f"{self.base_url}/chat/completions",
             headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
             json=payload,
-            timeout=(3.05, 120),
+            timeout=(3.05, read_timeout_s),
         )
         resp.raise_for_status()
         content = resp.json()["choices"][0]["message"]["content"]
         return _parse_json_object(content)
+
+
+def _local_llm_read_timeout_s() -> float | None:
+    """Configured local-model read timeout; zero/negative means no read deadline."""
+    try:
+        value = float(os.environ.get("VIRTUROID_LOCAL_LLM_READ_TIMEOUT_S", "120"))
+    except ValueError:
+        value = 120.0
+    return None if value <= 0 else value
 
 
 # Roles split by how hard the reasoning is. High-volume specialist roles run on a cheap

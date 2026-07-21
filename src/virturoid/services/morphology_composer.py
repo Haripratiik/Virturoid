@@ -290,10 +290,18 @@ def morphology_from_requirements(reach_m: float, payload_kg: float, *, prompt: s
         qleg = [{"length": 0.025 * s, "axis": (1, 0, 0), "torque": round(14.0 * st, 2), "radius": 0.032 * s,
                  "mass": 0.15 * sm, "lower": -0.7, "upper": 0.7,
                  "geometry": _role("quad_hip", 0.025 * s, 0.032 * s)},                       # hip abduction (roll)
+                # ANATOMICAL joint ranges. These rows used to omit lower/upper, so they inherited the +-3.14
+                # (+-180 deg) catch-all from compose_from_spec -- a knee that hyperextends a half turn, which is
+                # the first thing a robotics reviewer notices in the XML. Values are MEASURED from the walking
+                # gait's own excursion on this body (thigh -1.25..+0.06, knee +1.07..+1.50) and set to contain it
+                # with margin, so the limits are honest anatomy AND cannot clamp the gait. Cross-checked against
+                # Unitree Go2 (Menagerie go2.xml): calf range -2.72..-0.84 is likewise FLEXION-ONLY (span 1.9).
                 {"length": _tl, "axis": (0, 1, 0), "torque": round(16.0 * st, 2), "radius": 0.035 * s,
-                 "mass": 0.3 * sm * mp, "geometry": _role("quad_thigh", _tl, 0.035 * s)},     # thigh
+                 "mass": 0.3 * sm * mp, "lower": -1.7, "upper": 0.7,                          # hip pitch (fore/aft)
+                 "geometry": _role("quad_thigh", _tl, 0.035 * s)},                            # thigh
                 {"length": _cl, "axis": (0, 1, 0), "torque": round(12.0 * st, 2), "radius": 0.030 * s,
-                 "mass": 0.3 * sm * mp, "geometry": _role("quad_calf", _cl, 0.030 * s)},      # calf (shin)
+                 "mass": 0.3 * sm * mp, "lower": 0.0, "upper": 2.4,                           # knee: flexion ONLY
+                 "geometry": _role("quad_calf", _cl, 0.030 * s)},                             # calf (shin)
                 {"length": 0.05 * s, "axis": (0, 1, 0), "torque": round(6.0 * st, 2), "radius": 0.038 * s,
                  "mass": 0.3 * sm * mp, "joint": "fixed", "shape": "box",
                  "geometry": {"family": "extrude", "height": 0.05 * s,

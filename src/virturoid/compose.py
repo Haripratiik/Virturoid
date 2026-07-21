@@ -24,6 +24,8 @@ def main(argv=None) -> int:
     ap.add_argument("--payload", type=float, default=None, help="payload (kg)")
     ap.add_argument("--save-gene", default=None)
     ap.add_argument("--workspace", default=None, help="if set, auto-place the gene in that workspace's species tree")
+    ap.add_argument("--offline-template", action="store_true",
+                    help="explicitly allow the legacy heuristic/template fallback when no LLM is available")
     ap.add_argument("--build", default=None, metavar="OUTPUT_DIR",
                     help="also compile the composed robot into a package and evaluate it in real physics")
     ap.add_argument("--co-design", action="store_true",
@@ -49,7 +51,8 @@ def main(argv=None) -> int:
             # DESIGN FLYWHEEL: warm-start from banked designs + bank the result, so runs self-improve.
             from virturoid.services.design_flywheel import co_design_with_memory
             from virturoid.services.memory_db import MemoryDB
-            gene = compose_robot(args.prompt, reach_m=args.reach, payload_kg=args.payload)
+            gene = compose_robot(args.prompt, reach_m=args.reach, payload_kg=args.payload,
+                                 strict_llm=not args.offline_template)
             with MemoryDB(Path(args.workspace) / "memory" / "virturoid_memory.db") as db:
                 res = co_design_with_memory(gene, args.prompt, db)
             gene = res["gene"]
@@ -57,13 +60,15 @@ def main(argv=None) -> int:
             print(f"Co-designed (flywheel{warm}): {res['baseline_value']} -> {res['best_value']} "
                   f"(prior banked best {res['prior_best']}).")
         elif args.co_design:
-            res = compose_working_robot(args.prompt, reach_m=args.reach, payload_kg=args.payload)
+            res = compose_working_robot(args.prompt, llm="auto", reach_m=args.reach, payload_kg=args.payload,
+                                        strict_llm=not args.offline_template)
             gene = res["gene"]
             controller_params = res["controller_params"]   # build with the SAME brain co-design tuned (§22)
             print(f"Co-designed into a working robot: task success {res['baseline_success']} -> "
                   f"{res['success_rate']} (history {res['history']}).")
         else:
-            gene = compose_robot(args.prompt, reach_m=args.reach, payload_kg=args.payload)
+            gene = compose_robot(args.prompt, reach_m=args.reach, payload_kg=args.payload,
+                                 strict_llm=not args.offline_template)
     except Exception as exc:  # noqa: BLE001
         print(f"ERROR: could not compose a robot: {exc}", file=sys.stderr)
         return 1

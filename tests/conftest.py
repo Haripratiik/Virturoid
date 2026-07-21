@@ -8,3 +8,7 @@ deterministic test expectations. Set before any virturoid import resolves a back
 import os
 
 os.environ.setdefault("VIRTUROID_NO_LOCAL_ENV", "1")
+# Production builds are LLM-first and fail closed when no design model is
+# configured.  Tests exercise the explicitly supported offline compatibility
+# lane instead of silently depending on that production fallback.
+os.environ.setdefault("VIRTUROID_ALLOW_HEURISTIC_FALLBACK", "1")

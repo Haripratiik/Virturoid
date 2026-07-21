@@ -10,9 +10,12 @@ reference is carried as a portable MJCF string (same string-based viewport/impor
 
 from __future__ import annotations
 
+import os
+
 
 def build_robot(prompt: str, *, prefer_real: bool = False, reach_m: float | None = None,
-                payload_kg: float | None = None, llm="auto") -> dict:
+                payload_kg: float | None = None, llm="auto",
+                allow_heuristic_fallback: bool | None = None) -> dict:
     """Return ``{kind: 'procedural'|'real', prompt, ...}``. Default GENERATES an original design ('procedural':
     ``gene``). ``prefer_real=True`` is the opt-in reference path (returns 'real': ``mjcf``, ``label``, …) — used
     only when the user explicitly wants to import/benchmark a real production model, never for original design."""
@@ -40,7 +43,10 @@ def build_robot(prompt: str, *, prefer_real: bool = False, reach_m: float | None
     from virturoid.services.gene_validation import validate_gene_design
     from virturoid.services.grounded_physics import ground_gene
     from virturoid.services.morphology_composer import compose_robot
-    gene = compose_robot(prompt, reach_m=reach_m, payload_kg=payload_kg, llm=llm)
+    if allow_heuristic_fallback is None:
+        allow_heuristic_fallback = os.environ.get("VIRTUROID_ALLOW_HEURISTIC_FALLBACK", "0") == "1"
+    gene = compose_robot(prompt, reach_m=reach_m, payload_kg=payload_kg, llm=llm,
+                         strict_llm=not allow_heuristic_fallback)
     # Validate BEFORE grounding (on the design torques) so the actuator-margin checks aren't double-counted:
     # ground_gene rewrites each joint torque to its real actuator's stall, which would inflate a re-derived BOM.
     validation = validate_gene_design(gene, payload_kg=float(payload_kg or 0.0))

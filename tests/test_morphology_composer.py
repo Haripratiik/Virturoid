@@ -2,6 +2,7 @@
 
 import importlib.util
 import unittest
+from unittest.mock import patch
 
 from virturoid.services.morphology_composer import (
     _articulation_issues, _morphology_quality_issues, compose_from_spec, compose_robot,
@@ -26,6 +27,19 @@ _VALID_ARM = {
     "links": [{"name": "l1", "length": 0.2, "axis": [0, 1, 0]}, {"name": "l2", "length": 0.2, "axis": [0, 1, 0]},
               {"name": "l3", "length": 0.1, "axis": [0, 1, 0]}],
     "end_effector": {"kind": "gripper", "span": 0.1},
+}
+_VALID_ANATOMY_ARM = {
+    "robot_class": "manipulator", "name": "sorter", "base_mount": "table",
+    "parts": [
+        {"name": "base", "role": "body", "size": 0.16, "girth": 0.10},
+        {"name": "shoulder", "role": "arm", "parent": "base", "attach": "front_top",
+         "aim": "forward_up", "size": 0.20, "girth": 0.04, "joint": "revolute"},
+        {"name": "forearm", "role": "arm", "parent": "shoulder", "attach": "tip",
+         "aim": "forward", "size": 0.18, "girth": 0.035, "joint": "revolute"},
+        {"name": "wrist", "role": "arm", "parent": "forearm", "attach": "tip",
+         "aim": "forward_down", "size": 0.10, "girth": 0.025, "joint": "revolute"},
+    ],
+    "end_effector": {"kind": "gripper", "parent": "wrist", "span": 0.10},
 }
 _GAPPY_QUAD = {                                    # a limb floating 0.5 m off a 0.1 m-wide torso
     "robot_class": "quadruped", "base_mount": "free",
@@ -122,6 +136,61 @@ class MorphologyComposerTests(unittest.TestCase):
     def test_no_llm_is_deterministic_template(self):
         spec = propose_morphology_spec("a quadruped robot", llm=None, robot_class="quadruped")
         self.assertEqual(spec["design_source"], "heuristic")
+
+    def test_ai_first_composition_rejects_missing_llm_instead_of_using_a_template(self):
+        from virturoid.services.morphology_composer import LLMDesignUnavailable
+
+        with self.assertRaises(LLMDesignUnavailable):
+            compose_robot("a six-legged trilobite-like robot that walks", llm=None, strict_llm=True)
+
+    def test_ai_first_repair_rechecks_the_grounding_gate(self):
+        from virturoid.services.intent_planner import BuildPlan
+        from virturoid.services.morphology_composer import LLMDesignUnavailable
+
+        plan = BuildPlan(
+            prompt="a compact arm to sort blocks", robot_class="manipulator",
+            task_family="pick_place_sort", morphology="compact serial arm",
+        )
+        llm = _MockLLM(_VALID_ANATOMY_ARM)
+        with patch("virturoid.services.morphology_composer._intent_validation_issues", return_value=["unsafe joint"]):
+            with self.assertRaises(LLMDesignUnavailable):
+                compose_robot(plan.prompt, llm=llm, plan=plan, strict_llm=True)
+        self.assertEqual(3, len(llm.calls))  # initial proposal + two grounded repair requests
+        self.assertIn("PREVIOUS anatomy graph was rejected", llm.calls[1])
+
+    def test_ai_first_composition_accepts_a_new_model_defined_body_class(self):
+        from virturoid.services.intent_planner import BuildPlan
+
+        plan = BuildPlan(
+            prompt="build a trilobite-like robot that walks", robot_class="quadruped",
+            task_family="locomotion", concept="trilobite-like", morphology="armored segmented crawler",
+        )
+        recipe = {**_VALID_ANATOMY_ARM, "robot_class": "trilobite", "name": "trilobite"}
+        with patch("virturoid.services.morphology_composer._intent_validation_issues", return_value=[]):
+            gene = compose_robot(plan.prompt, llm=_MockLLM(recipe), plan=plan, strict_llm=True)
+        self.assertEqual("trilobite", gene.robot_class)
+        self.assertEqual("llm_anatomy_graph", gene.design_source)
+        self.assertEqual([], gene.validate())
+
+    def test_ai_first_mode_never_replaces_a_model_body_with_keyword_aerial_template(self):
+        from virturoid.services.intent_planner import BuildPlan
+
+        plan = BuildPlan(prompt="design a drone", robot_class="manipulator", task_family="place_to_target")
+        with patch("virturoid.services.morphology_composer._intent_validation_issues", return_value=[]):
+            with patch("virturoid.services.aerial.build_quadcopter") as quadcopter:
+                gene = compose_robot(plan.prompt, llm=_MockLLM(_VALID_ANATOMY_ARM), plan=plan, strict_llm=True)
+        quadcopter.assert_not_called()
+        self.assertEqual("manipulator", gene.robot_class)
+
+    def test_ai_first_mode_does_not_even_prepare_a_template_fallback(self):
+        from virturoid.services.intent_planner import BuildPlan
+
+        plan = BuildPlan(prompt="build a novel robot arm", robot_class="manipulator", task_family="grasp_lift")
+        with patch("virturoid.services.morphology_composer._intent_validation_issues", return_value=[]):
+            with patch("virturoid.services.morphology_composer.morphology_from_requirements") as fallback:
+                gene = compose_robot(plan.prompt, llm=_MockLLM(_VALID_ANATOMY_ARM), plan=plan, strict_llm=True)
+        fallback.assert_not_called()
+        self.assertEqual("llm_anatomy_graph", gene.design_source)
 
     def test_mobile_prompt_composes_a_wheeled_base(self):
         g = compose_robot("a mobile robot base that can drive and navigate indoors to deliver parts")

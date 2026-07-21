@@ -2,6 +2,7 @@
 against what we can actually build and run. Hermetic — uses the heuristic and a MockLLM, never the network."""
 
 import unittest
+from unittest.mock import patch
 
 from virturoid.services.intent_planner import BuildPlan, plan_build
 
@@ -48,8 +49,45 @@ class HeuristicRoutingTests(unittest.TestCase):
         self.assertTrue(any("clarify" in gap.lower() for gap in plan.gaps), plan.gaps)
         self.assertFalse(plan.to_dict()["buildable"])
 
+    def test_new_concept_keeps_its_name_while_routing_from_observable_morphology(self):
+        plan = plan_build("build a trilobite-like robot with six legs that walks", llm=None)
+        # The user-facing concept remains arbitrary; the legacy robot_class field
+        # is only the execution route required by the current compiler/evaluator.
+        self.assertEqual("trilobite-like", plan.concept)
+        self.assertEqual("quadruped", plan.robot_class)
+        self.assertEqual("locomotion", plan.task_family)
+        self.assertTrue(plan.buildable, plan.gaps)
+
 
 class LLMPlannerTests(unittest.TestCase):
+    def test_ai_first_mode_fails_closed_when_no_llm_is_available(self):
+        with patch.dict("os.environ", {"VIRTUROID_LLM_BACKEND": "off", "VIRTUROID_NO_INTERNAL_LLM": "1"}):
+            plan = plan_build("build a six-legged trilobite-like robot that walks", llm="auto", require_llm=True)
+        self.assertEqual("llm_unavailable", plan.source)
+        self.assertFalse(plan.buildable)
+        self.assertEqual("llm_unavailable", plan.routing_confidence)
+
+    def test_ai_first_planner_repairs_an_unexecutable_route_with_llm_feedback(self):
+        from virturoid.services.llm_client import MockLLM
+
+        proposals = [
+            {"robot_class": "mobile_manipulator", "task_family": "pick_place_sort",
+             "concept": "tabletop sorting arm", "morphology": "mobile arm", "routing_confidence": "explicit"},
+            {"robot_class": "manipulator", "task_family": "pick_place_sort",
+             "concept": "tabletop sorting arm", "morphology": "compact fixed-base arm", "routing_confidence": "explicit"},
+        ]
+        calls = []
+
+        def responder(_system, user, _schema):
+            calls.append(user)
+            return proposals[len(calls) - 1]
+
+        plan = plan_build("sort red and blue blocks into bins", llm=MockLLM(responder=responder), require_llm=True)
+        self.assertTrue(plan.buildable, plan.gaps)
+        self.assertEqual("manipulator", plan.robot_class)
+        self.assertEqual(2, len(calls))
+        self.assertIn("cannot execute", calls[1])
+
     def test_llm_proposal_is_used_but_feasibility_is_ours(self):
         from virturoid.services.llm_client import MockLLM
 
@@ -73,6 +111,26 @@ class LLMPlannerTests(unittest.TestCase):
         self.assertIsInstance(plan, BuildPlan)
         self.assertEqual(plan.robot_class, "manipulator")      # heuristic recovered it
         self.assertEqual(plan.source, "heuristic")
+
+    def test_llm_novel_concept_is_preserved_but_does_not_become_a_fake_route(self):
+        from virturoid.services.llm_client import MockLLM
+
+        plan = plan_build(
+            "build a trilobite-like robot with six legs that walks",
+            llm=MockLLM(fixed={
+                "robot_class": "trilobite",  # a new concept, not an installed executor
+                "concept": "trilobite-like",
+                "concept_aliases": ["armored six-legged crawler"],
+                "task_family": "locomotion",
+                "morphology": "six-legged walking body",
+                "routing_confidence": "explicit",
+            }),
+        )
+        self.assertEqual("llm", plan.source)
+        self.assertEqual("trilobite-like", plan.concept)
+        self.assertEqual(["armored six-legged crawler"], plan.concept_aliases)
+        self.assertEqual("quadruped", plan.robot_class)  # route inferred from body evidence, not the label
+        self.assertTrue(plan.buildable, plan.gaps)
 
     def test_uncertain_llm_route_is_also_blocked(self):
         from virturoid.services.llm_client import MockLLM
