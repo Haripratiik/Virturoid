@@ -271,6 +271,33 @@ def _bank_to_flywheel(gene, *, prompt: str, task: str, success_rate: float | Non
         pass
 
 
+def _dropped_part_coercions(graph: dict, gene) -> list:
+    """Authored parts that produced NO segment in the built body — reported as coercions, never silently.
+
+    MEASURED (MVP red-team): a graph with a CYCLE, or simply authored bottom-up (a part listed before its
+    parent), compiles to `ok: True` with the offending limbs missing — `_emit_chain` skips any part whose parent
+    is not built yet. One probe produced a legless torso (n_seg=1) with `coercions: None`: the product silently
+    shipped a different robot than the one authored. A >80-part graph is also clamped to 8 without a word.
+
+    A part legitimately expands into several segments (a leg -> leg_0, leg_1...), so this matches by name prefix
+    and only flags parts that contributed NOTHING.
+    """
+    try:
+        parts = [p for p in (graph.get("parts") or []) if isinstance(p, dict) and p.get("name")]
+        seg_names = [s.name for s in getattr(gene, "segments", [])]
+        dropped = [str(p["name"]) for p in parts
+                   if not any(n == p["name"] or n.startswith(f"{p['name']}_") for n in seg_names)]
+        if not dropped:
+            return []
+        return [{"field": "parts", "part": nm, "from": "authored", "to": "omitted",
+                 "why": ("this part produced no body: its parent was not built before it (a cycle, or the part "
+                         "listed before its parent), or the graph exceeded the part cap. Reorder so every part "
+                         "follows its parent, and check the root has no parent.")}
+                for nm in dropped[:12]]
+    except Exception:  # noqa: BLE001 - provenance is additive; never block a valid design
+        return []
+
+
 def _robotics_grounding(gene) -> dict:
     """The robotics AI GROUNDING the LLM's design (the whole point of having one): the nearest PHYSICS-VERIFIED
     prior bodies by the morphology embedding + whether a banked gait is likely to warm-start this body. So the
@@ -366,7 +393,8 @@ def submit_design(args: dict) -> dict:
         out["proportion_warnings"] = warns
     try:                                                       # WS-B.4: surface EVERY compiler coercion of the
         from virturoid.services.coercion_audit import detect_coercions   # authored graph — no silent rewrites
-        coer = detect_coercions(graph)
+        coer = list(detect_coercions(graph) or [])
+        coer.extend(_dropped_part_coercions(graph, gene))       # parts that produced NO body at all (see helper)
         if coer:
             out["coercions"] = coer
             out["coercions_note"] = ("the compiler clamped/defaulted these fields of your design (buildability / "
