@@ -102,7 +102,23 @@ def _render_gene(gene, tag: str, *, azimuth: float = 50.0, elevation: float = -1
         _pose_manipulator_for_render(m, d, gene)               # bend an arm into a natural pose (no-op for others)
         mujoco.mj_forward(m, d)
         rr = mujoco.Renderer(m, height=420, width=560); cam = mujoco.MjvCamera()
-        cam.lookat[:] = [0.0, 0.0, 0.15]; cam.distance, cam.azimuth, cam.elevation = 1.9, float(azimuth), float(elevation)
+        # FRAME THE ACTUAL BODY. A fixed lookat z=0.15 / distance=1.9 is sized for a quadruped, so a tall body
+        # (the humanoid) rendered with its HEAD CUT OFF in the gallery. Fit to the body's bounding box instead,
+        # excluding world geoms (the floor plane is effectively infinite and would blow the box up). The 3.2x
+        # factor is chosen so a typical quad still frames at ~1.9 -- existing renders are preserved, tall bodies
+        # simply stop being cropped.
+        _bg = [i for i in range(m.ngeom) if int(m.geom_bodyid[i]) != 0]
+        if _bg:
+            import numpy as _np
+            _p = _np.asarray(d.geom_xpos)[_bg]
+            _lo, _hi = _p.min(axis=0), _p.max(axis=0)
+            _c = (_lo + _hi) / 2.0
+            _extent = float(_np.linalg.norm(_hi - _lo)) or 0.6
+            cam.lookat[:] = [float(_c[0]), float(_c[1]), float(_c[2])]
+            cam.distance = float(min(8.0, max(1.2, 2.4 * _extent)))   # fills the frame; verified uncropped on a humanoid
+        else:
+            cam.lookat[:] = [0.0, 0.0, 0.15]; cam.distance = 1.9
+        cam.azimuth, cam.elevation = float(azimuth), float(elevation)
         rr.update_scene(d, camera=cam); img = PIL.Image.fromarray(rr.render().copy()); rr.close()
         path = _RENDER_DIR / f"{tag}.png"; img.save(path)
         return str(path)
