@@ -99,6 +99,21 @@ def autonomous_build(
     except Exception:  # noqa: BLE001 - concept memory is additive, never a build blocker
         concept_record = None
 
+    # MVP-B2: an unconfigured/unreachable LLM must not mean "no robot at all". The offline heuristic composer is
+    # the SAME one create_robot uses (compose_robot(llm=None)) and it builds a real, physics-verifiable body in
+    # ~10 s -- so a zero-token evaluator (fresh clone, no API key) gets an actual package instead of a dead end.
+    # Honest, not silent: the result is stamped design_source="offline_composer" and carries a note saying what
+    # an LLM backend would add. A genuinely ambiguous prompt still falls through to clarification below, because
+    # the re-planned intent has to stand on its own.
+    offline_fallback = False
+    if intent.routing_confidence == "llm_unavailable" and not allow_heuristic_fallback:
+        allow_heuristic_fallback = True
+        offline_fallback = True
+        intent = plan_build(prompt, llm=None, require_llm=False)
+        emit("offline_composer",
+             "No LLM backend is configured or reachable - designing with the offline heuristic composer.",
+             {"design_source": "offline_composer"})
+
     if intent.routing_confidence in {"novel", "uncertain", "llm_unavailable"} or (
         not allow_heuristic_fallback and not intent.buildable
     ):
@@ -169,6 +184,8 @@ def autonomous_build(
         emit("llm_grounding_failed", str(exc), {"intent": intent.to_dict()})
         return report
     if gene_report is not None:
+        if offline_fallback:                               # the gene path builds+writes its own report
+            _note_offline_design(gene_report, output_dir)
         return gene_report
 
     # Optional Task Agent (plan §8, Phase D): a cloud model expands the prompt into a
@@ -228,6 +245,8 @@ def autonomous_build(
         decisions=decisions,
         exported_artifacts=dict(build.artifacts),
     )
+    if offline_fallback:                                   # MVP-B2: never let offline provenance be invisible
+        _note_offline_design(report, output_dir)
     if not getattr(build, "species_exact", True):
         report.notes.append(build.species_note)
         report.requested_species = build.requested_species
@@ -659,6 +678,28 @@ def _write_memory_effectiveness_report(output_dir: Path, memory_dir: Path, repor
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return "reports/memory_effectiveness_report.json"
+
+
+_OFFLINE_DESIGN_NOTE = (
+    "Designed by the OFFLINE heuristic composer - no LLM backend was configured or reachable. The body is real "
+    "and physics-verified, but the design reasoning is rule-based; set VIRTUROID_LLM_BACKEND (and OPENAI_API_KEY) "
+    "for LLM-authored anatomy.")
+
+
+def _note_offline_design(report: AutonomyReport, output_dir: Path) -> None:
+    """Stamp offline-composer provenance on a report AND re-write it to disk (MVP-B2).
+
+    Both build routes need this and they build their reports in different places: the legacy path constructs one
+    inline, while the gene path builds + WRITES its own before returning. Re-writing here is what makes the note
+    survive into reports/autonomy_report.json on the gene route -- otherwise the provenance exists only in memory
+    and the artifact a reviewer opens silently omits how the body was designed."""
+    if _OFFLINE_DESIGN_NOTE in (report.notes or []):
+        return
+    report.notes.append(_OFFLINE_DESIGN_NOTE)
+    try:
+        _write_report(output_dir, report)
+    except Exception:  # noqa: BLE001 - provenance is additive; never fail a completed build over it
+        pass
 
 
 def _maybe_ai_design(prompt: str, emit) -> dict | None:
