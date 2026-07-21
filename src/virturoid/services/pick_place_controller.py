@@ -459,7 +459,12 @@ def run_pick_place_episode(model, scene: dict, params: dict | None = None, perce
         if grasped and stable:
             drive(above_block, phase_steps, grasp=block, point=p_above_block)
             drive(above_bin, phase_steps, grasp=block, point=p_above_bin)
-            drive(in_bin, phase_steps // 2, grasp=block, point=p_in_bin)
+            # The PLACE phase is the one that decides success, yet it used to get HALF the steps of every
+            # other phase. Task-space servoing (the redundant-arm path) converges by iterated J-transpose/DLS
+            # steps, so a halved budget lands the block short: MEASURED a 7-DOF arm settling 7.7 cm from the
+            # bin versus 1.4 cm for the 6-DOF joint-PD arm, which is the #185 sort regression (0.4 < 0.7).
+            # Joint-PD arms already converge well inside the half budget, so their behaviour is unchanged.
+            drive(in_bin, phase_steps if use_task_space else phase_steps // 2, grasp=block, point=p_in_bin)
             drive(above_bin, phase_steps // 2, point=p_above_bin)  # release over the bin
         per_block[block] = {"grasped": grasped}
         if not stable:
