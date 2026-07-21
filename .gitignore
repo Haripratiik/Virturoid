@@ -47,6 +47,10 @@ AGENTS.md
 .claude/
 .claude/settings.local.json
 
+# Frontend (Virturoid Studio) build artifacts
+frontend/node_modules/
+frontend/dist/
+
 # Virtualenvs
 .venv/
 venv/
@@ -57,3 +61,7 @@ env/
 .idea/
 .vscode/
 *.swp
+
+# MVP audit hygiene: never ship local run junk on a blind `git add -A`
+MUJOCO_LOG.TXT
+reports/
