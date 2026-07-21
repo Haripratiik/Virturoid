@@ -787,11 +787,23 @@ class _Handler(BaseHTTPRequestHandler):
         return call_tool(payload.get("tool", ""), payload.get("args") or {})
 
     def _handle_json_post(self, handler) -> None:
+        # PARSE first, and report a bad REQUEST as 400 — not 500. A malformed body, a non-numeric
+        # Content-Length, or a JSON scalar/array where an object is required is the CALLER's error; returning
+        # 500 told an integrator our server had crashed and made their own bugs undebuggable (red-team finding).
         try:
             length = int(self.headers.get("Content-Length", "0"))
-            payload = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
+            if length < 0:
+                raise ValueError("negative Content-Length")
+            raw = self.rfile.read(length).decode("utf-8") if length else ""
+            payload = json.loads(raw) if raw.strip() else {}
+            if not isinstance(payload, dict):
+                raise TypeError(f"body must be a JSON object, got {type(payload).__name__}")
+        except Exception as exc:  # noqa: BLE001 - malformed input from the client
+            self._send_json({"error": f"bad request: {exc}"}, status=HTTPStatus.BAD_REQUEST)
+            return
+        try:
             result = handler(payload)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001 - a genuine server-side failure
             self._send_json({"error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
             return
         self._send_json(result)
