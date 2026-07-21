@@ -66,6 +66,12 @@ class FlywheelAutoBankTests(unittest.TestCase):
         # RECALL, done as HINTS not copy-paste (the user's core principle): a SINGLE banked gait is a point, not a
         # region, so the deploy hint fires only once >=2 credible walks are banked NEAR the body. Bank a real one
         # (auto-bank) + a second distinct quad, then a fresh quad recalls them as a warm-start hint region.
+        #
+        # The second body is constructed EXPLICITLY (scaled dims + its own id) rather than prompted, because this
+        # test pins the FLYWHEEL mechanics. Measured 2026-07-21: "a quadruped robot dog" via the walkable build
+        # path and "a large quadruped robot" compose to the byte-identical gene (same anatomy content id), so
+        # keep-best CORRECTLY deduped them to one row — a composer prompt-differentiation gap (tracked: cheetah==
+        # dog family), not a banking bug. Two genuinely distinct bodies must yield two rows and a hint region.
         import types
         from virturoid.services.gait_flywheel import bank_gait
         from virturoid.services.gait_hints import mine_gait_hints
@@ -74,10 +80,16 @@ class FlywheelAutoBankTests(unittest.TestCase):
         v1 = self._build_and_verify("a quadruped robot dog")   # auto-banks the FIRST credible quad gait
         self.assertTrue(v1["verdict"].startswith("CREDIBLE"))
         with MemoryDB(self._db) as db:
+            big = compose_robot("a quadruped robot dog")       # a 2nd DISTINCT quad: same family, larger build
+            for s in big.segments:
+                s.length_m = round(s.length_m * 1.3, 5)
+                s.radius_m = round(s.radius_m * 1.25, 5)
+                s.mass_kg = round(s.mass_kg * 1.6, 5)
+            big.id = f"{big.id}_large"                         # distinct body => its own bank identity
             r = types.SimpleNamespace(best_survived=True, best_forward=0.9, best_credible=True,
                                       best_height_ratio=0.85, best_params={"freq": 1.5, "hip_amp": 0.9,
                                       "knee_amp": 1.0, "duty": 0.25, "kp": 32.0, "kd": 1.5})
-            bank_gait(db, compose_robot("a large quadruped robot"), r)   # a 2nd DISTINCT quad -> a region exists
+            bank_gait(db, big, r)                              # -> a region exists
             self.assertGreaterEqual(self._gaits(), 2, "two distinct quad gaits banked")
             h = mine_gait_hints(db, gene=compose_robot("a quadruped robot dog"))
         self.assertGreaterEqual(h["n"], 2, f"the next body RECALLS the banked gaits as a warm-start hint: {h}")

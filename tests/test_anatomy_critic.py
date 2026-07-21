@@ -22,21 +22,37 @@ class AnatomyCriticTests(unittest.TestCase):
         self.assertGreater(c["measures"]["height_m"], 0.5)
         self.assertTrue(0.0 <= c["score"] <= 1.0)
 
-    def test_flags_stance_defect_and_baked_rest_pose_fixes_it(self):
+    def test_flags_stance_defect_and_the_shipped_quad_clears_it(self):
         # The critic must catch a proportion/stance defect when one exists (so an iterative loop / LLM-repair has a
-        # signal). A quad with NO baked stance stands on straight-down legs = too tall/narrow (aspect < 0.8) and the
-        # critic flags 'stance'. Baking the default crouch rest pose widens the stance and measurably clears it —
-        # this also locks in that the offline quad's baked rest pose is a real proportion improvement, not cosmetic.
+        # signal). HISTORY: this test used to elicit the defect by stripping the baked crouch off the default quad
+        # (straight-down legs read tall/narrow). The 2026-07 anatomy work moved the wide stance INTO the authored
+        # geometry, so the default quad now clears the check even unposed (measured aspect ~1.25 — a real body
+        # improvement, which went stale-proxy on this test). The capability is therefore pinned on a CONSTRUCTED
+        # defective body: a stilt — one tall stack of short segments on a small base (W:H ~0.22) — the exact
+        # too-tall/narrow shape the check exists to flag. NOTE the width measure uses geom_rbound (bounding
+        # spheres), so long-limbed bodies self-widen; only a stack of SHORT segments is genuinely narrow to it.
         import os
         os.environ.setdefault("VIRTUROID_NO_LOCAL_ENV", "1")
+        from virturoid.schemas.gene import GeneSegment, RobotGene
         from virturoid.services.anatomy_critic import critique_gene
         from virturoid.services.morphology_composer import compose_robot
-        unposed = compose_robot("a quadruped robot"); unposed.metadata = {}     # strip the baked crouch
-        cu = critique_gene(unposed)
-        self.assertIn("stance", {i["check"] for i in cu["issues"]},
-                      f"critic must flag the straight-leg stance defect, got {cu['issues']}")
-        posed = critique_gene(compose_robot("a quadruped robot"))               # default = baked crouch
-        self.assertGreater(posed["score"], cu["score"])                        # the rest pose improves the body
+        segs = [GeneSegment("torso", parent=None, shape="box", length_m=0.1, radius_m=0.05, mass_kg=0.6)]
+        prev = "torso"
+        for i in range(5):                                     # children stack upward at the default mount_euler
+            segs.append(GeneSegment(f"c{i}", parent=prev, shape="capsule", length_m=0.14, radius_m=0.025,
+                                    mass_kg=0.12, joint_type="revolute", joint_axis=(0, 1, 0), joint_lower=-0.5,
+                                    joint_upper=0.5, is_end_effector=(i == 4)))
+            prev = f"c{i}"
+        stilt = RobotGene(id="stilt", species="stilt", robot_class="quadruped", base_mount="free",
+                          end_effector_type="none", segments=segs)
+        cd = critique_gene(stilt)
+        self.assertIn("stance", {i["check"] for i in cd["issues"]},
+                      f"critic must flag the tall/narrow stilt body, got {cd['issues']}")
+        self.assertLess(cd["score"], 1.0)
+        posed = critique_gene(compose_robot("a quadruped robot"))              # the SHIPPED default quad
+        self.assertNotIn("stance", {i["check"] for i in posed["issues"]},
+                         "the default quad's authored wide stance must clear the check")
+        self.assertGreater(posed["score"], cd["score"])                       # good body outscores the defect
 
     def test_never_crashes_on_an_invalid_gene(self):
         from virturoid.schemas.gene import GeneSegment, RobotGene
