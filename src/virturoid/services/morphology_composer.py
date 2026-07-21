@@ -285,17 +285,22 @@ def morphology_from_requirements(reach_m: float, payload_kg: float, *, prompt: s
         # byte-identical to the gait-tuned Go1-class baseline that the locomotion tests pin. Clamped so a
         # hallucinated value can't build a degenerate body; masses ~ s^3 (volume), torques ~ s^2 (a rough size
         # law — ground_gene + the validation gate still re-pick/flag real actuators afterward).
-        s = 1.0
+        # A measured value (leg_mm / scale_m) is a real measurement and WINS; plain-English size words are the
+        # fallback prior. Before this, words were dropped entirely: "a large quadruped" and "a small lightweight
+        # quadruped" composed the SAME body (total link length 2.241 m both), the clearest template tell there is.
+        from virturoid.services.animal_proportions import animal_proportions, size_scale
+        s, size_mass = 1.0, 1.0
         if nominal_dims and nominal_dims.get("leg_mm"):
             s = max(0.5, min(2.5, float(nominal_dims["leg_mm"]) / 0.24))
         elif scale_m:
             s = max(0.5, min(2.5, float(scale_m) / 0.45))
+        else:
+            s, size_mass = size_scale(p)                   # (1.0, 1.0) when the prompt says nothing about size
         sm, st = s ** 3, s ** 2
         # P4: animal proportion priors (leg length / stance width / torso length / mass) — 1.0 for generic/dog so
         # the gait-pinned baseline is byte-identical; a horse gets long legs, a gecko short splayed legs, etc.
-        from virturoid.services.animal_proportions import animal_proportions
         prop = animal_proportions(p)
-        lp, wp, tp, mp = prop["leg"], prop["stance"], prop["torso"], prop["mass"]
+        lp, wp, tp, mp = prop["leg"], prop["stance"], prop["torso"], prop["mass"] * size_mass
         _tl, _cl = 0.12 * s * lp, 0.12 * s * lp            # thigh / calf link length (the gait-determining lever)
         # Real-quadruped leg topology (matches a Go1-class baseline): 3 actuated DOF per leg —
         # hip ABDUCTION (roll about body x) + hip PITCH (thigh) + KNEE (shin) — then a welded foot.

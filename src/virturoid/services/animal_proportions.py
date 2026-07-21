@@ -39,7 +39,70 @@ _ANIMAL_PROPORTIONS: dict[str, dict] = {
     "mouse":     {"leg": 0.70, "stance": 1.05, "torso": 0.90, "mass": 0.4},
     "corgi":     {"leg": 0.60, "stance": 1.05, "torso": 1.20, "mass": 0.8},
     "dachshund": {"leg": 0.55, "stance": 1.00, "torso": 1.45, "mass": 0.8},
+    # Sight-hunters / cursorial runners: long thin legs, long flexible spine, narrow track, light frame. MEASURED
+    # GAP 2026-07-21: "a cheetah robot that runs fast" composed BYTE-IDENTICAL geometry to "a robot dog" (the
+    # table simply had no cheetah), which is the single most obvious "this is a template, not a generator" tell.
+    "cheetah":   {"leg": 1.35, "stance": 0.82, "torso": 1.25, "mass": 0.75},
+    "greyhound": {"leg": 1.30, "stance": 0.82, "torso": 1.20, "mass": 0.70},
+    "antelope":  {"leg": 1.45, "stance": 0.82, "torso": 1.00, "mass": 0.8},
+    "gazelle":   {"leg": 1.45, "stance": 0.80, "torso": 0.95, "mass": 0.7},
+    "zebra":     {"leg": 1.45, "stance": 0.88, "torso": 1.18, "mass": 1.25},
+    "camel":     {"leg": 1.55, "stance": 0.90, "torso": 1.15, "mass": 1.4},
+    "leopard":   {"leg": 1.10, "stance": 0.95, "torso": 1.15, "mass": 1.0},
+    "jaguar":    {"leg": 1.05, "stance": 1.00, "torso": 1.15, "mass": 1.1},
+    "panther":   {"leg": 1.10, "stance": 0.95, "torso": 1.15, "mass": 1.0},
+    "tiger":     {"leg": 1.00, "stance": 1.05, "torso": 1.15, "mass": 1.5},
+    "lion":      {"leg": 1.00, "stance": 1.05, "torso": 1.10, "mass": 1.5},
+    "wolf":      {"leg": 1.05, "stance": 0.95, "torso": 1.05, "mass": 0.95},
+    "fox":       {"leg": 0.95, "stance": 0.95, "torso": 1.00, "mass": 0.6},
+    "goat":      {"leg": 1.05, "stance": 0.90, "torso": 0.95, "mass": 0.7},
+    "sheep":     {"leg": 0.95, "stance": 1.00, "torso": 1.05, "mass": 0.9},
+    "pig":       {"leg": 0.60, "stance": 1.15, "torso": 1.25, "mass": 1.3},
+    "cow":       {"leg": 1.00, "stance": 1.08, "torso": 1.25, "mass": 2.0},
+    "bear":      {"leg": 0.85, "stance": 1.20, "torso": 1.20, "mass": 2.0},
+    "badger":    {"leg": 0.58, "stance": 1.25, "torso": 1.15, "mass": 0.8},
+    "otter":     {"leg": 0.55, "stance": 1.20, "torso": 1.20, "mass": 0.6},
+    "rabbit":    {"leg": 0.85, "stance": 0.95, "torso": 0.85, "mass": 0.4},
+    "hare":      {"leg": 0.95, "stance": 0.92, "torso": 0.85, "mass": 0.4},
 }
+
+# SIZE words -> a uniform body-scale multiplier (and a mass nudge on top of the s^3 volume law).
+#
+# MEASURED GAP 2026-07-21: "a large quadruped robot" and "a small lightweight quadruped" composed to the SAME
+# body (identical total link length 2.241 m) — the composer's uniform scale `s` was only ever fed by an explicit
+# scale_m / nominal_dims from a spec, so plain-English size words were dropped on the floor. A user typing
+# "small" and getting the same robot as "large" is the fastest way to conclude the thing is a template.
+#
+# NOT included on purpose: "heavy-duty"/"rugged"/"lightweight-for-flight" already drive a REAL, separate
+# mechanism (bom_builder._SKELETON_THICKNESS thickens or slims the load path, and the task material choice
+# changes density), so adding them here would double-count. This table is body SIZE only.
+_SIZE_WORDS: tuple[tuple[str, float, float], ...] = (   # (pattern, size_scale, extra mass multiplier)
+    (r"\b(?:miniature|tiny|micro|palm[- ]?sized|insect[- ]?sized)\b", 0.55, 1.0),
+    (r"\b(?:small|compact|little|mini)\b",                            0.72, 1.0),
+    (r"\b(?:giant|huge|massive|enormous)\b",                          1.70, 1.0),
+    (r"\b(?:large|big|full[- ]?size[d]?)\b",                          1.35, 1.0),
+    (r"\b(?:lightweight|featherweight)\b",                            1.00, 0.70),
+)
+
+
+def size_scale(prompt: str) -> tuple[float, float]:
+    """Return ``(size_scale, mass_multiplier)`` implied by plain-English SIZE words in the prompt.
+
+    ``(1.0, 1.0)`` when the prompt says nothing about size — so a neutral prompt stays BYTE-IDENTICAL to the
+    gait-tuned baseline that the locomotion tests pin. Deterministic, first-hit-wins, word-boundary matched
+    (so 'little' never fires on 'littoral'). Subordinate to an explicit scale_m / nominal_dims, which are a
+    real measurement and always win over a word.
+    """
+    p = (prompt or "").lower()
+    scale, mass = 1.0, 1.0
+    for pat, s, m in _SIZE_WORDS:
+        if re.search(pat, p):
+            scale, mass = s, m
+            break
+    # a size word AND a weight word can both apply ("a small lightweight quadruped")
+    if scale != 1.0 and re.search(r"\b(?:lightweight|featherweight)\b", p):
+        mass *= 0.70
+    return scale, mass
 
 
 def animal_proportions(prompt: str) -> dict:
