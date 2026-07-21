@@ -1,0 +1,61 @@
+@import "tailwindcss";
+
+/*
+  Virturoid Studio design tokens (dark-first, oklch).
+  Surfaces follow the Blender register: clean NEUTRAL grays with real contrast
+  between levels — no warm cast, no glow. Ember-orange marks interaction
+  (Blender's selection orange lineage); ion-blue marks everything AI-authored.
+  Semantic colors (ok/warn/fail) are reserved for VERDICTS only — never decoration.
+*/
+@theme {
+  /* Surfaces: cool-neutral ramp with REAL contrast between levels so regions
+     read as distinct — canvas (darkest, viewport) < app (chrome) < panel
+     (side panel bodies) < raised (controls). */
+  --color-canvas: oklch(0.185 0.003 250);
+  --color-app: oklch(0.225 0.004 250);
+  --color-panel: oklch(0.27 0.005 250);
+  --color-raised: oklch(0.335 0.006 250);
+  --color-overlay: oklch(0.385 0.006 250);
+  --color-hairline: oklch(0.46 0.006 250 / 50%);
+  --color-hairline-strong: oklch(0.56 0.007 250 / 65%);
+
+  /* Text — pure neutrals, Blender-legible */
+  --color-primary: oklch(0.955 0 0);
+  --color-secondary: oklch(0.78 0 0);
+  --color-muted: oklch(0.62 0 0);
+
+  /* Accents: ember = interactive (selection/focus/actions); ion blue = AI-authored */
+  --color-accent: oklch(0.74 0.16 55);
+  --color-accent-dim: oklch(0.74 0.16 55 / 15%);
+  --color-agent: oklch(0.72 0.12 250);
+  --color-agent-dim: oklch(0.72 0.12 250 / 15%);
+
+  /* Verdicts ONLY — always paired with icon + label in the UI.
+     warn (yellow, hue 95) is kept visually distinct from ember (hue 55). */
+  --color-ok: oklch(0.75 0.13 155);
+  --color-ok-dim: oklch(0.75 0.13 155 / 15%);
+  --color-warn: oklch(0.84 0.14 95);
+  --color-warn-dim: oklch(0.84 0.14 95 / 14%);
+  --color-fail: oklch(0.66 0.19 25);
+  --color-fail-dim: oklch(0.66 0.19 25 / 15%);
+  --color-skip: oklch(0.56 0.01 80);
+  --color-skip-dim: oklch(0.56 0.01 80 / 15%);
+
+  /* Type: Space Grotesk carries the brand voice; Inter does the reading;
+     JetBrains Mono owns data, ids, and the command line. */
+  --font-display: "Space Grotesk Variable", "Space Grotesk", "Segoe UI", sans-serif;
+  --font-sans: "Inter Variable", "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono Variable", "JetBrains Mono", ui-monospace, "Cascadia Code", monospace;
+
+  --text-2xs: 11px;
+  --text-xs: 12px;
+  --text-sm: 13px;
+  --text-base: 14px;
+  --text-lg: 16px;
+  --text-xl: 20px;
+  --text-2xl: 28px;
+
+  --radius-ctl: 4px;
+  --radius-card: 6px;
+  --radius-panel: 10px;
+}

@@ -1,0 +1,87 @@
+{
+  "id": "morph_fixed_arm_three_dof_tabletop",
+  "version": "0.1.0",
+  "robot_class": "manipulator",
+  "species_pattern": "fixed_arm.three_dof.tabletop",
+  "parent_species": "fixed_arm",
+  "morphology_tags": [
+    "fixed_base",
+    "serial_chain",
+    "manipulator",
+    "tabletop"
+  ],
+  "supported_task_types": [
+    "pick_place_sort",
+    "pick_place_box",
+    "generic_manipulation"
+  ],
+  "required_modules": [
+    {
+      "role": "base",
+      "description": "Fixed base or mounting plate.",
+      "required": true,
+      "compatible_component_categories": [
+        "structural"
+      ]
+    },
+    {
+      "role": "joint_actuator",
+      "description": "Repeated rotary actuator used for arm joints.",
+      "required": true,
+      "compatible_component_categories": [
+        "actuator"
+      ]
+    },
+    {
+      "role": "links",
+      "description": "Rigid upper and forearm links sized from reach requirements.",
+      "required": true,
+      "compatible_component_categories": [
+        "structural"
+      ]
+    },
+    {
+      "role": "wrist_sensor",
+      "description": "Task-facing wrist perception module.",
+      "required": true,
+      "compatible_component_categories": [
+        "sensor"
+      ]
+    },
+    {
+      "role": "end_effector",
+      "description": "Task-appropriate gripper or tool.",
+      "required": true,
+      "compatible_component_categories": [
+        "gripper"
+      ]
+    },
+    {
+      "role": "main_compute",
+      "description": "Onboard or nearby controller computer.",
+      "required": true,
+      "compatible_component_categories": [
+        "compute"
+      ]
+    }
+  ],
+  "default_links": [
+    "base_link",
+    "upper_link",
+    "forearm_link",
+    "wrist_link",
+    "gripper_link"
+  ],
+  "default_skills": [
+    "reach",
+    "grasp",
+    "lift",
+    "place",
+    "sort"
+  ],
+  "builder_service": "virturoid.services.robot_arm_builder.build_reference_robot_arm",
+  "notes": [
+    "Current MVP template.",
+    "Exercises the generic build pipeline through a bounded manipulation robot."
+  ]
+}

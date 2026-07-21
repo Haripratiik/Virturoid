@@ -1,0 +1,101 @@
+{
+  "id": "robot_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo",
+  "version": "0.1.0",
+  "name": "Autonomous reference tabletop arm",
+  "species": "fixed_arm.three_dof.tabletop",
+  "morphology_template_id": "morph_fixed_arm_three_dof_tabletop",
+  "source_cad_assembly_id": "asm_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo",
+  "links": [
+    "base_link",
+    "upper_link",
+    "forearm_link",
+    "wrist_link",
+    "gripper_link"
+  ],
+  "joints": [
+    {
+      "name": "base_yaw",
+      "joint_type": "revolute",
+      "parent_link": "base_link",
+      "child_link": "upper_link",
+      "axis_xyz": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "limit": {
+        "lower": -3.14,
+        "upper": 3.14,
+        "velocity": 1.2,
+        "effort": 12.0
+      },
+      "actuator_component_id": "cmp_actuator_vx12"
+    },
+    {
+      "name": "shoulder_pitch",
+      "joint_type": "revolute",
+      "parent_link": "upper_link",
+      "child_link": "forearm_link",
+      "axis_xyz": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "limit": {
+        "lower": -1.57,
+        "upper": 1.57,
+        "velocity": 1.0,
+        "effort": 12.0
+      },
+      "actuator_component_id": "cmp_actuator_vx12"
+    },
+    {
+      "name": "elbow_pitch",
+      "joint_type": "revolute",
+      "parent_link": "forearm_link",
+      "child_link": "wrist_link",
+      "axis_xyz": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "limit": {
+        "lower": -1.57,
+        "upper": 1.57,
+        "velocity": 1.0,
+        "effort": 12.0
+      },
+      "actuator_component_id": "cmp_actuator_vx12"
+    }
+  ],
+  "sensors": [
+    {
+      "name": "wrist_rgbd_camera",
+      "sensor_component_id": "cmp_camera_rgbd_mini",
+      "parent_link": "wrist_link",
+      "transform_xyz_rpy": [
+        0.03,
+        0.0,
+        0.04,
+        0.0,
+        0.0,
+        0.0
+      ]
+    }
+  ],
+  "end_effectors": [
+    "pg2_parallel_gripper"
+  ],
+  "supported_backends": {
+    "mujoco": "schema_ready",
+    "isaac": "planned"
+  },
+  "known_skills": [
+    "reach",
+    "grasp",
+    "lift",
+    "place",
+    "sort"
+  ],
+  "known_failures": []
+}

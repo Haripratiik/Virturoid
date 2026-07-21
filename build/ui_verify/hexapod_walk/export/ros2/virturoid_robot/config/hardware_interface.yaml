@@ -1,0 +1,77 @@
+# Maps each robot joint to the REAL actuator from the bill of materials and the ros2_control interface it
+# exposes. Set hardware_plugin to your bus driver (Dynamixel / ODrive / CAN / EtherCAT) before deploying.
+hardware:
+  hardware_plugin: "REPLACE_WITH_YOUR_DRIVER  # e.g. dynamixel_hardware/DynamixelHardware"
+joints:
+  leg0_0_joint:
+    actuator: "GENERIC position actuator (set from the BOM)"
+    command_interface: position
+    state_interfaces: [position, velocity]
+  leg0_1_joint:
+    actuator: "GENERIC position actuator (set from the BOM)"
+    command_interface: position
+    state_interfaces: [position, velocity]
+  leg0_2_joint:
+    actuator: "GENERIC position actuator (set from the BOM)"
+    command_interface: position
+    state_interfaces: [position, velocity]
+  leg1_0_joint:
+    actuator: "GENERIC position actuator (set from the BOM)"
+    command_interface: position
+    state_interfaces: [position, velocity]
+  leg1_1_joint:
+    actuator: "GENERIC position actuator (set from the BOM)"
+    command_interface: position
+    state_interfaces: [position, velocity]
+  leg1_2_joint:
+    actuator: "GENERIC position actuator (set from the BOM)"
+    command_interface: position
+    state_interfaces: [position, velocity]
+  leg2_0_joint:
+    actuator: "GENERIC position actuator (set from the BOM)"
+    command_interface: position
+    state_interfaces: [position, velocity]
+  leg2_1_joint:
+    actuator: "GENERIC position actuator (set from the BOM)"
+    command_interface: position
+    state_interfaces: [position, velocity]
+  leg2_2_joint:
+    actuator: "GENERIC position actuator (set from the BOM)"
+    command_interface: position
+    state_interfaces: [position, velocity]
+  leg3_0_joint:
+    actuator: "GENERIC position actuator (set from the BOM)"
+    command_interface: position
+    state_interfaces: [position, velocity]
+  leg3_1_joint:
+    actuator: "GENERIC position actuator (set from the BOM)"
+    command_interface: position
+    state_interfaces: [position, velocity]
+  leg3_2_joint:
+    actuator: "GENERIC position actuator (set from the BOM)"
+    command_interface: position
+    state_interfaces: [position, velocity]
+  leg4_0_joint:
+    actuator: "GENERIC position actuator (set from the BOM)"
+    command_interface: position
+    state_interfaces: [position, velocity]
+  leg4_1_joint:
+    actuator: "GENERIC position actuator (set from the BOM)"
+    command_interface: position
+    state_interfaces: [position, velocity]
+  leg4_2_joint:
+    actuator: "GENERIC position actuator (set from the BOM)"
+    command_interface: position
+    state_interfaces: [position, velocity]
+  leg5_0_joint:
+    actuator: "GENERIC position actuator (set from the BOM)"
+    command_interface: position
+    state_interfaces: [position, velocity]
+  leg5_1_joint:
+    actuator: "GENERIC position actuator (set from the BOM)"
+    command_interface: position
+    state_interfaces: [position, velocity]
+  leg5_2_joint:
+    actuator: "GENERIC position actuator (set from the BOM)"
+    command_interface: position
+    state_interfaces: [position, velocity]

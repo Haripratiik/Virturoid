@@ -1,0 +1,48 @@
+{
+  "id": "dry_training_run_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_mujoco_revision_001",
+  "version": "0.1.0",
+  "training_run_config_id": "training_run_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_mujoco_revision_001",
+  "backend": "mujoco",
+  "adapter_name": "dry_run.synthetic_v0",
+  "robot_model_uri": "simulation/mujoco/mvp_scene.xml",
+  "perception_artifact_uri": "simulation/perception_config.json",
+  "objective_artifact_uri": "training/training_objective.json",
+  "curriculum_artifact_uri": "training/training_curriculum.json",
+  "compiled_scene_index_uri": "simulation/mujoco/compiled_scene_index.json",
+  "reward_terms": [
+    "reach_selected_object",
+    "grasp_selected_object",
+    "red_sorted",
+    "blue_sorted",
+    "all_sorted_bonus",
+    "collision_penalty",
+    "drop_penalty",
+    "timeout_penalty"
+  ],
+  "observation_streams": [
+    "wrist_rgbd_camera"
+  ],
+  "total_scenes": 3,
+  "total_planned_episodes": 3,
+  "estimated_success_rate": 0.7,
+  "replay_index_uri": "runs/mvp_training_revision/replay_index.json",
+  "episode_trace_uri": "runs/mvp_training_revision/logs/episode_trace.jsonl",
+  "group_results": [
+    {
+      "purpose": "revision",
+      "scene_artifact": "simulation/revision_scene_set.json",
+      "scene_count": 3,
+      "planned_episodes": 3,
+      "simulated_success_rate": 0.7,
+      "first_episode_id": "episode_revision_0001",
+      "last_episode_id": "episode_revision_0003"
+    }
+  ],
+  "notes": [
+    "Dry-run only: no physics simulator was executed.",
+    "This verifies the training package can be consumed by a runner-shaped service.",
+    "Perception streams: wrist_rgbd_camera.",
+    "Reward terms: reach_selected_object, grasp_selected_object, red_sorted, blue_sorted, all_sorted_bonus, collision_penalty, drop_penalty, timeout_penalty.",
+    "Curriculum stages: baseline_curriculum, variation_curriculum, edge_case_curriculum, regression_curriculum, holdout_curriculum, revision_curriculum."
+  ]
+}

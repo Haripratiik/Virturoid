@@ -1,0 +1,210 @@
+<mujoco model="built_legged_26seg">
+  <compiler angle="radian" autolimits="true"/>
+  <option timestep="0.002" gravity="0 0 -9.81"/>
+  <visual>
+    <headlight ambient="0.45 0.45 0.48" diffuse="0.65 0.65 0.68" specular="0.22 0.22 0.22"/>
+    <quality shadowsize="4096"/>
+    <map znear="0.01" zfar="60"/>
+  </visual>
+  <default>
+    <joint damping="0.8" armature="0.01"/>
+    <geom friction="1 0.05 0.001"/>
+  </default>
+  <asset>
+    <texture name="skybox" type="skybox" builtin="gradient" rgb1="0.16 0.18 0.23" rgb2="0.03 0.04 0.06" width="512" height="512"/>
+    <texture name="grid" type="2d" builtin="checker" rgb1="0.21 0.24 0.29" rgb2="0.26 0.30 0.35" width="300" height="300"/>
+    <material name="grid" texture="grid" texrepeat="6 6" specular="0.1" shininess="0.1" reflectance="0.02"/>
+    <material name="mat_body" rgba="0.84 0.86 0.89 1" specular="0.35" shininess="0.45" reflectance="0.05"/>
+    <material name="mat_joint" rgba="0.15 0.16 0.20 1" specular="0.6" shininess="0.7" reflectance="0.1"/>
+    <material name="mat_accent" rgba="0.92 0.47 0.13 1" specular="0.45" shininess="0.55"/>
+    <material name="mat_ee" rgba="0.22 0.24 0.29 1" specular="0.5" shininess="0.6"/>
+    <material name="mat_alu" rgba="0.78 0.80 0.84 1" specular="0.55" shininess="0.5" reflectance="0.12"/>
+    <material name="mat_steel" rgba="0.34 0.36 0.40 1" specular="0.7" shininess="0.7" reflectance="0.18"/>
+    <material name="mat_cf" rgba="0.11 0.12 0.14 1" specular="0.45" shininess="0.4" reflectance="0.06"/>
+    <material name="mat_ti" rgba="0.60 0.60 0.65 1" specular="0.5" shininess="0.55" reflectance="0.1"/>
+    <material name="mat_shell" rgba="0.20 0.42 0.72 1" specular="0.4" shininess="0.5" reflectance="0.05"/>
+    <material name="mat_metal" rgba="0.47 0.49 0.53 1" specular="0.78" shininess="0.78" reflectance="0.22"/>
+    <material name="mat_rubber" rgba="0.13 0.13 0.15 1" specular="0.15" shininess="0.15"/>
+  </asset>
+  <worldbody>
+    <light name="key" pos="1.6 -1.1 3.0" dir="-0.45 0.32 -1" diffuse="0.55 0.55 0.58" specular="0.25 0.25 0.25"/>
+    <light name="fill" pos="-2.0 1.6 2.2" dir="0.5 -0.42 -1" diffuse="0.22 0.22 0.26"/>
+    <geom name="floor" type="plane" size="3 3 0.1" material="grid"/>
+    <body name="torso" pos="0.00000 0.00000 0.28210">
+      <freejoint name="torso_free"/>
+      <geom name="torso_geom" type="box" pos="0 0 0.04000" size="0.18000 0.18000 0.04000" mass="3.00000" material="mat_shell"/>
+      <body name="head_0" pos="0.12000 0.00000 0.04000" euler="0.00000 1.57080 0.00000">
+        <geom name="head_0_geom" type="capsule" fromto="0 0 0 0 0 0.06000" size="0.03200" mass="0.20000" material="mat_shell"/>
+      </body>
+
+      <body name="leg0_0" pos="0.14000 0.13000 0.04000" euler="3.14159 0.00000 0.00000">
+        <joint name="leg0_0_joint" type="hinge" axis="1.0000 0.0000 0.0000" range="-0.7000 0.7000"/>
+        <geom name="leg0_0_geom" type="capsule" fromto="0 0 0 0 0 0.02500" size="0.03200" mass="0.15000" material="mat_alu"/>
+        <geom name="leg0_0_motor" type="cylinder" fromto="-0.05120 -0.00000 -0.00000 0.05120 0.00000 0.00000" size="0.04640" material="mat_joint" mass="0" contype="0" conaffinity="0"/>
+        <body name="leg0_1" pos="0.00000 0.00000 0.02500">
+          <joint name="leg0_1_joint" type="hinge" axis="0.0000 1.0000 0.0000" range="-3.1400 3.1400"/>
+          <geom name="leg0_1_geom" type="capsule" fromto="0 0 0 0 0 0.12000" size="0.03500" mass="0.30000" material="mat_alu"/>
+          <geom name="leg0_1_motor" type="cylinder" fromto="-0.00000 -0.05500 -0.00000 0.00000 0.05500 0.00000" size="0.05075" material="mat_joint" mass="0" contype="0" conaffinity="0"/>
+          <geom name="leg0_1_collar" type="cylinder" fromto="0 0 0.10800 0 0 0.13200" size="0.04270" material="mat_joint" mass="0" contype="0" conaffinity="0"/>
+          <body name="leg0_2" pos="0.00000 0.00000 0.12000">
+            <joint name="leg0_2_joint" type="hinge" axis="0.0000 1.0000 0.0000" range="-3.1400 3.1400"/>
+            <geom name="leg0_2_geom" type="capsule" fromto="0 0 0 0 0 0.12000" size="0.03000" mass="0.30000" material="mat_alu"/>
+            <geom name="leg0_2_motor" type="cylinder" fromto="-0.00000 -0.04800 -0.00000 0.00000 0.04800 0.00000" size="0.04350" material="mat_joint" mass="0" contype="0" conaffinity="0"/>
+            <geom name="leg0_2_collar" type="cylinder" fromto="0 0 0.10800 0 0 0.13200" size="0.03660" material="mat_joint" mass="0" contype="0" conaffinity="0"/>
+            <body name="leg0_3" pos="0.00000 0.00000 0.12000">
+              <geom name="leg0_3_geom" type="box" pos="0 0 0.02500" size="0.03800 0.03800 0.02500" mass="0.30000" material="mat_alu"/>
+            </body>
+
+          </body>
+
+        </body>
+
+      </body>
+
+      <body name="leg1_0" pos="0.14000 -0.13000 0.04000" euler="3.14159 0.00000 0.00000">
+        <joint name="leg1_0_joint" type="hinge" axis="1.0000 0.0000 0.0000" range="-0.7000 0.7000"/>
+        <geom name="leg1_0_geom" type="capsule" fromto="0 0 0 0 0 0.02500" size="0.03200" mass="0.15000" material="mat_alu"/>
+        <geom name="leg1_0_motor" type="cylinder" fromto="-0.05120 -0.00000 -0.00000 0.05120 0.00000 0.00000" size="0.04640" material="mat_joint" mass="0" contype="0" conaffinity="0"/>
+        <body name="leg1_1" pos="0.00000 0.00000 0.02500">
+          <joint name="leg1_1_joint" type="hinge" axis="0.0000 1.0000 0.0000" range="-3.1400 3.1400"/>
+          <geom name="leg1_1_geom" type="capsule" fromto="0 0 0 0 0 0.12000" size="0.03500" mass="0.30000" material="mat_alu"/>
+          <geom name="leg1_1_motor" type="cylinder" fromto="-0.00000 -0.05500 -0.00000 0.00000 0.05500 0.00000" size="0.05075" material="mat_joint" mass="0" contype="0" conaffinity="0"/>
+          <geom name="leg1_1_collar" type="cylinder" fromto="0 0 0.10800 0 0 0.13200" size="0.04270" material="mat_joint" mass="0" contype="0" conaffinity="0"/>
+          <body name="leg1_2" pos="0.00000 0.00000 0.12000">
+            <joint name="leg1_2_joint" type="hinge" axis="0.0000 1.0000 0.0000" range="-3.1400 3.1400"/>
+            <geom name="leg1_2_geom" type="capsule" fromto="0 0 0 0 0 0.12000" size="0.03000" mass="0.30000" material="mat_alu"/>
+            <geom name="leg1_2_motor" type="cylinder" fromto="-0.00000 -0.04800 -0.00000 0.00000 0.04800 0.00000" size="0.04350" material="mat_joint" mass="0" contype="0" conaffinity="0"/>
+            <geom name="leg1_2_collar" type="cylinder" fromto="0 0 0.10800 0 0 0.13200" size="0.03660" material="mat_joint" mass="0" contype="0" conaffinity="0"/>
+            <body name="leg1_3" pos="0.00000 0.00000 0.12000">
+              <geom name="leg1_3_geom" type="box" pos="0 0 0.02500" size="0.03800 0.03800 0.02500" mass="0.30000" material="mat_alu"/>
+            </body>
+
+          </body>
+
+        </body>
+
+      </body>
+
+      <body name="leg2_0" pos="0.00000 0.13000 0.04000" euler="3.14159 0.00000 0.00000">
+        <joint name="leg2_0_joint" type="hinge" axis="1.0000 0.0000 0.0000" range="-0.7000 0.7000"/>
+        <geom name="leg2_0_geom" type="capsule" fromto="0 0 0 0 0 0.02500" size="0.03200" mass="0.15000" material="mat_alu"/>
+        <geom name="leg2_0_motor" type="cylinder" fromto="-0.05120 -0.00000 -0.00000 0.05120 0.00000 0.00000" size="0.04640" material="mat_joint" mass="0" contype="0" conaffinity="0"/>
+        <body name="leg2_1" pos="0.00000 0.00000 0.02500">
+          <joint name="leg2_1_joint" type="hinge" axis="0.0000 1.0000 0.0000" range="-3.1400 3.1400"/>
+          <geom name="leg2_1_geom" type="capsule" fromto="0 0 0 0 0 0.12000" size="0.03500" mass="0.30000" material="mat_alu"/>
+          <geom name="leg2_1_motor" type="cylinder" fromto="-0.00000 -0.05500 -0.00000 0.00000 0.05500 0.00000" size="0.05075" material="mat_joint" mass="0" contype="0" conaffinity="0"/>
+          <geom name="leg2_1_collar" type="cylinder" fromto="0 0 0.10800 0 0 0.13200" size="0.04270" material="mat_joint" mass="0" contype="0" conaffinity="0"/>
+          <body name="leg2_2" pos="0.00000 0.00000 0.12000">
+            <joint name="leg2_2_joint" type="hinge" axis="0.0000 1.0000 0.0000" range="-3.1400 3.1400"/>
+            <geom name="leg2_2_geom" type="capsule" fromto="0 0 0 0 0 0.12000" size="0.03000" mass="0.30000" material="mat_alu"/>
+            <geom name="leg2_2_motor" type="cylinder" fromto="-0.00000 -0.04800 -0.00000 0.00000 0.04800 0.00000" size="0.04350" material="mat_joint" mass="0" contype="0" conaffinity="0"/>
+            <geom name="leg2_2_collar" type="cylinder" fromto="0 0 0.10800 0 0 0.13200" size="0.03660" material="mat_joint" mass="0" contype="0" conaffinity="0"/>
+            <body name="leg2_3" pos="0.00000 0.00000 0.12000">
+              <geom name="leg2_3_geom" type="box" pos="0 0 0.02500" size="0.03800 0.03800 0.02500" mass="0.30000" material="mat_alu"/>
+            </body>
+
+          </body>
+
+        </body>
+
+      </body>
+
+      <body name="leg3_0" pos="0.00000 -0.13000 0.04000" euler="3.14159 0.00000 0.00000">
+        <joint name="leg3_0_joint" type="hinge" axis="1.0000 0.0000 0.0000" range="-0.7000 0.7000"/>
+        <geom name="leg3_0_geom" type="capsule" fromto="0 0 0 0 0 0.02500" size="0.03200" mass="0.15000" material="mat_alu"/>
+        <geom name="leg3_0_motor" type="cylinder" fromto="-0.05120 -0.00000 -0.00000 0.05120 0.00000 0.00000" size="0.04640" material="mat_joint" mass="0" contype="0" conaffinity="0"/>
+        <body name="leg3_1" pos="0.00000 0.00000 0.02500">
+          <joint name="leg3_1_joint" type="hinge" axis="0.0000 1.0000 0.0000" range="-3.1400 3.1400"/>
+          <geom name="leg3_1_geom" type="capsule" fromto="0 0 0 0 0 0.12000" size="0.03500" mass="0.30000" material="mat_alu"/>
+          <geom name="leg3_1_motor" type="cylinder" fromto="-0.00000 -0.05500 -0.00000 0.00000 0.05500 0.00000" size="0.05075" material="mat_joint" mass="0" contype="0" conaffinity="0"/>
+          <geom name="leg3_1_collar" type="cylinder" fromto="0 0 0.10800 0 0 0.13200" size="0.04270" material="mat_joint" mass="0" contype="0" conaffinity="0"/>
+          <body name="leg3_2" pos="0.00000 0.00000 0.12000">
+            <joint name="leg3_2_joint" type="hinge" axis="0.0000 1.0000 0.0000" range="-3.1400 3.1400"/>
+            <geom name="leg3_2_geom" type="capsule" fromto="0 0 0 0 0 0.12000" size="0.03000" mass="0.30000" material="mat_alu"/>
+            <geom name="leg3_2_motor" type="cylinder" fromto="-0.00000 -0.04800 -0.00000 0.00000 0.04800 0.00000" size="0.04350" material="mat_joint" mass="0" contype="0" conaffinity="0"/>
+            <geom name="leg3_2_collar" type="cylinder" fromto="0 0 0.10800 0 0 0.13200" size="0.03660" material="mat_joint" mass="0" contype="0" conaffinity="0"/>
+            <body name="leg3_3" pos="0.00000 0.00000 0.12000">
+              <geom name="leg3_3_geom" type="box" pos="0 0 0.02500" size="0.03800 0.03800 0.02500" mass="0.30000" material="mat_alu"/>
+            </body>
+
+          </body>
+
+        </body>
+
+      </body>
+
+      <body name="leg4_0" pos="-0.14000 0.13000 0.04000" euler="3.14159 0.00000 0.00000">
+        <joint name="leg4_0_joint" type="hinge" axis="1.0000 0.0000 0.0000" range="-0.7000 0.7000"/>
+        <geom name="leg4_0_geom" type="capsule" fromto="0 0 0 0 0 0.02500" size="0.03200" mass="0.15000" material="mat_alu"/>
+        <geom name="leg4_0_motor" type="cylinder" fromto="-0.05120 -0.00000 -0.00000 0.05120 0.00000 0.00000" size="0.04640" material="mat_joint" mass="0" contype="0" conaffinity="0"/>
+        <body name="leg4_1" pos="0.00000 0.00000 0.02500">
+          <joint name="leg4_1_joint" type="hinge" axis="0.0000 1.0000 0.0000" range="-3.1400 3.1400"/>
+          <geom name="leg4_1_geom" type="capsule" fromto="0 0 0 0 0 0.12000" size="0.03500" mass="0.30000" material="mat_alu"/>
+          <geom name="leg4_1_motor" type="cylinder" fromto="-0.00000 -0.05500 -0.00000 0.00000 0.05500 0.00000" size="0.05075" material="mat_joint" mass="0" contype="0" conaffinity="0"/>
+          <geom name="leg4_1_collar" type="cylinder" fromto="0 0 0.10800 0 0 0.13200" size="0.04270" material="mat_joint" mass="0" contype="0" conaffinity="0"/>
+          <body name="leg4_2" pos="0.00000 0.00000 0.12000">
+            <joint name="leg4_2_joint" type="hinge" axis="0.0000 1.0000 0.0000" range="-3.1400 3.1400"/>
+            <geom name="leg4_2_geom" type="capsule" fromto="0 0 0 0 0 0.12000" size="0.03000" mass="0.30000" material="mat_alu"/>
+            <geom name="leg4_2_motor" type="cylinder" fromto="-0.00000 -0.04800 -0.00000 0.00000 0.04800 0.00000" size="0.04350" material="mat_joint" mass="0" contype="0" conaffinity="0"/>
+            <geom name="leg4_2_collar" type="cylinder" fromto="0 0 0.10800 0 0 0.13200" size="0.03660" material="mat_joint" mass="0" contype="0" conaffinity="0"/>
+            <body name="leg4_3" pos="0.00000 0.00000 0.12000">
+              <geom name="leg4_3_geom" type="box" pos="0 0 0.02500" size="0.03800 0.03800 0.02500" mass="0.30000" material="mat_alu"/>
+            </body>
+
+          </body>
+
+        </body>
+
+      </body>
+
+      <body name="leg5_0" pos="-0.14000 -0.13000 0.04000" euler="3.14159 0.00000 0.00000">
+        <joint name="leg5_0_joint" type="hinge" axis="1.0000 0.0000 0.0000" range="-0.7000 0.7000"/>
+        <geom name="leg5_0_geom" type="capsule" fromto="0 0 0 0 0 0.02500" size="0.03200" mass="0.15000" material="mat_alu"/>
+        <geom name="leg5_0_motor" type="cylinder" fromto="-0.05120 -0.00000 -0.00000 0.05120 0.00000 0.00000" size="0.04640" material="mat_joint" mass="0" contype="0" conaffinity="0"/>
+        <body name="leg5_1" pos="0.00000 0.00000 0.02500">
+          <joint name="leg5_1_joint" type="hinge" axis="0.0000 1.0000 0.0000" range="-3.1400 3.1400"/>
+          <geom name="leg5_1_geom" type="capsule" fromto="0 0 0 0 0 0.12000" size="0.03500" mass="0.30000" material="mat_alu"/>
+          <geom name="leg5_1_motor" type="cylinder" fromto="-0.00000 -0.05500 -0.00000 0.00000 0.05500 0.00000" size="0.05075" material="mat_joint" mass="0" contype="0" conaffinity="0"/>
+          <geom name="leg5_1_collar" type="cylinder" fromto="0 0 0.10800 0 0 0.13200" size="0.04270" material="mat_joint" mass="0" contype="0" conaffinity="0"/>
+          <body name="leg5_2" pos="0.00000 0.00000 0.12000">
+            <joint name="leg5_2_joint" type="hinge" axis="0.0000 1.0000 0.0000" range="-3.1400 3.1400"/>
+            <geom name="leg5_2_geom" type="capsule" fromto="0 0 0 0 0 0.12000" size="0.03000" mass="0.30000" material="mat_alu"/>
+            <geom name="leg5_2_motor" type="cylinder" fromto="-0.00000 -0.04800 -0.00000 0.00000 0.04800 0.00000" size="0.04350" material="mat_joint" mass="0" contype="0" conaffinity="0"/>
+            <geom name="leg5_2_collar" type="cylinder" fromto="0 0 0.10800 0 0 0.13200" size="0.03660" material="mat_joint" mass="0" contype="0" conaffinity="0"/>
+            <body name="leg5_3" pos="0.00000 0.00000 0.12000">
+              <geom name="leg5_3_geom" type="box" pos="0 0 0.02500" size="0.03800 0.03800 0.02500" mass="0.30000" material="mat_alu"/>
+              <site name="ee_site" pos="0 0 0.05000" size="0.01"/>
+            </body>
+
+          </body>
+
+        </body>
+
+      </body>
+
+    </body>
+  </worldbody>
+  <actuator>
+    <motor name="leg0_0_motor" joint="leg0_0_joint" gear="1" forcerange="-14.00 14.00"/>
+    <motor name="leg0_1_motor" joint="leg0_1_joint" gear="1" forcerange="-16.00 16.00"/>
+    <motor name="leg0_2_motor" joint="leg0_2_joint" gear="1" forcerange="-12.00 12.00"/>
+    <motor name="leg1_0_motor" joint="leg1_0_joint" gear="1" forcerange="-14.00 14.00"/>
+    <motor name="leg1_1_motor" joint="leg1_1_joint" gear="1" forcerange="-16.00 16.00"/>
+    <motor name="leg1_2_motor" joint="leg1_2_joint" gear="1" forcerange="-12.00 12.00"/>
+    <motor name="leg2_0_motor" joint="leg2_0_joint" gear="1" forcerange="-14.00 14.00"/>
+    <motor name="leg2_1_motor" joint="leg2_1_joint" gear="1" forcerange="-16.00 16.00"/>
+    <motor name="leg2_2_motor" joint="leg2_2_joint" gear="1" forcerange="-12.00 12.00"/>
+    <motor name="leg3_0_motor" joint="leg3_0_joint" gear="1" forcerange="-14.00 14.00"/>
+    <motor name="leg3_1_motor" joint="leg3_1_joint" gear="1" forcerange="-16.00 16.00"/>
+    <motor name="leg3_2_motor" joint="leg3_2_joint" gear="1" forcerange="-12.00 12.00"/>
+    <motor name="leg4_0_motor" joint="leg4_0_joint" gear="1" forcerange="-14.00 14.00"/>
+    <motor name="leg4_1_motor" joint="leg4_1_joint" gear="1" forcerange="-16.00 16.00"/>
+    <motor name="leg4_2_motor" joint="leg4_2_joint" gear="1" forcerange="-12.00 12.00"/>
+    <motor name="leg5_0_motor" joint="leg5_0_joint" gear="1" forcerange="-14.00 14.00"/>
+    <motor name="leg5_1_motor" joint="leg5_1_joint" gear="1" forcerange="-16.00 16.00"/>
+    <motor name="leg5_2_motor" joint="leg5_2_joint" gear="1" forcerange="-12.00 12.00"/>
+  </actuator>
+  <keyframe>
+    <key name="rest" qpos="0.00000 0.00000 0.28210 1.00000 0.00000 0.00000 0.00000 0.00000 -0.55000 1.10000 0.00000 -0.55000 1.10000 0.00000 -0.55000 1.10000 0.00000 -0.55000 1.10000 0.00000 -0.55000 1.10000 0.00000 -0.55000 1.10000"/>
+  </keyframe>
+</mujoco>

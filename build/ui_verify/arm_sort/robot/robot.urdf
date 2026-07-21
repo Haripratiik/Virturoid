@@ -1,0 +1,87 @@
+<robot name="manipulator.composed">
+  <link name="base">
+    <inertial><origin xyz="0 0 0" rpy="0 0 0" /><mass value="1.0" /><inertia ixx="0.001067" ixy="0" ixz="0" iyy="0.001067" iyz="0" izz="0.001067" /></inertial>
+    <visual><origin xyz="0.00000 0.00000 0.04000" rpy="0.00000 0.00000 0.00000" /><geometry><box size="0.08000 0.08000 0.08000" /></geometry><material name="base_m0"><color rgba="0.500 0.500 0.500 1" /></material></visual>
+    <collision><origin xyz="0.00000 0.00000 0.04000" rpy="0.00000 0.00000 0.00000" /><geometry><box size="0.08000 0.08000 0.08000" /></geometry></collision>
+  </link>
+  <link name="shoulder">
+    <inertial><origin xyz="0 0 0" rpy="0 0 0" /><mass value="0.4" /><inertia ixx="0.000449" ixy="0" ixz="0" iyy="0.000449" iyz="0" izz="0.000221" /></inertial>
+    <visual><origin xyz="0.00000 0.00000 0.02500" rpy="3.14159 0.00000 0.00000" /><geometry><cylinder radius="0.03500" length="0.05000" /></geometry><material name="shoulder_m1"><color rgba="0.500 0.500 0.500 1" /></material></visual>
+    <visual><origin xyz="0.00000 0.00000 0.00000" rpy="3.14159 0.00000 0.00000" /><geometry><cylinder radius="0.05075" length="0.11000" /></geometry><material name="shoulder_m2"><color rgba="0.500 0.500 0.500 1" /></material></visual>
+    <collision><origin xyz="0.00000 0.00000 0.02500" rpy="3.14159 0.00000 0.00000" /><geometry><cylinder radius="0.03500" length="0.05000" /></geometry></collision>
+    <collision><origin xyz="0.00000 0.00000 0.00000" rpy="3.14159 0.00000 0.00000" /><geometry><cylinder radius="0.05075" length="0.11000" /></geometry></collision>
+  </link>
+  <link name="j1">
+    <inertial><origin xyz="0 0 0" rpy="0 0 0" /><mass value="0.35" /><inertia ixx="0.003980" ixy="0" ixz="0" iyy="0.003980" iyz="0" izz="0.000154" /></inertial>
+    <visual><origin xyz="0.00000 0.00000 0.16250" rpy="3.14159 0.00000 0.00000" /><geometry><cylinder radius="0.03000" length="0.32500" /></geometry><material name="j1_m3"><color rgba="0.500 0.500 0.500 1" /></material></visual>
+    <visual><origin xyz="0.00000 0.00000 0.00000" rpy="1.57080 0.00000 0.00000" /><geometry><cylinder radius="0.04350" length="0.09600" /></geometry><material name="j1_m4"><color rgba="0.500 0.500 0.500 1" /></material></visual>
+    <visual><origin xyz="0.00000 0.00000 0.32500" rpy="3.14159 0.00000 0.00000" /><geometry><cylinder radius="0.03660" length="0.02400" /></geometry><material name="j1_m5"><color rgba="0.500 0.500 0.500 1" /></material></visual>
+    <collision><origin xyz="0.00000 0.00000 0.16250" rpy="3.14159 0.00000 0.00000" /><geometry><cylinder radius="0.03000" length="0.32500" /></geometry></collision>
+    <collision><origin xyz="0.00000 0.00000 0.00000" rpy="1.57080 0.00000 0.00000" /><geometry><cylinder radius="0.04350" length="0.09600" /></geometry></collision>
+    <collision><origin xyz="0.00000 0.00000 0.32500" rpy="3.14159 0.00000 0.00000" /><geometry><cylinder radius="0.03660" length="0.02400" /></geometry></collision>
+  </link>
+  <link name="j2">
+    <inertial><origin xyz="0 0 0" rpy="0 0 0" /><mass value="0.3" /><inertia ixx="0.003412" ixy="0" ixz="0" iyy="0.003412" iyz="0" izz="0.000132" /></inertial>
+    <visual><origin xyz="0.00000 0.00000 0.16250" rpy="3.14159 0.00000 0.00000" /><geometry><cylinder radius="0.03000" length="0.32500" /></geometry><material name="j2_m6"><color rgba="0.500 0.500 0.500 1" /></material></visual>
+    <visual><origin xyz="0.00000 0.00000 0.00000" rpy="1.57080 0.00000 0.00000" /><geometry><cylinder radius="0.04350" length="0.09600" /></geometry><material name="j2_m7"><color rgba="0.500 0.500 0.500 1" /></material></visual>
+    <visual><origin xyz="0.00000 0.00000 0.32500" rpy="3.14159 0.00000 0.00000" /><geometry><cylinder radius="0.03660" length="0.02400" /></geometry><material name="j2_m8"><color rgba="0.500 0.500 0.500 1" /></material></visual>
+    <collision><origin xyz="0.00000 0.00000 0.16250" rpy="3.14159 0.00000 0.00000" /><geometry><cylinder radius="0.03000" length="0.32500" /></geometry></collision>
+    <collision><origin xyz="0.00000 0.00000 0.00000" rpy="1.57080 0.00000 0.00000" /><geometry><cylinder radius="0.04350" length="0.09600" /></geometry></collision>
+    <collision><origin xyz="0.00000 0.00000 0.32500" rpy="3.14159 0.00000 0.00000" /><geometry><cylinder radius="0.03660" length="0.02400" /></geometry></collision>
+  </link>
+  <link name="wrist">
+    <inertial><origin xyz="0 0 0" rpy="0 0 0" /><mass value="0.2" /><inertia ixx="0.000151" ixy="0" ixz="0" iyy="0.000151" iyz="0" izz="0.000058" /></inertial>
+    <visual><origin xyz="0.00000 0.00000 0.02500" rpy="3.14159 0.00000 0.00000" /><geometry><cylinder radius="0.02500" length="0.05000" /></geometry><material name="wrist_m9"><color rgba="0.500 0.500 0.500 1" /></material></visual>
+    <visual><origin xyz="0.00000 0.00000 0.00000" rpy="1.57080 0.00000 0.00000" /><geometry><cylinder radius="0.03625" length="0.08000" /></geometry><material name="wrist_m10"><color rgba="0.500 0.500 0.500 1" /></material></visual>
+    <visual><origin xyz="0.00000 0.00000 0.05000" rpy="0.00000 0.00000 0.00000" /><geometry><box size="0.04320 0.12400 0.02160" /></geometry><material name="wrist_m11"><color rgba="0.500 0.500 0.500 1" /></material></visual>
+    <collision><origin xyz="0.00000 0.00000 0.02500" rpy="3.14159 0.00000 0.00000" /><geometry><cylinder radius="0.02500" length="0.05000" /></geometry></collision>
+    <collision><origin xyz="0.00000 0.00000 0.00000" rpy="1.57080 0.00000 0.00000" /><geometry><cylinder radius="0.03625" length="0.08000" /></geometry></collision>
+    <collision><origin xyz="0.00000 0.00000 0.05000" rpy="0.00000 0.00000 0.00000" /><geometry><box size="0.04320 0.12400 0.02160" /></geometry></collision>
+  </link>
+  <link name="finger_l">
+    <inertial><origin xyz="0 0 0" rpy="0 0 0" /><mass value="0.03" /><inertia ixx="0.000010" ixy="0" ixz="0" iyy="0.000010" iyz="0" izz="0.000003" /></inertial>
+    <visual><origin xyz="0.00000 0.00000 0.03000" rpy="0.00000 0.00000 0.00000" /><geometry><box size="0.02400 0.02400 0.06000" /></geometry><material name="finger_l_m12"><color rgba="0.500 0.500 0.500 1" /></material></visual>
+    <collision><origin xyz="0.00000 0.00000 0.03000" rpy="0.00000 0.00000 0.00000" /><geometry><box size="0.02400 0.02400 0.06000" /></geometry></collision>
+  </link>
+  <link name="finger_r">
+    <inertial><origin xyz="0 0 0" rpy="0 0 0" /><mass value="0.03" /><inertia ixx="0.000010" ixy="0" ixz="0" iyy="0.000010" iyz="0" izz="0.000003" /></inertial>
+    <visual><origin xyz="0.00000 0.00000 0.03000" rpy="0.00000 0.00000 0.00000" /><geometry><box size="0.02400 0.02400 0.06000" /></geometry><material name="finger_r_m13"><color rgba="0.500 0.500 0.500 1" /></material></visual>
+    <collision><origin xyz="0.00000 0.00000 0.03000" rpy="0.00000 0.00000 0.00000" /><geometry><box size="0.02400 0.02400 0.06000" /></geometry></collision>
+  </link>
+  <joint name="shoulder_joint" type="revolute">
+    <parent link="base" /><child link="shoulder" />
+    <origin xyz="0.00000 0.00000 0.08000" rpy="0.00000 0.00000 0.00000" />
+    <axis xyz="0.0000 0.0000 1.0000" />
+    <limit lower="-3.1400" upper="3.1400" effort="30" velocity="10" />
+  </joint>
+  <joint name="j1_joint" type="revolute">
+    <parent link="shoulder" /><child link="j1" />
+    <origin xyz="0.00000 0.00000 0.05000" rpy="0.00000 0.00000 0.00000" />
+    <axis xyz="0.0000 1.0000 0.0000" />
+    <limit lower="-3.1400" upper="3.1400" effort="30" velocity="10" />
+  </joint>
+  <joint name="j2_joint" type="revolute">
+    <parent link="j1" /><child link="j2" />
+    <origin xyz="0.00000 0.00000 0.32500" rpy="0.00000 0.00000 0.00000" />
+    <axis xyz="0.0000 1.0000 0.0000" />
+    <limit lower="-3.1400" upper="3.1400" effort="30" velocity="10" />
+  </joint>
+  <joint name="wrist_joint" type="revolute">
+    <parent link="j2" /><child link="wrist" />
+    <origin xyz="0.00000 0.00000 0.32500" rpy="0.00000 0.00000 0.00000" />
+    <axis xyz="0.0000 1.0000 0.0000" />
+    <limit lower="-6.2800" upper="6.2800" effort="30" velocity="10" />
+  </joint>
+  <joint name="finger_l_joint" type="prismatic">
+    <parent link="wrist" /><child link="finger_l" />
+    <origin xyz="0.00000 0.05000 0.05000" rpy="0.00000 0.00000 0.00000" />
+    <axis xyz="0.0000 -1.0000 0.0000" />
+    <limit lower="0.0000" upper="0.0450" effort="30" velocity="10" />
+  </joint>
+  <joint name="finger_r_joint" type="prismatic">
+    <parent link="wrist" /><child link="finger_r" />
+    <origin xyz="0.00000 -0.05000 0.05000" rpy="0.00000 0.00000 0.00000" />
+    <axis xyz="0.0000 1.0000 0.0000" />
+    <limit lower="0.0000" upper="0.0450" effort="30" velocity="10" />
+  </joint>
+</robot>

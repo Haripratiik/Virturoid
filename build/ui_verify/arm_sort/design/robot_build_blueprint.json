@@ -1,0 +1,219 @@
+{
+  "id": "blueprint_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo",
+  "version": "0.1.0",
+  "requirements_id": "req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo",
+  "task_graph_id": "task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo",
+  "robot_genome_id": "robot_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo",
+  "morphology_template_id": "morph_fixed_arm_three_dof_tabletop",
+  "robot_class": "manipulator",
+  "morphology": "fixed_arm.three_dof.tabletop",
+  "candidate_morphology_template_ids": [
+    "morph_fixed_arm_three_dof_tabletop"
+  ],
+  "autonomy_scope": [
+    "parse user prompt into structured requirements",
+    "select a robot morphology template from an extensible template catalog",
+    "select parts from curated component database",
+    "generate robot genome and CAD handoff",
+    "generate baseline/variation/regression/holdout/revision scene sets",
+    "compile generated scenes into simulator XML placeholders",
+    "emit simulator-ready curriculum and dry-run traces"
+  ],
+  "decisions": [
+    {
+      "area": "robot_morphology",
+      "decision": "Use morph_fixed_arm_three_dof_tabletop (fixed_arm.three_dof.tabletop) with 3 actuated joints.",
+      "rationale": "Selected morph_fixed_arm_three_dof_tabletop because task_type=pick_place_sort, environment=tabletop, and prompt='a tabletop robot arm that sorts red and blue blocks into matching bins' matched robot_class=manipulator. This template supports task_type=pick_place_sort and keeps the MVP bounded while preserving a catalog route for mobile bases, humanoids, and future robot classes.",
+      "source_refs": [
+        "req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo",
+        "robot_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo",
+        "morph_fixed_arm_three_dof_tabletop"
+      ]
+    },
+    {
+      "area": "part_selection",
+      "decision": "Select joint_actuator:VX-12 Smart Servo, wrist_sensor:RGBD Mini Wrist Camera, gripper:PG-2 Parallel Gripper, main_compute:EDGE-1 Robotics Compute Module",
+      "rationale": "Parts satisfy named user requests when present, otherwise use requirement-aware recommendations.",
+      "source_refs": [
+        "bom/part_resolution_report.json"
+      ]
+    },
+    {
+      "area": "cad_handoff",
+      "decision": "Generate 5 CAD model records and 5 assembly instances.",
+      "rationale": "The MVP keeps exact geometry, parametric source, visual meshes, and assembly operations as separate handoffs; estimated printed mass is 0.925 kg.",
+      "source_refs": [
+        "cad/build_plan.json",
+        "cad/parametric/robot_arm.py"
+      ]
+    },
+    {
+      "area": "scene_generation",
+      "decision": "Generate scene families for pick_place_sort: baseline:2, variation:10, edge_case:3, regression:3, holdout:3.",
+      "rationale": "Scene families separate smoke tests, training variation, failure replay, and holdout generalization.",
+      "source_refs": [
+        "simulation/scene_set.json",
+        "simulation/regression_scene_set.json"
+      ]
+    },
+    {
+      "area": "training_handoff",
+      "decision": "Use measurable task criteria as reward, termination, curriculum, and trace contracts for pick_place_sort.",
+      "rationale": "A real simulator runner can replace the dry-run adapter while keeping the same artifact inputs.",
+      "source_refs": [
+        "training/training_objective.json",
+        "training/training_curriculum.json"
+      ]
+    }
+  ],
+  "handoffs": [
+    {
+      "stage": "requirements_to_parts",
+      "description": "Resolve named or recommended components with technical limits and CAD asset references.",
+      "inputs": [
+        {
+          "uri": "project.json",
+          "media_type": "application/json",
+          "sha256": null,
+          "description": null
+        }
+      ],
+      "outputs": [
+        {
+          "uri": "bom/bom.json",
+          "media_type": "application/json",
+          "sha256": null,
+          "description": null
+        },
+        {
+          "uri": "bom/part_resolution_report.json",
+          "media_type": "application/json",
+          "sha256": null,
+          "description": null
+        }
+      ]
+    },
+    {
+      "stage": "parts_to_robot",
+      "description": "Build structured robot genome, parametric CAD source, exact placeholder assembly, and visual meshes.",
+      "inputs": [
+        {
+          "uri": "bom/bom.json",
+          "media_type": "application/json",
+          "sha256": null,
+          "description": null
+        },
+        {
+          "uri": "cad/build_plan.json",
+          "media_type": "application/json",
+          "sha256": null,
+          "description": null
+        }
+      ],
+      "outputs": [
+        {
+          "uri": "robot/robot_genome.json",
+          "media_type": "application/json",
+          "sha256": null,
+          "description": null
+        },
+        {
+          "uri": "robot/robot.urdf",
+          "media_type": "application/xml",
+          "sha256": null,
+          "description": null
+        },
+        {
+          "uri": "cad/parametric/robot_arm.py",
+          "media_type": "text/x-python",
+          "sha256": null,
+          "description": null
+        },
+        {
+          "uri": "cad/exact/robot_assembly.step",
+          "media_type": "model/step",
+          "sha256": null,
+          "description": null
+        }
+      ]
+    },
+    {
+      "stage": "task_to_scene",
+      "description": "Generate train/evaluate scene families from task criteria, failures, and holdout coverage.",
+      "inputs": [
+        {
+          "uri": "training/training_objective.json",
+          "media_type": "application/json",
+          "sha256": null,
+          "description": null
+        }
+      ],
+      "outputs": [
+        {
+          "uri": "simulation/scene_set.json",
+          "media_type": "application/json",
+          "sha256": null,
+          "description": null
+        },
+        {
+          "uri": "simulation/mujoco/compiled_scene_index.json",
+          "media_type": "application/json",
+          "sha256": null,
+          "description": null
+        },
+        {
+          "uri": "training/training_curriculum.json",
+          "media_type": "application/json",
+          "sha256": null,
+          "description": null
+        }
+      ]
+    },
+    {
+      "stage": "scene_to_training",
+      "description": "Run a deterministic simulator-adapter dry run over generated scenes and policy steps.",
+      "inputs": [
+        {
+          "uri": "training/training_run_config.json",
+          "media_type": "application/json",
+          "sha256": null,
+          "description": null
+        },
+        {
+          "uri": "software/policy_plan.json",
+          "media_type": "application/json",
+          "sha256": null,
+          "description": null
+        }
+      ],
+      "outputs": [
+        {
+          "uri": "runs/mvp_training/dry_run_result.json",
+          "media_type": "application/json",
+          "sha256": null,
+          "description": null
+        },
+        {
+          "uri": "runs/mvp_training/logs/episode_trace.jsonl",
+          "media_type": "application/x-ndjson",
+          "sha256": null,
+          "description": null
+        }
+      ]
+    }
+  ],
+  "required_builder_capabilities": [
+    "component_database_lookup",
+    "parametric_cad_generation",
+    "urdf_export",
+    "mjcf_scene_export",
+    "curriculum_generation",
+    "simulator_adapter_execution",
+    "feedback_revision_loop"
+  ],
+  "open_limitations": [
+    "CAD and MJCF are structured placeholders, not physics-validated production geometry yet.",
+    "Dry-run training validates package contracts but does not execute real dynamics.",
+    "Part database is curated fixture data; live datasheet ingestion is still future work."
+  ]
+}

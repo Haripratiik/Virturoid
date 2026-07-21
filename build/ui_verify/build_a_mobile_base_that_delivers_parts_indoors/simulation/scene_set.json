@@ -1,0 +1,1113 @@
+{
+  "id": "sceneset_built_mobile_base_5seg",
+  "version": "0.1.0",
+  "task_graph_id": "task_built_mobile_base_5seg",
+  "purpose": "variation",
+  "task_type": "navigation",
+  "scenes": [
+    {
+      "id": "scene_task_req_build_a_mobile_base_that_delivers_parts_indoors_variation_000",
+      "version": "0.1.0",
+      "name": "Navigate indoor route variation scene 1",
+      "backend_targets": [
+        "mujoco"
+      ],
+      "robot_spawn_xyz_rpy": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "objects": [
+        {
+          "name": "arena_floor",
+          "object_type": "floor",
+          "pose_xyz_rpy": [
+            1.173,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "mass_kg": null,
+          "material": "matte_gray",
+          "friction": 0.509,
+          "scale": 1.573
+        },
+        {
+          "name": "start_zone",
+          "object_type": "zone",
+          "pose_xyz_rpy": [
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "mass_kg": null,
+          "material": "matte_blue",
+          "friction": null,
+          "scale": 0.7
+        },
+        {
+          "name": "goal_zone",
+          "object_type": "zone",
+          "pose_xyz_rpy": [
+            2.346,
+            0.074,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "mass_kg": null,
+          "material": "matte_green",
+          "friction": null,
+          "scale": 1.3
+        },
+        {
+          "name": "wall_bottom",
+          "object_type": "wall",
+          "pose_xyz_rpy": [
+            1.173,
+            -1.523,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "mass_kg": null,
+          "material": "matte_gray",
+          "friction": null,
+          "scale": 3.146
+        },
+        {
+          "name": "wall_top",
+          "object_type": "wall",
+          "pose_xyz_rpy": [
+            1.173,
+            1.523,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "mass_kg": null,
+          "material": "matte_gray",
+          "friction": null,
+          "scale": 3.146
+        },
+        {
+          "name": "wall_left",
+          "object_type": "wall",
+          "pose_xyz_rpy": [
+            -0.3999999999999999,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.5708
+          ],
+          "mass_kg": null,
+          "material": "matte_gray",
+          "friction": null,
+          "scale": 3.046
+        },
+        {
+          "name": "wall_right",
+          "object_type": "wall",
+          "pose_xyz_rpy": [
+            2.746,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.5708
+          ],
+          "mass_kg": null,
+          "material": "matte_gray",
+          "friction": null,
+          "scale": 3.046
+        },
+        {
+          "name": "obstacle_0_0",
+          "object_type": "obstacle",
+          "pose_xyz_rpy": [
+            0.7379,
+            -0.2347,
+            0.0,
+            0.0,
+            0.0,
+            -0.7962
+          ],
+          "mass_kg": null,
+          "material": "matte_gray",
+          "friction": 1.156,
+          "scale": 1.598
+        },
+        {
+          "name": "obstacle_0_1",
+          "object_type": "obstacle",
+          "pose_xyz_rpy": [
+            1.5341,
+            0.3026,
+            0.0,
+            0.0,
+            0.0,
+            -0.4262
+          ],
+          "mass_kg": null,
+          "material": "matte_gray",
+          "friction": 1.076,
+          "scale": 1.356
+        }
+      ],
+      "variation_parameters": {
+        "index": 0,
+        "purpose": "variation",
+        "seed": 1380481127,
+        "route_length_m": 2.346,
+        "lane_offset_m": 0.074,
+        "obstacle_count": 2,
+        "clutter": true,
+        "difficulty": 2,
+        "position_jitter_m": 0.07,
+        "lighting_level": 0.749,
+        "camera_noise_std": 0.0022,
+        "table_friction": 1.15,
+        "distractor_count": 1,
+        "background_texture": "plain"
+      },
+      "requirement_trace": [
+        "navigation",
+        "variation",
+        "indoor_navigation",
+        "difficulty_2"
+      ]
+    },
+    {
+      "id": "scene_task_req_build_a_mobile_base_that_delivers_parts_indoors_variation_001",
+      "version": "0.1.0",
+      "name": "Navigate indoor route variation scene 2",
+      "backend_targets": [
+        "mujoco"
+      ],
+      "robot_spawn_xyz_rpy": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "objects": [
+        {
+          "name": "arena_floor",
+          "object_type": "floor",
+          "pose_xyz_rpy": [
+            1.1145,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "mass_kg": null,
+          "material": "matte_gray",
+          "friction": 0.528,
+          "scale": 1.514
+        },
+        {
+          "name": "start_zone",
+          "object_type": "zone",
+          "pose_xyz_rpy": [
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "mass_kg": null,
+          "material": "matte_blue",
+          "friction": null,
+          "scale": 0.7
+        },
+        {
+          "name": "goal_zone",
+          "object_type": "zone",
+          "pose_xyz_rpy": [
+            2.229,
+            0.036,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "mass_kg": null,
+          "material": "matte_green",
+          "friction": null,
+          "scale": 1.3
+        },
+        {
+          "name": "wall_bottom",
+          "object_type": "wall",
+          "pose_xyz_rpy": [
+            1.1145,
+            -1.465,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "mass_kg": null,
+          "material": "matte_gray",
+          "friction": null,
+          "scale": 3.028
+        },
+        {
+          "name": "wall_top",
+          "object_type": "wall",
+          "pose_xyz_rpy": [
+            1.1145,
+            1.465,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "mass_kg": null,
+          "material": "matte_gray",
+          "friction": null,
+          "scale": 3.028
+        },
+        {
+          "name": "wall_left",
+          "object_type": "wall",
+          "pose_xyz_rpy": [
+            -0.39949999999999997,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.5708
+          ],
+          "mass_kg": null,
+          "material": "matte_gray",
+          "friction": null,
+          "scale": 2.93
+        },
+        {
+          "name": "wall_right",
+          "object_type": "wall",
+          "pose_xyz_rpy": [
+            2.6285,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.5708
+          ],
+          "mass_kg": null,
+          "material": "matte_gray",
+          "friction": null,
+          "scale": 2.93
+        },
+        {
+          "name": "obstacle_1_0",
+          "object_type": "obstacle",
+          "pose_xyz_rpy": [
+            0.8177,
+            0.2072,
+            0.0,
+            0.0,
+            0.0,
+            0.6265
+          ],
+          "mass_kg": null,
+          "material": "matte_gray",
+          "friction": 0.917,
+          "scale": 1.573
+        },
+        {
+          "name": "obstacle_1_1",
+          "object_type": "obstacle",
+          "pose_xyz_rpy": [
+            1.506,
+            0.3516,
+            0.0,
+            0.0,
+            0.0,
+            0.4651
+          ],
+          "mass_kg": null,
+          "material": "matte_gray",
+          "friction": 1.143,
+          "scale": 1.528
+        }
+      ],
+      "variation_parameters": {
+        "index": 1,
+        "purpose": "variation",
+        "seed": 2036773749,
+        "route_length_m": 2.229,
+        "lane_offset_m": 0.036,
+        "obstacle_count": 2,
+        "clutter": true,
+        "difficulty": 2,
+        "position_jitter_m": 0.07,
+        "lighting_level": 0.871,
+        "camera_noise_std": 0.0135,
+        "table_friction": 1.063,
+        "distractor_count": 1,
+        "background_texture": "wood"
+      },
+      "requirement_trace": [
+        "navigation",
+        "variation",
+        "indoor_navigation",
+        "difficulty_2"
+      ]
+    },
+    {
+      "id": "scene_task_req_build_a_mobile_base_that_delivers_parts_indoors_variation_002",
+      "version": "0.1.0",
+      "name": "Navigate indoor route variation scene 3",
+      "backend_targets": [
+        "mujoco"
+      ],
+      "robot_spawn_xyz_rpy": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "objects": [
+        {
+          "name": "arena_floor",
+          "object_type": "floor",
+          "pose_xyz_rpy": [
+            1.1895,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "mass_kg": null,
+          "material": "matte_gray",
+          "friction": 0.503,
+          "scale": 1.59
+        },
+        {
+          "name": "start_zone",
+          "object_type": "zone",
+          "pose_xyz_rpy": [
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "mass_kg": null,
+          "material": "matte_blue",
+          "friction": null,
+          "scale": 0.7
+        },
+        {
+          "name": "goal_zone",
+          "object_type": "zone",
+          "pose_xyz_rpy": [
+            2.379,
+            -0.118,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "mass_kg": null,
+          "material": "matte_green",
+          "friction": null,
+          "scale": 1.3
+        },
+        {
+          "name": "wall_bottom",
+          "object_type": "wall",
+          "pose_xyz_rpy": [
+            1.1895,
+            -1.539,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "mass_kg": null,
+          "material": "matte_gray",
+          "friction": null,
+          "scale": 3.18
+        },
+        {
+          "name": "wall_top",
+          "object_type": "wall",
+          "pose_xyz_rpy": [
+            1.1895,
+            1.539,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "mass_kg": null,
+          "material": "matte_gray",
+          "friction": null,
+          "scale": 3.18
+        },
+        {
+          "name": "wall_left",
+          "object_type": "wall",
+          "pose_xyz_rpy": [
+            -0.4005000000000001,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.5708
+          ],
+          "mass_kg": null,
+          "material": "matte_gray",
+          "friction": null,
+          "scale": 3.078
+        },
+        {
+          "name": "wall_right",
+          "object_type": "wall",
+          "pose_xyz_rpy": [
+            2.7795,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.5708
+          ],
+          "mass_kg": null,
+          "material": "matte_gray",
+          "friction": null,
+          "scale": 3.078
+        },
+        {
+          "name": "obstacle_2_0",
+          "object_type": "obstacle",
+          "pose_xyz_rpy": [
+            0.8515,
+            0.1927,
+            0.0,
+            0.0,
+            0.0,
+            -0.2594
+          ],
+          "mass_kg": null,
+          "material": "matte_gray",
+          "friction": 1.116,
+          "scale": 1.579
+        },
+        {
+          "name": "obstacle_2_1",
+          "object_type": "obstacle",
+          "pose_xyz_rpy": [
+            1.5608,
+            -0.3171,
+            0.0,
+            0.0,
+            0.0,
+            1.3454
+          ],
+          "mass_kg": null,
+          "material": "matte_gray",
+          "friction": 0.857,
+          "scale": 1.082
+        }
+      ],
+      "variation_parameters": {
+        "index": 2,
+        "purpose": "variation",
+        "seed": 1640819400,
+        "route_length_m": 2.379,
+        "lane_offset_m": -0.118,
+        "obstacle_count": 2,
+        "clutter": true,
+        "difficulty": 2,
+        "position_jitter_m": 0.07,
+        "lighting_level": 0.81,
+        "camera_noise_std": 0.01,
+        "table_friction": 1.002,
+        "distractor_count": 1,
+        "background_texture": "industrial"
+      },
+      "requirement_trace": [
+        "navigation",
+        "variation",
+        "indoor_navigation",
+        "difficulty_2"
+      ]
+    },
+    {
+      "id": "scene_task_req_build_a_mobile_base_that_delivers_parts_indoors_variation_003",
+      "version": "0.1.0",
+      "name": "Navigate indoor route variation scene 4",
+      "backend_targets": [
+        "mujoco"
+      ],
+      "robot_spawn_xyz_rpy": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "objects": [
+        {
+          "name": "arena_floor",
+          "object_type": "floor",
+          "pose_xyz_rpy": [
+            1.0175,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "mass_kg": null,
+          "material": "matte_gray",
+          "friction": 0.564,
+          "scale": 1.417
+        },
+        {
+          "name": "start_zone",
+          "object_type": "zone",
+          "pose_xyz_rpy": [
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "mass_kg": null,
+          "material": "matte_blue",
+          "friction": null,
+          "scale": 0.7
+        },
+        {
+          "name": "goal_zone",
+          "object_type": "zone",
+          "pose_xyz_rpy": [
+            2.035,
+            0.234,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "mass_kg": null,
+          "material": "matte_green",
+          "friction": null,
+          "scale": 1.3
+        },
+        {
+          "name": "wall_bottom",
+          "object_type": "wall",
+          "pose_xyz_rpy": [
+            1.0175,
+            -1.368,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "mass_kg": null,
+          "material": "matte_gray",
+          "friction": null,
+          "scale": 2.834
+        },
+        {
+          "name": "wall_top",
+          "object_type": "wall",
+          "pose_xyz_rpy": [
+            1.0175,
+            1.368,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "mass_kg": null,
+          "material": "matte_gray",
+          "friction": null,
+          "scale": 2.834
+        },
+        {
+          "name": "wall_left",
+          "object_type": "wall",
+          "pose_xyz_rpy": [
+            -0.39949999999999997,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.5708
+          ],
+          "mass_kg": null,
+          "material": "matte_gray",
+          "friction": null,
+          "scale": 2.736
+        },
+        {
+          "name": "wall_right",
+          "object_type": "wall",
+          "pose_xyz_rpy": [
+            2.4345,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.5708
+          ],
+          "mass_kg": null,
+          "material": "matte_gray",
+          "friction": null,
+          "scale": 2.736
+        },
+        {
+          "name": "obstacle_3_0",
+          "object_type": "obstacle",
+          "pose_xyz_rpy": [
+            0.7383,
+            -0.2837,
+            0.0,
+            0.0,
+            0.0,
+            -1.3793
+          ],
+          "mass_kg": null,
+          "material": "matte_gray",
+          "friction": 1.074,
+          "scale": 1.152
+        },
+        {
+          "name": "obstacle_3_1",
+          "object_type": "obstacle",
+          "pose_xyz_rpy": [
+            1.2824,
+            -0.2399,
+            0.0,
+            0.0,
+            0.0,
+            -0.9739
+          ],
+          "mass_kg": null,
+          "material": "matte_gray",
+          "friction": 0.872,
+          "scale": 1.288
+        }
+      ],
+      "variation_parameters": {
+        "index": 3,
+        "purpose": "variation",
+        "seed": 1476257380,
+        "route_length_m": 2.035,
+        "lane_offset_m": 0.234,
+        "obstacle_count": 2,
+        "clutter": true,
+        "difficulty": 2,
+        "position_jitter_m": 0.07,
+        "lighting_level": 0.834,
+        "camera_noise_std": 0.0176,
+        "table_friction": 0.829,
+        "distractor_count": 1,
+        "background_texture": "industrial"
+      },
+      "requirement_trace": [
+        "navigation",
+        "variation",
+        "indoor_navigation",
+        "difficulty_2"
+      ]
+    },
+    {
+      "id": "scene_task_req_build_a_mobile_base_that_delivers_parts_indoors_variation_004",
+      "version": "0.1.0",
+      "name": "Navigate indoor route variation scene 5",
+      "backend_targets": [
+        "mujoco"
+      ],
+      "robot_spawn_xyz_rpy": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "objects": [
+        {
+          "name": "arena_floor",
+          "object_type": "floor",
+          "pose_xyz_rpy": [
+            1.071,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "mass_kg": null,
+          "material": "matte_gray",
+          "friction": 0.544,
+          "scale": 1.471
+        },
+        {
+          "name": "start_zone",
+          "object_type": "zone",
+          "pose_xyz_rpy": [
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "mass_kg": null,
+          "material": "matte_blue",
+          "friction": null,
+          "scale": 0.7
+        },
+        {
+          "name": "goal_zone",
+          "object_type": "zone",
+          "pose_xyz_rpy": [
+            2.142,
+            0.192,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "mass_kg": null,
+          "material": "matte_green",
+          "friction": null,
+          "scale": 1.3
+        },
+        {
+          "name": "wall_bottom",
+          "object_type": "wall",
+          "pose_xyz_rpy": [
+            1.071,
+            -1.421,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "mass_kg": null,
+          "material": "matte_gray",
+          "friction": null,
+          "scale": 2.942
+        },
+        {
+          "name": "wall_top",
+          "object_type": "wall",
+          "pose_xyz_rpy": [
+            1.071,
+            1.421,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "mass_kg": null,
+          "material": "matte_gray",
+          "friction": null,
+          "scale": 2.942
+        },
+        {
+          "name": "wall_left",
+          "object_type": "wall",
+          "pose_xyz_rpy": [
+            -0.40000000000000013,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.5708
+          ],
+          "mass_kg": null,
+          "material": "matte_gray",
+          "friction": null,
+          "scale": 2.842
+        },
+        {
+          "name": "wall_right",
+          "object_type": "wall",
+          "pose_xyz_rpy": [
+            2.542,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.5708
+          ],
+          "mass_kg": null,
+          "material": "matte_gray",
+          "friction": null,
+          "scale": 2.842
+        },
+        {
+          "name": "obstacle_4_0",
+          "object_type": "obstacle",
+          "pose_xyz_rpy": [
+            0.6858,
+            -0.2249,
+            0.0,
+            0.0,
+            0.0,
+            0.6872
+          ],
+          "mass_kg": null,
+          "material": "matte_gray",
+          "friction": 0.892,
+          "scale": 1.334
+        },
+        {
+          "name": "obstacle_4_1",
+          "object_type": "obstacle",
+          "pose_xyz_rpy": [
+            1.3923,
+            -0.0591,
+            0.0,
+            0.0,
+            0.0,
+            2.0258
+          ],
+          "mass_kg": null,
+          "material": "matte_gray",
+          "friction": 0.856,
+          "scale": 1.174
+        }
+      ],
+      "variation_parameters": {
+        "index": 4,
+        "purpose": "variation",
+        "seed": 1672192112,
+        "route_length_m": 2.142,
+        "lane_offset_m": 0.192,
+        "obstacle_count": 2,
+        "clutter": true,
+        "difficulty": 2,
+        "position_jitter_m": 0.07,
+        "lighting_level": 0.662,
+        "camera_noise_std": 0.0143,
+        "table_friction": 1.102,
+        "distractor_count": 1,
+        "background_texture": "speckled"
+      },
+      "requirement_trace": [
+        "navigation",
+        "variation",
+        "indoor_navigation",
+        "difficulty_2"
+      ]
+    },
+    {
+      "id": "scene_task_req_build_a_mobile_base_that_delivers_parts_indoors_variation_005",
+      "version": "0.1.0",
+      "name": "Navigate indoor route variation scene 6",
+      "backend_targets": [
+        "mujoco"
+      ],
+      "robot_spawn_xyz_rpy": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "objects": [
+        {
+          "name": "arena_floor",
+          "object_type": "floor",
+          "pose_xyz_rpy": [
+            1.0195,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "mass_kg": null,
+          "material": "matte_gray",
+          "friction": 0.564,
+          "scale": 1.42
+        },
+        {
+          "name": "start_zone",
+          "object_type": "zone",
+          "pose_xyz_rpy": [
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "mass_kg": null,
+          "material": "matte_blue",
+          "friction": null,
+          "scale": 0.7
+        },
+        {
+          "name": "goal_zone",
+          "object_type": "zone",
+          "pose_xyz_rpy": [
+            2.039,
+            0.226,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "mass_kg": null,
+          "material": "matte_green",
+          "friction": null,
+          "scale": 1.3
+        },
+        {
+          "name": "wall_bottom",
+          "object_type": "wall",
+          "pose_xyz_rpy": [
+            1.0195,
+            -1.369,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "mass_kg": null,
+          "material": "matte_gray",
+          "friction": null,
+          "scale": 2.84
+        },
+        {
+          "name": "wall_top",
+          "object_type": "wall",
+          "pose_xyz_rpy": [
+            1.0195,
+            1.369,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "mass_kg": null,
+          "material": "matte_gray",
+          "friction": null,
+          "scale": 2.84
+        },
+        {
+          "name": "wall_left",
+          "object_type": "wall",
+          "pose_xyz_rpy": [
+            -0.40049999999999986,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.5708
+          ],
+          "mass_kg": null,
+          "material": "matte_gray",
+          "friction": null,
+          "scale": 2.738
+        },
+        {
+          "name": "wall_right",
+          "object_type": "wall",
+          "pose_xyz_rpy": [
+            2.4395,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.5708
+          ],
+          "mass_kg": null,
+          "material": "matte_gray",
+          "friction": null,
+          "scale": 2.738
+        },
+        {
+          "name": "obstacle_5_0",
+          "object_type": "obstacle",
+          "pose_xyz_rpy": [
+            0.746,
+            -0.1421,
+            0.0,
+            0.0,
+            0.0,
+            -0.525
+          ],
+          "mass_kg": null,
+          "material": "matte_gray",
+          "friction": 0.911,
+          "scale": 1.29
+        },
+        {
+          "name": "obstacle_5_1",
+          "object_type": "obstacle",
+          "pose_xyz_rpy": [
+            1.3891,
+            -0.1964,
+            0.0,
+            0.0,
+            0.0,
+            -1.728
+          ],
+          "mass_kg": null,
+          "material": "matte_gray",
+          "friction": 1.104,
+          "scale": 1.27
+        }
+      ],
+      "variation_parameters": {
+        "index": 5,
+        "purpose": "variation",
+        "seed": 369413588,
+        "route_length_m": 2.039,
+        "lane_offset_m": 0.226,
+        "obstacle_count": 2,
+        "clutter": true,
+        "difficulty": 2,
+        "position_jitter_m": 0.07,
+        "lighting_level": 0.884,
+        "camera_noise_std": 0.0186,
+        "table_friction": 1.123,
+        "distractor_count": 1,
+        "background_texture": "wood"
+      },
+      "requirement_trace": [
+        "navigation",
+        "variation",
+        "indoor_navigation",
+        "difficulty_2"
+      ]
+    }
+  ]
+}

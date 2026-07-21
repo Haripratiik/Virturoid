@@ -1,0 +1,216 @@
+{
+  "id": "scenes_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_baseline",
+  "version": "0.1.0",
+  "task_graph_id": "task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo",
+  "purpose": "baseline",
+  "scenes": [
+    {
+      "id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_baseline_000",
+      "version": "0.1.0",
+      "name": "Sort colored blocks baseline scene 1",
+      "backend_targets": [
+        "mujoco"
+      ],
+      "robot_spawn_xyz_rpy": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "objects": [
+        {
+          "name": "red_block",
+          "object_type": "cube",
+          "pose_xyz_rpy": [
+            0.417,
+            -0.0347,
+            0.02,
+            0.0,
+            0.0,
+            0.9704
+          ],
+          "mass_kg": 0.0473,
+          "material": "matte_red",
+          "friction": 0.867,
+          "scale": 0.929
+        },
+        {
+          "name": "blue_block",
+          "object_type": "cube",
+          "pose_xyz_rpy": [
+            0.3967,
+            0.0751,
+            0.02,
+            0.0,
+            0.0,
+            2.8481
+          ],
+          "mass_kg": 0.057,
+          "material": "matte_blue",
+          "friction": 0.873,
+          "scale": 1.039
+        },
+        {
+          "name": "red_bin",
+          "object_type": "container",
+          "pose_xyz_rpy": [
+            0.55,
+            -0.2081,
+            0.02,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "mass_kg": null,
+          "material": null,
+          "friction": null,
+          "scale": null
+        },
+        {
+          "name": "blue_bin",
+          "object_type": "container",
+          "pose_xyz_rpy": [
+            0.55,
+            0.213,
+            0.02,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "mass_kg": null,
+          "material": null,
+          "friction": null,
+          "scale": null
+        }
+      ],
+      "variation_parameters": {
+        "index": 0,
+        "purpose": "baseline",
+        "clutter": false,
+        "seed": 1894753007,
+        "difficulty": 1,
+        "position_jitter_m": 0.045,
+        "lighting_level": 0.603,
+        "camera_noise_std": 0.0026,
+        "table_friction": 0.808,
+        "distractor_count": 0,
+        "background_texture": "industrial"
+      },
+      "requirement_trace": [
+        "pick_place_sort",
+        "baseline",
+        "tabletop",
+        "difficulty_1"
+      ]
+    },
+    {
+      "id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_baseline_001",
+      "version": "0.1.0",
+      "name": "Sort colored blocks baseline scene 2",
+      "backend_targets": [
+        "mujoco"
+      ],
+      "robot_spawn_xyz_rpy": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "objects": [
+        {
+          "name": "red_block",
+          "object_type": "cube",
+          "pose_xyz_rpy": [
+            0.4159,
+            -0.0274,
+            0.02,
+            0.0,
+            0.0,
+            -0.3231
+          ],
+          "mass_kg": 0.0402,
+          "material": "matte_red",
+          "friction": 0.987,
+          "scale": 1.076
+        },
+        {
+          "name": "blue_block",
+          "object_type": "cube",
+          "pose_xyz_rpy": [
+            0.36,
+            0.052,
+            0.02,
+            0.0,
+            0.0,
+            2.0602
+          ],
+          "mass_kg": 0.0609,
+          "material": "matte_blue",
+          "friction": 1.022,
+          "scale": 1.088
+        },
+        {
+          "name": "red_bin",
+          "object_type": "container",
+          "pose_xyz_rpy": [
+            0.55,
+            -0.2254,
+            0.02,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "mass_kg": null,
+          "material": null,
+          "friction": null,
+          "scale": null
+        },
+        {
+          "name": "blue_bin",
+          "object_type": "container",
+          "pose_xyz_rpy": [
+            0.55,
+            0.2206,
+            0.02,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "mass_kg": null,
+          "material": null,
+          "friction": null,
+          "scale": null
+        }
+      ],
+      "variation_parameters": {
+        "index": 1,
+        "purpose": "baseline",
+        "clutter": false,
+        "seed": 1483098349,
+        "difficulty": 1,
+        "position_jitter_m": 0.045,
+        "lighting_level": 0.822,
+        "camera_noise_std": 0.0068,
+        "table_friction": 1.174,
+        "distractor_count": 0,
+        "background_texture": "plain"
+      },
+      "requirement_trace": [
+        "pick_place_sort",
+        "baseline",
+        "tabletop",
+        "difficulty_1"
+      ]
+    }
+  ],
+  "generation_rules": [
+    "seeded domain randomization per scene (pose, yaw, size, mass, friction)",
+    "lighting and camera-noise randomization tied to difficulty",
+    "clutter and distractors scale with difficulty level",
+    "keep matching bins visible and tabletop reachable"
+  ]
+}

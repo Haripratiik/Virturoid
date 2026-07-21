@@ -1,0 +1,148 @@
+{
+  "id": "frame_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_008_wrist_rgbd_camera",
+  "version": "0.1.0",
+  "scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_008",
+  "scene_set_id": "scenes_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation",
+  "purpose": "variation",
+  "sensor_name": "wrist_rgbd_camera",
+  "sensor_type": "rgbd_camera",
+  "modalities": [
+    "rgb_image",
+    "depth_image",
+    "camera_intrinsics"
+  ],
+  "image_size_px": [
+    1280,
+    720
+  ],
+  "expected_outputs": {
+    "rgb_image": "datasets/synthetic_observations/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_008/wrist_rgbd_camera/rgb.png",
+    "depth_image": "datasets/synthetic_observations/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_008/wrist_rgbd_camera/depth.exr",
+    "annotations": "datasets/synthetic_observations/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_008/wrist_rgbd_camera/annotations.json"
+  },
+  "annotations": [
+    {
+      "name": "red_block",
+      "label": "red_block",
+      "object_type": "cube",
+      "pose_xyz_rpy": [
+        0.4022,
+        -0.085,
+        0.02,
+        0.0,
+        0.0,
+        -2.4675
+      ],
+      "bbox_xywh": [
+        788,
+        361,
+        65,
+        65
+      ],
+      "depth_m": 0.4116,
+      "segmentation_id": 1,
+      "physical_parameters": {
+        "mass_kg": 0.06,
+        "friction": 0.946,
+        "scale": 1.139
+      }
+    },
+    {
+      "name": "blue_block",
+      "label": "blue_block",
+      "object_type": "cube",
+      "pose_xyz_rpy": [
+        0.36,
+        0.0774,
+        0.02,
+        0.0,
+        0.0,
+        -1.9714
+      ],
+      "bbox_xywh": [
+        772,
+        300,
+        58,
+        58
+      ],
+      "depth_m": 0.3688,
+      "segmentation_id": 2,
+      "physical_parameters": {
+        "mass_kg": 0.0614,
+        "friction": 0.889,
+        "scale": 1.022
+      }
+    },
+    {
+      "name": "red_bin",
+      "label": "red_bin",
+      "object_type": "container",
+      "pose_xyz_rpy": [
+        0.55,
+        -0.2432,
+        0.02,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bbox_xywh": [
+        858,
+        428,
+        57,
+        57
+      ],
+      "depth_m": 0.6017,
+      "segmentation_id": 3,
+      "physical_parameters": {}
+    },
+    {
+      "name": "blue_bin",
+      "label": "blue_bin",
+      "object_type": "container",
+      "pose_xyz_rpy": [
+        0.55,
+        0.2648,
+        0.02,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bbox_xywh": [
+        858,
+        227,
+        57,
+        57
+      ],
+      "depth_m": 0.6108,
+      "segmentation_id": 4,
+      "physical_parameters": {}
+    },
+    {
+      "name": "distractor_8_0",
+      "label": "distractor_8_0",
+      "object_type": "cube",
+      "pose_xyz_rpy": [
+        0.36,
+        0.0476,
+        0.02,
+        0.0,
+        0.0,
+        -1.266
+      ],
+      "bbox_xywh": [
+        769,
+        309,
+        64,
+        64
+      ],
+      "depth_m": 0.3637,
+      "segmentation_id": 5,
+      "physical_parameters": {
+        "mass_kg": 0.0466,
+        "friction": 1.084,
+        "scale": 1.112
+      }
+    }
+  ],
+  "world_state_uri": "simulation/world_states/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_008.json"
+}

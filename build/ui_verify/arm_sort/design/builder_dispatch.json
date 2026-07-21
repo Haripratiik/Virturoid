@@ -1,0 +1,51 @@
+{
+  "id": "builder_dispatch_morph_fixed_arm_three_dof_tabletop",
+  "version": "0.1.0",
+  "selected_morphology_template_id": "morph_fixed_arm_three_dof_tabletop",
+  "selected_robot_class": "manipulator",
+  "selected_builder_service": "virturoid.services.robot_arm_builder.build_reference_robot_arm",
+  "dispatch_status": "implemented",
+  "implemented_templates": [
+    {
+      "morphology_template_id": "morph_fixed_arm_three_dof_tabletop",
+      "robot_class": "manipulator",
+      "builder_service": "virturoid.services.robot_arm_builder.build_reference_robot_arm",
+      "status": "implemented",
+      "notes": [
+        "Current MVP template.",
+        "Exercises the generic build pipeline through a bounded manipulation robot."
+      ]
+    },
+    {
+      "morphology_template_id": "morph_mobile_base_differential",
+      "robot_class": "mobile_base",
+      "builder_service": "virturoid.services.mobile_base_builder.build_differential_mobile_base",
+      "status": "implemented",
+      "notes": [
+        "Second implemented robot class; proves the build pipeline is not arm-specific.",
+        "Built via `python -m virturoid.mobile_base`."
+      ]
+    }
+  ],
+  "planned_templates": [
+    {
+      "morphology_template_id": "morph_humanoid_upper_body",
+      "robot_class": "humanoid",
+      "builder_service": "planned.humanoid_builder",
+      "status": "planned",
+      "notes": [
+        "Catalog entry to keep the species tree extensible beyond the arm MVP."
+      ]
+    },
+    {
+      "morphology_template_id": "morph_quadruped_quadruped",
+      "robot_class": "quadruped",
+      "builder_service": "planned.quadruped_builder",
+      "status": "planned",
+      "notes": [
+        "Catalog entry to keep the species tree extensible beyond arm and wheeled bases."
+      ]
+    }
+  ],
+  "rationale": "Morphology selector chose morph_fixed_arm_three_dof_tabletop. Builder service virturoid.services.robot_arm_builder.build_reference_robot_arm is implemented; 2 template(s) implemented and 2 planned."
+}

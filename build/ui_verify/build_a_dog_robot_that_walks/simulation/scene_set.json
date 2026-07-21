@@ -1,0 +1,14 @@
+{
+  "id": "sceneset_anatomy_creature",
+  "version": "0.1.0",
+  "task_graph_id": "task_anatomy_creature",
+  "purpose": "locomotion",
+  "task_type": "locomotion",
+  "scenes": [
+    {
+      "id": "locomotion_anatomy_creature",
+      "name": "locomotion (forward walk)",
+      "objects": []
+    }
+  ]
+}

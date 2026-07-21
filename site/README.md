@@ -1,34 +1,29 @@
 # Virturoid landing page
 
-Static marketing site (Astro). Separate from the app by design — nothing here is imported by `frontend/` or the Python backend.
+Static Astro marketing site. It is deliberately separate from the desktop app and Python backend.
+
+The page presents Virturoid as a self-improving robot-design brain: a stylized system view carries a generated robot through candidate, testing, verified, and banked-memory states. The stage is an illustration, never labeled as a live simulator capture. Real screenshots and metrics are clearly marked as artifact-backed evidence.
 
 ## Commands
 
 ```bash
 npm install
-npm run dev       # local dev at :4321
-npm run build     # static output in dist/
-npm run preview   # serve the built site
-node scripts/check_page.mjs   # automated render check (desktop + mobile, needs the preview running)
-node scripts/peek.mjs "#train" out.png   # full-res capture of one section
-node scripts/make_og.mjs      # regenerate the social card from the live hero
+npm run dev
+npm run build
+npm run preview
+node scripts/check_page.mjs
 ```
 
-## Sim feed (scroll-scrubbed robot)
+`check_page.mjs` expects the preview server to be running. It verifies the four story states, reverse scrolling, the `/evidence` route, mobile state illustrations, console errors, and horizontal overflow. It writes screenshots to the system temp directory.
 
-The hero's SIM FEED scrubs `public/seq/frame_*.webp` with scroll and docks to the corner
-while you read. Frames are captured from the real simulator by
-`frontend/scripts/capture_seq.mjs` (Studio server must be running). To replace them with
-Blender renders, follow `ASSETS.md` — same filenames, zero code changes.
+## Evidence and honesty
 
-## Honesty rule
+`/evidence` is the technical companion page. Its numbers render from `src/data/*.json`, which are unedited copies of real build artifacts. Real Studio images are in `public/shots/`; do not present the stylized system view as a recording or a physics result.
 
-Every number on the page renders from `src/data/*.json`, which are **unedited copies of real build artifacts** (`build/ui_verify/arm_sort`). If you regenerate the reference build, re-copy the artifacts — never hand-edit the values. The screenshots in `public/shots/` are captured from the real Studio by `frontend/scripts/capture_shots.mjs`.
+## Waitlist
 
-## Waitlist form
-
-Set `PUBLIC_FORM_ENDPOINT` in `site/.env` to a Formspree endpoint (e.g. `https://formspree.io/f/xxxx`). Without it the page falls back to a `mailto:` link.
+The primary request-access action currently falls back to `mailto:hello@virturoid.dev`. Connect `PUBLIC_FORM_ENDPOINT` when a hosted form is ready.
 
 ## Deploy
 
-`.github/workflows/deploy-site.yml` builds `site/` and deploys to GitHub Pages on push to `main` (Settings → Pages → Source: GitHub Actions).
+`.github/workflows/deploy-site.yml` builds `site/` and deploys it to GitHub Pages on pushes to `main`.

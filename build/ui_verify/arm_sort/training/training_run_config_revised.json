@@ -1,0 +1,64 @@
+{
+  "id": "training_run_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_mujoco_revision_001",
+  "version": "0.1.0",
+  "robot_genome_id": "robot_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo",
+  "task_graph_id": "task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo",
+  "policy_id": "policy_mvp_scripted_sort",
+  "backend": "mujoco",
+  "robot_model": {
+    "uri": "simulation/mujoco/mvp_scene.xml",
+    "media_type": "application/xml",
+    "sha256": null,
+    "description": null
+  },
+  "policy_artifact": {
+    "uri": "software/policy_plan_revised.json",
+    "media_type": "application/json",
+    "sha256": null,
+    "description": null
+  },
+  "perception_artifact": {
+    "uri": "simulation/perception_config.json",
+    "media_type": "application/json",
+    "sha256": null,
+    "description": null
+  },
+  "objective_artifact": {
+    "uri": "training/training_objective.json",
+    "media_type": "application/json",
+    "sha256": null,
+    "description": null
+  },
+  "curriculum_artifact": {
+    "uri": "training/training_curriculum.json",
+    "media_type": "application/json",
+    "sha256": null,
+    "description": null
+  },
+  "compiled_scene_artifact": {
+    "uri": "simulation/mujoco/compiled_scene_index.json",
+    "media_type": "application/json",
+    "sha256": null,
+    "description": null
+  },
+  "scene_artifacts": [
+    {
+      "uri": "simulation/revision_scene_set.json",
+      "media_type": "application/json",
+      "sha256": null,
+      "description": null
+    }
+  ],
+  "training_manifest": {
+    "uri": "training/training_manifest.json",
+    "media_type": "application/json",
+    "sha256": null,
+    "description": null
+  },
+  "output_dir": "runs/mvp_training_revision",
+  "episode_multiplier_overrides": {},
+  "notes": [
+    "Second dry-run pass generated after applying training feedback.",
+    "Uses the revised policy plan and revision scene set."
+  ]
+}

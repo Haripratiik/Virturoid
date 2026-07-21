@@ -1,41 +1,40 @@
 ---
-// Minimal mono nav — a document header, not a SaaS bar.
+const onEvidence = Astro.url.pathname.startsWith("/evidence");
+const root = onEvidence ? "/" : "";
 ---
 
 <nav class="nav">
   <div class="bar">
-    <a href="#top" class="brand mono" aria-label="Virturoid — top">
+    <a href={`${root}#top`} class="brand mono" aria-label="Virturoid home">
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
         <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
       </svg>
       VIRTUROID
     </a>
     <div class="links mono">
-      <a href="#design">01 Design</a>
-      <a href="#simulate">02 Simulate</a>
-      <a href="#train">03 Train</a>
-      <a href="#verify">04 Verify</a>
-      <a href="#export">05 Export</a>
-      <a href="#memory">06 Memory</a>
+      <a href={`${root}#job`}>01 Job</a>
+      <a href={`${root}#world`}>02 World</a>
+      <a href={`${root}#proof`}>03 Proof</a>
+      <a href={`${root}#memory`}>04 Memory</a>
     </div>
-    <a href="#access" class="cta mono">EARLY ACCESS ↗</a>
+    <a href={`${root}#access`} class="cta mono">REQUEST ACCESS</a>
   </div>
 </nav>
 
 <style>
   .nav {
     position: fixed;
-    inset: 0 0 auto 0;
+    inset: 0 0 auto;
     z-index: 50;
-    backdrop-filter: blur(10px);
-    background: oklch(0.14 0.004 250 / 0.8);
+    backdrop-filter: blur(14px);
+    background: oklch(0.14 0.004 250 / 0.78);
     border-bottom: 1px solid var(--rule);
   }
   .bar {
     display: flex;
     align-items: center;
     gap: 28px;
-    height: 52px;
+    height: 54px;
     padding: 0 var(--gutter);
   }
   .brand {
@@ -47,41 +46,27 @@
     font-weight: 600;
     letter-spacing: 0.22em;
   }
-  .brand svg {
-    color: var(--ember);
-  }
-  .links {
-    display: flex;
-    gap: 22px;
-    margin-left: auto;
-  }
+  .brand svg { color: var(--ember); }
+  .links { display: flex; gap: 22px; margin-left: auto; }
   .links a {
-    font-size: 11.5px;
-    letter-spacing: 0.08em;
+    font-size: 10.5px;
+    letter-spacing: 0.1em;
     color: var(--ink-3);
     transition: color 0.15s;
   }
-  .links a:hover {
-    color: var(--ink-1);
-  }
+  .links a:hover { color: var(--ink-1); }
   .cta {
-    font-size: 11.5px;
-    font-weight: 600;
-    letter-spacing: 0.12em;
     color: var(--paper);
     background: var(--ember);
-    padding: 8px 14px;
+    padding: 8px 13px;
+    font-size: 10.5px;
+    font-weight: 700;
+    letter-spacing: 0.12em;
     transition: filter 0.15s;
   }
-  .cta:hover {
-    filter: brightness(1.12);
-  }
-  @media (max-width: 720px) {
-    .links {
-      display: none;
-    }
-    .cta {
-      margin-left: auto;
-    }
+  .cta:hover { filter: brightness(1.12); }
+  @media (max-width: 760px) {
+    .links { display: none; }
+    .cta { margin-left: auto; }
   }
 </style>

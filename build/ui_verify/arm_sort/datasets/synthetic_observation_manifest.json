@@ -1,0 +1,163 @@
+{
+  "id": "synthetic_observations_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo",
+  "version": "0.1.0",
+  "world_model_contract_uri": "simulation/world_model_contract.json",
+  "perception_config_id": "perception_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_mujoco",
+  "synthetic_observation_index_uri": "datasets/synthetic_observations/index.json",
+  "world_state_index_uri": "simulation/world_state_index.json",
+  "output_root": "datasets/synthetic_observations",
+  "renderer_backends": [
+    "mujoco",
+    "worldlabs_or_equivalent_texture_generator"
+  ],
+  "splits": {
+    "train_scenes": 15,
+    "validation_scenes": 4,
+    "holdout_scenes": 2
+  },
+  "annotation_formats": [
+    "coco_json",
+    "segmentation_png",
+    "pose_json",
+    "depth_exr_or_range_json"
+  ],
+  "vision_annotations": [
+    {
+      "name": "rgb_detection_and_segmentation",
+      "target_object_types": [
+        "cube",
+        "container",
+        "distractor"
+      ],
+      "annotation_modalities": [
+        "2d_bounding_box",
+        "instance_mask",
+        "semantic_mask"
+      ],
+      "label_space": [
+        "blue_bin",
+        "blue_block",
+        "red_bin",
+        "red_block"
+      ],
+      "output_pattern": "observations/{scene_id}/{sensor_name}/annotations_rgb.json"
+    },
+    {
+      "name": "depth_geometry",
+      "target_object_types": [
+        "cube",
+        "container",
+        "distractor"
+      ],
+      "annotation_modalities": [
+        "depth_map",
+        "surface_normal",
+        "object_pose_6d"
+      ],
+      "label_space": [
+        "blue_bin",
+        "blue_block",
+        "red_bin",
+        "red_block"
+      ],
+      "output_pattern": "observations/{scene_id}/{sensor_name}/annotations_depth.json"
+    }
+  ],
+  "scene_sets": [
+    {
+      "scene_set_id": "scenes_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_baseline",
+      "purpose": "baseline",
+      "scene_ids": [
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_baseline_000",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_baseline_001"
+      ]
+    },
+    {
+      "scene_set_id": "scenes_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation",
+      "purpose": "variation",
+      "scene_ids": [
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_000",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_001",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_002",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_003",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_004",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_005",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_006",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_007",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_008",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_009"
+      ]
+    },
+    {
+      "scene_set_id": "scenes_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case",
+      "purpose": "edge_case",
+      "scene_ids": [
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_000",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_001",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_002"
+      ]
+    },
+    {
+      "scene_set_id": "scenes_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_regression",
+      "purpose": "regression",
+      "scene_ids": [
+        "regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_000",
+        "regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_001",
+        "regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_002"
+      ]
+    },
+    {
+      "scene_set_id": "scenes_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout",
+      "purpose": "holdout",
+      "scene_ids": [
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout_000",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout_001",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout_002"
+      ]
+    }
+  ],
+  "observation_streams": [
+    "wrist_rgbd_camera"
+  ],
+  "physical_parameter_targets": [
+    {
+      "name": "joint_actuator_response",
+      "target": "robot.joints",
+      "initial_source": "bom/part_resolution_report.json",
+      "learning_signal": "rollout tracking error and control saturation",
+      "optimization_role": "controller_tuning_and_actuator_selection"
+    },
+    {
+      "name": "link_geometry",
+      "target": "robot.links",
+      "initial_source": "cad/build_plan.json",
+      "learning_signal": "task success, collisions, reach margin",
+      "optimization_role": "hardware_codesign"
+    },
+    {
+      "name": "sensor_noise_model",
+      "target": "perception.sensor_streams",
+      "initial_source": "simulation/perception_config.json",
+      "learning_signal": "synthetic-to-sim observation mismatch",
+      "optimization_role": "cv_domain_randomization"
+    },
+    {
+      "name": "container_contact_model",
+      "target": "scene.objects.container",
+      "initial_source": "simulation/scene_set.json",
+      "learning_signal": "grasp slip, collision impulse, trajectory deviation",
+      "optimization_role": "world_model_physics_estimation"
+    },
+    {
+      "name": "cube_contact_model",
+      "target": "scene.objects.cube",
+      "initial_source": "simulation/scene_set.json",
+      "learning_signal": "grasp slip, collision impulse, trajectory deviation",
+      "optimization_role": "world_model_physics_estimation"
+    }
+  ],
+  "notes": [
+    "This manifest is a renderer-ready dataset contract; image files are generated by a future renderer adapter.",
+    "World Labs or a similar world-generation tool can satisfy texture and photorealism fields without changing downstream consumers."
+  ]
+}

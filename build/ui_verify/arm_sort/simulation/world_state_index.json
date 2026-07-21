@@ -1,0 +1,161 @@
+{
+  "id": "world_state_index_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo",
+  "version": "0.1.0",
+  "world_model_contract_uri": "simulation/world_model_contract.json",
+  "state_variable_count": 5,
+  "physical_parameter_target_count": 5,
+  "scene_state_count": 21,
+  "scene_states": [
+    {
+      "scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_baseline_000",
+      "scene_set_id": "scenes_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_baseline",
+      "purpose": "baseline",
+      "world_state_uri": "simulation/world_states/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_baseline_000.json",
+      "object_count": 4
+    },
+    {
+      "scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_baseline_001",
+      "scene_set_id": "scenes_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_baseline",
+      "purpose": "baseline",
+      "world_state_uri": "simulation/world_states/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_baseline_001.json",
+      "object_count": 4
+    },
+    {
+      "scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_000",
+      "scene_set_id": "scenes_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation",
+      "purpose": "variation",
+      "world_state_uri": "simulation/world_states/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_000.json",
+      "object_count": 5
+    },
+    {
+      "scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_001",
+      "scene_set_id": "scenes_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation",
+      "purpose": "variation",
+      "world_state_uri": "simulation/world_states/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_001.json",
+      "object_count": 5
+    },
+    {
+      "scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_002",
+      "scene_set_id": "scenes_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation",
+      "purpose": "variation",
+      "world_state_uri": "simulation/world_states/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_002.json",
+      "object_count": 5
+    },
+    {
+      "scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_003",
+      "scene_set_id": "scenes_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation",
+      "purpose": "variation",
+      "world_state_uri": "simulation/world_states/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_003.json",
+      "object_count": 5
+    },
+    {
+      "scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_004",
+      "scene_set_id": "scenes_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation",
+      "purpose": "variation",
+      "world_state_uri": "simulation/world_states/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_004.json",
+      "object_count": 5
+    },
+    {
+      "scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_005",
+      "scene_set_id": "scenes_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation",
+      "purpose": "variation",
+      "world_state_uri": "simulation/world_states/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_005.json",
+      "object_count": 5
+    },
+    {
+      "scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_006",
+      "scene_set_id": "scenes_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation",
+      "purpose": "variation",
+      "world_state_uri": "simulation/world_states/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_006.json",
+      "object_count": 5
+    },
+    {
+      "scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_007",
+      "scene_set_id": "scenes_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation",
+      "purpose": "variation",
+      "world_state_uri": "simulation/world_states/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_007.json",
+      "object_count": 5
+    },
+    {
+      "scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_008",
+      "scene_set_id": "scenes_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation",
+      "purpose": "variation",
+      "world_state_uri": "simulation/world_states/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_008.json",
+      "object_count": 5
+    },
+    {
+      "scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_009",
+      "scene_set_id": "scenes_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation",
+      "purpose": "variation",
+      "world_state_uri": "simulation/world_states/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_009.json",
+      "object_count": 5
+    },
+    {
+      "scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_000",
+      "scene_set_id": "scenes_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case",
+      "purpose": "edge_case",
+      "world_state_uri": "simulation/world_states/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_000.json",
+      "object_count": 7
+    },
+    {
+      "scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_001",
+      "scene_set_id": "scenes_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case",
+      "purpose": "edge_case",
+      "world_state_uri": "simulation/world_states/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_001.json",
+      "object_count": 7
+    },
+    {
+      "scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_002",
+      "scene_set_id": "scenes_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case",
+      "purpose": "edge_case",
+      "world_state_uri": "simulation/world_states/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_002.json",
+      "object_count": 7
+    },
+    {
+      "scene_id": "regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_000",
+      "scene_set_id": "scenes_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_regression",
+      "purpose": "regression",
+      "world_state_uri": "simulation/world_states/regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_000.json",
+      "object_count": 5
+    },
+    {
+      "scene_id": "regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_001",
+      "scene_set_id": "scenes_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_regression",
+      "purpose": "regression",
+      "world_state_uri": "simulation/world_states/regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_001.json",
+      "object_count": 5
+    },
+    {
+      "scene_id": "regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_002",
+      "scene_set_id": "scenes_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_regression",
+      "purpose": "regression",
+      "world_state_uri": "simulation/world_states/regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_002.json",
+      "object_count": 5
+    },
+    {
+      "scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout_000",
+      "scene_set_id": "scenes_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout",
+      "purpose": "holdout",
+      "world_state_uri": "simulation/world_states/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout_000.json",
+      "object_count": 6
+    },
+    {
+      "scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout_001",
+      "scene_set_id": "scenes_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout",
+      "purpose": "holdout",
+      "world_state_uri": "simulation/world_states/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout_001.json",
+      "object_count": 6
+    },
+    {
+      "scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout_002",
+      "scene_set_id": "scenes_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout",
+      "purpose": "holdout",
+      "world_state_uri": "simulation/world_states/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout_002.json",
+      "object_count": 6
+    }
+  ],
+  "notes": [
+    "Each world-state snapshot is generated directly from the scene graph.",
+    "Policy training and CV model training can consume these snapshots as ground truth."
+  ]
+}

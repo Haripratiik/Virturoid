@@ -49,7 +49,6 @@ AGENTS.md
 
 # Frontend (Virturoid Studio) build artifacts
 frontend/node_modules/
-frontend/dist/
 
 # Virtualenvs
 .venv/
@@ -65,3 +64,17 @@ env/
 # MVP audit hygiene: never ship local run junk on a blind `git add -A`
 MUJOCO_LOG.TXT
 reports/
+
+# MVP: ship the built Studio UI + a few demo robot packages so a FRESH CLONE can
+# actually run the demo. ui_server auto-serves build/ui_verify when ui_workbench
+# is absent, so these curated packages appear with zero build. cad/ stays ignored
+# (STL/STEP dominate size and the viewport never reads them).
+!build/
+build/*
+!build/ui_verify/
+build/ui_verify/*
+!build/ui_verify/build_a_dog_robot_that_walks/
+!build/ui_verify/build_a_mobile_base_that_delivers_parts_indoors/
+!build/ui_verify/hexapod_walk/
+!build/ui_verify/arm_sort/
+build/ui_verify/*/cad/

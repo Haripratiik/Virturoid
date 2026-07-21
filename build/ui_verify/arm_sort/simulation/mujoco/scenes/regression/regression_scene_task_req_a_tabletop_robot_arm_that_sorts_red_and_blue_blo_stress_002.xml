@@ -1,0 +1,81 @@
+<mujoco model="Autonomous reference tabletop arm regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_002">
+  <compiler angle="radian" coordinate="local" />
+  <option timestep="0.002" gravity="0 0 -9.81" />
+  <!-- scene_set_id=scenes_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_regression scene_id=regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_002 -->
+  <default>
+    <joint damping="0.8" armature="0.01" />
+    <geom friction="1 0.1 0.01" />
+  </default>
+  <asset>
+    <material name="mat_red" rgba="0.8 0.1 0.1 1" />
+    <material name="mat_blue" rgba="0.1 0.2 0.8 1" />
+    <material name="mat_gray" rgba="0.5 0.5 0.5 1" />
+    <material name="mat_link" rgba="0.35 0.35 0.38 1" />
+  </asset>
+  <worldbody>
+    <light name="key" pos="0 0 2" dir="0 0 -1" />
+    <geom name="table" type="box" size="0.7 0.45 0.025" pos="0.4 0 0" rgba="0.7 0.7 0.65 1" />
+    <body name="base_link" pos="0.0 0.0 0.025">
+      <geom name="base_link_geom" type="box" size="0.06 0.06 0.035" pos="0 0 0.035" mass="0.45" material="mat_link" />
+      <body name="upper_link" pos="0.0 0.0 0.07">
+        <joint name="base_yaw" type="hinge" axis="0.0 0.0 1.0" pos="0 0 0" limited="true" range="-3.14 3.14" />
+        <geom name="upper_link_geom" type="box" size="0.018 0.018 0.035" pos="0 0 0.035" mass="0.22" material="mat_link" />
+        <body name="forearm_link" pos="0.0 0.0 0.07">
+          <joint name="shoulder_pitch" type="hinge" axis="0.0 1.0 0.0" pos="0 0 0" limited="true" range="-1.57 1.57" />
+          <geom name="forearm_link_geom" type="box" size="0.016 0.016 0.1785" pos="0 0 0.1785" mass="0.18" material="mat_link" />
+          <body name="wrist_link" pos="0.0 0.0 0.357">
+            <joint name="elbow_pitch" type="hinge" axis="0.0 1.0 0.0" pos="0 0 0" limited="true" range="-1.57 1.57" />
+            <geom name="wrist_link_geom" type="box" size="0.02 0.02 0.08" pos="0 0 0.08" mass="0.035" material="mat_link" />
+            <camera name="wrist_rgbd_camera" pos="0.03 0.0 0.04" xyaxes="0 -1 0 0 0 1" mode="fixed" user="0.0 0.0 0.0" />
+            <body name="gripper_link" pos="0.0 0.0 0.16">
+              <geom name="gripper_link_geom" type="box" size="0.03 0.03 0.035" pos="0 0 0.035" mass="0.04" material="mat_link" />
+              <site name="ee_site" pos="0 0 0.07" size="0.012" rgba="0.1 0.9 0.5 1" />
+              <site name="grasp_site" pos="0 0 0.015" size="0.01" rgba="1 0.7 0.1 1" />
+              <body name="left_gripper_finger" pos="0 0.055 0.07">
+                <joint name="left_gripper_slide" type="slide" axis="0 -1 0" limited="true" range="0 0.04" damping="2.0" />
+                <geom name="left_gripper_pad" type="box" size="0.012 0.008 0.055" pos="0 0 -0.045" mass="0.025" rgba="0.12 0.12 0.14 1" friction="1.5 0.1 0.01" />
+              </body>
+              <body name="right_gripper_finger" pos="0 -0.055 0.07">
+                <joint name="right_gripper_slide" type="slide" axis="0 1 0" limited="true" range="0 0.04" damping="2.0" />
+                <geom name="right_gripper_pad" type="box" size="0.012 0.008 0.055" pos="0 0 -0.045" mass="0.025" rgba="0.12 0.12 0.14 1" friction="1.5 0.1 0.01" />
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+    </body>
+    <body name="obj_red_block" pos="0.3227 -0.069 0.0483" euler="0 0 -0.537">
+      <freejoint name="free_red_block" />
+      <geom name="red_block" type="box" size="0.0223 0.0223 0.0223" mass="0.0663" friction="0.893 0.1 0.01" material="mat_red" />
+    </body>
+    <body name="obj_blue_block" pos="0.3284 0.0325 0.0469" euler="0 0 -1.5676">
+      <freejoint name="free_blue_block" />
+      <geom name="blue_block" type="box" size="0.0209 0.0209 0.0209" mass="0.0688" friction="0.927 0.1 0.01" material="mat_blue" />
+    </body>
+    <geom name="red_bin" type="box" size="0.07 0.07 0.004" pos="0.3011 -0.135 0.029" material="mat_gray" />
+    <geom name="red_bin_wall_px" type="box" size="0.006 0.07600000000000001 0.04" pos="0.3711 -0.135 0.065" material="mat_gray" />
+    <geom name="red_bin_wall_nx" type="box" size="0.006 0.07600000000000001 0.04" pos="0.2311 -0.135 0.065" material="mat_gray" />
+    <geom name="red_bin_wall_py" type="box" size="0.07600000000000001 0.006 0.04" pos="0.3011 -0.065 0.065" material="mat_gray" />
+    <geom name="red_bin_wall_ny" type="box" size="0.07600000000000001 0.006 0.04" pos="0.3011 -0.205 0.065" material="mat_gray" />
+    <geom name="blue_bin" type="box" size="0.07 0.07 0.004" pos="0.3013 0.1346 0.029" material="mat_gray" />
+    <geom name="blue_bin_wall_px" type="box" size="0.006 0.07600000000000001 0.04" pos="0.3713 0.1346 0.065" material="mat_gray" />
+    <geom name="blue_bin_wall_nx" type="box" size="0.006 0.07600000000000001 0.04" pos="0.2313 0.1346 0.065" material="mat_gray" />
+    <geom name="blue_bin_wall_py" type="box" size="0.07600000000000001 0.006 0.04" pos="0.3013 0.2046 0.065" material="mat_gray" />
+    <geom name="blue_bin_wall_ny" type="box" size="0.07600000000000001 0.006 0.04" pos="0.3013 0.0646 0.065" material="mat_gray" />
+    <body name="obj_distractor_2_0" pos="0.3282 0.0339 0.0515" euler="0 0 2.8243">
+      <freejoint name="free_distractor_2_0" />
+      <geom name="distractor_2_0" type="box" size="0.0255 0.0255 0.0255" mass="0.0592" friction="0.824 0.1 0.01" material="mat_gray" />
+    </body>
+  </worldbody>
+  <actuator>
+    <motor name="base_yaw_motor" joint="base_yaw" gear="1" forcerange="-12.0 12.0" />
+    <motor name="shoulder_pitch_motor" joint="shoulder_pitch" gear="1" forcerange="-12.0 12.0" />
+    <motor name="elbow_pitch_motor" joint="elbow_pitch" gear="1" forcerange="-12.0 12.0" />
+    <motor name="left_gripper_slide_motor" joint="left_gripper_slide" gear="1" forcerange="-25 25" />
+    <motor name="right_gripper_slide_motor" joint="right_gripper_slide" gear="1" forcerange="-25 25" />
+  </actuator>
+  <sensor>
+    <framepos name="wrist_rgbd_camera_pose" objtype="camera" objname="wrist_rgbd_camera" />
+    <framequat name="wrist_rgbd_camera_orientation" objtype="camera" objname="wrist_rgbd_camera" />
+  </sensor>
+</mujoco>

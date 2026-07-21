@@ -1,0 +1,149 @@
+---
+import Base from "../layouts/Base.astro";
+import Footer from "../components/Footer.astro";
+import Nav from "../components/Nav.astro";
+import spec from "../data/spec.json";
+import ledger from "../data/ledger.json";
+import bom from "../data/bom.json";
+import training from "../data/training.json";
+import moat from "../data/moat.json";
+
+const STATUS: Record<string, string> = {
+  attained: "ATTAINED",
+  placeholder: "PLACEHOLDER",
+  unmet: "UNMET",
+  not_required: "NOT REQUIRED",
+};
+const tiers = (ledger.stages.find((stage) => stage.tier_success)?.tier_success ?? {}) as Record<string, number>;
+const pct = (value: number | undefined) => `${Math.round((value ?? 0) * 100)}%`;
+const money = (value: number) => value.toLocaleString("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 });
+---
+
+<Base
+  title="Virturoid evidence - reference build"
+  description="The artifact-backed reference package behind Virturoid's landing-page evidence."
+>
+  <Nav />
+  <main class="evidence-page" id="top">
+    <header class="evidence-hero wrap">
+      <p class="kicker"><span class="idx">REFERENCE PACKAGE</span> EVIDENCE, NOT THEATER</p>
+      <h1>What the page<br /><em>can prove today.</em></h1>
+      <p>
+        This is the compact technical companion to the Virturoid story. Every number below is read from a committed build artifact; it includes the successful paths and the work that is still incomplete.
+      </p>
+      <div class="source mono">{spec._source}</div>
+    </header>
+
+    <section class="block wrap">
+      <div class="heading">
+        <p class="kicker"><span class="idx">01</span> REFERENCE ROBOT</p>
+        <h2>One package, traced<br />from prompt to output.</h2>
+      </div>
+      <div class="reference-grid">
+        <figure class="capture">
+          <img src="shots/studio-inspector.png" width="2200" height="1375" alt="Real Studio inspector capture of the reference robot" />
+          <figcaption class="mono">REAL CAPTURE · Studio inspector</figcaption>
+        </figure>
+        <dl class="spec-card mono">
+          <div><dt>package</dt><dd>{ledger.package}</dd></div>
+          <div><dt>species</dt><dd>{spec.species}</dd></div>
+          <div><dt>robot class</dt><dd>{spec.robot_class}</dd></div>
+          <div><dt>actuated DOF</dt><dd>{spec.dof}</dd></div>
+          <div><dt>candidate mass</dt><dd>{spec.mass_kg} kg</dd></div>
+          <div><dt>peak joint torque</dt><dd>{spec.peak_joint_torque_nm} Nm</dd></div>
+        </dl>
+      </div>
+    </section>
+
+    <section class="block wrap">
+      <div class="heading">
+        <p class="kicker"><span class="idx">02</span> PHYSICS AND TRAINING</p>
+        <h2>Evidence is allowed<br />to contain a miss.</h2>
+      </div>
+      <div class="metrics mono">
+        <div><span>compiled scenes</span><b>24</b></div>
+        <div><span>smoke success</span><b>{pct(tiers.smoke)}</b></div>
+        <div><span>baseline success</span><b>{pct(tiers.baseline)}</b></div>
+        <div><span>randomized success</span><b>{pct(tiers.randomized)}</b></div>
+        <div class="warn"><span>stress success</span><b>{pct(tiers.stress)}</b></div>
+        <div><span>training iterations</span><b>{training.iterations}</b></div>
+      </div>
+      <div class="disclosure mono">
+        <span>LIMITATION</span>
+        {training.honest_note}
+      </div>
+      <figure class="capture wide">
+        <img src="shots/studio-simulate.png" width="2200" height="1375" alt="Real Studio capture of the reference robot in its simulation environment" loading="lazy" />
+        <figcaption class="mono">REAL CAPTURE · evaluation workspace</figcaption>
+      </figure>
+    </section>
+
+    <section class="block wrap">
+      <div class="heading">
+        <p class="kicker"><span class="idx">03</span> EXPORTABLE OUTPUT</p>
+        <h2>Buildable detail,<br />not a render.</h2>
+      </div>
+      <div class="output-grid">
+        <div class="bom-card">
+          <div class="card-head mono">BILL OF MATERIALS · {bom.totals.line_items} LINE ITEMS</div>
+          {bom.lines.slice(0, 4).map((line) => (
+            <div class="bom-line">
+              <span><b>{line.part}</b><small class="mono">{line.detail}</small></span>
+              <span class="mono">x{line.qty}</span>
+              <span class="mono">{money(line.price_usd)}</span>
+            </div>
+          ))}
+          <div class="bom-total mono"><span>{bom.totals.mass_kg} kg · {bom.totals.actuators} actuators</span><b>{money(bom.totals.price_usd)}</b></div>
+        </div>
+        <div class="ledger-card">
+          <div class="card-head mono">READINESS LEDGER</div>
+          {ledger.stages.map((stage) => (
+            <div class={`ledger-line ${stage.status}`}>
+              <span class="mono">{stage.stage}</span>
+              <b class="mono">{STATUS[stage.status] ?? stage.status}</b>
+            </div>
+          ))}
+        </div>
+      </div>
+    </section>
+
+    <section class="block memory wrap">
+      <div class="heading">
+        <p class="kicker"><span class="idx">04</span> COMPOUNDING KNOWLEDGE</p>
+        <h2>The result does not<br />disappear after export.</h2>
+      </div>
+      <div class="memory-grid mono">
+        <div><b>{moat.flywheel.banked_start} → {moat.flywheel.banked_end}</b><span>banked reusable assets<br />across three cycles</span></div>
+        <div><b>{Math.round(moat.flywheel.warm_start_fraction * 100)}%</b><span>of those cycles<br />were warm-started</span></div>
+        <div><b>{moat.brain.provenance_edges}</b><span>traceable warm-start<br />lineage edges</span></div>
+      </div>
+      <p class="ledger-note mono">{ledger.disclaimer}</p>
+    </section>
+
+    <section class="return wrap">
+      <a href="/#top" class="mono">← BACK TO THE STORY</a>
+      <a href="mailto:hello@virturoid.dev?subject=Virturoid%20early%20access" class="request mono">REQUEST EARLY ACCESS</a>
+    </section>
+  </main>
+  <Footer />
+</Base>
+
+<style>
+  .evidence-page { padding: 128px 0 40px; }
+  .evidence-hero { max-width: 1200px; padding-bottom: 96px; }
+  h1, h2 { font-size: clamp(43px, 5vw, 76px); margin-top: 18px; }
+  .evidence-hero > p:not(.kicker) { max-width: 690px; margin: 24px 0 0; font-size: 18px; color: var(--ink-2); }
+  .source { max-width: 760px; margin-top: 24px; padding: 12px 14px; border-left: 2px solid var(--agent); background: var(--agent-dim); font-size: 10px; line-height: 1.65; color: var(--ink-3); }
+  .block { max-width: 1200px; padding-top: 92px; padding-bottom: 12px; border-top: 1px solid var(--rule); }
+  .heading h2 { font-size: clamp(34px, 4.2vw, 60px); }
+  .reference-grid, .output-grid { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(320px, 0.8fr); gap: 28px; margin-top: 38px; align-items: start; }
+  .capture { margin: 0; border: 1px solid var(--rule-strong); background: var(--paper-2); }.capture img { display: block; width: 100%; height: auto; }.capture figcaption { padding: 8px 10px; color: var(--ink-3); font-size: 9px; letter-spacing: 0.12em; }.capture.wide { width: min(720px, 100%); margin-top: 27px; }
+  .spec-card { margin: 0; border: 1px solid var(--rule-strong); background: var(--paper-2); }.spec-card div { display: grid; grid-template-columns: 125px 1fr; gap: 14px; padding: 13px 15px; border-bottom: 1px solid var(--rule); }.spec-card div:last-child { border-bottom: 0; }.spec-card dt { color: var(--ink-3); font-size: 10px; letter-spacing: 0.08em; }.spec-card dd { margin: 0; color: var(--ink-1); font-size: 12px; }
+  .metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; margin-top: 36px; background: var(--rule-strong); }.metrics div { padding: 16px; background: var(--paper-2); }.metrics span { display: block; color: var(--ink-3); font-size: 9px; letter-spacing: 0.08em; }.metrics b { display: block; margin-top: 4px; color: var(--ok); font-size: 28px; }.metrics .warn b { color: var(--warn); }
+  .disclosure { max-width: 740px; margin-top: 20px; padding: 14px 16px; border-left: 2px solid var(--warn); background: oklch(0.79 0.12 85 / 0.08); color: var(--ink-2); font-size: 11px; line-height: 1.65; }.disclosure span { display: block; margin-bottom: 5px; color: var(--warn); font-size: 9px; font-weight: 700; letter-spacing: 0.14em; }
+  .bom-card, .ledger-card { border: 1px solid var(--rule-strong); background: var(--paper-2); }.card-head { padding: 12px 15px; border-bottom: 1px double var(--rule-strong); color: var(--ink-3); font-size: 10px; letter-spacing: 0.12em; }.bom-line { display: grid; grid-template-columns: 1fr auto auto; gap: 12px; padding: 12px 15px; border-bottom: 1px solid var(--rule); font-size: 12px; }.bom-line b { display: block; color: var(--ink-1); }.bom-line small { display: block; margin-top: 3px; color: var(--ink-3); font-size: 9px; }.bom-total { display: flex; justify-content: space-between; padding: 13px 15px; color: var(--ink-2); font-size: 11px; }.bom-total b { color: var(--ember); }
+  .ledger-line { display: flex; justify-content: space-between; gap: 14px; padding: 12px 15px; border-bottom: 1px solid var(--rule); font-size: 10px; color: var(--ink-2); }.ledger-line:last-child { border-bottom: 0; }.ledger-line.attained b { color: var(--ok); }.ledger-line.placeholder b { color: var(--warn); }.ledger-line.not_required b { color: var(--ink-3); }
+  .memory-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; margin-top: 36px; background: var(--rule-strong); }.memory-grid div { padding: 22px 18px; background: var(--paper-2); }.memory-grid b { display: block; color: var(--ember); font-size: 30px; }.memory-grid span { display: block; margin-top: 8px; color: var(--ink-3); font-size: 10px; line-height: 1.5; }.ledger-note { max-width: 800px; margin: 24px 0 0; color: var(--ink-3); font-size: 10px; line-height: 1.65; }
+  .return { display: flex; justify-content: space-between; gap: 18px; max-width: 1200px; margin-top: 88px; padding-top: 28px; border-top: 1px solid var(--rule); font-size: 11px; letter-spacing: 0.11em; color: var(--ink-2); }.request { color: var(--ember); }
+  @media (max-width: 760px) { .evidence-page { padding-top: 96px; }.reference-grid, .output-grid { grid-template-columns: 1fr; }.metrics, .memory-grid { grid-template-columns: 1fr 1fr; }.return { flex-direction: column; }.bom-line { grid-template-columns: 1fr auto; }.bom-line > :last-child { display: none; } }
+</style>

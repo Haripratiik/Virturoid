@@ -1,0 +1,1184 @@
+{
+  "id": "scenes_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation",
+  "version": "0.1.0",
+  "task_graph_id": "task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo",
+  "purpose": "variation",
+  "scenes": [
+    {
+      "id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_000",
+      "version": "0.1.0",
+      "name": "Sort colored blocks variation scene 1",
+      "backend_targets": [
+        "mujoco"
+      ],
+      "robot_spawn_xyz_rpy": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "objects": [
+        {
+          "name": "red_block",
+          "object_type": "cube",
+          "pose_xyz_rpy": [
+            0.4095,
+            -0.085,
+            0.02,
+            0.0,
+            0.0,
+            0.9649
+          ],
+          "mass_kg": 0.0649,
+          "material": "matte_red",
+          "friction": 0.811,
+          "scale": 1.02
+        },
+        {
+          "name": "blue_block",
+          "object_type": "cube",
+          "pose_xyz_rpy": [
+            0.4058,
+            0.085,
+            0.02,
+            0.0,
+            0.0,
+            -1.8511
+          ],
+          "mass_kg": 0.049,
+          "material": "matte_blue",
+          "friction": 0.869,
+          "scale": 1.086
+        },
+        {
+          "name": "red_bin",
+          "object_type": "container",
+          "pose_xyz_rpy": [
+            0.55,
+            -0.23,
+            0.02,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "mass_kg": null,
+          "material": null,
+          "friction": null,
+          "scale": null
+        },
+        {
+          "name": "blue_bin",
+          "object_type": "container",
+          "pose_xyz_rpy": [
+            0.55,
+            0.2278,
+            0.02,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "mass_kg": null,
+          "material": null,
+          "friction": null,
+          "scale": null
+        },
+        {
+          "name": "distractor_0_0",
+          "object_type": "cube",
+          "pose_xyz_rpy": [
+            0.36,
+            -0.0337,
+            0.02,
+            0.0,
+            0.0,
+            1.6546
+          ],
+          "mass_kg": 0.054,
+          "material": "matte_gray",
+          "friction": 0.948,
+          "scale": 0.925
+        }
+      ],
+      "variation_parameters": {
+        "index": 0,
+        "purpose": "variation",
+        "clutter": true,
+        "seed": 505434413,
+        "difficulty": 2,
+        "position_jitter_m": 0.07,
+        "lighting_level": 0.791,
+        "camera_noise_std": 0.0052,
+        "table_friction": 0.937,
+        "distractor_count": 1,
+        "background_texture": "wood"
+      },
+      "requirement_trace": [
+        "pick_place_sort",
+        "variation",
+        "tabletop",
+        "difficulty_2"
+      ]
+    },
+    {
+      "id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_001",
+      "version": "0.1.0",
+      "name": "Sort colored blocks variation scene 2",
+      "backend_targets": [
+        "mujoco"
+      ],
+      "robot_spawn_xyz_rpy": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "objects": [
+        {
+          "name": "red_block",
+          "object_type": "cube",
+          "pose_xyz_rpy": [
+            0.36,
+            -0.0312,
+            0.02,
+            0.0,
+            0.0,
+            -2.0785
+          ],
+          "mass_kg": 0.0431,
+          "material": "matte_red",
+          "friction": 0.987,
+          "scale": 1.093
+        },
+        {
+          "name": "blue_block",
+          "object_type": "cube",
+          "pose_xyz_rpy": [
+            0.3776,
+            0.085,
+            0.02,
+            0.0,
+            0.0,
+            1.2858
+          ],
+          "mass_kg": 0.065,
+          "material": "matte_blue",
+          "friction": 1.212,
+          "scale": 1.118
+        },
+        {
+          "name": "red_bin",
+          "object_type": "container",
+          "pose_xyz_rpy": [
+            0.55,
+            -0.2382,
+            0.02,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "mass_kg": null,
+          "material": null,
+          "friction": null,
+          "scale": null
+        },
+        {
+          "name": "blue_bin",
+          "object_type": "container",
+          "pose_xyz_rpy": [
+            0.55,
+            0.2223,
+            0.02,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "mass_kg": null,
+          "material": null,
+          "friction": null,
+          "scale": null
+        },
+        {
+          "name": "distractor_1_0",
+          "object_type": "cube",
+          "pose_xyz_rpy": [
+            0.4007,
+            -0.0662,
+            0.02,
+            0.0,
+            0.0,
+            2.2574
+          ],
+          "mass_kg": 0.0577,
+          "material": "matte_gray",
+          "friction": 1.167,
+          "scale": 1.002
+        }
+      ],
+      "variation_parameters": {
+        "index": 1,
+        "purpose": "variation",
+        "clutter": true,
+        "seed": 1545793500,
+        "difficulty": 2,
+        "position_jitter_m": 0.07,
+        "lighting_level": 0.901,
+        "camera_noise_std": 0.0003,
+        "table_friction": 1.03,
+        "distractor_count": 1,
+        "background_texture": "industrial"
+      },
+      "requirement_trace": [
+        "pick_place_sort",
+        "variation",
+        "tabletop",
+        "difficulty_2"
+      ]
+    },
+    {
+      "id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_002",
+      "version": "0.1.0",
+      "name": "Sort colored blocks variation scene 3",
+      "backend_targets": [
+        "mujoco"
+      ],
+      "robot_spawn_xyz_rpy": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "objects": [
+        {
+          "name": "red_block",
+          "object_type": "cube",
+          "pose_xyz_rpy": [
+            0.3978,
+            -0.085,
+            0.02,
+            0.0,
+            0.0,
+            -0.537
+          ],
+          "mass_kg": 0.0663,
+          "material": "matte_red",
+          "friction": 0.893,
+          "scale": 0.991
+        },
+        {
+          "name": "blue_block",
+          "object_type": "cube",
+          "pose_xyz_rpy": [
+            0.4117,
+            0.0407,
+            0.02,
+            0.0,
+            0.0,
+            -1.5676
+          ],
+          "mass_kg": 0.0688,
+          "material": "matte_blue",
+          "friction": 0.927,
+          "scale": 0.93
+        },
+        {
+          "name": "red_bin",
+          "object_type": "container",
+          "pose_xyz_rpy": [
+            0.55,
+            -0.2465,
+            0.02,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "mass_kg": null,
+          "material": null,
+          "friction": null,
+          "scale": null
+        },
+        {
+          "name": "blue_bin",
+          "object_type": "container",
+          "pose_xyz_rpy": [
+            0.55,
+            0.2458,
+            0.02,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "mass_kg": null,
+          "material": null,
+          "friction": null,
+          "scale": null
+        },
+        {
+          "name": "distractor_2_0",
+          "object_type": "cube",
+          "pose_xyz_rpy": [
+            0.4178,
+            0.0432,
+            0.02,
+            0.0,
+            0.0,
+            2.8243
+          ],
+          "mass_kg": 0.0592,
+          "material": "matte_gray",
+          "friction": 0.824,
+          "scale": 1.134
+        }
+      ],
+      "variation_parameters": {
+        "index": 2,
+        "purpose": "variation",
+        "clutter": true,
+        "seed": 1574063894,
+        "difficulty": 2,
+        "position_jitter_m": 0.07,
+        "lighting_level": 0.796,
+        "camera_noise_std": 0.0142,
+        "table_friction": 1.12,
+        "distractor_count": 1,
+        "background_texture": "wood"
+      },
+      "requirement_trace": [
+        "pick_place_sort",
+        "variation",
+        "tabletop",
+        "difficulty_2"
+      ]
+    },
+    {
+      "id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_003",
+      "version": "0.1.0",
+      "name": "Sort colored blocks variation scene 4",
+      "backend_targets": [
+        "mujoco"
+      ],
+      "robot_spawn_xyz_rpy": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "objects": [
+        {
+          "name": "red_block",
+          "object_type": "cube",
+          "pose_xyz_rpy": [
+            0.4023,
+            -0.0704,
+            0.02,
+            0.0,
+            0.0,
+            -1.3755
+          ],
+          "mass_kg": 0.046,
+          "material": "matte_red",
+          "friction": 1.196,
+          "scale": 1.009
+        },
+        {
+          "name": "blue_block",
+          "object_type": "cube",
+          "pose_xyz_rpy": [
+            0.36,
+            0.085,
+            0.02,
+            0.0,
+            0.0,
+            -1.137
+          ],
+          "mass_kg": 0.0651,
+          "material": "matte_blue",
+          "friction": 1.075,
+          "scale": 0.911
+        },
+        {
+          "name": "red_bin",
+          "object_type": "container",
+          "pose_xyz_rpy": [
+            0.55,
+            -0.2609,
+            0.02,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "mass_kg": null,
+          "material": null,
+          "friction": null,
+          "scale": null
+        },
+        {
+          "name": "blue_bin",
+          "object_type": "container",
+          "pose_xyz_rpy": [
+            0.55,
+            0.2291,
+            0.02,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "mass_kg": null,
+          "material": null,
+          "friction": null,
+          "scale": null
+        },
+        {
+          "name": "distractor_3_0",
+          "object_type": "cube",
+          "pose_xyz_rpy": [
+            0.4169,
+            0.0512,
+            0.02,
+            0.0,
+            0.0,
+            2.7699
+          ],
+          "mass_kg": 0.0402,
+          "material": "matte_gray",
+          "friction": 1.215,
+          "scale": 1.08
+        }
+      ],
+      "variation_parameters": {
+        "index": 3,
+        "purpose": "variation",
+        "clutter": true,
+        "seed": 953980979,
+        "difficulty": 2,
+        "position_jitter_m": 0.07,
+        "lighting_level": 0.688,
+        "camera_noise_std": 0.0118,
+        "table_friction": 0.968,
+        "distractor_count": 1,
+        "background_texture": "speckled"
+      },
+      "requirement_trace": [
+        "pick_place_sort",
+        "variation",
+        "tabletop",
+        "difficulty_2"
+      ]
+    },
+    {
+      "id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_004",
+      "version": "0.1.0",
+      "name": "Sort colored blocks variation scene 5",
+      "backend_targets": [
+        "mujoco"
+      ],
+      "robot_spawn_xyz_rpy": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "objects": [
+        {
+          "name": "red_block",
+          "object_type": "cube",
+          "pose_xyz_rpy": [
+            0.3793,
+            -0.0113,
+            0.02,
+            0.0,
+            0.0,
+            -1.8749
+          ],
+          "mass_kg": 0.0645,
+          "material": "matte_red",
+          "friction": 1.211,
+          "scale": 1.059
+        },
+        {
+          "name": "blue_block",
+          "object_type": "cube",
+          "pose_xyz_rpy": [
+            0.36,
+            0.0794,
+            0.02,
+            0.0,
+            0.0,
+            -2.425
+          ],
+          "mass_kg": 0.0545,
+          "material": "matte_blue",
+          "friction": 1.073,
+          "scale": 1.005
+        },
+        {
+          "name": "red_bin",
+          "object_type": "container",
+          "pose_xyz_rpy": [
+            0.55,
+            -0.2401,
+            0.02,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "mass_kg": null,
+          "material": null,
+          "friction": null,
+          "scale": null
+        },
+        {
+          "name": "blue_bin",
+          "object_type": "container",
+          "pose_xyz_rpy": [
+            0.55,
+            0.2213,
+            0.02,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "mass_kg": null,
+          "material": null,
+          "friction": null,
+          "scale": null
+        },
+        {
+          "name": "distractor_4_0",
+          "object_type": "cube",
+          "pose_xyz_rpy": [
+            0.36,
+            0.0264,
+            0.02,
+            0.0,
+            0.0,
+            -1.7854
+          ],
+          "mass_kg": 0.0659,
+          "material": "matte_gray",
+          "friction": 0.987,
+          "scale": 1.067
+        }
+      ],
+      "variation_parameters": {
+        "index": 4,
+        "purpose": "variation",
+        "clutter": true,
+        "seed": 1999118536,
+        "difficulty": 2,
+        "position_jitter_m": 0.07,
+        "lighting_level": 0.959,
+        "camera_noise_std": 0.0053,
+        "table_friction": 1.123,
+        "distractor_count": 1,
+        "background_texture": "speckled"
+      },
+      "requirement_trace": [
+        "pick_place_sort",
+        "variation",
+        "tabletop",
+        "difficulty_2"
+      ]
+    },
+    {
+      "id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_005",
+      "version": "0.1.0",
+      "name": "Sort colored blocks variation scene 6",
+      "backend_targets": [
+        "mujoco"
+      ],
+      "robot_spawn_xyz_rpy": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "objects": [
+        {
+          "name": "red_block",
+          "object_type": "cube",
+          "pose_xyz_rpy": [
+            0.4045,
+            -0.085,
+            0.02,
+            0.0,
+            0.0,
+            1.33
+          ],
+          "mass_kg": 0.0436,
+          "material": "matte_red",
+          "friction": 1.174,
+          "scale": 1.059
+        },
+        {
+          "name": "blue_block",
+          "object_type": "cube",
+          "pose_xyz_rpy": [
+            0.4106,
+            0.085,
+            0.02,
+            0.0,
+            0.0,
+            1.8193
+          ],
+          "mass_kg": 0.0489,
+          "material": "matte_blue",
+          "friction": 0.926,
+          "scale": 1.078
+        },
+        {
+          "name": "red_bin",
+          "object_type": "container",
+          "pose_xyz_rpy": [
+            0.55,
+            -0.2578,
+            0.02,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "mass_kg": null,
+          "material": null,
+          "friction": null,
+          "scale": null
+        },
+        {
+          "name": "blue_bin",
+          "object_type": "container",
+          "pose_xyz_rpy": [
+            0.55,
+            0.2253,
+            0.02,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "mass_kg": null,
+          "material": null,
+          "friction": null,
+          "scale": null
+        },
+        {
+          "name": "distractor_5_0",
+          "object_type": "cube",
+          "pose_xyz_rpy": [
+            0.4189,
+            0.0301,
+            0.02,
+            0.0,
+            0.0,
+            2.5797
+          ],
+          "mass_kg": 0.0624,
+          "material": "matte_gray",
+          "friction": 0.942,
+          "scale": 1.115
+        }
+      ],
+      "variation_parameters": {
+        "index": 5,
+        "purpose": "variation",
+        "clutter": true,
+        "seed": 2057570778,
+        "difficulty": 2,
+        "position_jitter_m": 0.07,
+        "lighting_level": 0.996,
+        "camera_noise_std": 0.0108,
+        "table_friction": 1.031,
+        "distractor_count": 1,
+        "background_texture": "industrial"
+      },
+      "requirement_trace": [
+        "pick_place_sort",
+        "variation",
+        "tabletop",
+        "difficulty_2"
+      ]
+    },
+    {
+      "id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_006",
+      "version": "0.1.0",
+      "name": "Sort colored blocks variation scene 7",
+      "backend_targets": [
+        "mujoco"
+      ],
+      "robot_spawn_xyz_rpy": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "objects": [
+        {
+          "name": "red_block",
+          "object_type": "cube",
+          "pose_xyz_rpy": [
+            0.4016,
+            -0.085,
+            0.02,
+            0.0,
+            0.0,
+            2.9742
+          ],
+          "mass_kg": 0.0515,
+          "material": "matte_red",
+          "friction": 1.035,
+          "scale": 1.122
+        },
+        {
+          "name": "blue_block",
+          "object_type": "cube",
+          "pose_xyz_rpy": [
+            0.3879,
+            0.0436,
+            0.02,
+            0.0,
+            0.0,
+            -1.9824
+          ],
+          "mass_kg": 0.0414,
+          "material": "matte_blue",
+          "friction": 1.121,
+          "scale": 1.127
+        },
+        {
+          "name": "red_bin",
+          "object_type": "container",
+          "pose_xyz_rpy": [
+            0.55,
+            -0.2059,
+            0.02,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "mass_kg": null,
+          "material": null,
+          "friction": null,
+          "scale": null
+        },
+        {
+          "name": "blue_bin",
+          "object_type": "container",
+          "pose_xyz_rpy": [
+            0.55,
+            0.2352,
+            0.02,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "mass_kg": null,
+          "material": null,
+          "friction": null,
+          "scale": null
+        },
+        {
+          "name": "distractor_6_0",
+          "object_type": "cube",
+          "pose_xyz_rpy": [
+            0.4012,
+            0.0007,
+            0.02,
+            0.0,
+            0.0,
+            -1.1999
+          ],
+          "mass_kg": 0.0447,
+          "material": "matte_gray",
+          "friction": 0.862,
+          "scale": 1.144
+        }
+      ],
+      "variation_parameters": {
+        "index": 6,
+        "purpose": "variation",
+        "clutter": true,
+        "seed": 2050562510,
+        "difficulty": 2,
+        "position_jitter_m": 0.07,
+        "lighting_level": 0.615,
+        "camera_noise_std": 0.0053,
+        "table_friction": 1.09,
+        "distractor_count": 1,
+        "background_texture": "industrial"
+      },
+      "requirement_trace": [
+        "pick_place_sort",
+        "variation",
+        "tabletop",
+        "difficulty_2"
+      ]
+    },
+    {
+      "id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_007",
+      "version": "0.1.0",
+      "name": "Sort colored blocks variation scene 8",
+      "backend_targets": [
+        "mujoco"
+      ],
+      "robot_spawn_xyz_rpy": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "objects": [
+        {
+          "name": "red_block",
+          "object_type": "cube",
+          "pose_xyz_rpy": [
+            0.4178,
+            -0.0425,
+            0.02,
+            0.0,
+            0.0,
+            -2.1378
+          ],
+          "mass_kg": 0.0587,
+          "material": "matte_red",
+          "friction": 1.15,
+          "scale": 1.038
+        },
+        {
+          "name": "blue_block",
+          "object_type": "cube",
+          "pose_xyz_rpy": [
+            0.36,
+            0.085,
+            0.02,
+            0.0,
+            0.0,
+            -1.3228
+          ],
+          "mass_kg": 0.0659,
+          "material": "matte_blue",
+          "friction": 0.879,
+          "scale": 1.022
+        },
+        {
+          "name": "red_bin",
+          "object_type": "container",
+          "pose_xyz_rpy": [
+            0.55,
+            -0.2021,
+            0.02,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "mass_kg": null,
+          "material": null,
+          "friction": null,
+          "scale": null
+        },
+        {
+          "name": "blue_bin",
+          "object_type": "container",
+          "pose_xyz_rpy": [
+            0.55,
+            0.2123,
+            0.02,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "mass_kg": null,
+          "material": null,
+          "friction": null,
+          "scale": null
+        },
+        {
+          "name": "distractor_7_0",
+          "object_type": "cube",
+          "pose_xyz_rpy": [
+            0.4195,
+            -0.021,
+            0.02,
+            0.0,
+            0.0,
+            -1.2034
+          ],
+          "mass_kg": 0.06,
+          "material": "matte_gray",
+          "friction": 0.876,
+          "scale": 1.01
+        }
+      ],
+      "variation_parameters": {
+        "index": 7,
+        "purpose": "variation",
+        "clutter": true,
+        "seed": 51696128,
+        "difficulty": 2,
+        "position_jitter_m": 0.07,
+        "lighting_level": 0.934,
+        "camera_noise_std": 0.0083,
+        "table_friction": 1.083,
+        "distractor_count": 1,
+        "background_texture": "wood"
+      },
+      "requirement_trace": [
+        "pick_place_sort",
+        "variation",
+        "tabletop",
+        "difficulty_2"
+      ]
+    },
+    {
+      "id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_008",
+      "version": "0.1.0",
+      "name": "Sort colored blocks variation scene 9",
+      "backend_targets": [
+        "mujoco"
+      ],
+      "robot_spawn_xyz_rpy": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "objects": [
+        {
+          "name": "red_block",
+          "object_type": "cube",
+          "pose_xyz_rpy": [
+            0.4022,
+            -0.085,
+            0.02,
+            0.0,
+            0.0,
+            -2.4675
+          ],
+          "mass_kg": 0.06,
+          "material": "matte_red",
+          "friction": 0.946,
+          "scale": 1.139
+        },
+        {
+          "name": "blue_block",
+          "object_type": "cube",
+          "pose_xyz_rpy": [
+            0.36,
+            0.0774,
+            0.02,
+            0.0,
+            0.0,
+            -1.9714
+          ],
+          "mass_kg": 0.0614,
+          "material": "matte_blue",
+          "friction": 0.889,
+          "scale": 1.022
+        },
+        {
+          "name": "red_bin",
+          "object_type": "container",
+          "pose_xyz_rpy": [
+            0.55,
+            -0.2432,
+            0.02,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "mass_kg": null,
+          "material": null,
+          "friction": null,
+          "scale": null
+        },
+        {
+          "name": "blue_bin",
+          "object_type": "container",
+          "pose_xyz_rpy": [
+            0.55,
+            0.2648,
+            0.02,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "mass_kg": null,
+          "material": null,
+          "friction": null,
+          "scale": null
+        },
+        {
+          "name": "distractor_8_0",
+          "object_type": "cube",
+          "pose_xyz_rpy": [
+            0.36,
+            0.0476,
+            0.02,
+            0.0,
+            0.0,
+            -1.266
+          ],
+          "mass_kg": 0.0466,
+          "material": "matte_gray",
+          "friction": 1.084,
+          "scale": 1.112
+        }
+      ],
+      "variation_parameters": {
+        "index": 8,
+        "purpose": "variation",
+        "clutter": true,
+        "seed": 1847194253,
+        "difficulty": 2,
+        "position_jitter_m": 0.07,
+        "lighting_level": 0.8,
+        "camera_noise_std": 0.0166,
+        "table_friction": 1.07,
+        "distractor_count": 1,
+        "background_texture": "plain"
+      },
+      "requirement_trace": [
+        "pick_place_sort",
+        "variation",
+        "tabletop",
+        "difficulty_2"
+      ]
+    },
+    {
+      "id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_009",
+      "version": "0.1.0",
+      "name": "Sort colored blocks variation scene 10",
+      "backend_targets": [
+        "mujoco"
+      ],
+      "robot_spawn_xyz_rpy": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "objects": [
+        {
+          "name": "red_block",
+          "object_type": "cube",
+          "pose_xyz_rpy": [
+            0.4101,
+            -0.085,
+            0.02,
+            0.0,
+            0.0,
+            2.5852
+          ],
+          "mass_kg": 0.0433,
+          "material": "matte_red",
+          "friction": 1.108,
+          "scale": 0.973
+        },
+        {
+          "name": "blue_block",
+          "object_type": "cube",
+          "pose_xyz_rpy": [
+            0.4009,
+            0.085,
+            0.02,
+            0.0,
+            0.0,
+            -0.3353
+          ],
+          "mass_kg": 0.0475,
+          "material": "matte_blue",
+          "friction": 1.203,
+          "scale": 0.949
+        },
+        {
+          "name": "red_bin",
+          "object_type": "container",
+          "pose_xyz_rpy": [
+            0.55,
+            -0.2418,
+            0.02,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "mass_kg": null,
+          "material": null,
+          "friction": null,
+          "scale": null
+        },
+        {
+          "name": "blue_bin",
+          "object_type": "container",
+          "pose_xyz_rpy": [
+            0.55,
+            0.268,
+            0.02,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "mass_kg": null,
+          "material": null,
+          "friction": null,
+          "scale": null
+        },
+        {
+          "name": "distractor_9_0",
+          "object_type": "cube",
+          "pose_xyz_rpy": [
+            0.3714,
+            -0.062,
+            0.02,
+            0.0,
+            0.0,
+            -1.7138
+          ],
+          "mass_kg": 0.0575,
+          "material": "matte_gray",
+          "friction": 1.261,
+          "scale": 1.024
+        }
+      ],
+      "variation_parameters": {
+        "index": 9,
+        "purpose": "variation",
+        "clutter": true,
+        "seed": 1315080213,
+        "difficulty": 2,
+        "position_jitter_m": 0.07,
+        "lighting_level": 0.71,
+        "camera_noise_std": 0.0032,
+        "table_friction": 0.961,
+        "distractor_count": 1,
+        "background_texture": "plain"
+      },
+      "requirement_trace": [
+        "pick_place_sort",
+        "variation",
+        "tabletop",
+        "difficulty_2"
+      ]
+    }
+  ],
+  "generation_rules": [
+    "seeded domain randomization per scene (pose, yaw, size, mass, friction)",
+    "lighting and camera-noise randomization tied to difficulty",
+    "clutter and distractors scale with difficulty level",
+    "keep matching bins visible and tabletop reachable"
+  ]
+}

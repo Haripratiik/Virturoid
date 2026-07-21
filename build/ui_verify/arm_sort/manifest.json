@@ -1,0 +1,393 @@
+{
+  "id": "export_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo",
+  "version": "0.1.0",
+  "project_id": "project_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo",
+  "design_artifacts": [
+    {
+      "uri": "design/morphology_template.json",
+      "media_type": "application/json",
+      "sha256": null,
+      "description": null
+    },
+    {
+      "uri": "design/builder_dispatch.json",
+      "media_type": "application/json",
+      "sha256": null,
+      "description": null
+    },
+    {
+      "uri": "design/robot_build_blueprint.json",
+      "media_type": "application/json",
+      "sha256": null,
+      "description": null
+    }
+  ],
+  "cad_artifacts": [
+    {
+      "uri": "cad/exact/robot_assembly.step",
+      "media_type": "model/step",
+      "sha256": null,
+      "description": null
+    },
+    {
+      "uri": "cad/parametric/robot_arm.py",
+      "media_type": "text/x-python",
+      "sha256": null,
+      "description": null
+    },
+    {
+      "uri": "cad/build_plan.json",
+      "media_type": "application/json",
+      "sha256": null,
+      "description": null
+    },
+    {
+      "uri": "cad/mesh/visual/cad_arm_base.stl",
+      "media_type": "model/stl",
+      "sha256": null,
+      "description": null
+    },
+    {
+      "uri": "cad/mesh/visual/cad_upper_link.stl",
+      "media_type": "model/stl",
+      "sha256": null,
+      "description": null
+    },
+    {
+      "uri": "cad/mesh/visual/cad_forearm_link.stl",
+      "media_type": "model/stl",
+      "sha256": null,
+      "description": null
+    },
+    {
+      "uri": "cad/mesh/visual/cad_wrist_camera_mount.stl",
+      "media_type": "model/stl",
+      "sha256": null,
+      "description": null
+    },
+    {
+      "uri": "cad/mesh/visual/cad_gripper_mount.stl",
+      "media_type": "model/stl",
+      "sha256": null,
+      "description": null
+    }
+  ],
+  "bom_artifacts": [
+    {
+      "uri": "bom/bom.json",
+      "media_type": "application/json",
+      "sha256": null,
+      "description": null
+    },
+    {
+      "uri": "bom/part_resolution_report.json",
+      "media_type": "application/json",
+      "sha256": null,
+      "description": null
+    }
+  ],
+  "robot_artifacts": [
+    {
+      "uri": "power/power_architecture.json",
+      "media_type": "application/json",
+      "sha256": null,
+      "description": null
+    },
+    {
+      "uri": "robot/robot_genome.json",
+      "media_type": "application/json",
+      "sha256": null,
+      "description": null
+    },
+    {
+      "uri": "robot/robot.urdf",
+      "media_type": "application/xml",
+      "sha256": null,
+      "description": null
+    }
+  ],
+  "simulation_artifacts": [
+    {
+      "uri": "simulation/baseline_scene_set.json",
+      "media_type": "application/json",
+      "sha256": null,
+      "description": null
+    },
+    {
+      "uri": "simulation/scene_set.json",
+      "media_type": "application/json",
+      "sha256": null,
+      "description": null
+    },
+    {
+      "uri": "simulation/regression_scene_set.json",
+      "media_type": "application/json",
+      "sha256": null,
+      "description": null
+    },
+    {
+      "uri": "simulation/holdout_scene_set.json",
+      "media_type": "application/json",
+      "sha256": null,
+      "description": null
+    },
+    {
+      "uri": "simulation/revision_scene_set.json",
+      "media_type": "application/json",
+      "sha256": null,
+      "description": null
+    },
+    {
+      "uri": "simulation/perception_config.json",
+      "media_type": "application/json",
+      "sha256": null,
+      "description": null
+    },
+    {
+      "uri": "simulation/world_model_contract.json",
+      "media_type": "application/json",
+      "sha256": null,
+      "description": null
+    },
+    {
+      "uri": "simulation/simulator_contract.json",
+      "media_type": "application/json",
+      "sha256": null,
+      "description": null
+    },
+    {
+      "uri": "simulation/mujoco/mvp_scene.xml",
+      "media_type": "application/xml",
+      "sha256": null,
+      "description": null
+    },
+    {
+      "uri": "simulation/mujoco/compiled_scene_index.json",
+      "media_type": "application/json",
+      "sha256": null,
+      "description": null
+    },
+    {
+      "uri": "simulation/previews/index.html",
+      "media_type": "text/html",
+      "sha256": null,
+      "description": null
+    },
+    {
+      "uri": "simulation/previews/baseline_scene.svg",
+      "media_type": "image/svg+xml",
+      "sha256": null,
+      "description": null
+    },
+    {
+      "uri": "simulation/previews/variation_scene.svg",
+      "media_type": "image/svg+xml",
+      "sha256": null,
+      "description": null
+    },
+    {
+      "uri": "simulation/previews/regression_scene.svg",
+      "media_type": "image/svg+xml",
+      "sha256": null,
+      "description": null
+    },
+    {
+      "uri": "simulation/previews/holdout_scene.svg",
+      "media_type": "image/svg+xml",
+      "sha256": null,
+      "description": null
+    }
+  ],
+  "software_artifacts": [
+    {
+      "uri": "software/policy_plan.json",
+      "media_type": "application/json",
+      "sha256": null,
+      "description": null
+    },
+    {
+      "uri": "software/policy_plan_revised.json",
+      "media_type": "application/json",
+      "sha256": null,
+      "description": null
+    },
+    {
+      "uri": "software/ros2_test_harness_placeholder.json",
+      "media_type": "application/json",
+      "sha256": null,
+      "description": null
+    }
+  ],
+  "dataset_artifacts": [
+    {
+      "uri": "training/training_manifest.json",
+      "media_type": "application/json",
+      "sha256": null,
+      "description": null
+    },
+    {
+      "uri": "training/training_objective.json",
+      "media_type": "application/json",
+      "sha256": null,
+      "description": null
+    },
+    {
+      "uri": "training/training_curriculum.json",
+      "media_type": "application/json",
+      "sha256": null,
+      "description": null
+    },
+    {
+      "uri": "training/training_run_config.json",
+      "media_type": "application/json",
+      "sha256": null,
+      "description": null
+    },
+    {
+      "uri": "training/training_run_config_revised.json",
+      "media_type": "application/json",
+      "sha256": null,
+      "description": null
+    },
+    {
+      "uri": "training/training_run_config_next.json",
+      "media_type": "application/json",
+      "sha256": null,
+      "description": null
+    },
+    {
+      "uri": "training/active_training_inputs.json",
+      "media_type": "application/json",
+      "sha256": null,
+      "description": null
+    },
+    {
+      "uri": "datasets/synthetic_observation_manifest.json",
+      "media_type": "application/json",
+      "sha256": null,
+      "description": null
+    },
+    {
+      "uri": "datasets/synthetic_observations/index.json",
+      "media_type": "application/json",
+      "sha256": null,
+      "description": null
+    },
+    {
+      "uri": "simulation/world_state_index.json",
+      "media_type": "application/json",
+      "sha256": null,
+      "description": null
+    },
+    {
+      "uri": "runs/mvp_training/dry_run_result.json",
+      "media_type": "application/json",
+      "sha256": null,
+      "description": null
+    },
+    {
+      "uri": "runs/mvp_training/replay_index.json",
+      "media_type": "application/json",
+      "sha256": null,
+      "description": null
+    },
+    {
+      "uri": "runs/mvp_training/logs/episode_trace.jsonl",
+      "media_type": "application/x-ndjson",
+      "sha256": null,
+      "description": null
+    },
+    {
+      "uri": "runs/mvp_training_revision/dry_run_result.json",
+      "media_type": "application/json",
+      "sha256": null,
+      "description": null
+    },
+    {
+      "uri": "runs/mvp_training_revision/replay_index.json",
+      "media_type": "application/json",
+      "sha256": null,
+      "description": null
+    },
+    {
+      "uri": "runs/mvp_training_revision/logs/episode_trace.jsonl",
+      "media_type": "application/x-ndjson",
+      "sha256": null,
+      "description": null
+    },
+    {
+      "uri": "runs/mvp_training_next/dry_run_result.json",
+      "media_type": "application/json",
+      "sha256": null,
+      "description": null
+    },
+    {
+      "uri": "runs/mvp_training_next/replay_index.json",
+      "media_type": "application/json",
+      "sha256": null,
+      "description": null
+    },
+    {
+      "uri": "runs/mvp_training_next/logs/episode_trace.jsonl",
+      "media_type": "application/x-ndjson",
+      "sha256": null,
+      "description": null
+    }
+  ],
+  "report_artifacts": [
+    {
+      "uri": "reports/design_validation_report.json",
+      "media_type": "application/json",
+      "sha256": null,
+      "description": null
+    },
+    {
+      "uri": "reports/mvp_evaluation_report.json",
+      "media_type": "application/json",
+      "sha256": null,
+      "description": null
+    },
+    {
+      "uri": "reports/training_feedback.json",
+      "media_type": "application/json",
+      "sha256": null,
+      "description": null
+    },
+    {
+      "uri": "reports/redesign_revision.json",
+      "media_type": "application/json",
+      "sha256": null,
+      "description": null
+    },
+    {
+      "uri": "reports/improvement_report.json",
+      "media_type": "application/json",
+      "sha256": null,
+      "description": null
+    },
+    {
+      "uri": "reports/promotion_decision.json",
+      "media_type": "application/json",
+      "sha256": null,
+      "description": null
+    },
+    {
+      "uri": "reports/package_validation_report.json",
+      "media_type": "application/json",
+      "sha256": null,
+      "description": null
+    },
+    {
+      "uri": "reports/mvp_summary.md",
+      "media_type": "text/markdown",
+      "sha256": null,
+      "description": null
+    },
+    {
+      "uri": "reports/index.html",
+      "media_type": "text/html",
+      "sha256": null,
+      "description": null
+    }
+  ]
+}

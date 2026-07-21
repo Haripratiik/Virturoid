@@ -1,0 +1,413 @@
+{
+  "id": "scenes_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout",
+  "version": "0.1.0",
+  "task_graph_id": "task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo",
+  "purpose": "holdout",
+  "scenes": [
+    {
+      "id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout_000",
+      "version": "0.1.0",
+      "name": "Sort colored blocks holdout scene 1",
+      "backend_targets": [
+        "mujoco"
+      ],
+      "robot_spawn_xyz_rpy": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "objects": [
+        {
+          "name": "red_block",
+          "object_type": "cube",
+          "pose_xyz_rpy": [
+            0.36,
+            0.0083,
+            0.02,
+            0.0,
+            0.0,
+            -0.802
+          ],
+          "mass_kg": 0.0518,
+          "material": "matte_red",
+          "friction": 1.254,
+          "scale": 0.975
+        },
+        {
+          "name": "blue_block",
+          "object_type": "cube",
+          "pose_xyz_rpy": [
+            0.36,
+            0.0601,
+            0.02,
+            0.0,
+            0.0,
+            -2.4528
+          ],
+          "mass_kg": 0.0615,
+          "material": "matte_blue",
+          "friction": 0.851,
+          "scale": 1.003
+        },
+        {
+          "name": "red_bin",
+          "object_type": "container",
+          "pose_xyz_rpy": [
+            0.55,
+            -0.283,
+            0.02,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "mass_kg": null,
+          "material": null,
+          "friction": null,
+          "scale": null
+        },
+        {
+          "name": "blue_bin",
+          "object_type": "container",
+          "pose_xyz_rpy": [
+            0.55,
+            0.2726,
+            0.02,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "mass_kg": null,
+          "material": null,
+          "friction": null,
+          "scale": null
+        },
+        {
+          "name": "distractor_0_0",
+          "object_type": "cube",
+          "pose_xyz_rpy": [
+            0.4141,
+            -0.0704,
+            0.02,
+            0.0,
+            0.0,
+            -0.4959
+          ],
+          "mass_kg": 0.0544,
+          "material": "matte_gray",
+          "friction": 0.897,
+          "scale": 0.982
+        },
+        {
+          "name": "distractor_0_1",
+          "object_type": "cube",
+          "pose_xyz_rpy": [
+            0.36,
+            -0.085,
+            0.02,
+            0.0,
+            0.0,
+            2.7744
+          ],
+          "mass_kg": 0.0465,
+          "material": "matte_gray",
+          "friction": 0.819,
+          "scale": 1.116
+        }
+      ],
+      "variation_parameters": {
+        "index": 0,
+        "purpose": "holdout",
+        "clutter": true,
+        "seed": 1824680937,
+        "difficulty": 3,
+        "position_jitter_m": 0.095,
+        "lighting_level": 0.866,
+        "camera_noise_std": 0.0166,
+        "table_friction": 0.872,
+        "distractor_count": 2,
+        "background_texture": "speckled"
+      },
+      "requirement_trace": [
+        "pick_place_sort",
+        "holdout",
+        "tabletop",
+        "difficulty_3"
+      ]
+    },
+    {
+      "id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout_001",
+      "version": "0.1.0",
+      "name": "Sort colored blocks holdout scene 2",
+      "backend_targets": [
+        "mujoco"
+      ],
+      "robot_spawn_xyz_rpy": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "objects": [
+        {
+          "name": "red_block",
+          "object_type": "cube",
+          "pose_xyz_rpy": [
+            0.36,
+            -0.085,
+            0.02,
+            0.0,
+            0.0,
+            -3.088
+          ],
+          "mass_kg": 0.0409,
+          "material": "matte_red",
+          "friction": 1.178,
+          "scale": 0.954
+        },
+        {
+          "name": "blue_block",
+          "object_type": "cube",
+          "pose_xyz_rpy": [
+            0.4061,
+            0.085,
+            0.02,
+            0.0,
+            0.0,
+            0.5837
+          ],
+          "mass_kg": 0.042,
+          "material": "matte_blue",
+          "friction": 0.878,
+          "scale": 1.037
+        },
+        {
+          "name": "red_bin",
+          "object_type": "container",
+          "pose_xyz_rpy": [
+            0.55,
+            -0.2403,
+            0.02,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "mass_kg": null,
+          "material": null,
+          "friction": null,
+          "scale": null
+        },
+        {
+          "name": "blue_bin",
+          "object_type": "container",
+          "pose_xyz_rpy": [
+            0.55,
+            0.2799,
+            0.02,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "mass_kg": null,
+          "material": null,
+          "friction": null,
+          "scale": null
+        },
+        {
+          "name": "distractor_1_0",
+          "object_type": "cube",
+          "pose_xyz_rpy": [
+            0.4182,
+            0.0387,
+            0.02,
+            0.0,
+            0.0,
+            -0.4027
+          ],
+          "mass_kg": 0.0594,
+          "material": "matte_gray",
+          "friction": 1.213,
+          "scale": 1.029
+        },
+        {
+          "name": "distractor_1_1",
+          "object_type": "cube",
+          "pose_xyz_rpy": [
+            0.4001,
+            0.0443,
+            0.02,
+            0.0,
+            0.0,
+            -0.2066
+          ],
+          "mass_kg": 0.0682,
+          "material": "matte_gray",
+          "friction": 0.836,
+          "scale": 1.076
+        }
+      ],
+      "variation_parameters": {
+        "index": 1,
+        "purpose": "holdout",
+        "clutter": true,
+        "seed": 725159835,
+        "difficulty": 3,
+        "position_jitter_m": 0.095,
+        "lighting_level": 0.984,
+        "camera_noise_std": 0.0103,
+        "table_friction": 0.918,
+        "distractor_count": 2,
+        "background_texture": "plain"
+      },
+      "requirement_trace": [
+        "pick_place_sort",
+        "holdout",
+        "tabletop",
+        "difficulty_3"
+      ]
+    },
+    {
+      "id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout_002",
+      "version": "0.1.0",
+      "name": "Sort colored blocks holdout scene 3",
+      "backend_targets": [
+        "mujoco"
+      ],
+      "robot_spawn_xyz_rpy": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "objects": [
+        {
+          "name": "red_block",
+          "object_type": "cube",
+          "pose_xyz_rpy": [
+            0.3646,
+            -0.085,
+            0.02,
+            0.0,
+            0.0,
+            -0.4691
+          ],
+          "mass_kg": 0.0432,
+          "material": "matte_red",
+          "friction": 0.949,
+          "scale": 1.098
+        },
+        {
+          "name": "blue_block",
+          "object_type": "cube",
+          "pose_xyz_rpy": [
+            0.36,
+            0.085,
+            0.02,
+            0.0,
+            0.0,
+            1.7512
+          ],
+          "mass_kg": 0.0688,
+          "material": "matte_blue",
+          "friction": 0.966,
+          "scale": 0.94
+        },
+        {
+          "name": "red_bin",
+          "object_type": "container",
+          "pose_xyz_rpy": [
+            0.55,
+            -0.2428,
+            0.02,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "mass_kg": null,
+          "material": null,
+          "friction": null,
+          "scale": null
+        },
+        {
+          "name": "blue_bin",
+          "object_type": "container",
+          "pose_xyz_rpy": [
+            0.55,
+            0.212,
+            0.02,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "mass_kg": null,
+          "material": null,
+          "friction": null,
+          "scale": null
+        },
+        {
+          "name": "distractor_2_0",
+          "object_type": "cube",
+          "pose_xyz_rpy": [
+            0.4157,
+            -0.06,
+            0.02,
+            0.0,
+            0.0,
+            -2.9741
+          ],
+          "mass_kg": 0.0477,
+          "material": "matte_gray",
+          "friction": 1.263,
+          "scale": 1.048
+        },
+        {
+          "name": "distractor_2_1",
+          "object_type": "cube",
+          "pose_xyz_rpy": [
+            0.4121,
+            0.0813,
+            0.02,
+            0.0,
+            0.0,
+            -2.6759
+          ],
+          "mass_kg": 0.0636,
+          "material": "matte_gray",
+          "friction": 0.963,
+          "scale": 1.107
+        }
+      ],
+      "variation_parameters": {
+        "index": 2,
+        "purpose": "holdout",
+        "clutter": true,
+        "seed": 1272312478,
+        "difficulty": 3,
+        "position_jitter_m": 0.095,
+        "lighting_level": 0.658,
+        "camera_noise_std": 0.0101,
+        "table_friction": 1.164,
+        "distractor_count": 2,
+        "background_texture": "industrial"
+      },
+      "requirement_trace": [
+        "pick_place_sort",
+        "holdout",
+        "tabletop",
+        "difficulty_3"
+      ]
+    }
+  ],
+  "generation_rules": [
+    "seeded domain randomization per scene (pose, yaw, size, mass, friction)",
+    "lighting and camera-noise randomization tied to difficulty",
+    "clutter and distractors scale with difficulty level",
+    "keep matching bins visible and tabletop reachable"
+  ]
+}

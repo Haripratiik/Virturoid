@@ -1,0 +1,80 @@
+{
+  "id": "plan_policy_mvp_scripted_sort",
+  "version": "0.1.0",
+  "policy_id": "policy_mvp_scripted_sort",
+  "task_graph_id": "task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo",
+  "robot_genome_id": "robot_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo",
+  "policy_type": "scripted_skill_sequence",
+  "observation_keys": [
+    "object_poses",
+    "joint_positions",
+    "wrist_rgbd_camera"
+  ],
+  "action_space": "discrete_skill_sequence",
+  "steps": [
+    {
+      "step_id": "observe_workspace",
+      "skill": "perception",
+      "command": "detect_sortable_objects_and_bins",
+      "target_selector": "all_visible_objects",
+      "expected_observations": [
+        "object_poses",
+        "bin_poses",
+        "wrist_rgbd_camera"
+      ],
+      "success_condition": "at least one object and matching bin are localized",
+      "fallback": "request wider camera sweep"
+    },
+    {
+      "step_id": "select_target",
+      "skill": "task_planning",
+      "command": "select_next_object_by_color",
+      "target_selector": "nearest_unsorted_object",
+      "expected_observations": [
+        "object_poses"
+      ],
+      "success_condition": "target object has a matching destination bin",
+      "fallback": "skip ambiguous object"
+    },
+    {
+      "step_id": "plan_grasp",
+      "skill": "motion_planning",
+      "command": "compute_top_down_grasp",
+      "target_selector": "selected_object",
+      "expected_observations": [
+        "object_pose",
+        "joint_positions"
+      ],
+      "success_condition": "grasp pose is reachable and collision free",
+      "fallback": "try side grasp"
+    },
+    {
+      "step_id": "execute_pick",
+      "skill": "manipulation",
+      "command": "move_close_gripper_lift",
+      "target_selector": "selected_object",
+      "expected_observations": [
+        "joint_positions",
+        "gripper_state"
+      ],
+      "success_condition": "object is retained by gripper",
+      "fallback": "retry with lower approach speed"
+    },
+    {
+      "step_id": "execute_place",
+      "skill": "manipulation",
+      "command": "move_to_matching_bin_open_gripper",
+      "target_selector": "matching_bin",
+      "expected_observations": [
+        "bin_pose",
+        "joint_positions"
+      ],
+      "success_condition": "object rests inside matching bin",
+      "fallback": "drop at safe staging zone"
+    }
+  ],
+  "notes": [
+    "MVP scripted policy plan generated from the task graph.",
+    "A learned controller can replace or refine these skill steps after simulator rollouts exist."
+  ]
+}

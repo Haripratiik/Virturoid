@@ -1,0 +1,251 @@
+{
+  "id": "sim_contract_training_run_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_mujoco",
+  "version": "0.1.0",
+  "backend": "mujoco",
+  "robot_genome_id": "robot_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo",
+  "training_run_config_uri": "training/training_run_config.json",
+  "compiled_scene_index_uri": "simulation/mujoco/compiled_scene_index.json",
+  "required_inputs": [
+    {
+      "uri": "simulation/mujoco/mvp_scene.xml",
+      "media_type": "application/xml",
+      "sha256": null,
+      "description": null
+    },
+    {
+      "uri": "software/policy_plan.json",
+      "media_type": "application/json",
+      "sha256": null,
+      "description": null
+    },
+    {
+      "uri": "simulation/perception_config.json",
+      "media_type": "application/json",
+      "sha256": null,
+      "description": null
+    },
+    {
+      "uri": "training/training_objective.json",
+      "media_type": "application/json",
+      "sha256": null,
+      "description": null
+    },
+    {
+      "uri": "training/training_curriculum.json",
+      "media_type": "application/json",
+      "sha256": null,
+      "description": null
+    },
+    {
+      "uri": "simulation/mujoco/compiled_scene_index.json",
+      "media_type": "application/json",
+      "sha256": null,
+      "description": null
+    }
+  ],
+  "backend_capabilities": [
+    {
+      "backend": "dry_run",
+      "adapter_name": "dry_run.synthetic_v0",
+      "status": "contract_runner_available",
+      "available": true,
+      "reason": "Deterministic adapter can consume scene/config artifacts and write replay traces."
+    },
+    {
+      "backend": "mujoco",
+      "adapter_name": "mujoco.python",
+      "status": "real_backend_available",
+      "available": true,
+      "reason": "Detected importable Python package 'mujoco'."
+    },
+    {
+      "backend": "isaac",
+      "adapter_name": "isaac.sim",
+      "status": "planned",
+      "available": false,
+      "reason": "Isaac adapter contract is planned after the MuJoCo backend path is proven."
+    }
+  ],
+  "scene_contracts": [
+    {
+      "scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_baseline_000",
+      "purpose": "baseline",
+      "compiled_scene_xml_uri": "simulation/mujoco/scenes/baseline/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_baseline_000.xml",
+      "xml_parse_status": "pass",
+      "object_count": 4
+    },
+    {
+      "scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_baseline_001",
+      "purpose": "baseline",
+      "compiled_scene_xml_uri": "simulation/mujoco/scenes/baseline/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_baseline_001.xml",
+      "xml_parse_status": "pass",
+      "object_count": 4
+    },
+    {
+      "scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_000",
+      "purpose": "variation",
+      "compiled_scene_xml_uri": "simulation/mujoco/scenes/variation/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_000.xml",
+      "xml_parse_status": "pass",
+      "object_count": 5
+    },
+    {
+      "scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_001",
+      "purpose": "variation",
+      "compiled_scene_xml_uri": "simulation/mujoco/scenes/variation/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_001.xml",
+      "xml_parse_status": "pass",
+      "object_count": 5
+    },
+    {
+      "scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_002",
+      "purpose": "variation",
+      "compiled_scene_xml_uri": "simulation/mujoco/scenes/variation/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_002.xml",
+      "xml_parse_status": "pass",
+      "object_count": 5
+    },
+    {
+      "scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_003",
+      "purpose": "variation",
+      "compiled_scene_xml_uri": "simulation/mujoco/scenes/variation/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_003.xml",
+      "xml_parse_status": "pass",
+      "object_count": 5
+    },
+    {
+      "scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_004",
+      "purpose": "variation",
+      "compiled_scene_xml_uri": "simulation/mujoco/scenes/variation/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_004.xml",
+      "xml_parse_status": "pass",
+      "object_count": 5
+    },
+    {
+      "scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_005",
+      "purpose": "variation",
+      "compiled_scene_xml_uri": "simulation/mujoco/scenes/variation/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_005.xml",
+      "xml_parse_status": "pass",
+      "object_count": 5
+    },
+    {
+      "scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_006",
+      "purpose": "variation",
+      "compiled_scene_xml_uri": "simulation/mujoco/scenes/variation/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_006.xml",
+      "xml_parse_status": "pass",
+      "object_count": 5
+    },
+    {
+      "scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_007",
+      "purpose": "variation",
+      "compiled_scene_xml_uri": "simulation/mujoco/scenes/variation/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_007.xml",
+      "xml_parse_status": "pass",
+      "object_count": 5
+    },
+    {
+      "scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_008",
+      "purpose": "variation",
+      "compiled_scene_xml_uri": "simulation/mujoco/scenes/variation/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_008.xml",
+      "xml_parse_status": "pass",
+      "object_count": 5
+    },
+    {
+      "scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_009",
+      "purpose": "variation",
+      "compiled_scene_xml_uri": "simulation/mujoco/scenes/variation/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_009.xml",
+      "xml_parse_status": "pass",
+      "object_count": 5
+    },
+    {
+      "scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_000",
+      "purpose": "edge_case",
+      "compiled_scene_xml_uri": "simulation/mujoco/scenes/edge_case/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_000.xml",
+      "xml_parse_status": "pass",
+      "object_count": 7
+    },
+    {
+      "scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_001",
+      "purpose": "edge_case",
+      "compiled_scene_xml_uri": "simulation/mujoco/scenes/edge_case/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_001.xml",
+      "xml_parse_status": "pass",
+      "object_count": 7
+    },
+    {
+      "scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_002",
+      "purpose": "edge_case",
+      "compiled_scene_xml_uri": "simulation/mujoco/scenes/edge_case/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_002.xml",
+      "xml_parse_status": "pass",
+      "object_count": 7
+    },
+    {
+      "scene_id": "regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_000",
+      "purpose": "regression",
+      "compiled_scene_xml_uri": "simulation/mujoco/scenes/regression/regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_000.xml",
+      "xml_parse_status": "pass",
+      "object_count": 5
+    },
+    {
+      "scene_id": "regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_001",
+      "purpose": "regression",
+      "compiled_scene_xml_uri": "simulation/mujoco/scenes/regression/regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_001.xml",
+      "xml_parse_status": "pass",
+      "object_count": 5
+    },
+    {
+      "scene_id": "regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_002",
+      "purpose": "regression",
+      "compiled_scene_xml_uri": "simulation/mujoco/scenes/regression/regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_002.xml",
+      "xml_parse_status": "pass",
+      "object_count": 5
+    },
+    {
+      "scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout_000",
+      "purpose": "holdout",
+      "compiled_scene_xml_uri": "simulation/mujoco/scenes/holdout/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout_000.xml",
+      "xml_parse_status": "pass",
+      "object_count": 6
+    },
+    {
+      "scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout_001",
+      "purpose": "holdout",
+      "compiled_scene_xml_uri": "simulation/mujoco/scenes/holdout/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout_001.xml",
+      "xml_parse_status": "pass",
+      "object_count": 6
+    },
+    {
+      "scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout_002",
+      "purpose": "holdout",
+      "compiled_scene_xml_uri": "simulation/mujoco/scenes/holdout/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout_002.xml",
+      "xml_parse_status": "pass",
+      "object_count": 6
+    },
+    {
+      "scene_id": "revision_regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_000",
+      "purpose": "revision",
+      "compiled_scene_xml_uri": "simulation/mujoco/scenes/revision/revision_regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_000.xml",
+      "xml_parse_status": "pass",
+      "object_count": 5
+    },
+    {
+      "scene_id": "revision_regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_001",
+      "purpose": "revision",
+      "compiled_scene_xml_uri": "simulation/mujoco/scenes/revision/revision_regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_001.xml",
+      "xml_parse_status": "pass",
+      "object_count": 5
+    },
+    {
+      "scene_id": "revision_regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_002",
+      "purpose": "revision",
+      "compiled_scene_xml_uri": "simulation/mujoco/scenes/revision/revision_regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_002.xml",
+      "xml_parse_status": "pass",
+      "object_count": 5
+    }
+  ],
+  "runner_requirements": [
+    "load robot model and compiled scene XML",
+    "bind policy action trace or learned policy to robot joints",
+    "emit observation streams declared in perception_config.json",
+    "score reward terms declared in training_objective.json",
+    "write replay index and episode_trace.jsonl"
+  ],
+  "blocking_gaps": [],
+  "notes": [
+    "Robot robot_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo has 3 joint(s) and 1 sensor(s).",
+    "This artifact is the handoff from package-shaped MVP to real simulator execution."
+  ]
+}

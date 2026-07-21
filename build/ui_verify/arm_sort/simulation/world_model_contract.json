@@ -1,0 +1,614 @@
+{
+  "id": "world_model_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo",
+  "version": "0.1.0",
+  "robot_genome_id": "robot_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo",
+  "task_graph_id": "task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo",
+  "perception_config_id": "perception_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_mujoco",
+  "scene_set_ids": [
+    "scenes_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_baseline",
+    "scenes_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation",
+    "scenes_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case",
+    "scenes_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_regression",
+    "scenes_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout"
+  ],
+  "observable_entities": [
+    {
+      "name": "blue_bin",
+      "object_type": "container",
+      "source_scene_ids": [
+        "regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_000",
+        "regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_001",
+        "regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_002",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_baseline_000",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_baseline_001",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_000",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_001",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_002",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout_000",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout_001",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout_002",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_000",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_001",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_002",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_003",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_004",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_005",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_006",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_007",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_008",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_009"
+      ],
+      "observation_keys": [
+        "wrist_rgbd_camera"
+      ],
+      "annotation_labels": [
+        "blue_bin"
+      ],
+      "state_variables": [
+        "blue_bin.pose_xyz_rpy",
+        "blue_bin.visible"
+      ],
+      "physical_parameters": []
+    },
+    {
+      "name": "blue_block",
+      "object_type": "cube",
+      "source_scene_ids": [
+        "regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_000",
+        "regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_001",
+        "regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_002",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_baseline_000",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_baseline_001",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_000",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_001",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_002",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout_000",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout_001",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout_002",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_000",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_001",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_002",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_003",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_004",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_005",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_006",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_007",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_008",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_009"
+      ],
+      "observation_keys": [
+        "wrist_rgbd_camera"
+      ],
+      "annotation_labels": [
+        "blue_block"
+      ],
+      "state_variables": [
+        "blue_block.pose_xyz_rpy",
+        "blue_block.visible"
+      ],
+      "physical_parameters": [
+        "blue_block.friction",
+        "blue_block.mass_kg",
+        "blue_block.scale"
+      ]
+    },
+    {
+      "name": "distractor_0_0",
+      "object_type": "cube",
+      "source_scene_ids": [
+        "regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_000",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_000",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout_000",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_000"
+      ],
+      "observation_keys": [
+        "wrist_rgbd_camera"
+      ],
+      "annotation_labels": [],
+      "state_variables": [
+        "distractor_0_0.pose_xyz_rpy",
+        "distractor_0_0.visible"
+      ],
+      "physical_parameters": [
+        "distractor_0_0.friction",
+        "distractor_0_0.mass_kg",
+        "distractor_0_0.scale"
+      ]
+    },
+    {
+      "name": "distractor_0_1",
+      "object_type": "cube",
+      "source_scene_ids": [
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_000",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout_000"
+      ],
+      "observation_keys": [
+        "wrist_rgbd_camera"
+      ],
+      "annotation_labels": [],
+      "state_variables": [
+        "distractor_0_1.pose_xyz_rpy",
+        "distractor_0_1.visible"
+      ],
+      "physical_parameters": [
+        "distractor_0_1.friction",
+        "distractor_0_1.mass_kg",
+        "distractor_0_1.scale"
+      ]
+    },
+    {
+      "name": "distractor_0_2",
+      "object_type": "cube",
+      "source_scene_ids": [
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_000"
+      ],
+      "observation_keys": [
+        "wrist_rgbd_camera"
+      ],
+      "annotation_labels": [],
+      "state_variables": [
+        "distractor_0_2.pose_xyz_rpy",
+        "distractor_0_2.visible"
+      ],
+      "physical_parameters": [
+        "distractor_0_2.friction",
+        "distractor_0_2.mass_kg",
+        "distractor_0_2.scale"
+      ]
+    },
+    {
+      "name": "distractor_1_0",
+      "object_type": "cube",
+      "source_scene_ids": [
+        "regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_001",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_001",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout_001",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_001"
+      ],
+      "observation_keys": [
+        "wrist_rgbd_camera"
+      ],
+      "annotation_labels": [],
+      "state_variables": [
+        "distractor_1_0.pose_xyz_rpy",
+        "distractor_1_0.visible"
+      ],
+      "physical_parameters": [
+        "distractor_1_0.friction",
+        "distractor_1_0.mass_kg",
+        "distractor_1_0.scale"
+      ]
+    },
+    {
+      "name": "distractor_1_1",
+      "object_type": "cube",
+      "source_scene_ids": [
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_001",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout_001"
+      ],
+      "observation_keys": [
+        "wrist_rgbd_camera"
+      ],
+      "annotation_labels": [],
+      "state_variables": [
+        "distractor_1_1.pose_xyz_rpy",
+        "distractor_1_1.visible"
+      ],
+      "physical_parameters": [
+        "distractor_1_1.friction",
+        "distractor_1_1.mass_kg",
+        "distractor_1_1.scale"
+      ]
+    },
+    {
+      "name": "distractor_1_2",
+      "object_type": "cube",
+      "source_scene_ids": [
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_001"
+      ],
+      "observation_keys": [
+        "wrist_rgbd_camera"
+      ],
+      "annotation_labels": [],
+      "state_variables": [
+        "distractor_1_2.pose_xyz_rpy",
+        "distractor_1_2.visible"
+      ],
+      "physical_parameters": [
+        "distractor_1_2.friction",
+        "distractor_1_2.mass_kg",
+        "distractor_1_2.scale"
+      ]
+    },
+    {
+      "name": "distractor_2_0",
+      "object_type": "cube",
+      "source_scene_ids": [
+        "regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_002",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_002",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout_002",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_002"
+      ],
+      "observation_keys": [
+        "wrist_rgbd_camera"
+      ],
+      "annotation_labels": [],
+      "state_variables": [
+        "distractor_2_0.pose_xyz_rpy",
+        "distractor_2_0.visible"
+      ],
+      "physical_parameters": [
+        "distractor_2_0.friction",
+        "distractor_2_0.mass_kg",
+        "distractor_2_0.scale"
+      ]
+    },
+    {
+      "name": "distractor_2_1",
+      "object_type": "cube",
+      "source_scene_ids": [
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_002",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout_002"
+      ],
+      "observation_keys": [
+        "wrist_rgbd_camera"
+      ],
+      "annotation_labels": [],
+      "state_variables": [
+        "distractor_2_1.pose_xyz_rpy",
+        "distractor_2_1.visible"
+      ],
+      "physical_parameters": [
+        "distractor_2_1.friction",
+        "distractor_2_1.mass_kg",
+        "distractor_2_1.scale"
+      ]
+    },
+    {
+      "name": "distractor_2_2",
+      "object_type": "cube",
+      "source_scene_ids": [
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_002"
+      ],
+      "observation_keys": [
+        "wrist_rgbd_camera"
+      ],
+      "annotation_labels": [],
+      "state_variables": [
+        "distractor_2_2.pose_xyz_rpy",
+        "distractor_2_2.visible"
+      ],
+      "physical_parameters": [
+        "distractor_2_2.friction",
+        "distractor_2_2.mass_kg",
+        "distractor_2_2.scale"
+      ]
+    },
+    {
+      "name": "distractor_3_0",
+      "object_type": "cube",
+      "source_scene_ids": [
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_003"
+      ],
+      "observation_keys": [
+        "wrist_rgbd_camera"
+      ],
+      "annotation_labels": [],
+      "state_variables": [
+        "distractor_3_0.pose_xyz_rpy",
+        "distractor_3_0.visible"
+      ],
+      "physical_parameters": [
+        "distractor_3_0.friction",
+        "distractor_3_0.mass_kg",
+        "distractor_3_0.scale"
+      ]
+    },
+    {
+      "name": "distractor_4_0",
+      "object_type": "cube",
+      "source_scene_ids": [
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_004"
+      ],
+      "observation_keys": [
+        "wrist_rgbd_camera"
+      ],
+      "annotation_labels": [],
+      "state_variables": [
+        "distractor_4_0.pose_xyz_rpy",
+        "distractor_4_0.visible"
+      ],
+      "physical_parameters": [
+        "distractor_4_0.friction",
+        "distractor_4_0.mass_kg",
+        "distractor_4_0.scale"
+      ]
+    },
+    {
+      "name": "distractor_5_0",
+      "object_type": "cube",
+      "source_scene_ids": [
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_005"
+      ],
+      "observation_keys": [
+        "wrist_rgbd_camera"
+      ],
+      "annotation_labels": [],
+      "state_variables": [
+        "distractor_5_0.pose_xyz_rpy",
+        "distractor_5_0.visible"
+      ],
+      "physical_parameters": [
+        "distractor_5_0.friction",
+        "distractor_5_0.mass_kg",
+        "distractor_5_0.scale"
+      ]
+    },
+    {
+      "name": "distractor_6_0",
+      "object_type": "cube",
+      "source_scene_ids": [
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_006"
+      ],
+      "observation_keys": [
+        "wrist_rgbd_camera"
+      ],
+      "annotation_labels": [],
+      "state_variables": [
+        "distractor_6_0.pose_xyz_rpy",
+        "distractor_6_0.visible"
+      ],
+      "physical_parameters": [
+        "distractor_6_0.friction",
+        "distractor_6_0.mass_kg",
+        "distractor_6_0.scale"
+      ]
+    },
+    {
+      "name": "distractor_7_0",
+      "object_type": "cube",
+      "source_scene_ids": [
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_007"
+      ],
+      "observation_keys": [
+        "wrist_rgbd_camera"
+      ],
+      "annotation_labels": [],
+      "state_variables": [
+        "distractor_7_0.pose_xyz_rpy",
+        "distractor_7_0.visible"
+      ],
+      "physical_parameters": [
+        "distractor_7_0.friction",
+        "distractor_7_0.mass_kg",
+        "distractor_7_0.scale"
+      ]
+    },
+    {
+      "name": "distractor_8_0",
+      "object_type": "cube",
+      "source_scene_ids": [
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_008"
+      ],
+      "observation_keys": [
+        "wrist_rgbd_camera"
+      ],
+      "annotation_labels": [],
+      "state_variables": [
+        "distractor_8_0.pose_xyz_rpy",
+        "distractor_8_0.visible"
+      ],
+      "physical_parameters": [
+        "distractor_8_0.friction",
+        "distractor_8_0.mass_kg",
+        "distractor_8_0.scale"
+      ]
+    },
+    {
+      "name": "distractor_9_0",
+      "object_type": "cube",
+      "source_scene_ids": [
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_009"
+      ],
+      "observation_keys": [
+        "wrist_rgbd_camera"
+      ],
+      "annotation_labels": [],
+      "state_variables": [
+        "distractor_9_0.pose_xyz_rpy",
+        "distractor_9_0.visible"
+      ],
+      "physical_parameters": [
+        "distractor_9_0.friction",
+        "distractor_9_0.mass_kg",
+        "distractor_9_0.scale"
+      ]
+    },
+    {
+      "name": "red_bin",
+      "object_type": "container",
+      "source_scene_ids": [
+        "regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_000",
+        "regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_001",
+        "regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_002",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_baseline_000",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_baseline_001",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_000",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_001",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_002",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout_000",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout_001",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout_002",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_000",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_001",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_002",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_003",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_004",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_005",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_006",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_007",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_008",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_009"
+      ],
+      "observation_keys": [
+        "wrist_rgbd_camera"
+      ],
+      "annotation_labels": [
+        "red_bin"
+      ],
+      "state_variables": [
+        "red_bin.pose_xyz_rpy",
+        "red_bin.visible"
+      ],
+      "physical_parameters": []
+    },
+    {
+      "name": "red_block",
+      "object_type": "cube",
+      "source_scene_ids": [
+        "regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_000",
+        "regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_001",
+        "regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_002",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_baseline_000",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_baseline_001",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_000",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_001",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_002",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout_000",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout_001",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout_002",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_000",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_001",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_002",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_003",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_004",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_005",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_006",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_007",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_008",
+        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_009"
+      ],
+      "observation_keys": [
+        "wrist_rgbd_camera"
+      ],
+      "annotation_labels": [
+        "red_block"
+      ],
+      "state_variables": [
+        "red_block.pose_xyz_rpy",
+        "red_block.visible"
+      ],
+      "physical_parameters": [
+        "red_block.friction",
+        "red_block.mass_kg",
+        "red_block.scale"
+      ]
+    }
+  ],
+  "state_variables": [
+    {
+      "key": "robot.joint_positions",
+      "source": "robot_state",
+      "units": "radians_or_meters",
+      "used_by": [
+        "controller",
+        "simulator",
+        "policy_training"
+      ],
+      "notes": "Joint state is the low-level control context."
+    },
+    {
+      "key": "robot.end_effector_pose",
+      "source": "kinematics",
+      "units": "meters_radians",
+      "used_by": [
+        "world_model",
+        "policy_training"
+      ],
+      "notes": "Primary body pose used to reason about action feasibility."
+    },
+    {
+      "key": "perception.wrist_rgbd_camera",
+      "source": "rgbd_camera",
+      "units": null,
+      "used_by": [
+        "cv_model",
+        "world_model"
+      ],
+      "notes": "Modalities: rgb_image, depth_image, camera_intrinsics."
+    },
+    {
+      "key": "world.object_poses",
+      "source": "cv_model",
+      "units": "meters_radians",
+      "used_by": [
+        "controller",
+        "reward_model"
+      ],
+      "notes": ""
+    },
+    {
+      "key": "world.container_poses",
+      "source": "cv_model",
+      "units": "meters_radians",
+      "used_by": [
+        "controller",
+        "reward_model"
+      ],
+      "notes": ""
+    }
+  ],
+  "physical_parameter_targets": [
+    {
+      "name": "joint_actuator_response",
+      "target": "robot.joints",
+      "initial_source": "bom/part_resolution_report.json",
+      "learning_signal": "rollout tracking error and control saturation",
+      "optimization_role": "controller_tuning_and_actuator_selection"
+    },
+    {
+      "name": "link_geometry",
+      "target": "robot.links",
+      "initial_source": "cad/build_plan.json",
+      "learning_signal": "task success, collisions, reach margin",
+      "optimization_role": "hardware_codesign"
+    },
+    {
+      "name": "sensor_noise_model",
+      "target": "perception.sensor_streams",
+      "initial_source": "simulation/perception_config.json",
+      "learning_signal": "synthetic-to-sim observation mismatch",
+      "optimization_role": "cv_domain_randomization"
+    },
+    {
+      "name": "container_contact_model",
+      "target": "scene.objects.container",
+      "initial_source": "simulation/scene_set.json",
+      "learning_signal": "grasp slip, collision impulse, trajectory deviation",
+      "optimization_role": "world_model_physics_estimation"
+    },
+    {
+      "name": "cube_contact_model",
+      "target": "scene.objects.cube",
+      "initial_source": "simulation/scene_set.json",
+      "learning_signal": "grasp slip, collision impulse, trajectory deviation",
+      "optimization_role": "world_model_physics_estimation"
+    }
+  ],
+  "synthetic_dataset_manifest_uri": "datasets/synthetic_observation_manifest.json",
+  "policy_observation_keys": [
+    "collision_count",
+    "drop_rate",
+    "perception.wrist_rgbd_camera",
+    "robot.end_effector_pose",
+    "robot.joint_positions",
+    "success_rate",
+    "timeout_rate",
+    "world.object_poses"
+  ],
+  "memory_key": "manipulator:fixed_arm.three_dof.tabletop:pick_place_sort",
+  "notes": [
+    "World model contract maps synthetic CV observations into policy-ready state.",
+    "Physical parameters listed here are the first-class knobs for Physical AI learning and co-design."
+  ]
+}

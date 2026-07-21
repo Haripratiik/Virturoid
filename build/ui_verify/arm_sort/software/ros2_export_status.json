@@ -1,0 +1,7 @@
+{
+  "status": "not_exported",
+  "detail": "No ROS2 package yet \u2014 run the build with --train to generate export/ros2/virturoid_robot (its node runs the exported controller).",
+  "ros2_package": null,
+  "robot_genome_id": "robot_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo",
+  "task_graph_id": "task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo"
+}

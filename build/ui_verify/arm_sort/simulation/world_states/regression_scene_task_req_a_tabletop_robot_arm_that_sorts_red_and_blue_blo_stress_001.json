@@ -1,0 +1,134 @@
+{
+  "id": "world_state_regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_001",
+  "version": "0.1.0",
+  "scene_id": "regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_001",
+  "scene_set_id": "scenes_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_regression",
+  "purpose": "regression",
+  "world_model_contract_uri": "simulation/world_model_contract.json",
+  "robot_spawn_xyz_rpy": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+  ],
+  "state_variables": [
+    "robot.joint_positions",
+    "robot.end_effector_pose",
+    "perception.wrist_rgbd_camera",
+    "world.object_poses",
+    "world.container_poses"
+  ],
+  "objects": [
+    {
+      "name": "red_block",
+      "object_type": "cube",
+      "pose_xyz_rpy": [
+        0.3288,
+        -0.0285,
+        0.02,
+        0.0,
+        0.0,
+        -2.0785
+      ],
+      "visible": true,
+      "material": "matte_red",
+      "physical_parameters": {
+        "mass_kg": 0.0431,
+        "friction": 0.987,
+        "scale": 0.984
+      }
+    },
+    {
+      "name": "blue_block",
+      "object_type": "cube",
+      "pose_xyz_rpy": [
+        0.3219,
+        0.0725,
+        0.02,
+        0.0,
+        0.0,
+        1.2858
+      ],
+      "visible": true,
+      "material": "matte_blue",
+      "physical_parameters": {
+        "mass_kg": 0.065,
+        "friction": 1.212,
+        "scale": 1.006
+      }
+    },
+    {
+      "name": "red_bin",
+      "object_type": "container",
+      "pose_xyz_rpy": [
+        0.3028,
+        -0.1311,
+        0.02,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "visible": true,
+      "material": null,
+      "physical_parameters": {}
+    },
+    {
+      "name": "blue_bin",
+      "object_type": "container",
+      "pose_xyz_rpy": [
+        0.306,
+        0.1237,
+        0.02,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "visible": true,
+      "material": null,
+      "physical_parameters": {}
+    },
+    {
+      "name": "distractor_1_0",
+      "object_type": "cube",
+      "pose_xyz_rpy": [
+        0.3256,
+        -0.0538,
+        0.02,
+        0.0,
+        0.0,
+        2.2574
+      ],
+      "visible": true,
+      "material": "matte_gray",
+      "physical_parameters": {
+        "mass_kg": 0.0577,
+        "friction": 1.167,
+        "scale": 0.902
+      }
+    }
+  ],
+  "variation_parameters": {
+    "index": 1,
+    "purpose": "regression",
+    "clutter": true,
+    "seed": 1690840009,
+    "difficulty": 3,
+    "position_jitter_m": 0.095,
+    "lighting_level": 0.603,
+    "camera_noise_std": 0.0275,
+    "table_friction": 1.152,
+    "distractor_count": 2,
+    "background_texture": "wood",
+    "failure_type": "dropped",
+    "source_failure_id": "failure_episode_run_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_011",
+    "source_scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_001",
+    "counterfactual": "lower_lift_slower_transport",
+    "changed_variable": "controller",
+    "controller_adjustment": {
+      "lift_z": 0.18,
+      "transport_speed": 0.6
+    }
+  }
+}

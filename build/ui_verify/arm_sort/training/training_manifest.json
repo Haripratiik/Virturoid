@@ -1,0 +1,44 @@
+{
+  "id": "training_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_mujoco",
+  "version": "0.1.0",
+  "task_graph_id": "task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo",
+  "robot_genome_id": "robot_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo",
+  "backend": "mujoco",
+  "scene_groups": [
+    {
+      "purpose": "baseline",
+      "scene_set_id": "scenes_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_baseline",
+      "scene_count": 2,
+      "usage": "smoke_test"
+    },
+    {
+      "purpose": "variation",
+      "scene_set_id": "scenes_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation",
+      "scene_count": 10,
+      "usage": "training_and_evaluation"
+    },
+    {
+      "purpose": "edge_case",
+      "scene_set_id": "scenes_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case",
+      "scene_count": 3,
+      "usage": "auxiliary"
+    },
+    {
+      "purpose": "regression",
+      "scene_set_id": "scenes_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_regression",
+      "scene_count": 3,
+      "usage": "failure_reproduction"
+    },
+    {
+      "purpose": "holdout",
+      "scene_set_id": "scenes_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout",
+      "scene_count": 3,
+      "usage": "generalization_check"
+    }
+  ],
+  "curriculum_notes": [
+    "Start with variation scenes for basic robustness.",
+    "Replay regression scenes after every policy or scene-generation change.",
+    "Keep holdout scenes separate once a real simulator backend is connected."
+  ]
+}

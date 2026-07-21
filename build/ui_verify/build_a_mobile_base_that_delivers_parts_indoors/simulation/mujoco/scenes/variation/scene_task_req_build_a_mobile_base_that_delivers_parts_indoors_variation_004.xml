@@ -1,0 +1,78 @@
+<mujoco model="built_mobile_base_5seg">
+  <compiler angle="radian" autolimits="true"/>
+  <option timestep="0.002" gravity="0 0 -9.81"/>
+  <visual>
+    <headlight ambient="0.45 0.45 0.48" diffuse="0.65 0.65 0.68" specular="0.22 0.22 0.22"/>
+    <quality shadowsize="4096"/>
+    <map znear="0.01" zfar="60"/>
+  </visual>
+  <default>
+    <joint damping="0.8" armature="0.01"/>
+    <geom friction="1 0.1 0.01"/>
+  </default>
+  <asset>
+    <material name="mat_red" rgba="0.8 0.1 0.1 1"/>
+    <material name="mat_blue" rgba="0.1 0.2 0.8 1"/>
+    <material name="mat_gray" rgba="0.5 0.5 0.5 1"/>
+    <material name="mat_link" rgba="0.35 0.35 0.38 1"/>
+    <material name="mat_body" rgba="0.84 0.86 0.89 1" specular="0.35" shininess="0.45" reflectance="0.05"/>
+    <material name="mat_joint" rgba="0.15 0.16 0.20 1" specular="0.6" shininess="0.7" reflectance="0.1"/>
+    <material name="mat_accent" rgba="0.92 0.47 0.13 1" specular="0.45" shininess="0.55"/>
+    <material name="mat_ee" rgba="0.22 0.24 0.29 1" specular="0.5" shininess="0.6"/>
+    <material name="mat_alu" rgba="0.78 0.80 0.84 1" specular="0.55" shininess="0.5" reflectance="0.12"/>
+    <material name="mat_steel" rgba="0.34 0.36 0.40 1" specular="0.7" shininess="0.7" reflectance="0.18"/>
+    <material name="mat_cf" rgba="0.11 0.12 0.14 1" specular="0.45" shininess="0.4" reflectance="0.06"/>
+    <material name="mat_ti" rgba="0.60 0.60 0.65 1" specular="0.5" shininess="0.55" reflectance="0.1"/>
+    <material name="mat_shell" rgba="0.20 0.42 0.72 1" specular="0.4" shininess="0.5" reflectance="0.05"/>
+    <material name="mat_metal" rgba="0.47 0.49 0.53 1" specular="0.78" shininess="0.78" reflectance="0.22"/>
+    <material name="mat_rubber" rgba="0.13 0.13 0.15 1" specular="0.15" shininess="0.15"/>
+  </asset>
+  <worldbody>
+    <light name="key" pos="1.6 -1.1 3.0" dir="-0.45 0.32 -1" diffuse="0.55 0.55 0.58" specular="0.25 0.25 0.25"/>
+    <light name="fill" pos="-2.0 1.6 2.2" dir="0.5 -0.42 -1" diffuse="0.22 0.22 0.26"/>
+    <body name="chassis" pos="0.00000 0.00000 0.10000">
+      <freejoint name="chassis_free"/>
+      <geom name="chassis_geom" type="box" pos="0 0 0.04000" size="0.18000 0.18000 0.04000" mass="3.00000" material="mat_shell"/>
+      <body name="wheel_0" pos="0.13000 0.15000 0.00000" euler="1.57080 0.00000 0.00000">
+        <joint name="wheel_0_joint" type="hinge" axis="0.0000 0.0000 1.0000"/>
+        <geom name="wheel_0_geom" type="cylinder" fromto="0 0 0 0 0 0.04000" size="0.06000" mass="0.30000" material="mat_metal"/>
+        <geom name="wheel_0_motor" type="cylinder" fromto="-0.00000 -0.00000 -0.08000 0.00000 0.00000 0.08000" size="0.08200" material="mat_joint" mass="0" contype="0" conaffinity="0"/>
+      </body>
+
+      <body name="wheel_1" pos="0.13000 -0.15000 0.00000" euler="1.57080 0.00000 0.00000">
+        <joint name="wheel_1_joint" type="hinge" axis="0.0000 0.0000 1.0000"/>
+        <geom name="wheel_1_geom" type="cylinder" fromto="0 0 0 0 0 0.04000" size="0.06000" mass="0.30000" material="mat_metal"/>
+        <geom name="wheel_1_motor" type="cylinder" fromto="-0.00000 -0.00000 -0.08000 0.00000 0.00000 0.08000" size="0.08200" material="mat_joint" mass="0" contype="0" conaffinity="0"/>
+      </body>
+
+      <body name="wheel_2" pos="-0.13000 0.15000 0.00000" euler="1.57080 0.00000 0.00000">
+        <joint name="wheel_2_joint" type="hinge" axis="0.0000 0.0000 1.0000"/>
+        <geom name="wheel_2_geom" type="cylinder" fromto="0 0 0 0 0 0.04000" size="0.06000" mass="0.30000" material="mat_metal"/>
+        <geom name="wheel_2_motor" type="cylinder" fromto="-0.00000 -0.00000 -0.08000 0.00000 0.00000 0.08000" size="0.08200" material="mat_joint" mass="0" contype="0" conaffinity="0"/>
+      </body>
+
+      <body name="wheel_3" pos="-0.13000 -0.15000 0.00000" euler="1.57080 0.00000 0.00000">
+        <joint name="wheel_3_joint" type="hinge" axis="0.0000 0.0000 1.0000"/>
+        <geom name="wheel_3_geom" type="cylinder" fromto="0 0 0 0 0 0.04000" size="0.06000" mass="0.30000" material="mat_metal"/>
+        <geom name="wheel_3_motor" type="cylinder" fromto="-0.00000 -0.00000 -0.08000 0.00000 0.00000 0.08000" size="0.08200" material="mat_joint" mass="0" contype="0" conaffinity="0"/>
+        <site name="ee_site" pos="0 0 0.04000" size="0.01"/>
+      </body>
+
+    </body>
+    <geom name="arena_floor" type="box" size="1.471 0.8 0.02" pos="1.071 0.0 -0.02" rgba="0.82 0.82 0.85 1"/>
+    <geom name="start_zone" type="box" size="0.112 0.112 0.006" pos="0.0 0.0 0.006" rgba="0.15 0.25 0.8 1"/>
+    <geom name="goal_zone" type="box" size="0.208 0.208 0.006" pos="2.142 0.192 0.006" rgba="0.2 0.7 0.3 1"/>
+    <geom name="wall_bottom" type="box" size="1.471 0.03 0.16" pos="1.071 -1.421 0.16" euler="0 0 0.0" rgba="0.5 0.5 0.55 1"/>
+    <geom name="wall_top" type="box" size="1.471 0.03 0.16" pos="1.071 1.421 0.16" euler="0 0 0.0" rgba="0.5 0.5 0.55 1"/>
+    <geom name="wall_left" type="box" size="1.421 0.03 0.16" pos="-0.40000000000000013 0.0 0.16" euler="0 0 1.5708" rgba="0.5 0.5 0.55 1"/>
+    <geom name="wall_right" type="box" size="1.421 0.03 0.16" pos="2.542 0.0 0.16" euler="0 0 1.5708" rgba="0.5 0.5 0.55 1"/>
+    <geom name="obstacle_4_0" type="box" size="0.1601 0.1601 0.07" pos="0.6858 -0.2249 0.07" euler="0 0 0.6872" rgba="0.5 0.5 0.55 1"/>
+    <geom name="obstacle_4_1" type="box" size="0.1409 0.1409 0.07" pos="1.3923 -0.0591 0.07" euler="0 0 2.0258" rgba="0.5 0.5 0.55 1"/>
+  </worldbody>
+  <actuator>
+    <motor name="wheel_0_motor" joint="wheel_0_joint" gear="1" forcerange="-8.00 8.00"/>
+    <motor name="wheel_1_motor" joint="wheel_1_joint" gear="1" forcerange="-8.00 8.00"/>
+    <motor name="wheel_2_motor" joint="wheel_2_joint" gear="1" forcerange="-8.00 8.00"/>
+    <motor name="wheel_3_motor" joint="wheel_3_joint" gear="1" forcerange="-8.00 8.00"/>
+  </actuator>
+</mujoco>

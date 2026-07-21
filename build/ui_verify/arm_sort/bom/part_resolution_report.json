@@ -1,0 +1,120 @@
+{
+  "id": "parts_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo",
+  "version": "0.1.0",
+  "requirements_id": "req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo",
+  "requested_part_mentions": [],
+  "resolved_parts": [
+    {
+      "role": "joint_actuator",
+      "component_id": "cmp_actuator_vx12",
+      "source": "requirement_recommendation",
+      "reason": "Selected lowest available actuator that clears estimated 3.19 Nm torque; part provides 12.00 Nm.",
+      "constraints_used": [
+        "voltage_range:12.0-24.0V",
+        "max_current:3.2A",
+        "mass:0.18kg",
+        "stall_torque:12.0Nm"
+      ],
+      "technical_limits": {
+        "mass_kg": 0.18,
+        "max_current_a": 3.2,
+        "min_voltage_v": 12.0,
+        "max_voltage_v": 24.0,
+        "actuator_type": "smart_servo",
+        "stall_torque_nm": 12.0,
+        "no_load_speed_rpm": 50.0,
+        "rated_torque_nm": 5.5,
+        "rated_speed_rpm": 35.0,
+        "control_frequency_hz": 200.0,
+        "communication_protocol": "uart"
+      },
+      "cad_assets": [
+        {
+          "uri": "fixtures/cad/vx12_servo.step",
+          "media_type": "model/step",
+          "sha256": null,
+          "description": "Reference exact CAD placeholder"
+        }
+      ]
+    },
+    {
+      "role": "wrist_sensor",
+      "component_id": "cmp_camera_rgbd_mini",
+      "source": "requirement_recommendation",
+      "reason": "Selected to satisfy sensor requirements: rgbd_camera.",
+      "constraints_used": [
+        "voltage_range:5.0-5.0V",
+        "max_current:0.8A",
+        "mass:0.065kg",
+        "sensor_type:rgbd_camera"
+      ],
+      "technical_limits": {
+        "mass_kg": 0.065,
+        "max_current_a": 0.8,
+        "min_voltage_v": 5.0,
+        "max_voltage_v": 5.0,
+        "sensor_type": "rgbd_camera",
+        "frame_rate_hz": 30.0,
+        "ros_message_type": "sensor_msgs/Image",
+        "resolution_width_px": 1280,
+        "resolution_height_px": 720,
+        "horizontal_fov_deg": 74.0,
+        "vertical_fov_deg": 58.0,
+        "min_range_m": 0.2,
+        "max_range_m": 3.5
+      },
+      "cad_assets": [
+        {
+          "uri": "fixtures/cad/rgbd_mini.step",
+          "media_type": "model/step",
+          "sha256": null,
+          "description": "Reference exact CAD placeholder"
+        }
+      ]
+    },
+    {
+      "role": "gripper",
+      "component_id": "cmp_gripper_pg2",
+      "source": "requirement_recommendation",
+      "reason": "Selected as the current reference MVP component for this role.",
+      "constraints_used": [
+        "voltage_range:12.0-24.0V",
+        "max_current:1.2A",
+        "mass:0.16kg"
+      ],
+      "technical_limits": {
+        "mass_kg": 0.16,
+        "max_current_a": 1.2,
+        "min_voltage_v": 12.0,
+        "max_voltage_v": 24.0
+      },
+      "cad_assets": [
+        {
+          "uri": "fixtures/cad/pg2_gripper.step",
+          "media_type": "model/step",
+          "sha256": null,
+          "description": "Reference exact CAD placeholder"
+        }
+      ]
+    },
+    {
+      "role": "main_compute",
+      "component_id": "cmp_compute_edge1",
+      "source": "requirement_recommendation",
+      "reason": "Selected as the current reference MVP component for this role.",
+      "constraints_used": [
+        "voltage_range:9.0-20.0V",
+        "max_current:2.5A",
+        "mass:0.09kg"
+      ],
+      "technical_limits": {
+        "mass_kg": 0.09,
+        "max_current_a": 2.5,
+        "min_voltage_v": 9.0,
+        "max_voltage_v": 20.0
+      },
+      "cad_assets": []
+    }
+  ],
+  "warnings": []
+}

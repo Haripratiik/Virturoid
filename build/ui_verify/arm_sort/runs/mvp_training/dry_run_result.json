@@ -1,0 +1,84 @@
+{
+  "id": "dry_training_run_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_mujoco",
+  "version": "0.1.0",
+  "training_run_config_id": "training_run_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_mujoco",
+  "backend": "mujoco",
+  "adapter_name": "dry_run.synthetic_v0",
+  "robot_model_uri": "simulation/mujoco/mvp_scene.xml",
+  "perception_artifact_uri": "simulation/perception_config.json",
+  "objective_artifact_uri": "training/training_objective.json",
+  "curriculum_artifact_uri": "training/training_curriculum.json",
+  "compiled_scene_index_uri": "simulation/mujoco/compiled_scene_index.json",
+  "reward_terms": [
+    "reach_selected_object",
+    "grasp_selected_object",
+    "red_sorted",
+    "blue_sorted",
+    "all_sorted_bonus",
+    "collision_penalty",
+    "drop_penalty",
+    "timeout_penalty"
+  ],
+  "observation_streams": [
+    "wrist_rgbd_camera"
+  ],
+  "total_scenes": 21,
+  "total_planned_episodes": 77,
+  "estimated_success_rate": 0.76,
+  "replay_index_uri": "runs/mvp_training/replay_index.json",
+  "episode_trace_uri": "runs/mvp_training/logs/episode_trace.jsonl",
+  "group_results": [
+    {
+      "purpose": "baseline",
+      "scene_artifact": "simulation/baseline_scene_set.json",
+      "scene_count": 2,
+      "planned_episodes": 6,
+      "simulated_success_rate": 0.92,
+      "first_episode_id": "episode_baseline_0001",
+      "last_episode_id": "episode_baseline_0006"
+    },
+    {
+      "purpose": "variation",
+      "scene_artifact": "simulation/scene_set.json",
+      "scene_count": 10,
+      "planned_episodes": 50,
+      "simulated_success_rate": 0.78,
+      "first_episode_id": "episode_variation_0007",
+      "last_episode_id": "episode_variation_0056"
+    },
+    {
+      "purpose": "edge_case",
+      "scene_artifact": "simulation/edge_case_scene_set.json",
+      "scene_count": 3,
+      "planned_episodes": 3,
+      "simulated_success_rate": 0.7,
+      "first_episode_id": "episode_edge_case_0057",
+      "last_episode_id": "episode_edge_case_0059"
+    },
+    {
+      "purpose": "regression",
+      "scene_artifact": "simulation/regression_scene_set.json",
+      "scene_count": 3,
+      "planned_episodes": 12,
+      "simulated_success_rate": 0.62,
+      "first_episode_id": "episode_regression_0060",
+      "last_episode_id": "episode_regression_0071"
+    },
+    {
+      "purpose": "holdout",
+      "scene_artifact": "simulation/holdout_scene_set.json",
+      "scene_count": 3,
+      "planned_episodes": 6,
+      "simulated_success_rate": 0.74,
+      "first_episode_id": "episode_holdout_0072",
+      "last_episode_id": "episode_holdout_0077"
+    }
+  ],
+  "notes": [
+    "Dry-run only: no physics simulator was executed.",
+    "This verifies the training package can be consumed by a runner-shaped service.",
+    "Perception streams: wrist_rgbd_camera.",
+    "Reward terms: reach_selected_object, grasp_selected_object, red_sorted, blue_sorted, all_sorted_bonus, collision_penalty, drop_penalty, timeout_penalty.",
+    "Curriculum stages: baseline_curriculum, variation_curriculum, edge_case_curriculum, regression_curriculum, holdout_curriculum."
+  ]
+}

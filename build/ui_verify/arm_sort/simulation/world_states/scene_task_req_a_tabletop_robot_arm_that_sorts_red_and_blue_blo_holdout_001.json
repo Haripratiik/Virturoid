@@ -1,0 +1,144 @@
+{
+  "id": "world_state_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout_001",
+  "version": "0.1.0",
+  "scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout_001",
+  "scene_set_id": "scenes_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout",
+  "purpose": "holdout",
+  "world_model_contract_uri": "simulation/world_model_contract.json",
+  "robot_spawn_xyz_rpy": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+  ],
+  "state_variables": [
+    "robot.joint_positions",
+    "robot.end_effector_pose",
+    "perception.wrist_rgbd_camera",
+    "world.object_poses",
+    "world.container_poses"
+  ],
+  "objects": [
+    {
+      "name": "red_block",
+      "object_type": "cube",
+      "pose_xyz_rpy": [
+        0.36,
+        -0.085,
+        0.02,
+        0.0,
+        0.0,
+        -3.088
+      ],
+      "visible": true,
+      "material": "matte_red",
+      "physical_parameters": {
+        "mass_kg": 0.0409,
+        "friction": 1.178,
+        "scale": 0.954
+      }
+    },
+    {
+      "name": "blue_block",
+      "object_type": "cube",
+      "pose_xyz_rpy": [
+        0.4061,
+        0.085,
+        0.02,
+        0.0,
+        0.0,
+        0.5837
+      ],
+      "visible": true,
+      "material": "matte_blue",
+      "physical_parameters": {
+        "mass_kg": 0.042,
+        "friction": 0.878,
+        "scale": 1.037
+      }
+    },
+    {
+      "name": "red_bin",
+      "object_type": "container",
+      "pose_xyz_rpy": [
+        0.55,
+        -0.2403,
+        0.02,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "visible": true,
+      "material": null,
+      "physical_parameters": {}
+    },
+    {
+      "name": "blue_bin",
+      "object_type": "container",
+      "pose_xyz_rpy": [
+        0.55,
+        0.2799,
+        0.02,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "visible": true,
+      "material": null,
+      "physical_parameters": {}
+    },
+    {
+      "name": "distractor_1_0",
+      "object_type": "cube",
+      "pose_xyz_rpy": [
+        0.4182,
+        0.0387,
+        0.02,
+        0.0,
+        0.0,
+        -0.4027
+      ],
+      "visible": true,
+      "material": "matte_gray",
+      "physical_parameters": {
+        "mass_kg": 0.0594,
+        "friction": 1.213,
+        "scale": 1.029
+      }
+    },
+    {
+      "name": "distractor_1_1",
+      "object_type": "cube",
+      "pose_xyz_rpy": [
+        0.4001,
+        0.0443,
+        0.02,
+        0.0,
+        0.0,
+        -0.2066
+      ],
+      "visible": true,
+      "material": "matte_gray",
+      "physical_parameters": {
+        "mass_kg": 0.0682,
+        "friction": 0.836,
+        "scale": 1.076
+      }
+    }
+  ],
+  "variation_parameters": {
+    "index": 1,
+    "purpose": "holdout",
+    "clutter": true,
+    "seed": 725159835,
+    "difficulty": 3,
+    "position_jitter_m": 0.095,
+    "lighting_level": 0.984,
+    "camera_noise_std": 0.0103,
+    "table_friction": 0.918,
+    "distractor_count": 2,
+    "background_texture": "plain"
+  }
+}

@@ -1,0 +1,56 @@
+{
+  "id": "bom_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo",
+  "version": "0.1.0",
+  "robot_design_id": "design_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo",
+  "items": [
+    {
+      "role": "base_actuator",
+      "component_id": "cmp_actuator_vx12",
+      "quantity": 1,
+      "required": true,
+      "unit_cost_usd": null,
+      "notes": null
+    },
+    {
+      "role": "shoulder_actuator",
+      "component_id": "cmp_actuator_vx12",
+      "quantity": 1,
+      "required": true,
+      "unit_cost_usd": null,
+      "notes": null
+    },
+    {
+      "role": "elbow_actuator",
+      "component_id": "cmp_actuator_vx12",
+      "quantity": 1,
+      "required": true,
+      "unit_cost_usd": null,
+      "notes": null
+    },
+    {
+      "role": "wrist_sensor",
+      "component_id": "cmp_camera_rgbd_mini",
+      "quantity": 1,
+      "required": true,
+      "unit_cost_usd": null,
+      "notes": null
+    },
+    {
+      "role": "gripper",
+      "component_id": "cmp_gripper_pg2",
+      "quantity": 1,
+      "required": true,
+      "unit_cost_usd": null,
+      "notes": null
+    },
+    {
+      "role": "main_compute",
+      "component_id": "cmp_compute_edge1",
+      "quantity": 1,
+      "required": true,
+      "unit_cost_usd": null,
+      "notes": null
+    }
+  ],
+  "warnings": []
+}

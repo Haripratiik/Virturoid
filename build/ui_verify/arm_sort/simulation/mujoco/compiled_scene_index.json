@@ -1,0 +1,180 @@
+{
+  "id": "compiled_mujoco_robot_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo",
+  "robot_genome_id": "robot_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo",
+  "backend": "mujoco",
+  "scene_count": 24,
+  "scenes": [
+    {
+      "scene_set_id": "scenes_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_baseline",
+      "scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_baseline_000",
+      "purpose": "baseline",
+      "mujoco_xml": "simulation/mujoco/scenes/baseline/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_baseline_000.xml",
+      "object_count": 4
+    },
+    {
+      "scene_set_id": "scenes_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_baseline",
+      "scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_baseline_001",
+      "purpose": "baseline",
+      "mujoco_xml": "simulation/mujoco/scenes/baseline/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_baseline_001.xml",
+      "object_count": 4
+    },
+    {
+      "scene_set_id": "scenes_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation",
+      "scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_000",
+      "purpose": "variation",
+      "mujoco_xml": "simulation/mujoco/scenes/variation/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_000.xml",
+      "object_count": 5
+    },
+    {
+      "scene_set_id": "scenes_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation",
+      "scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_001",
+      "purpose": "variation",
+      "mujoco_xml": "simulation/mujoco/scenes/variation/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_001.xml",
+      "object_count": 5
+    },
+    {
+      "scene_set_id": "scenes_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation",
+      "scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_002",
+      "purpose": "variation",
+      "mujoco_xml": "simulation/mujoco/scenes/variation/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_002.xml",
+      "object_count": 5
+    },
+    {
+      "scene_set_id": "scenes_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation",
+      "scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_003",
+      "purpose": "variation",
+      "mujoco_xml": "simulation/mujoco/scenes/variation/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_003.xml",
+      "object_count": 5
+    },
+    {
+      "scene_set_id": "scenes_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation",
+      "scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_004",
+      "purpose": "variation",
+      "mujoco_xml": "simulation/mujoco/scenes/variation/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_004.xml",
+      "object_count": 5
+    },
+    {
+      "scene_set_id": "scenes_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation",
+      "scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_005",
+      "purpose": "variation",
+      "mujoco_xml": "simulation/mujoco/scenes/variation/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_005.xml",
+      "object_count": 5
+    },
+    {
+      "scene_set_id": "scenes_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation",
+      "scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_006",
+      "purpose": "variation",
+      "mujoco_xml": "simulation/mujoco/scenes/variation/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_006.xml",
+      "object_count": 5
+    },
+    {
+      "scene_set_id": "scenes_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation",
+      "scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_007",
+      "purpose": "variation",
+      "mujoco_xml": "simulation/mujoco/scenes/variation/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_007.xml",
+      "object_count": 5
+    },
+    {
+      "scene_set_id": "scenes_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation",
+      "scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_008",
+      "purpose": "variation",
+      "mujoco_xml": "simulation/mujoco/scenes/variation/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_008.xml",
+      "object_count": 5
+    },
+    {
+      "scene_set_id": "scenes_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation",
+      "scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_009",
+      "purpose": "variation",
+      "mujoco_xml": "simulation/mujoco/scenes/variation/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_009.xml",
+      "object_count": 5
+    },
+    {
+      "scene_set_id": "scenes_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case",
+      "scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_000",
+      "purpose": "edge_case",
+      "mujoco_xml": "simulation/mujoco/scenes/edge_case/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_000.xml",
+      "object_count": 7
+    },
+    {
+      "scene_set_id": "scenes_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case",
+      "scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_001",
+      "purpose": "edge_case",
+      "mujoco_xml": "simulation/mujoco/scenes/edge_case/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_001.xml",
+      "object_count": 7
+    },
+    {
+      "scene_set_id": "scenes_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case",
+      "scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_002",
+      "purpose": "edge_case",
+      "mujoco_xml": "simulation/mujoco/scenes/edge_case/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_002.xml",
+      "object_count": 7
+    },
+    {
+      "scene_set_id": "scenes_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_regression",
+      "scene_id": "regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_000",
+      "purpose": "regression",
+      "mujoco_xml": "simulation/mujoco/scenes/regression/regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_000.xml",
+      "object_count": 5
+    },
+    {
+      "scene_set_id": "scenes_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_regression",
+      "scene_id": "regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_001",
+      "purpose": "regression",
+      "mujoco_xml": "simulation/mujoco/scenes/regression/regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_001.xml",
+      "object_count": 5
+    },
+    {
+      "scene_set_id": "scenes_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_regression",
+      "scene_id": "regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_002",
+      "purpose": "regression",
+      "mujoco_xml": "simulation/mujoco/scenes/regression/regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_002.xml",
+      "object_count": 5
+    },
+    {
+      "scene_set_id": "scenes_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout",
+      "scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout_000",
+      "purpose": "holdout",
+      "mujoco_xml": "simulation/mujoco/scenes/holdout/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout_000.xml",
+      "object_count": 6
+    },
+    {
+      "scene_set_id": "scenes_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout",
+      "scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout_001",
+      "purpose": "holdout",
+      "mujoco_xml": "simulation/mujoco/scenes/holdout/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout_001.xml",
+      "object_count": 6
+    },
+    {
+      "scene_set_id": "scenes_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout",
+      "scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout_002",
+      "purpose": "holdout",
+      "mujoco_xml": "simulation/mujoco/scenes/holdout/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout_002.xml",
+      "object_count": 6
+    },
+    {
+      "scene_set_id": "scenes_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_regression_revision_001",
+      "scene_id": "revision_regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_000",
+      "purpose": "revision",
+      "mujoco_xml": "simulation/mujoco/scenes/revision/revision_regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_000.xml",
+      "object_count": 5
+    },
+    {
+      "scene_set_id": "scenes_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_regression_revision_001",
+      "scene_id": "revision_regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_001",
+      "purpose": "revision",
+      "mujoco_xml": "simulation/mujoco/scenes/revision/revision_regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_001.xml",
+      "object_count": 5
+    },
+    {
+      "scene_set_id": "scenes_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_regression_revision_001",
+      "scene_id": "revision_regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_002",
+      "purpose": "revision",
+      "mujoco_xml": "simulation/mujoco/scenes/revision/revision_regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_002.xml",
+      "object_count": 5
+    }
+  ],
+  "notes": [
+    "Each generated training scene has a concrete MJCF XML file.",
+    "Bodies form a serial kinematic chain; manipulable objects are dynamic free bodies."
+  ]
+}

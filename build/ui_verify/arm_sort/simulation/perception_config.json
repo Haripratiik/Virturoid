@@ -1,0 +1,160 @@
+{
+  "id": "perception_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_mujoco",
+  "version": "0.1.0",
+  "robot_genome_id": "robot_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo",
+  "task_graph_id": "task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo",
+  "backend": "mujoco",
+  "sensor_streams": [
+    {
+      "name": "wrist_rgbd_camera",
+      "sensor_component_id": "cmp_camera_rgbd_mini",
+      "sensor_type": "rgbd_camera",
+      "parent_link": "wrist_link",
+      "observation_key": "wrist_rgbd_camera",
+      "output_modalities": [
+        "rgb_image",
+        "depth_image",
+        "camera_intrinsics"
+      ],
+      "simulated_outputs": [
+        "observations/wrist_rgbd_camera/rgb.png",
+        "observations/wrist_rgbd_camera/depth.exr",
+        "observations/wrist_rgbd_camera/segmentation.png"
+      ],
+      "technical_limits": {
+        "sensor_type": "rgbd_camera",
+        "frame_rate_hz": 30.0,
+        "ros_message_type": "sensor_msgs/Image",
+        "resolution_width_px": 1280,
+        "resolution_height_px": 720,
+        "horizontal_fov_deg": 74.0,
+        "vertical_fov_deg": 58.0,
+        "min_range_m": 0.2,
+        "max_range_m": 3.5
+      }
+    }
+  ],
+  "vision_annotations": [
+    {
+      "name": "rgb_detection_and_segmentation",
+      "target_object_types": [
+        "cube",
+        "container",
+        "distractor"
+      ],
+      "annotation_modalities": [
+        "2d_bounding_box",
+        "instance_mask",
+        "semantic_mask"
+      ],
+      "label_space": [
+        "blue_bin",
+        "blue_block",
+        "red_bin",
+        "red_block"
+      ],
+      "output_pattern": "observations/{scene_id}/{sensor_name}/annotations_rgb.json"
+    },
+    {
+      "name": "depth_geometry",
+      "target_object_types": [
+        "cube",
+        "container",
+        "distractor"
+      ],
+      "annotation_modalities": [
+        "depth_map",
+        "surface_normal",
+        "object_pose_6d"
+      ],
+      "label_space": [
+        "blue_bin",
+        "blue_block",
+        "red_bin",
+        "red_block"
+      ],
+      "output_pattern": "observations/{scene_id}/{sensor_name}/annotations_depth.json"
+    }
+  ],
+  "synthetic_dataset": {
+    "output_root": "datasets/synthetic_observations",
+    "renderer_backends": [
+      "mujoco",
+      "worldlabs_or_equivalent_texture_generator"
+    ],
+    "splits": {
+      "train_scenes": 15,
+      "validation_scenes": 4,
+      "holdout_scenes": 2
+    },
+    "annotation_formats": [
+      "coco_json",
+      "segmentation_png",
+      "pose_json",
+      "depth_exr_or_range_json"
+    ],
+    "domain_randomization_sources": [
+      "simulation/scene_set.json",
+      "simulation/holdout_scene_set.json",
+      "simulation/perception_config.json"
+    ],
+    "notes": [
+      "Dataset spec generated for task type pick_place_sort.",
+      "Renderer integration can swap in a photorealistic/world-model tool while preserving this contract."
+    ]
+  },
+  "texture_randomization": [
+    {
+      "target": "cube:red_block",
+      "variants": [
+        "matte_red",
+        "gloss_red",
+        "slightly_worn_red"
+      ],
+      "purpose": "domain_randomization"
+    },
+    {
+      "target": "cube:blue_block",
+      "variants": [
+        "matte_blue",
+        "gloss_blue",
+        "slightly_worn_blue"
+      ],
+      "purpose": "domain_randomization"
+    },
+    {
+      "target": "container",
+      "variants": [
+        "matte_plastic",
+        "semi_gloss_plastic",
+        "printed_label"
+      ],
+      "purpose": "domain_randomization"
+    },
+    {
+      "target": "distractor",
+      "variants": [
+        "matte_gray",
+        "wood",
+        "black_plastic"
+      ],
+      "purpose": "domain_randomization"
+    }
+  ],
+  "lighting_randomization": [
+    "vary_key_light_intensity:0.65-1.25",
+    "vary_key_light_direction:small_tabletop_offsets",
+    "add_sensor_noise_profile:per_stream"
+  ],
+  "scene_bindings": [
+    "scenes_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_baseline",
+    "scenes_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation",
+    "scenes_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case",
+    "scenes_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_regression",
+    "scenes_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout"
+  ],
+  "notes": [
+    "This config is the scene-to-perception contract for simulator training.",
+    "A real renderer should emit these streams from the generated scene and selected robot sensors."
+  ]
+}

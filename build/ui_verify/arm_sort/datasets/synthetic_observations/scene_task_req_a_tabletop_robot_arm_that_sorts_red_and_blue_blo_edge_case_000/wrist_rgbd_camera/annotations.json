@@ -1,0 +1,200 @@
+{
+  "id": "frame_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_000_wrist_rgbd_camera",
+  "version": "0.1.0",
+  "scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_000",
+  "scene_set_id": "scenes_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case",
+  "purpose": "edge_case",
+  "sensor_name": "wrist_rgbd_camera",
+  "sensor_type": "rgbd_camera",
+  "modalities": [
+    "rgb_image",
+    "depth_image",
+    "camera_intrinsics"
+  ],
+  "image_size_px": [
+    1280,
+    720
+  ],
+  "expected_outputs": {
+    "rgb_image": "datasets/synthetic_observations/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_000/wrist_rgbd_camera/rgb.png",
+    "depth_image": "datasets/synthetic_observations/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_000/wrist_rgbd_camera/depth.exr",
+    "annotations": "datasets/synthetic_observations/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_000/wrist_rgbd_camera/annotations.json"
+  },
+  "annotations": [
+    {
+      "name": "red_block",
+      "label": "red_block",
+      "object_type": "cube",
+      "pose_xyz_rpy": [
+        0.4048,
+        -0.085,
+        0.02,
+        0.0,
+        0.0,
+        -0.1997
+      ],
+      "bbox_xywh": [
+        789,
+        361,
+        65,
+        65
+      ],
+      "depth_m": 0.4141,
+      "segmentation_id": 1,
+      "physical_parameters": {
+        "mass_kg": 0.0564,
+        "friction": 0.893,
+        "scale": 1.137
+      }
+    },
+    {
+      "name": "blue_block",
+      "label": "blue_block",
+      "object_type": "cube",
+      "pose_xyz_rpy": [
+        0.42,
+        -0.0041,
+        0.02,
+        0.0,
+        0.0,
+        -1.2037
+      ],
+      "bbox_xywh": [
+        800,
+        333,
+        57,
+        57
+      ],
+      "depth_m": 0.4205,
+      "segmentation_id": 2,
+      "physical_parameters": {
+        "mass_kg": 0.0475,
+        "friction": 1.29,
+        "scale": 0.999
+      }
+    },
+    {
+      "name": "red_bin",
+      "label": "red_bin",
+      "object_type": "container",
+      "pose_xyz_rpy": [
+        0.55,
+        -0.2013,
+        0.02,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bbox_xywh": [
+        858,
+        411,
+        57,
+        57
+      ],
+      "depth_m": 0.586,
+      "segmentation_id": 3,
+      "physical_parameters": {}
+    },
+    {
+      "name": "blue_bin",
+      "label": "blue_bin",
+      "object_type": "container",
+      "pose_xyz_rpy": [
+        0.55,
+        0.2807,
+        0.02,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bbox_xywh": [
+        858,
+        220,
+        57,
+        57
+      ],
+      "depth_m": 0.6178,
+      "segmentation_id": 4,
+      "physical_parameters": {}
+    },
+    {
+      "name": "distractor_0_0",
+      "label": "distractor_0_0",
+      "object_type": "cube",
+      "pose_xyz_rpy": [
+        0.407,
+        0.085,
+        0.02,
+        0.0,
+        0.0,
+        -0.2754
+      ],
+      "bbox_xywh": [
+        793,
+        297,
+        59,
+        59
+      ],
+      "depth_m": 0.4163,
+      "segmentation_id": 5,
+      "physical_parameters": {
+        "mass_kg": 0.0655,
+        "friction": 0.915,
+        "scale": 1.036
+      }
+    },
+    {
+      "name": "distractor_0_1",
+      "label": "distractor_0_1",
+      "object_type": "cube",
+      "pose_xyz_rpy": [
+        0.4199,
+        0.0072,
+        0.02,
+        0.0,
+        0.0,
+        0.1267
+      ],
+      "bbox_xywh": [
+        798,
+        327,
+        61,
+        61
+      ],
+      "depth_m": 0.4204,
+      "segmentation_id": 6,
+      "physical_parameters": {
+        "mass_kg": 0.0409,
+        "friction": 1.295,
+        "scale": 1.069
+      }
+    },
+    {
+      "name": "distractor_0_2",
+      "label": "distractor_0_2",
+      "object_type": "cube",
+      "pose_xyz_rpy": [
+        0.36,
+        -0.0794,
+        0.02,
+        0.0,
+        0.0,
+        -0.4199
+      ],
+      "bbox_xywh": [
+        771,
+        361,
+        60,
+        60
+      ],
+      "depth_m": 0.3692,
+      "segmentation_id": 7,
+      "physical_parameters": {
+        "mass_kg": 0.0598,
+        "friction": 1.247,
+        "scale": 1.049
+      }
+    }
+  ],
+  "world_state_uri": "simulation/world_states/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_000.json"
+}

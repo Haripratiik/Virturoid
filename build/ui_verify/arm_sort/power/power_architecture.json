@@ -1,0 +1,63 @@
+{
+  "id": "power_design_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo",
+  "version": "0.1.0",
+  "robot_design_id": "design_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo",
+  "rails": [
+    {
+      "name": "actuator_24v",
+      "nominal_voltage_v": 24.0,
+      "estimated_peak_current_a": 10.8,
+      "recommended_regulator_current_a": 20.0,
+      "headroom_percent": 85.2,
+      "component_roles": [
+        "base_actuator",
+        "shoulder_actuator",
+        "elbow_actuator",
+        "gripper"
+      ],
+      "notes": [
+        "Use an isolated or well-filtered actuator rail to reduce motor noise coupling."
+      ]
+    },
+    {
+      "name": "compute_12v",
+      "nominal_voltage_v": 12.0,
+      "estimated_peak_current_a": 2.5,
+      "recommended_regulator_current_a": 5.0,
+      "headroom_percent": 100.0,
+      "component_roles": [
+        "main_compute"
+      ],
+      "notes": [
+        "Use a stable regulator sized for processor peak load."
+      ]
+    },
+    {
+      "name": "sensor_5v",
+      "nominal_voltage_v": 5.0,
+      "estimated_peak_current_a": 0.8,
+      "recommended_regulator_current_a": 2.0,
+      "headroom_percent": 150.0,
+      "component_roles": [
+        "wrist_sensor"
+      ],
+      "notes": [
+        "Keep camera/sensor rail stable to avoid perception dropouts."
+      ]
+    }
+  ],
+  "battery": {
+    "nominal_voltage_v": 24.0,
+    "capacity_wh": 99.0,
+    "usable_capacity_wh": 79.2,
+    "estimated_average_power_w": 102.62,
+    "estimated_runtime_minutes": 46.3,
+    "notes": [
+      "MVP estimate assumes average draw is 35 percent of selected-component peak power.",
+      "Use real duty-cycle measurements before hardware deployment."
+    ]
+  },
+  "warnings": [
+    "Multiple power rails recommended; do not assume one shared supply for actuators, compute, and sensors."
+  ]
+}

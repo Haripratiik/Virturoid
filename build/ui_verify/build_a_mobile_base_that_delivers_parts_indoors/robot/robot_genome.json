@@ -1,0 +1,43 @@
+{
+  "id": "genome_built_mobile_base_5seg",
+  "name": "mobile_base.composed",
+  "species": "mobile_base.composed",
+  "robot_class": "mobile_base",
+  "links": [
+    "chassis",
+    "wheel_0",
+    "wheel_1",
+    "wheel_2",
+    "wheel_3"
+  ],
+  "joints": [
+    {
+      "name": "wheel_0_joint",
+      "joint_type": "revolute",
+      "parent_link": "chassis",
+      "child_link": "wheel_0"
+    },
+    {
+      "name": "wheel_1_joint",
+      "joint_type": "revolute",
+      "parent_link": "chassis",
+      "child_link": "wheel_1"
+    },
+    {
+      "name": "wheel_2_joint",
+      "joint_type": "revolute",
+      "parent_link": "chassis",
+      "child_link": "wheel_2"
+    },
+    {
+      "name": "wheel_3_joint",
+      "joint_type": "revolute",
+      "parent_link": "chassis",
+      "child_link": "wheel_3"
+    }
+  ],
+  "end_effectors": [
+    "wheel_3"
+  ],
+  "source": "gene_compiler"
+}

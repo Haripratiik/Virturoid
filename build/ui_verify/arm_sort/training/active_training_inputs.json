@@ -1,0 +1,24 @@
+{
+  "id": "active_promotion_improvement_training_run_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_mujoco_revision_001",
+  "version": "0.1.0",
+  "decision_id": "promotion_improvement_training_run_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_mujoco_revision_001",
+  "training_config": {
+    "uri": "training/training_run_config_revised.json",
+    "media_type": "application/json",
+    "sha256": null,
+    "description": null
+  },
+  "policy_plan": {
+    "uri": "software/policy_plan_revised.json",
+    "media_type": "application/json",
+    "sha256": null,
+    "description": null
+  },
+  "scene_set": {
+    "uri": "simulation/revision_scene_set.json",
+    "media_type": "application/json",
+    "sha256": null,
+    "description": null
+  },
+  "reason": "improvement_training_run_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_mujoco_revision_001 improved the target success rate, so revised artifacts are selected, but the revised pass used fewer planned episodes and needs expanded rollout coverage."
+}

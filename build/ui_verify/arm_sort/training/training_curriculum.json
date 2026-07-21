@@ -1,0 +1,289 @@
+{
+  "id": "curriculum_training_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_mujoco",
+  "version": "0.1.0",
+  "robot_genome_id": "robot_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo",
+  "task_graph_id": "task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo",
+  "backend": "mujoco",
+  "compiled_scene_index_uri": "simulation/mujoco/compiled_scene_index.json",
+  "stages": [
+    {
+      "name": "baseline_curriculum",
+      "purpose": "baseline",
+      "usage": "smoke_test",
+      "scene_count": 2,
+      "planned_episodes": 6,
+      "scene_bindings": [
+        {
+          "scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_baseline_000",
+          "purpose": "baseline",
+          "scene_set_uri": "simulation/baseline_scene_set.json",
+          "compiled_scene_xml_uri": "simulation/mujoco/scenes/baseline/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_baseline_000.xml",
+          "episode_multiplier": 3,
+          "randomization_profile": "nominal_pose_jitter"
+        },
+        {
+          "scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_baseline_001",
+          "purpose": "baseline",
+          "scene_set_uri": "simulation/baseline_scene_set.json",
+          "compiled_scene_xml_uri": "simulation/mujoco/scenes/baseline/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_baseline_001.xml",
+          "episode_multiplier": 3,
+          "randomization_profile": "nominal_pose_jitter"
+        }
+      ]
+    },
+    {
+      "name": "variation_curriculum",
+      "purpose": "variation",
+      "usage": "training_and_evaluation",
+      "scene_count": 10,
+      "planned_episodes": 50,
+      "scene_bindings": [
+        {
+          "scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_000",
+          "purpose": "variation",
+          "scene_set_uri": "simulation/scene_set.json",
+          "compiled_scene_xml_uri": "simulation/mujoco/scenes/variation/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_000.xml",
+          "episode_multiplier": 5,
+          "randomization_profile": "pose_jitter_with_clutter"
+        },
+        {
+          "scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_001",
+          "purpose": "variation",
+          "scene_set_uri": "simulation/scene_set.json",
+          "compiled_scene_xml_uri": "simulation/mujoco/scenes/variation/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_001.xml",
+          "episode_multiplier": 5,
+          "randomization_profile": "pose_jitter_with_clutter"
+        },
+        {
+          "scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_002",
+          "purpose": "variation",
+          "scene_set_uri": "simulation/scene_set.json",
+          "compiled_scene_xml_uri": "simulation/mujoco/scenes/variation/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_002.xml",
+          "episode_multiplier": 5,
+          "randomization_profile": "pose_jitter_with_clutter"
+        },
+        {
+          "scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_003",
+          "purpose": "variation",
+          "scene_set_uri": "simulation/scene_set.json",
+          "compiled_scene_xml_uri": "simulation/mujoco/scenes/variation/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_003.xml",
+          "episode_multiplier": 5,
+          "randomization_profile": "pose_jitter_with_clutter"
+        },
+        {
+          "scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_004",
+          "purpose": "variation",
+          "scene_set_uri": "simulation/scene_set.json",
+          "compiled_scene_xml_uri": "simulation/mujoco/scenes/variation/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_004.xml",
+          "episode_multiplier": 5,
+          "randomization_profile": "pose_jitter_with_clutter"
+        },
+        {
+          "scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_005",
+          "purpose": "variation",
+          "scene_set_uri": "simulation/scene_set.json",
+          "compiled_scene_xml_uri": "simulation/mujoco/scenes/variation/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_005.xml",
+          "episode_multiplier": 5,
+          "randomization_profile": "pose_jitter_with_clutter"
+        },
+        {
+          "scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_006",
+          "purpose": "variation",
+          "scene_set_uri": "simulation/scene_set.json",
+          "compiled_scene_xml_uri": "simulation/mujoco/scenes/variation/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_006.xml",
+          "episode_multiplier": 5,
+          "randomization_profile": "pose_jitter_with_clutter"
+        },
+        {
+          "scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_007",
+          "purpose": "variation",
+          "scene_set_uri": "simulation/scene_set.json",
+          "compiled_scene_xml_uri": "simulation/mujoco/scenes/variation/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_007.xml",
+          "episode_multiplier": 5,
+          "randomization_profile": "pose_jitter_with_clutter"
+        },
+        {
+          "scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_008",
+          "purpose": "variation",
+          "scene_set_uri": "simulation/scene_set.json",
+          "compiled_scene_xml_uri": "simulation/mujoco/scenes/variation/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_008.xml",
+          "episode_multiplier": 5,
+          "randomization_profile": "pose_jitter_with_clutter"
+        },
+        {
+          "scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_009",
+          "purpose": "variation",
+          "scene_set_uri": "simulation/scene_set.json",
+          "compiled_scene_xml_uri": "simulation/mujoco/scenes/variation/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_009.xml",
+          "episode_multiplier": 5,
+          "randomization_profile": "pose_jitter_with_clutter"
+        }
+      ]
+    },
+    {
+      "name": "edge_case_curriculum",
+      "purpose": "edge_case",
+      "usage": "auxiliary",
+      "scene_count": 3,
+      "planned_episodes": 3,
+      "scene_bindings": [
+        {
+          "scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_000",
+          "purpose": "edge_case",
+          "scene_set_uri": "simulation/edge_case_scene_set.json",
+          "compiled_scene_xml_uri": "simulation/mujoco/scenes/edge_case/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_000.xml",
+          "episode_multiplier": 1,
+          "randomization_profile": "pose_jitter_with_clutter"
+        },
+        {
+          "scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_001",
+          "purpose": "edge_case",
+          "scene_set_uri": "simulation/edge_case_scene_set.json",
+          "compiled_scene_xml_uri": "simulation/mujoco/scenes/edge_case/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_001.xml",
+          "episode_multiplier": 1,
+          "randomization_profile": "pose_jitter_with_clutter"
+        },
+        {
+          "scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_002",
+          "purpose": "edge_case",
+          "scene_set_uri": "simulation/edge_case_scene_set.json",
+          "compiled_scene_xml_uri": "simulation/mujoco/scenes/edge_case/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_002.xml",
+          "episode_multiplier": 1,
+          "randomization_profile": "pose_jitter_with_clutter"
+        }
+      ]
+    },
+    {
+      "name": "regression_curriculum",
+      "purpose": "regression",
+      "usage": "failure_reproduction",
+      "scene_count": 3,
+      "planned_episodes": 12,
+      "scene_bindings": [
+        {
+          "scene_id": "regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_000",
+          "purpose": "regression",
+          "scene_set_uri": "simulation/regression_scene_set.json",
+          "compiled_scene_xml_uri": "simulation/mujoco/scenes/regression/regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_000.xml",
+          "episode_multiplier": 4,
+          "randomization_profile": "failure_replay:dropped"
+        },
+        {
+          "scene_id": "regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_001",
+          "purpose": "regression",
+          "scene_set_uri": "simulation/regression_scene_set.json",
+          "compiled_scene_xml_uri": "simulation/mujoco/scenes/regression/regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_001.xml",
+          "episode_multiplier": 4,
+          "randomization_profile": "failure_replay:dropped"
+        },
+        {
+          "scene_id": "regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_002",
+          "purpose": "regression",
+          "scene_set_uri": "simulation/regression_scene_set.json",
+          "compiled_scene_xml_uri": "simulation/mujoco/scenes/regression/regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_002.xml",
+          "episode_multiplier": 4,
+          "randomization_profile": "failure_replay:dropped"
+        }
+      ]
+    },
+    {
+      "name": "holdout_curriculum",
+      "purpose": "holdout",
+      "usage": "generalization_check",
+      "scene_count": 3,
+      "planned_episodes": 6,
+      "scene_bindings": [
+        {
+          "scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout_000",
+          "purpose": "holdout",
+          "scene_set_uri": "simulation/holdout_scene_set.json",
+          "compiled_scene_xml_uri": "simulation/mujoco/scenes/holdout/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout_000.xml",
+          "episode_multiplier": 2,
+          "randomization_profile": "pose_jitter_with_clutter"
+        },
+        {
+          "scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout_001",
+          "purpose": "holdout",
+          "scene_set_uri": "simulation/holdout_scene_set.json",
+          "compiled_scene_xml_uri": "simulation/mujoco/scenes/holdout/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout_001.xml",
+          "episode_multiplier": 2,
+          "randomization_profile": "pose_jitter_with_clutter"
+        },
+        {
+          "scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout_002",
+          "purpose": "holdout",
+          "scene_set_uri": "simulation/holdout_scene_set.json",
+          "compiled_scene_xml_uri": "simulation/mujoco/scenes/holdout/scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout_002.xml",
+          "episode_multiplier": 2,
+          "randomization_profile": "pose_jitter_with_clutter"
+        }
+      ]
+    },
+    {
+      "name": "revision_curriculum",
+      "purpose": "revision",
+      "usage": "feedback_redesign_validation",
+      "scene_count": 3,
+      "planned_episodes": 3,
+      "scene_bindings": [
+        {
+          "scene_id": "revision_regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_000",
+          "purpose": "revision",
+          "scene_set_uri": "simulation/revision_scene_set.json",
+          "compiled_scene_xml_uri": "simulation/mujoco/scenes/revision/revision_regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_000.xml",
+          "episode_multiplier": 1,
+          "randomization_profile": "failure_replay:dropped"
+        },
+        {
+          "scene_id": "revision_regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_001",
+          "purpose": "revision",
+          "scene_set_uri": "simulation/revision_scene_set.json",
+          "compiled_scene_xml_uri": "simulation/mujoco/scenes/revision/revision_regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_001.xml",
+          "episode_multiplier": 1,
+          "randomization_profile": "failure_replay:dropped"
+        },
+        {
+          "scene_id": "revision_regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_002",
+          "purpose": "revision",
+          "scene_set_uri": "simulation/revision_scene_set.json",
+          "compiled_scene_xml_uri": "simulation/mujoco/scenes/revision/revision_regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_002.xml",
+          "episode_multiplier": 1,
+          "randomization_profile": "failure_replay:dropped"
+        }
+      ]
+    }
+  ],
+  "success_checks": [
+    "red_block inside red_bin",
+    "blue_block inside blue_bin"
+  ],
+  "safety_checks": [
+    "any block outside workspace",
+    "episode_time > 60",
+    "robot collides with forbidden object"
+  ],
+  "randomization_envelopes": {
+    "baseline": [
+      "nominal_pose_jitter"
+    ],
+    "variation": [
+      "pose_jitter_with_clutter"
+    ],
+    "edge_case": [
+      "pose_jitter_with_clutter"
+    ],
+    "regression": [
+      "failure_replay:dropped"
+    ],
+    "holdout": [
+      "pose_jitter_with_clutter"
+    ],
+    "revision": [
+      "failure_replay:dropped"
+    ]
+  },
+  "notes": [
+    "Curriculum is generated from exported scene sets and compiled simulator scene XML.",
+    "A real training runner can consume these stages in order or sample by purpose."
+  ]
+}

@@ -14,9 +14,11 @@
     "@fontsource-variable/jetbrains-mono": "^5.2.5",
     "@fontsource/chakra-petch": "^5.2.7",
     "@fontsource/instrument-serif": "^5.2.5",
-    "astro": "^5.7.0"
+    "astro": "^5.7.0",
+    "three": "^0.160.1"
   },
   "devDependencies": {
+    "@types/three": "^0.160.0",
     "puppeteer-core": "^25.3.0"
   }
 }

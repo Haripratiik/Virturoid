@@ -1,0 +1,148 @@
+{
+  "id": "frame_regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_002_wrist_rgbd_camera",
+  "version": "0.1.0",
+  "scene_id": "regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_002",
+  "scene_set_id": "scenes_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_regression",
+  "purpose": "regression",
+  "sensor_name": "wrist_rgbd_camera",
+  "sensor_type": "rgbd_camera",
+  "modalities": [
+    "rgb_image",
+    "depth_image",
+    "camera_intrinsics"
+  ],
+  "image_size_px": [
+    1280,
+    720
+  ],
+  "expected_outputs": {
+    "rgb_image": "datasets/synthetic_observations/regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_002/wrist_rgbd_camera/rgb.png",
+    "depth_image": "datasets/synthetic_observations/regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_002/wrist_rgbd_camera/depth.exr",
+    "annotations": "datasets/synthetic_observations/regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_002/wrist_rgbd_camera/annotations.json"
+  },
+  "annotations": [
+    {
+      "name": "red_block",
+      "label": "red_block",
+      "object_type": "cube",
+      "pose_xyz_rpy": [
+        0.3227,
+        -0.069,
+        0.02,
+        0.0,
+        0.0,
+        -0.537
+      ],
+      "bbox_xywh": [
+        759,
+        362,
+        51,
+        51
+      ],
+      "depth_m": 0.3306,
+      "segmentation_id": 1,
+      "physical_parameters": {
+        "mass_kg": 0.0663,
+        "friction": 0.893,
+        "scale": 0.892
+      }
+    },
+    {
+      "name": "blue_block",
+      "label": "blue_block",
+      "object_type": "cube",
+      "pose_xyz_rpy": [
+        0.3284,
+        0.0325,
+        0.02,
+        0.0,
+        0.0,
+        -1.5676
+      ],
+      "bbox_xywh": [
+        763,
+        323,
+        48,
+        48
+      ],
+      "depth_m": 0.3306,
+      "segmentation_id": 2,
+      "physical_parameters": {
+        "mass_kg": 0.0688,
+        "friction": 0.927,
+        "scale": 0.837
+      }
+    },
+    {
+      "name": "red_bin",
+      "label": "red_bin",
+      "object_type": "container",
+      "pose_xyz_rpy": [
+        0.3011,
+        -0.135,
+        0.02,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bbox_xywh": [
+        746,
+        385,
+        57,
+        57
+      ],
+      "depth_m": 0.3306,
+      "segmentation_id": 3,
+      "physical_parameters": {}
+    },
+    {
+      "name": "blue_bin",
+      "label": "blue_bin",
+      "object_type": "container",
+      "pose_xyz_rpy": [
+        0.3013,
+        0.1346,
+        0.02,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bbox_xywh": [
+        746,
+        278,
+        57,
+        57
+      ],
+      "depth_m": 0.3306,
+      "segmentation_id": 4,
+      "physical_parameters": {}
+    },
+    {
+      "name": "distractor_2_0",
+      "label": "distractor_2_0",
+      "object_type": "cube",
+      "pose_xyz_rpy": [
+        0.3282,
+        0.0339,
+        0.02,
+        0.0,
+        0.0,
+        2.8243
+      ],
+      "bbox_xywh": [
+        758,
+        317,
+        58,
+        58
+      ],
+      "depth_m": 0.3306,
+      "segmentation_id": 5,
+      "physical_parameters": {
+        "mass_kg": 0.0592,
+        "friction": 0.824,
+        "scale": 1.021
+      }
+    }
+  ],
+  "world_state_uri": "simulation/world_states/regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_002.json"
+}

@@ -1,0 +1,103 @@
+<mujoco model="built_manipulator_7seg">
+  <compiler angle="radian" autolimits="true"/>
+  <option timestep="0.002" gravity="0 0 -9.81"/>
+  <visual>
+    <headlight ambient="0.45 0.45 0.48" diffuse="0.65 0.65 0.68" specular="0.22 0.22 0.22"/>
+    <quality shadowsize="4096"/>
+    <map znear="0.01" zfar="60"/>
+  </visual>
+  <default>
+    <joint damping="0.8" armature="0.01"/>
+    <geom friction="1 0.1 0.01"/>
+  </default>
+  <asset>
+    <material name="mat_red" rgba="0.8 0.1 0.1 1"/>
+    <material name="mat_blue" rgba="0.1 0.2 0.8 1"/>
+    <material name="mat_gray" rgba="0.5 0.5 0.5 1"/>
+    <material name="mat_link" rgba="0.35 0.35 0.38 1"/>
+    <material name="mat_body" rgba="0.84 0.86 0.89 1" specular="0.35" shininess="0.45" reflectance="0.05"/>
+    <material name="mat_joint" rgba="0.15 0.16 0.20 1" specular="0.6" shininess="0.7" reflectance="0.1"/>
+    <material name="mat_accent" rgba="0.92 0.47 0.13 1" specular="0.45" shininess="0.55"/>
+    <material name="mat_ee" rgba="0.22 0.24 0.29 1" specular="0.5" shininess="0.6"/>
+    <material name="mat_alu" rgba="0.78 0.80 0.84 1" specular="0.55" shininess="0.5" reflectance="0.12"/>
+    <material name="mat_steel" rgba="0.34 0.36 0.40 1" specular="0.7" shininess="0.7" reflectance="0.18"/>
+    <material name="mat_cf" rgba="0.11 0.12 0.14 1" specular="0.45" shininess="0.4" reflectance="0.06"/>
+    <material name="mat_ti" rgba="0.60 0.60 0.65 1" specular="0.5" shininess="0.55" reflectance="0.1"/>
+    <material name="mat_shell" rgba="0.20 0.42 0.72 1" specular="0.4" shininess="0.5" reflectance="0.05"/>
+    <material name="mat_metal" rgba="0.47 0.49 0.53 1" specular="0.78" shininess="0.78" reflectance="0.22"/>
+    <material name="mat_rubber" rgba="0.13 0.13 0.15 1" specular="0.15" shininess="0.15"/>
+  </asset>
+  <worldbody>
+    <light name="key" pos="1.6 -1.1 3.0" dir="-0.45 0.32 -1" diffuse="0.55 0.55 0.58" specular="0.25 0.25 0.25"/>
+    <light name="fill" pos="-2.0 1.6 2.2" dir="0.5 -0.42 -1" diffuse="0.22 0.22 0.26"/>
+    <geom name="table" type="box" size="0.7 0.45 0.025" pos="0.4 0 0" rgba="0.7 0.7 0.65 1"/>
+    <body name="base" pos="0.00000 0.00000 0.02500">
+      <geom name="base_geom" type="box" pos="0 0 0.04000" size="0.04000 0.04000 0.04000" mass="1.00000" material="mat_shell"/>
+      <body name="shoulder" pos="0.00000 0.00000 0.08000">
+        <joint name="shoulder_joint" type="hinge" axis="0.0000 0.0000 1.0000" range="-3.1400 3.1400"/>
+        <geom name="shoulder_geom" type="capsule" fromto="0 0 0 0 0 0.05000" size="0.03500" mass="0.40000" material="mat_alu"/>
+        <geom name="shoulder_motor" type="cylinder" fromto="-0.00000 -0.00000 -0.05500 0.00000 0.00000 0.05500" size="0.05075" material="mat_joint" mass="0" contype="0" conaffinity="0"/>
+        <body name="j1" pos="0.00000 0.00000 0.05000">
+          <joint name="j1_joint" type="hinge" axis="0.0000 1.0000 0.0000" range="-3.1400 3.1400"/>
+          <geom name="j1_geom" type="capsule" fromto="0 0 0 0 0 0.32500" size="0.03000" mass="0.35000" material="mat_alu"/>
+          <geom name="j1_motor" type="cylinder" fromto="-0.00000 -0.04800 -0.00000 0.00000 0.04800 0.00000" size="0.04350" material="mat_joint" mass="0" contype="0" conaffinity="0"/>
+          <geom name="j1_collar" type="cylinder" fromto="0 0 0.31300 0 0 0.33700" size="0.03660" material="mat_joint" mass="0" contype="0" conaffinity="0"/>
+          <body name="j2" pos="0.00000 0.00000 0.32500">
+            <joint name="j2_joint" type="hinge" axis="0.0000 1.0000 0.0000" range="-3.1400 3.1400"/>
+            <geom name="j2_geom" type="capsule" fromto="0 0 0 0 0 0.32500" size="0.03000" mass="0.30000" material="mat_alu"/>
+            <geom name="j2_motor" type="cylinder" fromto="-0.00000 -0.04800 -0.00000 0.00000 0.04800 0.00000" size="0.04350" material="mat_joint" mass="0" contype="0" conaffinity="0"/>
+            <geom name="j2_collar" type="cylinder" fromto="0 0 0.31300 0 0 0.33700" size="0.03660" material="mat_joint" mass="0" contype="0" conaffinity="0"/>
+            <body name="wrist" pos="0.00000 0.00000 0.32500">
+              <joint name="wrist_joint" type="hinge" axis="0.0000 1.0000 0.0000" range="-6.2800 6.2800"/>
+              <geom name="wrist_geom" type="capsule" fromto="0 0 0 0 0 0.05000" size="0.02500" mass="0.20000" material="mat_alu"/>
+              <geom name="wrist_motor" type="cylinder" fromto="-0.00000 -0.04000 -0.00000 0.00000 0.04000 0.00000" size="0.03625" material="mat_joint" mass="0" contype="0" conaffinity="0"/>
+              <site name="ee_site" pos="0 0 0.05000" size="0.01"/>
+              <site name="grasp_site" pos="0 0 0.08000" size="0.01"/>
+              <geom name="wrist_palm" type="box" pos="0 0 0.05000" size="0.02160 0.06200 0.01080" material="mat_joint" mass="0" contype="0" conaffinity="0"/>
+              <body name="finger_l" pos="0.00000 0.05000 0.05000">
+                <joint name="finger_l_joint" type="slide" axis="0.0000 -1.0000 0.0000" range="0.0000 0.0450"/>
+                <geom name="finger_l_geom" type="box" pos="0 0 0.03000" size="0.01200 0.01200 0.03000" mass="0.03000" material="mat_metal"/>
+              </body>
+
+              <body name="finger_r" pos="0.00000 -0.05000 0.05000">
+                <joint name="finger_r_joint" type="slide" axis="0.0000 1.0000 0.0000" range="0.0000 0.0450"/>
+                <geom name="finger_r_geom" type="box" pos="0 0 0.03000" size="0.01200 0.01200 0.03000" mass="0.03000" material="mat_metal"/>
+              </body>
+
+            </body>
+
+          </body>
+
+        </body>
+
+      </body>
+
+    </body>
+    <body name="obj_red_block" pos="0.5173 0.0228 0.051" euler="0 0 -1.265">
+      <freejoint name="free_red_block" />
+      <geom name="red_block" type="box" size="0.025 0.025 0.025" mass="0.058" friction="1.0 0.1 0.01" material="mat_red" />
+    </body>
+    <body name="obj_blue_block" pos="0.3208 -0.249 0.051" euler="0 0 -2.026">
+      <freejoint name="free_blue_block" />
+      <geom name="blue_block" type="box" size="0.025 0.025 0.025" mass="0.0456" friction="1.0 0.1 0.01" material="mat_blue" />
+    </body>
+    <geom name="red_bin" type="box" size="0.07 0.07 0.004" pos="0.2096 0.3354 0.029" material="mat_red" />
+    <geom name="red_bin_wall_px" type="box" size="0.006 0.07600000000000001 0.04" pos="0.2796 0.3354 0.065" material="mat_red" />
+    <geom name="red_bin_wall_nx" type="box" size="0.006 0.07600000000000001 0.04" pos="0.1396 0.3354 0.065" material="mat_red" />
+    <geom name="red_bin_wall_py" type="box" size="0.07600000000000001 0.006 0.04" pos="0.2096 0.4054 0.065" material="mat_red" />
+    <geom name="red_bin_wall_ny" type="box" size="0.07600000000000001 0.006 0.04" pos="0.2096 0.2654 0.065" material="mat_red" />
+    <geom name="blue_bin" type="box" size="0.07 0.07 0.004" pos="0.5065 -0.3262 0.029" material="mat_blue" />
+    <geom name="blue_bin_wall_px" type="box" size="0.006 0.07600000000000001 0.04" pos="0.5765 -0.3262 0.065" material="mat_blue" />
+    <geom name="blue_bin_wall_nx" type="box" size="0.006 0.07600000000000001 0.04" pos="0.4365 -0.3262 0.065" material="mat_blue" />
+    <geom name="blue_bin_wall_py" type="box" size="0.07600000000000001 0.006 0.04" pos="0.5065 -0.2562 0.065" material="mat_blue" />
+    <geom name="blue_bin_wall_ny" type="box" size="0.07600000000000001 0.006 0.04" pos="0.5065 -0.3962 0.065" material="mat_blue" />
+  </worldbody>
+  <actuator>
+    <motor name="shoulder_motor" joint="shoulder_joint" gear="1" forcerange="-16.80 16.80"/>
+    <motor name="j1_motor" joint="j1_joint" gear="1" forcerange="-15.10 15.10"/>
+    <motor name="j2_motor" joint="j2_joint" gear="1" forcerange="-12.60 12.60"/>
+    <motor name="wrist_motor" joint="wrist_joint" gear="1" forcerange="-10.10 10.10"/>
+    <motor name="finger_l_motor" joint="finger_l_joint" gear="1" forcerange="-8.00 8.00"/>
+    <motor name="finger_r_motor" joint="finger_r_joint" gear="1" forcerange="-8.00 8.00"/>
+  </actuator>
+</mujoco>

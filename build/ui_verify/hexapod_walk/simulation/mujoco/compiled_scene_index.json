@@ -1,0 +1,15 @@
+{
+  "id": "compiled_built_legged_26seg",
+  "robot_genome_id": "built_legged_26seg",
+  "backend": "mujoco",
+  "scene_count": 1,
+  "scenes": [
+    {
+      "scene_set_id": "sceneset_built_legged_26seg",
+      "scene_id": "locomotion_built_legged_26seg",
+      "purpose": "locomotion",
+      "mujoco_xml": "simulation/mujoco/scenes/locomotion/built_legged_26seg.xml",
+      "object_count": 0
+    }
+  ]
+}

@@ -1,0 +1,50 @@
+{
+  "id": "compiled_built_mobile_base_5seg",
+  "robot_genome_id": "built_mobile_base_5seg",
+  "backend": "mujoco",
+  "scene_count": 6,
+  "scenes": [
+    {
+      "scene_set_id": "sceneset_built_mobile_base_5seg",
+      "scene_id": "scene_task_req_build_a_mobile_base_that_delivers_parts_indoors_variation_000",
+      "purpose": "variation",
+      "mujoco_xml": "simulation/mujoco/scenes/variation/scene_task_req_build_a_mobile_base_that_delivers_parts_indoors_variation_000.xml",
+      "object_count": 9
+    },
+    {
+      "scene_set_id": "sceneset_built_mobile_base_5seg",
+      "scene_id": "scene_task_req_build_a_mobile_base_that_delivers_parts_indoors_variation_001",
+      "purpose": "variation",
+      "mujoco_xml": "simulation/mujoco/scenes/variation/scene_task_req_build_a_mobile_base_that_delivers_parts_indoors_variation_001.xml",
+      "object_count": 9
+    },
+    {
+      "scene_set_id": "sceneset_built_mobile_base_5seg",
+      "scene_id": "scene_task_req_build_a_mobile_base_that_delivers_parts_indoors_variation_002",
+      "purpose": "variation",
+      "mujoco_xml": "simulation/mujoco/scenes/variation/scene_task_req_build_a_mobile_base_that_delivers_parts_indoors_variation_002.xml",
+      "object_count": 9
+    },
+    {
+      "scene_set_id": "sceneset_built_mobile_base_5seg",
+      "scene_id": "scene_task_req_build_a_mobile_base_that_delivers_parts_indoors_variation_003",
+      "purpose": "variation",
+      "mujoco_xml": "simulation/mujoco/scenes/variation/scene_task_req_build_a_mobile_base_that_delivers_parts_indoors_variation_003.xml",
+      "object_count": 9
+    },
+    {
+      "scene_set_id": "sceneset_built_mobile_base_5seg",
+      "scene_id": "scene_task_req_build_a_mobile_base_that_delivers_parts_indoors_variation_004",
+      "purpose": "variation",
+      "mujoco_xml": "simulation/mujoco/scenes/variation/scene_task_req_build_a_mobile_base_that_delivers_parts_indoors_variation_004.xml",
+      "object_count": 9
+    },
+    {
+      "scene_set_id": "sceneset_built_mobile_base_5seg",
+      "scene_id": "scene_task_req_build_a_mobile_base_that_delivers_parts_indoors_variation_005",
+      "purpose": "variation",
+      "mujoco_xml": "simulation/mujoco/scenes/variation/scene_task_req_build_a_mobile_base_that_delivers_parts_indoors_variation_005.xml",
+      "object_count": 9
+    }
+  ]
+}

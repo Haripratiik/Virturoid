@@ -1,0 +1,224 @@
+---
+import spec from "../data/spec.json";
+import ledger from "../data/ledger.json";
+import training from "../data/training.json";
+import moat from "../data/moat.json";
+import robotGallery from "../../../assets/robot_gallery.png";
+
+const tiers = (ledger.stages.find((stage) => stage.tier_success)?.tier_success ?? {}) as Record<string, number>;
+const pct = (value: number | undefined) => `${Math.round((value ?? 0) * 100)}%`;
+const cadStage = ledger.stages.find((stage) => stage.stage === "real_cad_exported");
+---
+
+<main class="landing" id="top">
+  <section class="hero shell">
+    <div class="hero-copy">
+      <p class="eyebrow mono"><span></span> VIRTUROID / ROBOT DESIGN WORKSPACE</p>
+      <h1>Give it the job.<br /><em>Keep the proof.</em></h1>
+      <p class="lede">
+        Virturoid turns a plain-language task into a buildable robot design, tests it in physics, and keeps the evidence that makes the next decision better.
+      </p>
+      <div class="hero-actions">
+        <a class="button primary mono" href="#access">REQUEST EARLY ACCESS</a>
+        <a class="button secondary mono" href="/evidence">EXPLORE THE EVIDENCE</a>
+      </div>
+      <p class="source-note mono">REAL PRODUCT CAPTURES AND COMMITTED BUILD ARTIFACTS. LIMITS ARE SHOWN WITH RESULTS.</p>
+    </div>
+
+    <figure class="hero-capture reveal" aria-labelledby="hero-capture-caption">
+      <div class="capture-top mono"><span>VIRTUROID STUDIO</span><span class="valid">ARM_SORT / VALID</span></div>
+      <img src="shots/studio-hero.png" width="2200" height="1375" fetchpriority="high" alt="Virturoid Studio showing a generated tabletop robot design, its task scene, and an agent workspace." />
+      <figcaption id="hero-capture-caption" class="mono">
+        <span>REAL STUDIO CAPTURE</span>
+        <span>REQUEST → ROBOT → SCENE</span>
+      </figcaption>
+    </figure>
+  </section>
+
+  <section id="robots" class="robot-bridge shell reveal" aria-labelledby="robot-bridge-title">
+    <div class="bridge-copy">
+      <p class="kicker mono">THE OUTPUT IS A ROBOT, NOT A CHAT RESPONSE</p>
+      <h2 id="robot-bridge-title">A job can lead to<br /><em>more than one kind of body.</em></h2>
+      <p>
+        Virturoid is built to reason about morphology as part of the job. A manipulator is one possible answer; a mobile base, quadruped, or multi-legged robot may be another.
+      </p>
+      <div class="bridge-facts mono">
+        <span><b>06</b> robot families</span>
+        <span><b>01</b> shared reasoning loop</span>
+      </div>
+    </div>
+    <figure class="robot-gallery">
+      <div class="robot-gallery-head mono"><span>GENERATED BODY SPACE</span><span>REFERENCE OUTPUTS</span></div>
+      <img src={robotGallery.src} width={robotGallery.width} height={robotGallery.height} loading="lazy" alt="Six generated robot body types: manipulator, quadruped, hexapod, mobile base, humanoid, and octopod." />
+      <figcaption class="mono">REAL GENERATED ASSEMBLIES / MORPHOLOGY VARIANTS</figcaption>
+    </figure>
+  </section>
+
+  <section class="proof-strip shell" aria-label="Build facts from the reference run">
+    <div><span class="mono">INPUT</span><b>1 job</b><p>Plain language, not a class template.</p></div>
+    <div><span class="mono">OUTPUT</span><b>{spec.dof} DOF</b><p>Candidate body with parts and constraints.</p></div>
+    <div><span class="mono">EVALUATION</span><b>24 scenes</b><p>Compiled before the result is screened.</p></div>
+    <div><span class="mono">EXPORT</span><b>14 STEP</b><p>Real B-rep CAD files in the reference package.</p></div>
+  </section>
+
+  <section id="job" class="chapter shell job">
+    <div class="chapter-number mono">01 / REQUEST</div>
+    <div class="chapter-grid">
+      <div class="chapter-copy reveal">
+        <p class="kicker mono">START WITH THE WORK, NOT A ROBOT CATEGORY</p>
+        <h2>Describe what needs doing.<br /><em>Virturoid gives it structure.</em></h2>
+        <p>
+          The request becomes a robot genome, a task graph, a parts plan, and a first scene. The system can choose a body that suits the job instead of forcing every request into one predefined robot class.
+        </p>
+        <div class="brief mono">
+          <span class="brief-label">REQUEST</span>
+          <p>Sort red and blue blocks into matching bins on a table.</p>
+        </div>
+        <ul class="output-list mono">
+          <li><span>01</span> Robot genome with {spec.dof} actuated DOF</li>
+          <li><span>02</span> Parts and BOM connected to the body</li>
+          <li><span>03</span> Task graph and scene contract</li>
+        </ul>
+      </div>
+      <figure class="agent-capture reveal">
+        <img src="shots/studio-agent.png" width="1024" height="1400" loading="lazy" alt="Virturoid Studio agent panel asking what robot should be built and offering example jobs." />
+        <figcaption class="mono">REAL STUDIO CAPTURE / AGENT BRIEF</figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <section id="world" class="chapter shell world">
+    <div class="chapter-number mono">02 / TEST</div>
+    <div class="chapter-grid world-grid">
+      <div class="world-capture reveal">
+        <figure>
+          <img src="shots/studio-simulate.png" width="2200" height="1375" loading="lazy" alt="Virturoid Studio simulation workspace showing the reference arm and pick-and-place scene." />
+          <figcaption class="mono"><span>REAL STUDIO CAPTURE</span><span>SIMULATE / ARM_SORT</span></figcaption>
+        </figure>
+        <div class="capture-note mono">A physics scene is not a victory lap. It is where the design gets contradicted.</div>
+      </div>
+      <div class="chapter-copy reveal">
+        <p class="kicker mono">MAKE THE DESIGN EARN ITS WAY FORWARD</p>
+        <h2>Test the robot where<br /><em>it might fail.</em></h2>
+        <p>
+          Scenes vary. Candidate policies are measured. Failed attempts become the next useful starting point instead of discarded demo debris.
+        </p>
+        <div class="metrics mono">
+          <div><b>{training.candidates_per_iteration}</b><span>candidate policies<br />per iteration</span></div>
+          <div><b>{training.training_scene_count}</b><span>training scenes<br />per search round</span></div>
+          <div><b>{training.iterations}</b><span>measured<br />iterations</span></div>
+        </div>
+        <blockquote class="feedback mono">“{training.feedback[0]}”</blockquote>
+      </div>
+    </div>
+  </section>
+
+  <section id="proof" class="chapter shell proof">
+    <div class="chapter-number mono">03 / INSPECT</div>
+    <div class="chapter-grid">
+      <div class="chapter-copy reveal">
+        <p class="kicker mono">A CLAIM SHOULD COME WITH ITS RECEIPT</p>
+        <h2>Know what the run proved.<br /><em>And what it did not.</em></h2>
+        <p>
+          Virturoid connects results to compiled scenes, export records, and a readiness ledger. Evidence is useful only when its boundary is visible too.
+        </p>
+        <a class="text-link mono" href="/evidence">OPEN THE REFERENCE PACKAGE <span>→</span></a>
+      </div>
+      <div class="ledger reveal" aria-label="Reference build evidence ledger">
+        <div class="ledger-head mono"><span>REFERENCE BUILD / ARM_SORT</span><span class="status">SCREENED</span></div>
+        <div class="ledger-row"><span>Compiled scenes</span><b>24</b><i class="attained">Attained</i></div>
+        <div class="ledger-row"><span>Baseline success</span><b>{pct(tiers.baseline)}</b><i class="attained">Attained</i></div>
+        <div class="ledger-row"><span>Randomized success</span><b>{pct(tiers.randomized)}</b><i class="attained">Attained</i></div>
+        <div class="ledger-row"><span>Stress success</span><b>{pct(tiers.stress)}</b><i class="limited">Limited</i></div>
+        <div class="ledger-row"><span>CAD export</span><b>{cadStage?.detail?.match(/\d+\/\d+/)?.[0] ?? "14/14"} STEP</b><i class="attained">Attained</i></div>
+        <p class="ledger-note mono">{ledger.disclaimer}</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="memory" class="chapter shell memory">
+    <div class="chapter-number mono">04 / REUSE</div>
+    <div class="chapter-grid memory-grid">
+      <div class="archive reveal" aria-label="Archive growth over three completed cycles">
+        <div class="archive-head mono"><span>DESIGN MEMORY / SNAPSHOT</span><span>COMPOUNDING</span></div>
+        <div class="archive-track" aria-hidden="true">
+          {moat.flywheel.series.map((point, index) => (
+            <div class:list={["archive-point", { "warm": point.warm_start }]} style={`--x:${index}; --v:${point.banked};`}>
+              <span>{point.banked}</span>
+              <i></i>
+              <b class="mono">CYCLE {point.cycle}</b>
+            </div>
+          ))}
+        </div>
+        <div class="archive-legend mono"><span><i></i> fresh start</span><span><i></i> warm start</span></div>
+        <p class="archive-copy">{moat.flywheel.headline}</p>
+      </div>
+      <div class="chapter-copy reveal">
+        <p class="kicker mono">THE NEXT ROBOT SHOULD NOT BEGIN EMPTY</p>
+        <h2>Turn experience into<br /><em>a better first try.</em></h2>
+        <p>
+          Proven bodies, scene outcomes, reward signals, and failures become searchable design knowledge. The next run starts from the nearest useful lesson.
+        </p>
+        <div class="metrics mono compact">
+          <div><b class="count" data-count={moat.brain.archive_coverage}>0</b><span>design niches<br />illuminated</span></div>
+          <div><b class="count" data-count={moat.brain.provenance_edges}>0</b><span>warm-start<br />lineage edges</span></div>
+          <div><b class="count" data-count={Math.round(moat.brain.positive_fraction * 100)}>0</b><span>reuses improved<br />a design</span></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="access" class="access">
+    <div class="access-inner reveal">
+      <p class="eyebrow mono"><span></span> EARLY ACCESS</p>
+      <h2>Bring us the job<br /><em>you want to stop starting over.</em></h2>
+      <p>Virturoid is being built for teams who need robot design to be faster, grounded in physics, and able to show its work.</p>
+      <a class="button primary mono" href="mailto:hello@virturoid.dev?subject=Virturoid%20early%20access">REQUEST EARLY ACCESS</a>
+    </div>
+  </section>
+</main>
+
+<style>
+  .landing { overflow: clip; padding-top: 54px; }
+  .shell { width: min(1240px, calc(100% - var(--gutter) * 2)); margin-inline: auto; }
+  .hero { display: grid; grid-template-columns: minmax(0, 0.9fr) minmax(460px, 1.1fr); align-items: center; gap: clamp(38px, 7vw, 100px); min-height: min(780px, calc(100svh - 54px)); padding: 72px 0 80px; }
+  .hero-copy { max-width: 570px; }
+  .eyebrow { display: flex; align-items: center; gap: 10px; margin: 0; color: var(--agent); font-size: 10px; font-weight: 700; letter-spacing: 0.16em; }
+  .eyebrow span { width: 8px; height: 8px; background: var(--ember); box-shadow: 0 0 0 4px var(--ember-dim); }
+  h1, h2 { text-wrap: balance; }
+  h1 { margin: 19px 0 0; font-size: clamp(54px, 6vw, 84px); }
+  .lede { max-width: 545px; margin: 23px 0 0; color: var(--ink-2); font-size: clamp(17px, 1.45vw, 20px); line-height: 1.55; }
+  .hero-actions { display: flex; flex-wrap: wrap; gap: 11px; margin-top: 29px; }
+  .button { display: inline-flex; align-items: center; justify-content: center; min-height: 46px; padding: 0 18px; font-size: 10px; font-weight: 700; letter-spacing: 0.14em; transition: transform .18s ease, filter .18s ease, background .18s ease; }
+  .button:hover { transform: translateY(-2px); }.button:active { transform: translateY(0); }
+  .primary { background: var(--ember); color: var(--paper); }.primary:hover { filter: brightness(1.08); }
+  .secondary { border: 1px solid var(--rule-strong); background: var(--paper-2); color: var(--ink-1); }.secondary:hover { background: var(--paper-3); }
+  .source-note { max-width: 470px; margin: 21px 0 0; color: var(--ink-3); font-size: 9px; line-height: 1.65; letter-spacing: .08em; }
+  .hero-capture, .agent-capture, .world-capture figure { margin: 0; overflow: hidden; border: 1px solid var(--rule-strong); background: var(--paper-2); box-shadow: 24px 28px 0 oklch(0.71 0.1 250 / .05), 0 26px 72px oklch(0.03 0 0 / .24); }
+  .hero-capture { position: relative; }.hero-capture img, .agent-capture img, .world-capture img { display: block; width: 100%; height: auto; }
+  .capture-top, .hero-capture figcaption, .world-capture figcaption { display: flex; justify-content: space-between; gap: 12px; padding: 10px 13px; color: var(--ink-3); font-size: 8px; letter-spacing: .13em; }
+  .capture-top { border-bottom: 1px solid var(--rule); }.valid { color: var(--ok); }.hero-capture figcaption, .world-capture figcaption { border-top: 1px solid var(--rule); }
+  .proof-strip { display: grid; grid-template-columns: repeat(4, 1fr); border-block: 1px solid var(--rule-strong); }
+  .proof-strip div { min-height: 148px; padding: 22px 24px 20px; border-right: 1px solid var(--rule); }.proof-strip div:last-child { border: 0; }
+  .proof-strip span { color: var(--agent); font-size: 9px; letter-spacing: .13em; }.proof-strip b { display: block; margin-top: 15px; color: var(--ink-1); font-family: var(--display); font-size: 28px; letter-spacing: -.04em; }.proof-strip p { margin: 7px 0 0; color: var(--ink-3); font-size: 12px; line-height: 1.5; }
+  .robot-bridge { display: grid; grid-template-columns: minmax(0, .72fr) minmax(540px, 1.28fr); gap: clamp(32px, 7vw, 94px); align-items: center; margin-bottom: clamp(74px, 10vw, 128px); padding: clamp(30px, 4vw, 52px); border: 1px solid var(--rule-strong); background: linear-gradient(125deg, var(--paper-2), oklch(0.16 0.018 250 / .5)); }
+  .bridge-copy { max-width: 430px; }.bridge-copy .kicker { margin: 0; color: var(--agent); font-size: 9px; font-weight: 700; letter-spacing: .15em; }.bridge-copy h2 { margin: 15px 0 0; font-size: clamp(36px, 3.9vw, 56px); line-height: 1.04; }.bridge-copy > p:not(.kicker) { margin: 19px 0 0; color: var(--ink-2); font-size: 15px; line-height: 1.6; }.bridge-facts { display: flex; gap: 22px; margin-top: 25px; padding-top: 17px; border-top: 1px solid var(--rule-strong); color: var(--ink-3); font-size: 9px; letter-spacing: .08em; }.bridge-facts b { margin-right: 6px; color: var(--ember); font-family: var(--display); font-size: 18px; letter-spacing: -.03em; }
+  .robot-gallery { min-width: 0; margin: 0; overflow: hidden; border: 1px solid oklch(0.7 0.08 250 / .28); background: #12171d; box-shadow: 17px 19px 0 oklch(0.71 0.1 250 / .05); }.robot-gallery img { display: block; width: 100%; height: auto; }.robot-gallery-head, .robot-gallery figcaption { display: flex; justify-content: space-between; gap: 14px; padding: 10px 12px; color: var(--ink-3); font-size: 8px; letter-spacing: .12em; }.robot-gallery-head { border-bottom: 1px solid var(--rule); }.robot-gallery-head span:last-child { color: var(--ok); }.robot-gallery figcaption { border-top: 1px solid var(--rule); }
+  .chapter { position: relative; padding: clamp(100px, 13vw, 174px) 0; border-bottom: 1px solid var(--rule); }
+  .chapter-number { margin-bottom: 30px; color: var(--ember); font-size: 10px; font-weight: 700; letter-spacing: .16em; }
+  .chapter-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(360px, .84fr); align-items: center; gap: clamp(40px, 8vw, 120px); }
+  .chapter-copy { max-width: 600px; }.chapter-copy .kicker { margin: 0; color: var(--agent); font-size: 9px; font-weight: 700; letter-spacing: .15em; }.chapter h2 { margin: 16px 0 0; font-size: clamp(40px, 4.7vw, 66px); line-height: 1.02; }.chapter-copy > p:not(.kicker) { max-width: 540px; margin: 20px 0 0; color: var(--ink-2); font-size: 16px; line-height: 1.62; }
+  .brief { margin-top: 31px; border-left: 2px solid var(--ember); background: var(--paper-2); padding: 16px 18px; }.brief-label { color: var(--ember); font-size: 9px; font-weight: 700; letter-spacing: .13em; }.brief p { margin: 8px 0 0; color: var(--ink-1); font-size: 12px; line-height: 1.55; }
+  .output-list { display: grid; gap: 10px; margin: 18px 0 0; padding: 0; list-style: none; }.output-list li { display: flex; gap: 12px; color: var(--ink-2); font-size: 10px; line-height: 1.5; }.output-list span { color: var(--ember); font-weight: 700; }
+  .agent-capture { width: min(100%, 410px); justify-self: end; }.agent-capture figcaption { padding: 9px 11px; border-top: 1px solid var(--rule); color: var(--ink-3); font-size: 8px; letter-spacing: .12em; }
+  .world-grid { grid-template-columns: minmax(450px, 1.17fr) minmax(0, .83fr); }.world-capture { min-width: 0; }.capture-note { margin-top: 12px; padding-left: 13px; border-left: 1px solid var(--agent); color: var(--ink-3); font-size: 9px; line-height: 1.6; letter-spacing: .07em; }
+  .metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; margin-top: 27px; background: var(--rule-strong); }.metrics div { padding: 14px 12px; background: var(--paper-2); }.metrics b { display: block; color: var(--ember); font-family: var(--display); font-size: 28px; line-height: 1; letter-spacing: -.04em; }.metrics span { display: block; margin-top: 8px; color: var(--ink-3); font-size: 8.5px; line-height: 1.5; }.feedback { margin: 18px 0 0; padding: 14px 16px; border-left: 2px solid var(--agent); background: var(--agent-dim); color: var(--ink-2); font-size: 10.5px; line-height: 1.65; }
+  .text-link { display: inline-flex; gap: 9px; margin-top: 27px; padding-bottom: 5px; border-bottom: 1px solid currentColor; color: var(--ember); font-size: 10px; font-weight: 700; letter-spacing: .13em; }.text-link span { font-size: 15px; line-height: .65; }
+  .ledger { border: 1px solid var(--rule-strong); background: linear-gradient(145deg, var(--paper-2), var(--paper)); }.ledger-head { display: flex; justify-content: space-between; gap: 12px; padding: 14px 15px; border-bottom: 1px solid var(--rule-strong); color: var(--ink-3); font-size: 8.5px; letter-spacing: .11em; }.ledger-head .status { color: var(--ok); }.ledger-row { display: grid; grid-template-columns: 1fr auto auto; align-items: baseline; gap: 13px; padding: 14px 15px; border-bottom: 1px solid var(--rule); font-size: 12px; }.ledger-row > span { color: var(--ink-2); }.ledger-row b { color: var(--ink-1); font-family: var(--mono); font-size: 11px; }.ledger-row i { font-style: normal; font-family: var(--mono); font-size: 8px; letter-spacing: .08em; }.attained { color: var(--ok); }.limited { color: var(--warn); }.ledger-note { margin: 0; padding: 14px 15px 16px; color: var(--ink-3); font-size: 8px; line-height: 1.65; letter-spacing: .04em; }
+  .memory-grid { grid-template-columns: minmax(430px, 1fr) minmax(0, .85fr); }.archive { min-height: 340px; padding: 18px; border: 1px solid var(--rule-strong); background: linear-gradient(155deg, var(--paper-2), oklch(0.16 0.01 250 / .5)); }.archive-head { display: flex; justify-content: space-between; color: var(--ink-3); font-size: 8.5px; letter-spacing: .12em; }.archive-head span:last-child { color: var(--ok); }.archive-track { position: relative; display: grid; grid-template-columns: repeat(3, 1fr); align-items: end; height: 205px; margin-top: 15px; border-bottom: 1px solid var(--rule-strong); background: repeating-linear-gradient(0deg, transparent 0 49px, var(--rule) 50px); }.archive-track::before { content: ""; position: absolute; left: 16%; right: 16%; bottom: 50px; border-top: 1px dashed oklch(0.73 0.12 250 / .45); transform: rotate(-10deg); transform-origin: left center; }.archive-point { position: relative; z-index: 1; display: grid; justify-items: center; align-items: end; height: calc(var(--v) * 18px); }.archive-point span { display: grid; place-items: center; width: 42px; aspect-ratio: 1; border: 1px solid var(--ember); border-radius: 50%; background: var(--paper); color: var(--ink-1); font-family: var(--display); font-size: 17px; }.archive-point i { position: absolute; bottom: -1px; width: 1px; height: 100%; background: var(--ember); }.archive-point b { position: absolute; bottom: -23px; color: var(--ink-3); font-size: 8px; letter-spacing: .1em; white-space: nowrap; }.archive-point.warm span { border-color: var(--ok); color: var(--ok); }.archive-point.warm i { background: var(--ok); }.archive-legend { display: flex; gap: 18px; margin-top: 33px; color: var(--ink-3); font-size: 8px; letter-spacing: .08em; }.archive-legend i { display: inline-block; width: 6px; height: 6px; margin-right: 6px; background: var(--ember); }.archive-legend span:last-child i { background: var(--ok); }.archive-copy { margin: 17px 0 0; color: var(--ink-2); font-size: 12px; line-height: 1.55; }.compact { margin-top: 28px; }
+  .access { margin-top: 0; padding: 140px var(--gutter); border-bottom: 1px solid var(--rule); background: radial-gradient(circle at 50% 120%, var(--ember-dim), transparent 40%), var(--paper-2); text-align: center; }.access-inner { max-width: 680px; margin: 0 auto; }.access .eyebrow { justify-content: center; }.access h2 { margin: 18px 0 0; font-size: clamp(44px, 5.7vw, 76px); }.access p:not(.eyebrow) { max-width: 560px; margin: 22px auto 30px; color: var(--ink-2); font-size: 17px; line-height: 1.6; }
+  @media (max-width: 1020px) { .hero { grid-template-columns: minmax(0, .92fr) minmax(390px, 1.08fr); gap: 40px; }.robot-bridge { grid-template-columns: minmax(0, .8fr) minmax(420px, 1.2fr); gap: 34px; }.chapter-grid, .world-grid, .memory-grid { gap: 46px; }.agent-capture { width: 100%; }.proof-strip div { padding-inline: 15px; }.proof-strip b { font-size: 24px; } }
+  @media (max-width: 780px) { .hero, .robot-bridge, .chapter-grid, .world-grid, .memory-grid { grid-template-columns: 1fr; }.hero { min-height: auto; padding: 68px 0 78px; }.robot-bridge { margin-bottom: 78px; padding: 24px; }.robot-gallery { margin-top: 4px; }.hero-capture { max-width: 640px; }.proof-strip { grid-template-columns: repeat(2, 1fr); }.proof-strip div:nth-child(2) { border-right: 0; }.proof-strip div:nth-child(-n + 2) { border-bottom: 1px solid var(--rule); }.chapter { padding: 86px 0; }.chapter-number { margin-bottom: 25px; }.world-capture { order: 2; }.agent-capture { width: min(100%, 410px); justify-self: start; }.ledger { width: 100%; }.memory .archive { order: 2; }.archive { min-height: 310px; }.access { padding-block: 104px; } }
+  @media (max-width: 500px) { h1 { font-size: clamp(45px, 14vw, 64px); }.hero-actions { display: grid; grid-template-columns: 1fr; }.button { width: 100%; }.proof-strip { width: 100%; }.proof-strip div { min-height: 126px; padding: 16px 14px; }.proof-strip p { font-size: 11px; }.metrics { grid-template-columns: 1fr; }.ledger-row { grid-template-columns: 1fr auto; }.ledger-row i { grid-column: 1 / -1; }.chapter h2 { font-size: clamp(38px, 12vw, 54px); }.archive-track { height: 180px; }.archive { min-height: 292px; }.capture-top, .hero-capture figcaption, .world-capture figcaption { font-size: 7px; }.access { padding-inline: var(--gutter); } }
+  @media (prefers-reduced-motion: reduce) { .button { transition: none; } }
+</style>

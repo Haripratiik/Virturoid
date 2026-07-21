@@ -1,0 +1,19 @@
+{
+  "id": "replay_training_run_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_mujoco_revision_001",
+  "version": "0.1.0",
+  "training_run_config_id": "training_run_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_mujoco_revision_001",
+  "backend": "mujoco",
+  "adapter_name": "dry_run.synthetic_v0",
+  "dry_run_result_uri": "runs/mvp_training_revision/dry_run_result.json",
+  "episode_trace_uri": "runs/mvp_training_revision/logs/episode_trace.jsonl",
+  "episode_count": 3,
+  "scene_artifacts": [
+    "simulation/revision_scene_set.json"
+  ],
+  "compiled_scene_index_uri": "simulation/mujoco/compiled_scene_index.json",
+  "compiled_scene_xml_uris": [
+    "simulation/mujoco/scenes/revision/revision_regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_000.xml",
+    "simulation/mujoco/scenes/revision/revision_regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_001.xml",
+    "simulation/mujoco/scenes/revision/revision_regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_002.xml"
+  ]
+}

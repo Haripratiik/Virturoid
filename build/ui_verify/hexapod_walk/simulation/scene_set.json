@@ -1,0 +1,14 @@
+{
+  "id": "sceneset_built_legged_26seg",
+  "version": "0.1.0",
+  "task_graph_id": "task_built_legged_26seg",
+  "purpose": "locomotion",
+  "task_type": "locomotion",
+  "scenes": [
+    {
+      "id": "locomotion_built_legged_26seg",
+      "name": "locomotion (forward walk)",
+      "objects": []
+    }
+  ]
+}

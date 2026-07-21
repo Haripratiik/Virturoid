@@ -1,0 +1,111 @@
+{
+  "id": "objective_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo",
+  "version": "0.1.0",
+  "task_graph_id": "task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo",
+  "robot_genome_id": "robot_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo",
+  "objective_type": "scripted_rl_contract",
+  "success_gates": [
+    "red_block inside red_bin",
+    "blue_block inside blue_bin"
+  ],
+  "failure_gates": [
+    "any block outside workspace",
+    "episode_time > 60",
+    "robot collides with forbidden object"
+  ],
+  "reward_terms": [
+    {
+      "name": "reach_selected_object",
+      "expression": "negative distance from gripper to selected block",
+      "weight": 0.15,
+      "kind": "dense",
+      "source_criterion": null
+    },
+    {
+      "name": "grasp_selected_object",
+      "expression": "selected block retained by gripper",
+      "weight": 0.25,
+      "kind": "sparse",
+      "source_criterion": null
+    },
+    {
+      "name": "red_sorted",
+      "expression": "red_block inside red_bin",
+      "weight": 0.75,
+      "kind": "sparse",
+      "source_criterion": "red_sorted"
+    },
+    {
+      "name": "blue_sorted",
+      "expression": "blue_block inside blue_bin",
+      "weight": 0.75,
+      "kind": "sparse",
+      "source_criterion": "blue_sorted"
+    },
+    {
+      "name": "all_sorted_bonus",
+      "expression": "red_block inside red_bin and blue_block inside blue_bin",
+      "weight": 1.0,
+      "kind": "sparse",
+      "source_criterion": null
+    },
+    {
+      "name": "collision_penalty",
+      "expression": "robot collides with forbidden object",
+      "weight": -1.0,
+      "kind": "sparse",
+      "source_criterion": "collision"
+    },
+    {
+      "name": "drop_penalty",
+      "expression": "any block outside workspace",
+      "weight": -0.8,
+      "kind": "sparse",
+      "source_criterion": "dropped_object"
+    },
+    {
+      "name": "timeout_penalty",
+      "expression": "episode_time > 60",
+      "weight": -0.5,
+      "kind": "sparse",
+      "source_criterion": "timeout"
+    }
+  ],
+  "termination_rules": [
+    {
+      "name": "success_red_sorted",
+      "expression": "red_block inside red_bin",
+      "terminal_status": "success"
+    },
+    {
+      "name": "success_blue_sorted",
+      "expression": "blue_block inside blue_bin",
+      "terminal_status": "success"
+    },
+    {
+      "name": "failure_dropped_object",
+      "expression": "any block outside workspace",
+      "terminal_status": "failure"
+    },
+    {
+      "name": "failure_timeout",
+      "expression": "episode_time > 60",
+      "terminal_status": "failure"
+    },
+    {
+      "name": "failure_collision",
+      "expression": "robot collides with forbidden object",
+      "terminal_status": "failure"
+    }
+  ],
+  "metrics": [
+    "success_rate",
+    "collision_count",
+    "timeout_rate",
+    "drop_rate"
+  ],
+  "notes": [
+    "MVP objective translates task criteria into simulator-consumable reward and termination terms.",
+    "A learned controller can use this contract for rollouts once a real simulator backend is connected."
+  ]
+}

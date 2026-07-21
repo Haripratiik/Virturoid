@@ -1,0 +1,148 @@
+{
+  "id": "genome_built_legged_26seg",
+  "name": "legged6.composed",
+  "species": "legged6.composed",
+  "robot_class": "legged",
+  "links": [
+    "torso",
+    "head_0",
+    "leg0_0",
+    "leg0_1",
+    "leg0_2",
+    "leg0_3",
+    "leg1_0",
+    "leg1_1",
+    "leg1_2",
+    "leg1_3",
+    "leg2_0",
+    "leg2_1",
+    "leg2_2",
+    "leg2_3",
+    "leg3_0",
+    "leg3_1",
+    "leg3_2",
+    "leg3_3",
+    "leg4_0",
+    "leg4_1",
+    "leg4_2",
+    "leg4_3",
+    "leg5_0",
+    "leg5_1",
+    "leg5_2",
+    "leg5_3"
+  ],
+  "joints": [
+    {
+      "name": "leg0_0_joint",
+      "joint_type": "revolute",
+      "parent_link": "torso",
+      "child_link": "leg0_0"
+    },
+    {
+      "name": "leg0_1_joint",
+      "joint_type": "revolute",
+      "parent_link": "leg0_0",
+      "child_link": "leg0_1"
+    },
+    {
+      "name": "leg0_2_joint",
+      "joint_type": "revolute",
+      "parent_link": "leg0_1",
+      "child_link": "leg0_2"
+    },
+    {
+      "name": "leg1_0_joint",
+      "joint_type": "revolute",
+      "parent_link": "torso",
+      "child_link": "leg1_0"
+    },
+    {
+      "name": "leg1_1_joint",
+      "joint_type": "revolute",
+      "parent_link": "leg1_0",
+      "child_link": "leg1_1"
+    },
+    {
+      "name": "leg1_2_joint",
+      "joint_type": "revolute",
+      "parent_link": "leg1_1",
+      "child_link": "leg1_2"
+    },
+    {
+      "name": "leg2_0_joint",
+      "joint_type": "revolute",
+      "parent_link": "torso",
+      "child_link": "leg2_0"
+    },
+    {
+      "name": "leg2_1_joint",
+      "joint_type": "revolute",
+      "parent_link": "leg2_0",
+      "child_link": "leg2_1"
+    },
+    {
+      "name": "leg2_2_joint",
+      "joint_type": "revolute",
+      "parent_link": "leg2_1",
+      "child_link": "leg2_2"
+    },
+    {
+      "name": "leg3_0_joint",
+      "joint_type": "revolute",
+      "parent_link": "torso",
+      "child_link": "leg3_0"
+    },
+    {
+      "name": "leg3_1_joint",
+      "joint_type": "revolute",
+      "parent_link": "leg3_0",
+      "child_link": "leg3_1"
+    },
+    {
+      "name": "leg3_2_joint",
+      "joint_type": "revolute",
+      "parent_link": "leg3_1",
+      "child_link": "leg3_2"
+    },
+    {
+      "name": "leg4_0_joint",
+      "joint_type": "revolute",
+      "parent_link": "torso",
+      "child_link": "leg4_0"
+    },
+    {
+      "name": "leg4_1_joint",
+      "joint_type": "revolute",
+      "parent_link": "leg4_0",
+      "child_link": "leg4_1"
+    },
+    {
+      "name": "leg4_2_joint",
+      "joint_type": "revolute",
+      "parent_link": "leg4_1",
+      "child_link": "leg4_2"
+    },
+    {
+      "name": "leg5_0_joint",
+      "joint_type": "revolute",
+      "parent_link": "torso",
+      "child_link": "leg5_0"
+    },
+    {
+      "name": "leg5_1_joint",
+      "joint_type": "revolute",
+      "parent_link": "leg5_0",
+      "child_link": "leg5_1"
+    },
+    {
+      "name": "leg5_2_joint",
+      "joint_type": "revolute",
+      "parent_link": "leg5_1",
+      "child_link": "leg5_2"
+    }
+  ],
+  "end_effectors": [
+    "leg5_3"
+  ],
+  "source": "gene_compiler"
+}

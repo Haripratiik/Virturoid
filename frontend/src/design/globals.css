@@ -1,0 +1,173 @@
+@import "./tokens.css";
+
+html,
+body,
+#root {
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  background: var(--color-app);
+  color: var(--color-primary);
+  font-family: var(--font-sans);
+  font-size: var(--text-sm);
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+  font-variant-numeric: tabular-nums;
+}
+
+*::selection {
+  background: var(--color-accent-dim);
+}
+
+/* Scrollbars tuned for a dense pro tool */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: oklch(0.38 0.003 260) transparent;
+}
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-thumb {
+  background: oklch(0.38 0.003 260);
+  border-radius: 4px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* Keyboard focus: 2px accent ring, only for keyboard users */
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+  border-radius: var(--radius-ctl);
+}
+
+/* Native <select> popups inherit OS white — force them onto our surfaces. */
+select {
+  color-scheme: dark;
+}
+select option,
+select optgroup {
+  background-color: var(--color-raised);
+  color: var(--color-primary);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* Streaming shimmer for incoming agent text */
+@keyframes vs-shimmer {
+  0% {
+    opacity: 0.55;
+  }
+  50% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0.55;
+  }
+}
+.vs-streaming {
+  animation: vs-shimmer 1.4s ease-in-out infinite;
+}
+
+/* Active job phase pulse */
+@keyframes vs-pulse {
+  0% {
+    box-shadow: 0 0 0 0 var(--color-agent-dim);
+  }
+  70% {
+    box-shadow: 0 0 0 6px transparent;
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+.vs-phase-active {
+  animation: vs-pulse 1.6s ease-out infinite;
+}
+
+/* Resizable panel handles */
+[data-panel-resize-handle-id] {
+  background: transparent;
+  transition: background 140ms ease-out;
+}
+[data-panel-resize-handle-id]:hover,
+[data-panel-resize-handle-id][data-resize-handle-active] {
+  background: var(--color-accent-dim);
+}
+
+/* Range input (episode scrubber / joint sliders) */
+input[type="range"].vs-scrub {
+  appearance: none;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--color-raised);
+  cursor: pointer;
+}
+input[type="range"].vs-scrub::-webkit-slider-thumb {
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--color-accent);
+  border: none;
+}
+
+/* ---- Texture language ---- */
+
+/* Display voice for brand, station names, hero numerals */
+.vs-display {
+  font-family: var(--font-display);
+}
+
+/* Dot-matrix field for canvas-level regions (subtle, non-glowing) */
+.vs-dotfield {
+  background-image: radial-gradient(oklch(0.34 0.003 260 / 35%) 1px, transparent 1px);
+  background-size: 22px 22px;
+}
+
+/* Drafting brackets: two hairline corner ticks that mark an instrument region */
+.vs-brackets {
+  position: relative;
+}
+.vs-brackets::before,
+.vs-brackets::after {
+  content: "";
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  pointer-events: none;
+  opacity: 0.65;
+}
+.vs-brackets::before {
+  top: 6px;
+  left: 6px;
+  border-top: 1px solid var(--color-hairline-strong);
+  border-left: 1px solid var(--color-hairline-strong);
+}
+.vs-brackets::after {
+  bottom: 6px;
+  right: 6px;
+  border-bottom: 1px solid var(--color-hairline-strong);
+  border-right: 1px solid var(--color-hairline-strong);
+}
+
+/* Station index micro-label (e.g. DES·01) */
+.vs-index {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
