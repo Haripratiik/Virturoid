@@ -94,8 +94,10 @@ def _render_gene(gene, tag: str, *, azimuth: float = 50.0, elevation: float = -1
 # quadcopters (aerial.py, _honest_fly) — both real tiers now. These lists are the fall-through guard: if a
 # swim/fly prompt somehow reaches a LAND verdict, _flag_physics_envelope flags it as a land proxy rather than
 # letting it masquerade as the real capability.
-_AQUATIC_WORDS = ("swim", "swimming", "aquatic", "underwater", "submarine", "eel", "fish", "shark", "whale",
-                  "dolphin", "manatee", "narwhal", "seahorse", "jellyfish", "octopus", "squid", "stingray")
+# canonical aquatic vocabulary lives in aquatic.py — importing it (rather than keeping a second copy) is what
+# stops the two lists drifting apart: they HAD drifted (this one knew octopus/squid, the routing one knew
+# manta/salmon/koi), so an octopus prompt was judged by a land-walk verdict it could never pass.
+from virturoid.services.aquatic import AQUATIC_ENV_WORDS as _AQUATIC_WORDS  # noqa: E402
 _AERIAL_WORDS = ("fly", "flying", "aerial", "drone", "quadcopter", "helicopter", "hover", "aircraft", "winged")
 
 
@@ -117,10 +119,16 @@ def _flag_physics_envelope(res: dict, prompt: str, kind: str) -> None:
     if env and kind in ("legged", "mobile"):
         res["physics_envelope"] = env
         res["credible_walk"] = False
+        # Reaching here means the body was NOT simulated in its own medium (that case returned at the top), so
+        # BOTH notes must say "land-based proxy". The aquatic note used to claim "it was simulated in water (see
+        # swim_m)" — false on this branch, and newly reachable now that radial cephalopods are correctly
+        # recognised as aquatic while keeping their (non-undulator) morphology.
         res["envelope_note"] = (
             "this prompt implies an AERIAL body; Virturoid flies quadcopters (build a drone and verify it), but "
             "this body was composed as a terrestrial one, so the verdict above is a LAND-BASED PROXY." if env == "aerial"
-            else "this prompt implies an aquatic body; it was simulated in water (see swim_m).")
+            else "this prompt implies an AQUATIC body, but it was composed as a non-undulator (e.g. a radial "
+                 "cephalopod) and evaluated on land, so the verdict above is a LAND-BASED PROXY, not a swim "
+                 "result. Virturoid swims serial-spine undulators (build a fish/eel and verify it).")
 
 
 def _swim_model(gene):

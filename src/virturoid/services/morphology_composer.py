@@ -657,8 +657,11 @@ def compose_robot(prompt: str, *, llm="auto", reach_m: float | None = None,
         # An aquatic prompt (fish/eel/shark/...) is an UNDULATOR, not a legged/quad body. Compose a serial spine
         # (a snake) if the built body branches into legs, then laterally-compress it into a fish cross-section so
         # it generates REAL undulatory thrust (measured 0.06 m round -> 0.25 m flat: DOES NOT SWIM -> SWIMS).
-        from virturoid.services.aquatic import _is_serial_spine, ensure_aquatic_body, is_aquatic_prompt
-        if not strict_llm and is_aquatic_prompt(prompt):
+        # is_UNDULATOR_prompt, not is_aquatic_prompt: the snake-substitution below DISCARDS the composed body, so
+        # it must fire only for species that genuinely ARE serial undulators. A cephalopod is aquatic but radial —
+        # it keeps its authored mantle + tentacles and is handled by the environment/verdict tier instead.
+        from virturoid.services.aquatic import _is_serial_spine, ensure_aquatic_body, is_undulator_prompt
+        if not strict_llm and is_undulator_prompt(prompt):
             if not _is_serial_spine(gene):
                 gene = _compose_robot_impl("a snake robot", llm=None)
             ensure_aquatic_body(gene)
