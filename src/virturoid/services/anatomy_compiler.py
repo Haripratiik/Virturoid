@@ -856,55 +856,6 @@ def generic_creature_gene(prompt: str, robot_class: str | None = None, n_legs: i
     return None
 
 
-_CANON_WALK_DIMS = {"leg": 0.42, "body": 0.58, "girth": 0.18}   # the gait-tuned Go1-class fanned quad
-
-
-def _walkable_dim_candidates(gene) -> list[dict]:
-    """Dimension sets to try for the fanned walkable rebuild, BEST-FIDELITY FIRST.
-
-    1. the gene's OWN measured leg/body/girth — keeps the designed animal intact when it can walk fanned;
-    2. the canonical gait-tuned RATIOS re-scaled to this gene's SIZE — when the authored proportions simply
-       cannot walk, we still honour how BIG the user asked for, only normalising the shape;
-    3. the canonical body itself — the historical behaviour, so nothing we cannot measure gets worse.
-
-    Why both 1 and 2: hardcoding (3) alone was a measured differentiation bug (every non-walking quadruped
-    prompt collapsed to ONE body), but preserving (1) alone regressed walking (a dog fell to FORWARD-BUT-SHORT)
-    because unwalkable proportions were faithfully preserved. The caller evaluates each and adopts the best,
-    so fidelity is kept exactly as far as it survives physics.
-    """
-    try:
-        segs = list(getattr(gene, "segments", None) or [])
-        if not segs:
-            return [dict(_CANON_WALK_DIMS)]
-        own = dict(_CANON_WALK_DIMS)
-        torso = next((s for s in segs if s.parent is None), None)
-        legs: dict[str, float] = {}
-        for s in segs:                                        # sum each leg CHAIN (thigh+calf+foot), then average
-            nm = (s.name or "").lower()
-            if "leg" in nm and (m := re.search(r"((?:(?:front|hind)_)?leg\d*_?[lr]?)", nm)):
-                legs[m.group(1)] = legs.get(m.group(1), 0.0) + float(s.length_m or 0.0)
-        if legs:
-            own["leg"] = max(0.12, min(1.20, sum(legs.values()) / len(legs)))
-        if torso is not None:
-            if torso.length_m:
-                own["body"] = max(0.20, min(1.60, float(torso.length_m)))
-            if torso.radius_m:                                # girth is a diameter-like thickness in the graph
-                own["girth"] = max(0.08, min(0.40, float(torso.radius_m) * 2.0))
-        # SIZE signal = how big this body is vs the canonical one, taken from the leg (the gait-determining lever)
-        scale = max(0.45, min(2.2, own["leg"] / _CANON_WALK_DIMS["leg"]))
-        scaled = {k: round(v * scale, 4) for k, v in _CANON_WALK_DIMS.items()}
-        out = [own, scaled, dict(_CANON_WALK_DIMS)]
-        seen, uniq = set(), []
-        for d in out:                                          # drop duplicates so we never pay for the same sim twice
-            key = tuple(round(d[k], 4) for k in ("leg", "body", "girth"))
-            if key not in seen:
-                seen.add(key)
-                uniq.append(d)
-        return uniq
-    except Exception:  # noqa: BLE001 - measurement is best-effort; the constants are a valid body
-        return [dict(_CANON_WALK_DIMS)]
-
-
 def ensure_walkable_quad(gene, prompt: str = "", *, force: bool = False):
     """DIAGNOSIS-DRIVEN, per-request walkability fallback for a QUADRUPED — a HINT the build reaches for, never a
     gait/body forced on every dog. If the body already walks under SOME gait (``evaluate_robot`` is gait-aware:
@@ -943,26 +894,21 @@ def ensure_walkable_quad(gene, prompt: str = "", *, force: bool = False):
                                  "hint": "widen the stance (fan the legs out) + use the crawl gait"}
             gene.metadata = md
             return gene
-        # Rebuild the walkable candidate AT THIS BODY'S OWN SIZE. What actually fixes a rolling quad is the FANNED
-        # stance (see _generic_legged_graph); the leg/torso/girth dimensions are not the problem, so there is no
-        # reason to discard them. Hardcoding them here was a measured differentiation bug: every quadruped prompt
-        # whose first body didn't walk was replaced by ONE canonical body, so "a large quadruped robot", "a small
-        # lightweight quadruped" and "a heavy-duty quadruped" all composed byte-identically (total link length
-        # 2.241 m each) -- the clearest "it's a template, not a generator" tell in the product. The adopt-only-if
-        # -materially-better comparison below is unchanged, so a size-preserving candidate that CAN'T walk is
-        # still rejected in favour of the original plus an honest walkability hint.
-        cand, cval = None, -1.0
-        for _dims in _walkable_dim_candidates(gene):
-            _c = build_from_anatomy(_generic_legged_graph(n_pairs=2, fan=True, **_dims))
-            if _c is None:
-                continue
-            _v = float(evaluate_robot(_c).get("value", 0.0))
-            if _v > cval:
-                cand, cval = _c, _v
-            if cval > max(base, 0.4):     # best-fidelity-first: the first set that clearly walks wins, no more sims
-                break
+        # The fanned wide-stance rebuild uses the gait-tuned CANONICAL dimensions.
+        #
+        # Rebuilding at the input body's own size was built and REVERTED 2026-07-21. It is the right instinct
+        # (this rebuild is why differently-sized quadruped prompts could collapse onto one body) but it does not
+        # work yet, for a physics reason rather than a code one: the crawl gait is tuned for THIS scale, so
+        # off-scale bodies measurably walk worse and the adopt-only-if-better comparison collapsed back to the
+        # canonical body anyway -- while an imported URDF, whose link names the measurement could not parse,
+        # mis-read as legs six times its torso and built a 4.76 m body that CROUCHed. Per-size gait tuning is
+        # the real prerequisite. Prompt-level differentiation (size words + animal proportions) is unaffected
+        # and still applies; only bodies that CANNOT walk are normalised here, and that is recorded in
+        # metadata.walkability_fallback rather than hidden. See docs/mvp_readiness_report.md.
+        cand = build_from_anatomy(_generic_legged_graph(n_pairs=2, fan=True, girth=0.18))
         if cand is None:
             return gene
+        cval = float(evaluate_robot(cand).get("value", 0.0))
         if cval > max(base, 0.4):                            # the fanned hint walks materially better -> adopt it
             md = dict(getattr(cand, "metadata", None) or {})
             md["walkability_fallback"] = {"applied": True, "from_distance_m": round(base, 3),

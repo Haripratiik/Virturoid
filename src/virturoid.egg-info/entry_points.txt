@@ -1,0 +1,9 @@
+[console_scripts]
+virturoid = virturoid.build:main
+virturoid-autobuild = virturoid.autobuild:main
+virturoid-build = virturoid.build:main
+virturoid-compose = virturoid.compose:main
+virturoid-desktop = virturoid.desktop:main
+virturoid-import = virturoid.import_robot:main
+virturoid-mvp = virturoid.mvp:main
+virturoid-studio = virturoid.desktop:main

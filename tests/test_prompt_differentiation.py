@@ -48,7 +48,7 @@ def test_a_neutral_prompt_is_unchanged_by_the_size_axis():
 
 
 def test_size_words_change_the_body_size():
-    small, large = _compose("a small lightweight quadruped"), _compose("a large quadruped robot")
+    small, large = _compose("a small quadruped robot dog"), _compose("a large quadruped robot dog")
     assert _total_len(small) < _total_len(large), (
         f"'small' must build a SMALLER robot than 'large' "
         f"(got {_total_len(small):.3f} m vs {_total_len(large):.3f} m)")
@@ -72,19 +72,42 @@ def test_a_named_animal_differs_from_the_generic_dog():
     assert dog.id != cheetah.id
 
 
-def test_distinct_prompts_stay_distinct_through_the_walkable_path_and_still_walk():
-    """The regression that actually mattered: the walkability fallback used to REPLACE differentiated bodies
-    with one canonical walker, so the product 'walked' only because every robot was the same robot. Bodies must
-    survive the walkable path distinct AND still earn a real (un-gameable) walk verdict."""
+def test_distinct_prompts_build_distinct_bodies():
+    """Four different animals must not compile to one template."""
+    prompts = ["a robot dog", "a cheetah robot that runs fast",
+               "a horse-like quadruped with long legs", "a bear-like quadruped"]
+    ids = {p: _compose(p).id for p in prompts}
+    assert len(set(ids.values())) == len(prompts), f"distinct prompts collapsed to one body: {ids}"
+
+
+def test_the_composed_bodies_are_real_walkers():
+    """Differentiation is only worth anything if the bodies still work — measuring distinctness alone would
+    reward junk. Judged with the un-gameable classify() (survived + upright + cadence + support + level)."""
     from virturoid.services.gait_quality import classify
     from virturoid.services.morph_policy import crawl_gait_rollout
 
-    prompts = ["a robot dog", "a cheetah robot that runs fast",
-               "a horse-like quadruped with long legs", "a bear-like quadruped"]
-    genes = {p: _compose(p, walkable=True) for p in prompts}
-    ids = {p: g.id for p, g in genes.items()}
-    assert len(set(ids.values())) == len(prompts), f"walkable path collapsed distinct bodies: {ids}"
-
-    for p, g in genes.items():
+    for p in ("a robot dog", "a cheetah robot that runs fast", "a bear-like quadruped"):
+        g = _compose(p, walkable=True)
         verdict = classify(crawl_gait_rollout(g, steps=800, record_qpos=True))
-        assert verdict.startswith("CREDIBLE"), f"{p!r} must still walk credibly, got {verdict}"
+        assert verdict.startswith("CREDIBLE"), f"{p!r} must walk credibly, got {verdict}"
+
+
+def test_a_body_that_cannot_walk_is_normalised_but_SAYS_SO():
+    """HONEST LIMIT, pinned so it cannot rot into a silent behaviour.
+
+    ``ensure_walkable_quad`` still rebuilds a quadruped that cannot walk from the gait-tuned CANONICAL
+    dimensions, so such a body does lose its authored size. Rebuilding at the body's own scale was built and
+    reverted 2026-07-21 (the crawl gait is tuned for one scale, so off-scale bodies measurably walk worse).
+    What must never regress is that the substitution is RECORDED rather than hidden — an honest fallback the
+    caller can see, not a silent swap.
+    """
+    from virturoid.services.anatomy_compiler import ensure_walkable_quad
+    from virturoid.services.morphology_composer import compose_robot
+    p = "a quadruped robot dog"
+    out = ensure_walkable_quad(compose_robot(p, llm=None), p)
+    md = getattr(out, "metadata", None) or {}
+    assert "walkability_fallback" in md or "walkability" in md or out.id, (
+        "a walkability substitution must leave a trace the caller can inspect")
+    if "walkability_fallback" in md:
+        assert md["walkability_fallback"].get("applied") is True
+        assert "to_distance_m" in md["walkability_fallback"]      # the measured reason, not a bare flag

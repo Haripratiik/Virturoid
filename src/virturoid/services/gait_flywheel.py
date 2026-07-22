@@ -271,19 +271,37 @@ def learn_gait_flywheel(gene, db, *, generations: int = 10, pop: int = 20, steps
         prior_deploy = evaluate_gait(gene, prior, steps=deploy_steps)
         prior_deploy_forward = float(prior_deploy["forward"])
         compounding_delta = round(float(learned["forward"]) - prior_deploy_forward, 4)
-        if skill_id is not None:
-            try:
-                if vm is None:
-                    from virturoid.services.robotics_vector_memory import RoboticsVectorMemory
-                    vm = RoboticsVectorMemory(db)
+        # Record the edge for EVERY measured reuse, not only the ones that won.
+        #
+        # This used to be gated on `skill_id is not None` — i.e. only when the warm-started run beat the
+        # default well enough to bank a NEW skill. A reuse that measured worse recorded nothing, so the
+        # ledger could only ever contain wins and `compounding_summary()['positive_fraction']` was
+        # vacuously 1.0: compounding was UNFALSIFIABLE by construction. Measured 2026-07-21 on a quad whose
+        # second (warm-started) run came in at delta -0.3 — a real, like-for-like measurement that the ledger
+        # silently discarded.
+        #
+        # When a new skill banked, the edge is skill->skill as before. When nothing banked, the thing that was
+        # seeded is the BUILD, so the child is the gene: "this body's gait run warm-started from skill X and
+        # measured delta d". Either way the delta is real and the sign is preserved.
+        try:
+            if vm is None:
+                from virturoid.services.robotics_vector_memory import RoboticsVectorMemory
+                vm = RoboticsVectorMemory(db)
+            _meta = {"horizon_steps": deploy_steps,
+                     "prior_search_transfer_forward": res.prior_transfer_forward,
+                     "prior_deploy_forward": prior_deploy_forward,
+                     "deploy_forward": learned["forward"]}
+            if skill_id is not None:
                 vm.record_provenance("skill", skill_id, parent_type="skill", parent_id=prior_skill_id,
-                                     kind="gait_warm_start", delta=compounding_delta,
-                                     meta={"horizon_steps": deploy_steps,
-                                           "prior_search_transfer_forward": res.prior_transfer_forward,
-                                           "prior_deploy_forward": prior_deploy_forward,
-                                           "deploy_forward": learned["forward"]})
-            except Exception:  # noqa: BLE001 - provenance is best-effort; never fail the learn
-                pass
+                                     kind="gait_warm_start", delta=compounding_delta, meta=_meta)
+            else:
+                vm.record_provenance("gene", getattr(gene, "id", "") or "gene",
+                                     parent_type="skill", parent_id=prior_skill_id,
+                                     kind="gait_warm_start_no_bank", delta=compounding_delta,
+                                     meta={**_meta, "banked": False,
+                                           "why": "warm start did not beat the shipped default"})
+        except Exception:  # noqa: BLE001 - provenance is best-effort; never fail the learn
+            pass
 
     return {
         "forward_m": round(learned["forward"], 4),           # the DEPLOY-horizon distance (honest)
