@@ -59,7 +59,18 @@ def segments_for_group(gene, group: str) -> list:
     words = _GROUP_WORDS.get(group)
     if words is None:
         raise EditError(f"unknown group '{group}'; valid groups: {sorted(_GROUP_WORDS) + ['all']}")
-    return [s for s in gene.segments if any(w in (s.name or "").lower() for w in words)]
+    hits = [s for s in gene.segments if any(w in (s.name or "").lower() for w in words)]
+    if group == "arms" and (gene.robot_class or "").lower() == "manipulator":
+        # MEASURED live 2026-07-22: the composed manipulator names its REAL links j1/j2 (0.325 m each), so the
+        # word list matched only the 0.05 m shoulder/wrist stubs — "make the arm longer" scaled two joints,
+        # moved reach 0.87 -> 0.90 m for a 1.3x request, and the barely-changed geometry verdicted STUCK. On a
+        # MANIPULATOR the arm IS the actuated chain: everything except the welded base and the gripper fingers.
+        import re as _re
+        chain = [s for s in gene.segments
+                 if _re.fullmatch(r"(?:j|joint|link|seg)[\s_]?\d+", (s.name or "").lower())]
+        merged = {id(s): s for s in hits + chain}
+        return list(merged.values())
+    return hits
 
 
 def _standing_height(gene) -> float:
