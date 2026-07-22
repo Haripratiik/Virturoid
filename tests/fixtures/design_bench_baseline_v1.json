@@ -1,10 +1,10 @@
 {
-  "note": "Design-Bench v1 baseline (offline heuristic cassette). The regression gate asserts current >= these minus tolerance. Re-record via scripts/design_bench.py --record when the battery/composer changes.",
+  "note": "Design-Bench v1 baseline (offline heuristic cassette). Re-recorded 2026-07-22 from 0.65: the novel family (starfish/inchworm) dropped 1.0 -> 0.25 because the 2026-07 ANATOMICAL joint ranges replaced the +-3.14 catch-all \u2014 the old credible verdicts rode on hyperextension the honest ranges forbid. The gate is now HERMETIC (gait-hint recall disabled during the bench), so this number no longer floats with session DB state. Re-record via scripts/design_bench.py --record when the battery/composer changes.",
   "battery_version": "v1",
   "model": "offline_heuristic_v1",
   "schema_valid@1": 1.0,
   "compile@1": 1.0,
-  "verdict@1": 0.65,
+  "verdict@1": 0.5,
   "diversity_unique_ratio": 0.5,
   "spec_faithfulness": 0.5,
   "by_family": {
@@ -12,6 +12,6 @@
     "vehicle": 1.0,
     "arm": 0.75,
     "hybrid": 1.0,
-    "novel": 1.0
+    "novel": 0.25
   }
 }

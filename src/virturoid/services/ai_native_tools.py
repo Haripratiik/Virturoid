@@ -523,8 +523,16 @@ def _honest_gait(gene, *, steps: int = 1200, render: bool = False, tag: str = "g
         # slightly-different body), start from the mined HINT REGION — where credible walks CLUSTER across bodies,
         # auto-derived from data (gait_hints). A quick verify uses this data-driven prior; the ``adapt_gait`` tool
         # runs the full per-body fit from the same hints. The deploy-select below still guards it vs the default.
+        #
+        # VIRTUROID_DISABLE_GAIT_HINTS=1 skips the recall entirely. Design-Bench sets it so the REGRESSION GATE
+        # is hermetic: measured 2026-07-22, verdict@1 read 0.50 on an empty DB and 0.55 on a banked one — the
+        # gate number floated with whatever the session had banked, which made CI flicker at the floor. The
+        # PRODUCT keeps hints on; the BENCH measures the composer+compiler alone, deterministically.
+        import os as _os
         from virturoid.services.gait_hints import mine_gait_hints
         from virturoid.services.memory_db import DEFAULT_DB_PATH, MemoryDB
+        if _os.environ.get("VIRTUROID_DISABLE_GAIT_HINTS") == "1":
+            raise LookupError("gait hints disabled for hermetic benchmarking")
         if DEFAULT_DB_PATH.exists():
             with MemoryDB(DEFAULT_DB_PATH) as _db:
                 _h = mine_gait_hints(_db, gene=gene)              # VECTOR-nearest robots seed the deploy hint

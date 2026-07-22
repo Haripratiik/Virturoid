@@ -300,7 +300,14 @@ def run_bench(designs: list[dict], *, model: str = "cassette", verify: bool = Tr
 
 
 def bench_from_cassette(cassette=None, *, verify: bool = True, fragility: bool = False, model: str = "cassette"):
-    """Run Design-Bench over the committed cassette + battery — the deterministic CI entry point."""
+    """Run Design-Bench over the committed cassette + battery — the deterministic CI entry point.
+
+    HERMETIC by construction: gait-hint recall is disabled for the duration (VIRTUROID_DISABLE_GAIT_HINTS), so
+    the gate measures the composer+compiler alone. Before this, verdict@1 floated with whatever gaits the
+    session DB happened to contain (measured 0.50 empty vs 0.55 banked, 2026-07-22) and the regression gate
+    flickered at its floor depending on test order. The product path keeps hints on; only the bench opts out.
+    """
+    import os
     from virturoid.services import design_battery as B
     from virturoid.services.design_cassette import DesignCassette
     cas = cassette or DesignCassette()
@@ -310,7 +317,15 @@ def bench_from_cassette(cassette=None, *, verify: bool = True, fragility: bool =
         designs.append({"prompt_id": pid, "family": rec["family"], "phrasing": rec["phrasing"],
                         "concept": rec["concept"], "constraints": rec.get("constraints"),
                         "gene": cas.get_gene(pid)})
-    out = run_bench(designs, model=model, verify=verify, fragility=fragility)
+    prev = os.environ.get("VIRTUROID_DISABLE_GAIT_HINTS")
+    os.environ["VIRTUROID_DISABLE_GAIT_HINTS"] = "1"
+    try:
+        out = run_bench(designs, model=model, verify=verify, fragility=fragility)
+    finally:
+        if prev is None:
+            os.environ.pop("VIRTUROID_DISABLE_GAIT_HINTS", None)
+        else:
+            os.environ["VIRTUROID_DISABLE_GAIT_HINTS"] = prev
     out["battery_version"] = B.BATTERY_VERSION
     out["cassette"] = cas.summary()
     return out
