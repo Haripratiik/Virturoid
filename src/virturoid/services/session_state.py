@@ -132,19 +132,39 @@ def robot_meta(robot_id: str) -> dict:
                 "undo_depth": len(rec["undo"])}
 
 
+# /api/sessions cache: (directory signature) -> parsed listing. MEASURED live 2026-07-22: the sessions dir had
+# accumulated 3,416 robot files (47 MB) and this function re-opened + JSON-parsed EVERY one on EVERY request,
+# while the /sessions viewer polls it each 2.5 s — the first cold hit exceeded 30 s and concurrent sweeps
+# stacked. The signature (file count + newest mtime) is a single cheap directory scan; content is re-parsed
+# only when a session file actually changed. Entries are summary-only, so staleness risk is nil beyond the
+# signature itself.
+_LIST_CACHE: dict = {"sig": None, "out": []}
+
+
 def list_robots() -> list[dict]:
     """All robot sessions on disk (for the app viewer's /api/sessions) — id + label + prompt."""
-    out = []
     d = _dir() / "robots"
-    if d.exists():
-        for p in sorted(d.glob("*.json")):
-            try:
-                j = json.loads(p.read_text(encoding="utf-8"))
-                out.append({"robot_id": p.stem, "label": j.get("label"), "prompt": j.get("prompt"),
-                            "robot_class": (j.get("gene") or {}).get("robot_class")})
-            except Exception:  # noqa: BLE001
-                pass
-    return out
+    if not d.exists():
+        return []
+    files = sorted(d.glob("*.json"))
+    try:
+        sig = (len(files), max((p.stat().st_mtime_ns for p in files), default=0))
+    except OSError:
+        sig = None                                            # racing writer -> just re-parse this once
+    with _LOCK:
+        if sig is not None and _LIST_CACHE["sig"] == sig:
+            return list(_LIST_CACHE["out"])
+    out = []
+    for p in files:
+        try:
+            j = json.loads(p.read_text(encoding="utf-8"))
+            out.append({"robot_id": p.stem, "label": j.get("label"), "prompt": j.get("prompt"),
+                        "robot_class": (j.get("gene") or {}).get("robot_class")})
+        except Exception:  # noqa: BLE001
+            pass
+    with _LOCK:
+        _LIST_CACHE["sig"], _LIST_CACHE["out"] = sig, out
+    return list(out)
 
 
 # ------------------------------------------------------------------ scenes

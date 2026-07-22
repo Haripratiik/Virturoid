@@ -915,6 +915,15 @@ def ensure_walkable_quad(gene, prompt: str = "", *, force: bool = False):
                                           "to_distance_m": round(cval, 3), "hint": "fanned_stance+crawl_gait"}
             cand.metadata = md
             cand.design_source = src or "anatomy_generic"
+            # HONESTY AT THE TOOL SURFACE (final-drive finding 2026-07-22): the substituted body inherited the
+            # generic builder's note "Compiled directly from the supplied anatomy graph." — which, for a body we
+            # just REPLACED, is actively false, and create_robot surfaces composition_notes while the true trace
+            # sat only in gene.metadata. Say what happened where the caller will actually see it.
+            cand.composition_notes = [
+                "Walkability fallback applied: the authored body could not walk "
+                f"({round(base, 3)} m under any gait), so a fanned wide-stance quadruped was substituted "
+                f"({round(cval, 3)} m). Details in metadata.walkability_fallback.",
+            ]
             return cand
         return gene
     except Exception:  # noqa: BLE001 - the fallback is best-effort; a rolling body beats a crash

@@ -80,4 +80,16 @@ def build_quadcopter(prompt: str = "a quadcopter drone", *, span_m: float = 0.25
         base_mount="free", end_effector_type="none",
         metadata={"aerial": True, "rotor_offsets": [[x, y] for (x, y) in corners], "rotor_L": L,
                   "prompt": prompt})
+    gene.design_source = "aerial_platform"
+    # HONESTY (final-drive finding 2026-07-22): "a bird robot that flies" returned this quadcopter with EMPTY
+    # composition_notes and design_source "unknown" — the render has zero bird traits, so the substitution was
+    # invisible at the tool surface. The flight verdict was already honest; the provenance now is too.
+    p = (prompt or "").lower()
+    if any(w in p for w in ("bird", "wing", "flap", "eagle", "hawk", "butterfly", "dragonfly", "bat", "insect")):
+        gene.composition_notes = [
+            "A rotor-based quadcopter platform was selected to realize flight; fixed-wing and flapping-wing "
+            "body plans are not yet supported, so the requested animal form was NOT preserved.",
+        ]
+    else:
+        gene.composition_notes = ["Deterministic quadcopter platform selected for the aerial request."]
     return gene

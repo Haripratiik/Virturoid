@@ -7,13 +7,14 @@ raw sim/gene dump (SWE-agent ACI). Registered into ``agent_tools.TOOLS`` so the 
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 _RENDER_DIR = Path("build/agent_renders")
 
 
 # ------------------------------------------------------------------ helpers
-def _summary(gene, robot_id: str | None = None) -> dict:
+def _summary(gene, robot_id: str | None = None, prompt: str = "") -> dict:
     """Compact, LLM-legible read of a robot: class, discovered appendages (GEN-1, structural), size, mass."""
     from virturoid.services.appendage_map import build_appendage_map
     from virturoid.services.edit_operators import _dominant_material, _standing_height
@@ -32,9 +33,49 @@ def _summary(gene, robot_id: str | None = None) -> dict:
            "material": _dominant_material(gene), "end_effector": gene.end_effector_type,
            "design_source": getattr(gene, "design_source", "unknown"),
            "composition_notes": list(getattr(gene, "composition_notes", []) or [])}
+    out["composition_notes"] += _requested_vs_built_notes(prompt, out)
     if robot_id:
         out["robot_id"] = robot_id
     return out
+
+
+# Words-per-unit multipliers the summary can compare against. Kept tiny on purpose: only EXPLICIT NUMBERS in
+# the prompt are checked (leg counts, metres of height) — fuzzy adjectives are the composer's job, not this.
+_REQ_LEGS = re.compile(r"\b(\d{1,4})\s*(?:-|\s)?legs?\b|\b(\d{1,4})\s*(?:-|\s)?legged\b")
+_REQ_HEIGHT_M = re.compile(r"\b(\d+(?:\.\d+)?)[\s-]*(?:m|meter|metre)s?\b(?:\s*tall)?", re.IGNORECASE)
+
+
+def _requested_vs_built_notes(prompt: str, summary: dict) -> list[str]:
+    """SURFACE, never hide, a wildly-coerced explicit request (final-drive red-team finding 2026-07-22).
+
+    Measured: "a 500-meter tall robot with 1000 legs" silently built a 0.16 m, 16-leg arachnid — the response
+    carried a generic archetype note and NOTHING about either coercion, which is precisely the silent
+    substitution the honesty architecture forbids. The build itself is allowed to clamp (a 500 m robot is not
+    simulable); staying QUIET about it is not. Additive + best-effort: never raises, never blocks a build.
+    """
+    notes: list[str] = []
+    try:
+        p = (prompt or "").lower()
+        m = _REQ_LEGS.search(p)
+        if m:
+            asked = int(next(g for g in m.groups() if g))
+            built = (summary.get("appendages") or {}).get("legs") if isinstance(summary.get("appendages"), dict) else None
+            if isinstance(built, int) and asked > 0 and built > 0 and not (0.5 <= built / asked <= 2.0):
+                notes.append(f"Requested {asked} legs; built {built} (structural/simulation cap). "
+                             "The count was coerced, not silently honored.")
+        # Metres are only a HEIGHT claim when the prompt says so ("500-meter tall") — "0.9 m reach" or
+        # "2 m long" are different dimensions with their own checks, and an arm's standing_height is a base-disc
+        # cosmetic value that would false-positive against them (caught by the guard probe on first try).
+        m = _REQ_HEIGHT_M.search(p) if re.search(r"\btall\b|\bheight\b|\bhigh\b", p) else None
+        if m:
+            asked_h = float(m.group(1))
+            built_h = summary.get("standing_height_m")
+            if isinstance(built_h, (int, float)) and asked_h > 0 and built_h and not (0.5 <= built_h / asked_h <= 2.0):
+                notes.append(f"Requested ~{asked_h:g} m tall; built {built_h:.3g} m (dimension priors clamp "
+                             "unsimulable scales). The size was coerced, not silently honored.")
+    except Exception:  # noqa: BLE001 - the note is additive; a parse failure must not sink the build
+        return notes
+    return notes
 
 
 def _pose_manipulator_for_render(m, d, gene) -> None:
@@ -759,7 +800,7 @@ def create_robot(args: dict) -> dict:
         except Exception:  # noqa: BLE001 - a tune failure must never block the build; defaults still apply
             pass
     rid = S.put_robot(gene, prompt=prompt)
-    out = {"ok": True, **_summary(gene, rid), "prompt": prompt}
+    out = {"ok": True, **_summary(gene, rid, prompt=prompt), "prompt": prompt}
     try:                                                       # WS-G: the robotics AI grounds a novel concept in
         from virturoid.services.agent_tools import safe_build_path   # the nearest VERIFIED concepts (advisory
         from virturoid.services.concept_grounding import ground_concept   # similarity, never a silent route)
