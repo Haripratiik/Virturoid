@@ -49,6 +49,12 @@ def export_ros2_package(package_dir: Path, package_name: str = "virturoid_robot"
     (root / "config").mkdir(parents=True, exist_ok=True)
     (root / "test").mkdir(parents=True, exist_ok=True)
     (root / "resource").mkdir(parents=True, exist_ok=True)
+    # M7: ship the robot_description -- copy the package's URDF into urdf/ so the installed package can publish it
+    # via robot_state_publisher (was absent -> a ROS 2 package with no robot to describe).
+    _src_urdf = package_dir / "robot" / "robot.urdf"
+    if _src_urdf.exists():
+        (root / "urdf").mkdir(parents=True, exist_ok=True)
+        (root / "urdf" / "robot.urdf").write_text(_src_urdf.read_text(encoding="utf-8"), encoding="utf-8")
 
     # Embed the exported controller (if the package has one) so the node runs the real policy.
     bundle_dir = package_dir / "software" / "controller"
@@ -238,12 +244,20 @@ _PACKAGE_XML = """<?xml version="1.0"?>
   <exec_depend>rclpy</exec_depend>
   <exec_depend>sensor_msgs</exec_depend>
   <exec_depend>trajectory_msgs</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>robot_state_publisher</exec_depend>
+  <exec_depend>xacro</exec_depend>
   <test_depend>python3-pytest</test_depend>
   <export><build_type>ament_python</build_type></export>
 </package>
 """
 
-_SETUP_PY = """from setuptools import setup
+_SETUP_PY = """import os
+from glob import glob
+
+from setuptools import setup
 
 package_name = "{name}"
 
@@ -251,14 +265,20 @@ setup(
     name=package_name,
     version="0.1.0",
     packages=[package_name],
+    # M7 (2026-07-24 audit): GLOB every config + launch + urdf so they survive `colcon build` install (was: a
+    # hardcoded subset -> ros2_control.yaml / hardware_interface.yaml / the URDF never installed -> the package
+    # only ran from the source tree). package_data ships policy_params.json beside the installed module.
     data_files=[
         ("share/ament_index/resource_index/packages", ["resource/" + package_name]),
         ("share/" + package_name, ["package.xml"]),
-        ("share/" + package_name + "/launch", ["launch/evaluate.launch.py"]),
-        ("share/" + package_name + "/config", ["config/robot.yaml"]),
+        (os.path.join("share", package_name, "launch"), glob("launch/*.launch.py")),
+        (os.path.join("share", package_name, "config"), glob("config/*.yaml") + glob("config/*.json")),
+        (os.path.join("share", package_name, "urdf"), glob("urdf/*")),
     ],
     install_requires=["setuptools"],
     zip_safe=True,
+    package_data={{package_name: ["*.json"]}},
+    include_package_data=True,
     entry_points={{"console_scripts": ["evaluation_node = {name}.evaluation_node:main"]}},
 )
 """
@@ -287,10 +307,23 @@ from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 _PKG = Path(__file__).resolve().parent
 
 
+def _config_dir():
+    # M7: after `colcon build` the config installs to share/<pkg>/config (NOT beside the module) -- resolve it via
+    # the ament share dir, falling back to the source-tree layout so `python evaluation_node.py` still runs.
+    try:
+        from ament_index_python.packages import get_package_share_directory
+        share = Path(get_package_share_directory("virturoid_robot"))
+        if (share / "config").is_dir():
+            return share / "config"
+    except Exception:
+        pass
+    return _PKG.parents[1] / "config"
+
+
 class EvaluationNode(Node):
     def __init__(self):
         super().__init__("virturoid_evaluation_node")
-        config = json.loads((_PKG.parents[1] / "config" / "robot.yaml").read_text())
+        config = json.loads((_config_dir() / "robot.yaml").read_text())
         self.joints = config["joints"]
         self.targets = config.get("target_positions") or [[0.4, 0.0]]
         self.policy_type = config.get("policy_type", "reach")

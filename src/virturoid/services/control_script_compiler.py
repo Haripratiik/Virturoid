@@ -368,8 +368,11 @@ def validate_scripts(scripts_dir) -> dict:
             results[py.name] = entry
             continue
         try:
-            proc = subprocess.run([sys.executable, str(py)], capture_output=True, text=True, timeout=30,
-                                  cwd=str(scripts_dir))
+            # B3a (2026-07-24 audit): pass the ABSOLUTE script path -- a relative one re-resolved against
+            # cwd=scripts_dir doubled the path ("...\scripts\...\scripts\x.py") and every dry-run false-FAILED,
+            # so the shipped package carried a red validation of its own working scripts.
+            proc = subprocess.run([sys.executable, str(py.resolve())], capture_output=True, text=True, timeout=30,
+                                  cwd=str(scripts_dir.resolve()))
             entry["dry_run"] = (proc.returncode == 0 and "OK" in proc.stdout)
             entry["detail"] = (proc.stdout.strip() or proc.stderr.strip())[:200]
             if not entry["dry_run"]:
