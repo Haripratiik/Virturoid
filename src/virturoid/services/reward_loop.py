@@ -138,7 +138,44 @@ def _generate_fusion(args: dict) -> dict:
         return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
 
+def _generate_control_scripts(args: dict) -> dict:
+    """NLP tool: 'write the control scripts for my robot' -> the operational .py inventory, each validated."""
+    from virturoid.services import session_state as S
+    rid = args.get("robot_id")
+    if not rid:
+        return {"ok": False, "error": "robot_id is required (a held robot)"}
+    gene = S.get_robot(rid)
+    if gene is None:
+        return {"ok": False, "error": f"no held robot '{rid}'; create_robot / submit_design / ingest_project first"}
+    try:
+        import tempfile
+        from pathlib import Path
+        from virturoid.services.control_script_compiler import compile_control_scripts, validate_scripts
+        out = compile_control_scripts(gene, task=str(args.get("task") or ""))
+        # validate in a scratch dir so the caller gets an honest compile+dry-run verdict, not just source
+        d = Path(tempfile.mkdtemp()) / "scripts"
+        d.mkdir(parents=True, exist_ok=True)
+        for rel, content in out["files"].items():
+            (d / rel).write_text(content, encoding="utf-8")
+        report = validate_scripts(d)
+        return {"ok": True, "manifest": out["manifest"], "validation": report}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+
 REWARD_LOOP_TOOLS = {
+    "generate_control_scripts": {
+        "description": "Write the operational control-script inventory a held robot needs to actually run -- an "
+                       "observation assembler that mirrors the policy's training obs, a safety filter that clamps "
+                       "every joint command to the PEAK TORQUE of the real actuator the BOM sized for it, a "
+                       "safety state machine (estop/stand/active/fall-damping), a watchdog, a teleop stub, and a "
+                       "joint calibration routine. Every generated .py is compile-checked AND dry-run before it "
+                       "ships; the result includes that honest pass/fail verdict. No human writes the glue.",
+        "parameters": {"type": "object", "required": ["robot_id"], "properties": {
+            "robot_id": {"type": "string"},
+            "task": {"type": "string", "description": "the deployment task (affects the obs layout)"}}},
+        "handler": _generate_control_scripts, "heavy": False,
+    },
     "generate_fusion": {
         "description": "Compile a deployable SENSOR-FUSION stack (state estimation) for a held robot from its "
                        "bill of materials -- a robot_localization EKF, an IMU orientation filter, and a wheel/leg "

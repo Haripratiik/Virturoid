@@ -895,6 +895,13 @@ def _emit_bom(gene: RobotGene, output_dir: Path, task: str = "") -> dict:
             write_sensor_fusion(gene, output_dir, task=task)   # -> output_dir/fusion/{config,launch}/...
         except Exception:  # noqa: BLE001 - fusion configs are value-add; never break a build
             pass
+        # The operational control scripts (obs-assembler, safety filter clamped to these actuators' peak torque,
+        # state machine, watchdog, teleop, calibration) -- each compile-checked + sim-dry-run before it ships.
+        try:
+            from virturoid.services.control_script_compiler import write_control_scripts
+            write_control_scripts(gene, output_dir, task=task)  # -> output_dir/software/scripts/*.py
+        except Exception:  # noqa: BLE001 - control scripts are value-add; never break a build
+            pass
         return bom.get("totals", {})
     except Exception:  # noqa: BLE001 - the BOM is value-add; never let it break a build
         return {}

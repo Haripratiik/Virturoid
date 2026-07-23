@@ -35,6 +35,8 @@ def build_deployment_guide(output_dir) -> str:
     has_control = (output_dir / "software" / "control_program.json").exists()
     has_urdf = (output_dir / "robot" / "robot.urdf").exists()
     fusion = _load(output_dir, "fusion_manifest.json")
+    scripts = _load(output_dir, "script_manifest.json")
+    script_val = _load(output_dir, "script_validation.json")
 
     out: list[str] = []
     out.append(f"# Build *{name}* for real - deployment guide")
@@ -116,7 +118,29 @@ def build_deployment_guide(output_dir) -> str:
         out.append("ros2 launch virturoid_robot sensor_fusion.launch.py")
         out.append("```")
         out.append("")
-    if not (has_ros2 or has_control or fusion):
+    if scripts:
+        n = len(scripts.get("scripts", []))
+        passed = script_val.get("all_pass") if script_val else None
+        badge = "" if passed is None else (" — all **compiled + sim-dry-run** ✅" if passed
+                                           else " — ⚠️ some scripts failed validation")
+        out.append(f"**Operational control scripts** — {n} generated from the robot, not hand-written{badge}. "
+                   f"Under `software/scripts/`:")
+        out.append("")
+        out.append("| Script | Role |")
+        out.append("| --- | --- |")
+        _ROLE = {"obs_assembler.py": "builds the exact observation vector the policy trained on",
+                 "safety_filter.py": "clamps every command to each actuator's peak torque + joint limits",
+                 "state_machine.py": "estop / stand / active / fall-damping supervisory logic",
+                 "watchdog.py": "trips estop on a stalled loop, comms timeout, or joint-limit breach",
+                 "teleop.py": "keyboard/joystick velocity teleop stub",
+                 "calibrate.py": "captures each joint's encoder zero offset"}
+        for s in scripts.get("scripts", []):
+            out.append(f"| `{s}` | {_ROLE.get(s, 'operational control script')} |")
+        out.append("")
+        out.append("The safety filter's torque ceilings are the datasheet peak torque of the actuators the BOM "
+                   "sized for each joint — a command that would exceed a motor is clipped before it reaches the bus.")
+        out.append("")
+    if not (has_ros2 or has_control or fusion or scripts):
         out.append("_No ROS2 package or control program was exported for this build._")
         out.append("")
 
