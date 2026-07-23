@@ -111,3 +111,21 @@ def test_a_body_that_cannot_walk_is_normalised_but_SAYS_SO():
     if "walkability_fallback" in md:
         assert md["walkability_fallback"].get("applied") is True
         assert "to_distance_m" in md["walkability_fallback"]      # the measured reason, not a bare flag
+
+
+def test_amending_a_link_length_keeps_the_visual_in_sync_with_the_collider():
+    """#216: scale_group(length) used to lengthen length_m (which moves the child body to the parent's new
+    distal tip) but leave the visual geometry short, so a lengthened arm link rendered short and its child
+    (the gripper) floated in a gap. The geometry's length-axis must scale with length_m."""
+    from virturoid.services.edit_operators import scale_group
+    from virturoid.services.morphology_composer import compose_robot
+    g = compose_robot("a robotic arm that sorts objects", llm=None)
+    j2 = next(s for s in g.segments if s.name == "j2")
+    assert (j2.geometry or {}).get("family") == "extrude"
+    h0, l0 = j2.geometry["height"], j2.length_m
+    g2, _ = scale_group(g, group="arms", dims="length", factor=1.3)
+    j2b = next(s for s in g2.segments if s.name == "j2")
+    # both the collider length AND the visual height scaled by the same factor -> no gap opens at the tip
+    assert abs(j2b.length_m - l0 * 1.3) < 1e-3
+    assert abs(j2b.geometry["height"] - h0 * 1.3) < 1e-3
+    assert abs(j2b.length_m - j2b.geometry["height"]) < 1e-3      # visual length == collider length, in lockstep

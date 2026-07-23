@@ -126,16 +126,18 @@ def scale_group(gene, *, group: str = "legs", dims: str = "length", factor: floa
     if not targets:
         raise EditError(f"no '{group}' segments on this robot (it is a {g.robot_class}); "
                         f"available groups here: {[k for k in _GROUP_WORDS if segments_for_group(g, k)] + ['all']}")
-    from virturoid.services.bom_builder import _scale_geo
+    from virturoid.services.bom_builder import _scale_geo, _scale_geo_length
     changed = []
     for s in targets:
         before = (round(s.length_m, 4), round(s.radius_m, 4))
         if dims in ("length", "both"):
             s.length_m = round(s.length_m * f, 5)
+            if s.geometry:
+                _scale_geo_length(s.geometry, f)          # #216: keep the VISUAL link as long as the collider
         if dims in ("girth", "both"):
             s.radius_m = round(s.radius_m * f, 5)
-        if dims == "both" and s.geometry:
-            _scale_geo(s.geometry, f)
+            if s.geometry:
+                _scale_geo(s.geometry, f)                 # cross-section only
         changed.append({"segment": s.name, "length_m": [before[0], round(s.length_m, 4)],
                         "radius_m": [before[1], round(s.radius_m, 4)]})
     h0 = _standing_height(gene)

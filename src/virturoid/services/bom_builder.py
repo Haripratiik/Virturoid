@@ -96,14 +96,47 @@ _SKELETON_THICKNESS = (
 
 
 def _scale_geo(geo, f: float) -> None:
-    """Scale a part's visual cross-section by ``f`` in place (extrude profile / compound sub-parts)."""
+    """Scale a part's visual CROSS-SECTION (girth) by ``f`` in place — extrude profile, tapered/role radii, loft
+    ring widths, compound sub-parts. Does NOT touch the length axis (see ``_scale_geo_length``)."""
     if not isinstance(geo, dict):
         return
-    if geo.get("family") == "extrude" and isinstance(geo.get("profile"), list):
+    fam = geo.get("family")
+    if fam == "extrude" and isinstance(geo.get("profile"), list):
         geo["profile"] = [[round(p[0] * f, 5), round(p[1] * f, 5)] for p in geo["profile"]]
-    if geo.get("family") == "compound":
+    elif fam in ("tapered", "role"):
+        for k in ("r0", "r1", "radius"):
+            if k in geo:
+                geo[k] = round(geo[k] * f, 5)
+    elif fam == "loft" and isinstance(geo.get("sections"), list):
+        geo["sections"] = [[z, round(hy * f, 5), round(hx * f, 5)] for z, hy, hx in geo["sections"]]
+    if fam == "compound":
         for sub in geo.get("parts", []):
             _scale_geo(sub, f)
+
+
+def _scale_geo_length(geo, f: float) -> None:
+    """Scale a part's visual LENGTH axis by ``f`` in place, so the RENDERED link stays as long as its collider.
+
+    #216: ``scale_group(dims='length')`` lengthened ``length_m`` (which moves the child body to the parent's new
+    distal tip) but never touched the visual geometry, so a lengthened arm link RENDERED short while the gripper
+    attached at the new, longer tip — the gripper appeared to float in a gap. Scaling the length-axis field of
+    each geometry family (extrude ``height``, tapered/role ``length``, loft ring ``z``, compound sub-part ``at``
+    offsets) keeps the visual and the kinematics in lockstep."""
+    if not isinstance(geo, dict):
+        return
+    fam = geo.get("family")
+    if fam == "extrude" and "height" in geo:
+        geo["height"] = round(geo["height"] * f, 5)
+    elif fam in ("tapered", "role") and "length" in geo:
+        geo["length"] = round(geo["length"] * f, 5)
+    elif fam == "loft" and isinstance(geo.get("sections"), list):
+        geo["sections"] = [[round(z * f, 5), hy, hx] for z, hy, hx in geo["sections"]]
+    if fam == "compound":
+        for sub in geo.get("parts", []):
+            _scale_geo_length(sub, f)
+            at = sub.get("at")
+            if isinstance(at, (list, tuple)) and len(at) == 3:   # push a stacked sub-part out along the length axis
+                sub["at"] = [at[0], at[1], round(at[2] * f, 5)]
 
 
 def refine_skeleton_for_task(gene: RobotGene, task: str = "") -> RobotGene:
