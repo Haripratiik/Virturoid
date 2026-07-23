@@ -9,7 +9,16 @@ verdict contract with teaching errors (SWE-agent ACI). Registered into ``agent_t
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
+
+# M11 honesty: goals that name a domain NONE of our tiers (land/mobile/legged/aerial/aquatic/manip) can run.
+# "fly to the target" is charitably a go-to for a legged body (handled by the proposer); "fly to the MOON",
+# "reach orbit", "teleport" have no honest reinterpretation, so run_task must say so instead of scoring the
+# body's default task 1.0.
+_OUT_OF_DOMAIN = re.compile(
+    r"\b(moon|outer ?space|to space|orbit|orbital|mars|jupiter|galaxy|interstellar|cosmos|"
+    r"teleport|time ?travel|through (?:the )?walls?|phase through|underground|to the stars)\b", re.I)
 
 # The REAL anatomy-graph vocabulary (extracted from anatomy_compiler.build_from_anatomy), so the schema we
 # teach the agent is accurate, not hallucinated. A part = one body/limb node; symmetry mirrors it to +-y.
@@ -699,6 +708,12 @@ def run_task(args: dict) -> dict:
     goal = (str(raw).strip() if raw else "") or (S.robot_meta(args["robot_id"]) or {}).get("prompt", "")
     if not goal:
         return {"ok": False, "error": "provide goal: a plain-language task (e.g. 'navigate to the far corner')"}
+    if _OUT_OF_DOMAIN.search(goal):                            # M11: honest infeasible, never a fake 1.0
+        return {"ok": True, "goal": goal, "feasible": False, "success": False, "score": 0.0,
+                "goal_met": 0, "goal_total": 0, "task": "out_of_domain", "planned_skills": [], "steps": [],
+                "issues": ["the goal names an out-of-domain intent this platform has no tier for "
+                           "(no aerospace / teleportation / phase-through capability) — rephrase as a "
+                           "ground locomotion, navigation, or manipulation task"]}
     r = evaluate_task(str(goal), gene, llm="auto")             # llm None under NO_INTERNAL_LLM -> heuristic plan
     return {"ok": True, "goal": goal, "feasible": bool(r.get("feasible")), "success": bool(r.get("success")),
             "score": round(float(r.get("score", 0.0)), 3), "goal_met": r.get("goal_met"),

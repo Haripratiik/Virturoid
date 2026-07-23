@@ -1014,6 +1014,11 @@ def create_scene(args: dict) -> dict:
     from virturoid.services import scene_themes as T
     from virturoid.services import session_state as S
     theme = args.get("theme", "warehouse"); task = args.get("task", "navigation")
+    # M11 honesty: build_scene silently falls back to 'warehouse' for an unknown theme while the caller echoes
+    # the requested one -- reject up front with the known list, the same way edit_scene/apply_theme already do,
+    # so we never hand back a warehouse labelled 'marsbase'.
+    if theme not in T.THEMES:
+        return {"ok": False, "error": f"unknown theme '{theme}'; known: {T.theme_names()}"}
     sg = T.build_scene(task=task, theme=theme, seed=int(args.get("seed", 0)))
     issues = sg.validate()
     sid = S.put_scene(sg.to_dict(), task=task, theme=theme)
