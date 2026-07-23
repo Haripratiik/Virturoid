@@ -723,11 +723,31 @@ def _honest_reach(gene, *, steps: int = 500, world_xml: str | None = None) -> di
             continue
     if ee is None:
         ee, _ = _base_body_id(model); ee = model.nbody - 1          # fall back to the last (distal) body
-    lo = model.actuator_ctrlrange[:, 0].copy(); hi = model.actuator_ctrlrange[:, 1].copy()
-    mid = np.where(hi > lo, 0.5 * (lo + hi), 0.0); amp = np.where(hi > lo, 0.5 * (hi - lo), 0.6)
+    # Drive each joint with a GRAVITY-COMPENSATED PD to a swept angle target — the way any real manipulator runs
+    # (and the way physics_evaluator drives it), NOT a raw torque sweep. Without the qfrc_bias term a torque-
+    # actuated arm just sags under gravity, and an AMENDED arm that embodied real motor mass reads a dishonest
+    # STUCK (#220) — the arm is fine; the strawman open-loop controller simply couldn't hold it up. Gravity
+    # compensation makes the sweep a test of the ARM's articulation, not of a controller that ignores dynamics.
+    acts = []                                                       # (ctrl_slot, qpos_adr, dof_adr, mid, amp, fmax, phase)
+    for i in range(model.nu):
+        if int(model.actuator_trntype[i]) != int(mujoco.mjtTrn.mjTRN_JOINT):
+            continue                                                # only joint actuators sweep a joint angle
+        jid = int(model.actuator_trnid[i, 0])
+        qadr = int(model.jnt_qposadr[jid]); vadr = int(model.jnt_dofadr[jid])
+        if model.jnt_limited[jid]:
+            jlo, jhi = float(model.jnt_range[jid, 0]), float(model.jnt_range[jid, 1])
+        else:
+            jlo, jhi = -1.5, 1.5
+        fr = model.actuator_forcerange[i]
+        fmax = float(fr[1]) if bool(model.actuator_forcelimited[i]) and fr[1] > fr[0] else 500.0
+        acts.append((i, qadr, vadr, 0.5 * (jlo + jhi), 0.45 * (jhi - jlo), fmax, 3.0 * i / max(1, model.nu)))
+    kp, kd = 40.0, 4.0
     pts = []
     for t in range(steps):
-        data.ctrl[:] = mid + amp * np.sin(2 * np.pi * (t / 180.0) + np.linspace(0, 3.0, model.nu))
+        for slot, qadr, vadr, mid_a, amp_a, fmax, phase in acts:
+            desired = mid_a + amp_a * np.sin(2 * np.pi * (t / 180.0) + phase)
+            cmd = data.qfrc_bias[vadr] + kp * (desired - data.qpos[qadr]) - kd * data.qvel[vadr]
+            data.ctrl[slot] = float(np.clip(cmd, -fmax, fmax))
         mujoco.mj_step(model, data)
         if t % 5 == 0:
             pts.append(np.array(data.xpos[ee]))
