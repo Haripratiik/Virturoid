@@ -35,54 +35,84 @@ def _steered_rollout_fn(gene, *, generations: int, pop: int, steps: int, seed: i
     return rollout_fn
 
 
+def _one_round(gene, task, *, llm, reflection, n_rewards, screen_generations, screen_pop,
+               final_generations, final_pop, steps, seed):
+    """One propose → screen → select → train pass. Returns the trained result + the verdict + selection stats."""
+    cands = propose_rewards(task, n=n_rewards, llm=llm, reflection=reflection)
+    rollout_fn = _steered_rollout_fn(gene, generations=screen_generations, pop=screen_pop, steps=steps, seed=seed)
+    sel = select_reward(cands, rollout_fn)
+    best = sel.get("best")
+    ranked = [{"name": c.name, "expr": c.expr, "trusted_success": round(c.trusted_success, 4),
+               "reward_return": round(c.reward_return, 4), "gamed": c.gamed} for c in sel.get("ranked", [])]
+    if best is None:                                         # every candidate gamed/failed -> honest default
+        res = search_gait(gene, generations=final_generations, pop=final_pop, steps=steps, seed=seed)
+        v = evaluate_gait(gene, res.best_params, steps=steps)
+        return {"reward_source": "default_fitness_fallback", "reward_name": None, "reward_expr": None,
+                "final": res, "v": v, "ranked": ranked, "n_gamed": sel.get("n_gamed", 0), "n_candidates": len(cands)}
+    final = search_gait(gene, generations=final_generations, pop=final_pop, steps=steps, seed=seed,
+                        reward_fn=best.compiled)
+    v = evaluate_gait(gene, final.best_params, steps=steps)  # classify verdict, reward-independent
+    return {"reward_source": ("llm" if best.name.startswith("llm") else "template"), "reward_name": best.name,
+            "reward_expr": best.expr, "final": final, "v": v, "ranked": ranked,
+            "n_gamed": sel.get("n_gamed", 0), "n_candidates": len(cands)}
+
+
+def _round_is_better(a, b) -> bool:
+    """Prefer a credible round; among equal credibility, more forward travel."""
+    if a["v"]["credible"] != b["v"]["credible"]:
+        return bool(a["v"]["credible"])
+    return float(a["v"]["forward"]) > float(b["v"]["forward"])
+
+
 def run_intelligent_reward_loop(gene, task: str = "walk forward", *, llm=None, n_rewards: int = 4,
                                 screen_generations: int = 3, screen_pop: int = 10,
                                 final_generations: int = 8, final_pop: int = 24, steps: int = 800,
-                                seed: int = 0, bank: bool = True, db=None) -> dict:
-    """Author → screen → select → train → verify, with zero hand-written reward code.
+                                seed: int = 0, iterations: int = 1, bank: bool = True, db=None) -> dict:
+    """Author → screen → select → train → verify → REFLECT → (re-propose), with zero hand-written reward code.
 
     1. ``propose_rewards`` writes ``n_rewards`` candidate reward expressions (LLM if given, else templates).
     2. each candidate cheaply STEERS a short search; ``select_reward`` ranks by trusted success + flags gaming.
     3. the winning (non-gamed) reward drives a FINAL, longer search.
-    4. the result is judged by the SAME un-gameable ``classify`` verdict ``verify_robot`` uses, then optionally
-       banked to the flywheel keyed by this body's morphology.
+    4. the result is judged by the SAME un-gameable ``classify`` verdict ``verify_robot`` uses.
+    5. an R2 REFLECTION payload names which reward term saturated / whether forward_vel stayed flat; if
+       ``iterations > 1`` and the gait isn't yet credible, that reflection feeds the next round's proposal
+       (the Eureka feedback loop) — otherwise it's returned as diagnostics. The best round across iterations is
+       kept, and a credible result is banked to the flywheel keyed by this body's morphology.
 
-    Returns a compact, honest report: the chosen reward, the trained gait + its verdict, and how many candidates
-    were rejected for gaming. Never raises — a total failure returns ``ok: False`` with a reason."""
+    Returns a compact, honest report. Never raises — a total failure returns ``ok: False`` with a reason."""
     try:
-        cands = propose_rewards(task, n=n_rewards, llm=llm)
-        rollout_fn = _steered_rollout_fn(gene, generations=screen_generations, pop=screen_pop,
-                                         steps=steps, seed=seed)
-        sel = select_reward(cands, rollout_fn)
-        best = sel.get("best")
-        ranked = [{"name": c.name, "expr": c.expr, "trusted_success": round(c.trusted_success, 4),
-                   "reward_return": round(c.reward_return, 4), "gamed": c.gamed}
-                  for c in sel.get("ranked", [])]
+        from virturoid.services.reward_reflection import build_reflection_payload, format_reflection_for_proposer
+        best_round, iter_log, reflection_text = None, [], ""
+        for it in range(max(1, iterations)):
+            r = _one_round(gene, task, llm=llm, reflection=reflection_text, n_rewards=n_rewards,
+                           screen_generations=screen_generations, screen_pop=screen_pop,
+                           final_generations=final_generations, final_pop=final_pop, steps=steps, seed=seed)
+            r["reflection"] = build_reflection_payload(gene, r["final"].best_params, r["reward_expr"], steps=steps)
+            v = r["v"]
+            iter_log.append({"iteration": it, "reward_expr": r["reward_expr"], "verdict": v["verdict"],
+                             "credible": v["credible"], "forward_m": round(v["forward"], 3)})
+            if best_round is None or _round_is_better(r, best_round):
+                best_round = r
+            if v["credible"]:
+                break                                        # a credible walk — stop; no need to iterate further
+            reflection_text = format_reflection_for_proposer(r["reflection"])   # feed the correction forward
 
-        if best is None:                                     # every candidate gamed or failed -> honest default
-            res = search_gait(gene, generations=final_generations, pop=final_pop, steps=steps, seed=seed)
-            v = evaluate_gait(gene, res.best_params, steps=steps)
-            return {"ok": True, "reward_source": "default_fitness_fallback", "reward_expr": None,
-                    "n_candidates": len(cands), "n_gamed": sel.get("n_gamed", 0), "ranked": ranked,
-                    "verdict": v["verdict"], "credible": v["credible"], "forward_m": round(v["forward"], 3),
-                    "gait_params": res.best_params,
-                    "note": "no reward beat the honesty gate; trained on the default un-gameable fitness"}
-
-        final = search_gait(gene, generations=final_generations, pop=final_pop, steps=steps, seed=seed,
-                            reward_fn=best.compiled)
-        v = evaluate_gait(gene, final.best_params, steps=steps)   # classify verdict, reward-independent
-        out = {"ok": True, "reward_source": ("llm" if best.name.startswith("llm") else "template"),
-               "reward_name": best.name, "reward_expr": best.expr,
-               "n_candidates": len(cands), "n_gamed": sel.get("n_gamed", 0), "ranked": ranked,
-               "verdict": v["verdict"], "credible": v["credible"], "forward_m": round(v["forward"], 3),
-               "height_ratio": round(v["height_ratio"], 3), "gait_params": final.best_params}
+        r, v = best_round, best_round["v"]
+        out = {"ok": True, "reward_source": r["reward_source"], "reward_name": r.get("reward_name"),
+               "reward_expr": r["reward_expr"], "n_candidates": r["n_candidates"], "n_gamed": r["n_gamed"],
+               "ranked": r["ranked"], "verdict": v["verdict"], "credible": v["credible"],
+               "forward_m": round(v["forward"], 3), "height_ratio": round(v.get("height_ratio", 0.0), 3),
+               "gait_params": r["final"].best_params, "reflection": r["reflection"],
+               "iterations_run": len(iter_log), "iteration_log": iter_log}
+        if r["reward_source"] == "default_fitness_fallback":
+            out["note"] = "no reward beat the honesty gate; trained on the default un-gameable fitness"
 
         if bank and v["credible"]:
             try:
                 from virturoid.services.gait_flywheel import bank_gait
                 from virturoid.services.memory_db import MemoryDB
                 _db = db or MemoryDB()
-                bank_gait(_db, gene, final)                  # bank the verified gait keyed by morphology
+                bank_gait(_db, gene, r["final"])             # bank the verified gait keyed by morphology
                 out["banked"] = True
                 if db is None:
                     _db.close()
@@ -112,7 +142,7 @@ def _train_reward(args: dict) -> dict:
         llm = None
     out = run_intelligent_reward_loop(
         gene, task=str(args.get("task") or "walk forward"), llm=llm,
-        n_rewards=int(args.get("n_rewards", 4)),
+        n_rewards=int(args.get("n_rewards", 4)), iterations=int(args.get("iterations", 1)),
         final_generations=int(args.get("generations", 8)), final_pop=int(args.get("pop", 24)),
         steps=int(args.get("steps", 800)), seed=int(args.get("seed", 0)),
         db=None)
@@ -199,6 +229,8 @@ REWARD_LOOP_TOOLS = {
             "robot_id": {"type": "string"},
             "task": {"type": "string", "description": "the goal in plain language"},
             "n_rewards": {"type": "integer", "description": "how many reward candidates to author (default 4)"},
+            "iterations": {"type": "integer", "description": "reflect-and-re-propose rounds; >1 runs the Eureka "
+                           "feedback loop, stopping early once a credible gait is found (default 1)"},
             "generations": {"type": "integer"}, "pop": {"type": "integer"}}},
         "handler": _train_reward, "heavy": True,
     },

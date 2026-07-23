@@ -105,14 +105,16 @@ _TEMPLATES: dict[str, str] = {
 }
 
 
-def propose_rewards(task: str = "walk forward", *, n: int = 4, llm=None) -> list[RewardCandidate]:
+def propose_rewards(task: str = "walk forward", *, n: int = 4, llm=None, reflection: str = "") -> list[RewardCandidate]:
     """Propose ``n`` candidate rewards. With ``llm`` (an object with ``.complete(prompt) -> str``) the model
     proposes expressions over the whitelisted API; each is validated + only compilable ones are kept, and the
-    heuristic templates backfill to guarantee ``n`` legal candidates. LLM-off returns the templates directly."""
+    heuristic templates backfill to guarantee ``n`` legal candidates. LLM-off returns the templates directly.
+    ``reflection`` (an R2 reflection block from the previous round) is injected into the LLM prompt so the next
+    proposal CORRECTS the last run's failure instead of guessing afresh."""
     cands: list[RewardCandidate] = []
     if llm is not None:
         try:
-            text = llm.complete(_reward_prompt(task, n))
+            text = llm.complete(_reward_prompt(task, n, reflection))
             for i, line in enumerate([l.strip() for l in text.splitlines() if l.strip()][:n]):
                 expr = line.split("#", 1)[0].strip().rstrip(",")
                 try:
@@ -129,12 +131,14 @@ def propose_rewards(task: str = "walk forward", *, n: int = 4, llm=None) -> list
     return good[:n]
 
 
-def _reward_prompt(task: str, n: int) -> str:
+def _reward_prompt(task: str, n: int, reflection: str = "") -> str:
     feats = ", ".join(REWARD_FEATURES); funcs = ", ".join(_SAFE_FUNCS)
+    fb = (f"\n\nFEEDBACK from the previous round (fix these specifically):\n{reflection}\n" if reflection else "")
     return (f"Write {n} candidate reward functions for the task: {task}.\n"
             f"Each MUST be a single Python arithmetic expression using ONLY these per-step features: {feats}.\n"
             f"You may call ONLY these functions: {funcs}. No other names, no attributes, no imports.\n"
-            f"One expression per line, no prose. Reward forward progress while upright; penalize slip + energy.")
+            f"One expression per line, no prose. Reward forward progress while upright; penalize slip + energy."
+            f"{fb}")
 
 
 def select_reward(candidates: list[RewardCandidate], rollout_fn, *, gaming_reward_z: float = 2.0) -> dict:
