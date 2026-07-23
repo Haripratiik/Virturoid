@@ -298,6 +298,12 @@ try:
 except Exception:  # noqa: BLE001
     pass
 
+try:
+    from virturoid.services.reward_loop import REWARD_LOOP_TOOLS
+    TOOLS.update(REWARD_LOOP_TOOLS)                          # R1: LLM-authored-reward training from an NLP task
+except Exception:  # noqa: BLE001
+    pass
+
 
 # The CONSOLIDATED MCP surface (agent_first_plan.md G-G). Research: Cursor caps ~40 active tools ACROSS all
 # servers and SILENTLY drops the rest; Codex/weaker clients degrade with a big flat menu. So the MCP server

@@ -91,3 +91,48 @@ def run_intelligent_reward_loop(gene, task: str = "walk forward", *, llm=None, n
         return out
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+
+# ---------------------------------------------------------------------------------------------------------
+# The NLP-facing agent tool: "train my robot to <task>" -> an LLM-authored reward drives a verified training run.
+def _train_reward(args: dict) -> dict:
+    from virturoid.services import session_state as S
+    rid = args.get("robot_id")
+    if not rid:
+        return {"ok": False, "error": "robot_id is required (a held robot to train)"}
+    gene = S.get_robot(rid)
+    if gene is None:
+        return {"ok": False, "error": f"no held robot '{rid}'; create_robot / submit_design / ingest_project first"}
+    # the customer's OWN LLM authors the rewards when a backend is configured (BYOK); else the heuristic templates.
+    llm = None
+    try:
+        from virturoid.services.llm_backend import get_llm
+        llm = get_llm()
+    except Exception:  # noqa: BLE001 - LLM-off is a first-class path; templates author the rewards
+        llm = None
+    out = run_intelligent_reward_loop(
+        gene, task=str(args.get("task") or "walk forward"), llm=llm,
+        n_rewards=int(args.get("n_rewards", 4)),
+        final_generations=int(args.get("generations", 8)), final_pop=int(args.get("pop", 24)),
+        steps=int(args.get("steps", 800)), seed=int(args.get("seed", 0)),
+        db=None)
+    out["reward_authored_by"] = "llm" if llm is not None else "templates (no LLM backend configured)"
+    return out
+
+
+REWARD_LOOP_TOOLS = {
+    "train_reward": {
+        "description": "Train a control policy for a held robot from an NLP task ('walk forward fast', 'carry "
+                       "load over rough ground') with NO hand-written reward: the LLM authors candidate reward "
+                       "functions over a safe feature vocabulary, each STEERS a real search, and the winner is "
+                       "chosen by an un-gameable success metric (a reward that games is dropped). Returns the "
+                       "chosen reward, the trained gait, its honest verdict, and banks a credible result to the "
+                       "flywheel. Uses your own LLM subscription when configured; heuristic templates otherwise.",
+        "parameters": {"type": "object", "required": ["robot_id"], "properties": {
+            "robot_id": {"type": "string"},
+            "task": {"type": "string", "description": "the goal in plain language"},
+            "n_rewards": {"type": "integer", "description": "how many reward candidates to author (default 4)"},
+            "generations": {"type": "integer"}, "pop": {"type": "integer"}}},
+        "handler": _train_reward, "heavy": True,
+    },
+}
