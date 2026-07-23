@@ -120,7 +120,37 @@ def _train_reward(args: dict) -> dict:
     return out
 
 
+def _generate_fusion(args: dict) -> dict:
+    """NLP tool: 'set up sensor fusion for my robot' -> a deployable EKF/AHRS/odometry stack from its BOM."""
+    from virturoid.services import session_state as S
+    rid = args.get("robot_id")
+    if not rid:
+        return {"ok": False, "error": "robot_id is required (a held robot)"}
+    gene = S.get_robot(rid)
+    if gene is None:
+        return {"ok": False, "error": f"no held robot '{rid}'; create_robot / submit_design / ingest_project first"}
+    try:
+        from virturoid.services.sensor_fusion_compiler import compile_sensor_fusion
+        out = compile_sensor_fusion(gene, task=str(args.get("task") or ""))
+        out.pop("_files_content", None)                      # the manifest, not the raw file bodies
+        return {"ok": True, **out}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+
 REWARD_LOOP_TOOLS = {
+    "generate_fusion": {
+        "description": "Compile a deployable SENSOR-FUSION stack (state estimation) for a held robot from its "
+                       "bill of materials -- a robot_localization EKF, an IMU orientation filter, and a wheel/leg "
+                       "odometry source, referencing EXACTLY the sensors the robot has, on the links they mount "
+                       "to. Picks the estimator by what the robot IS: a wheeled base gets a 2-D planar filter, a "
+                       "legged body gets contact-aided leg-odometry + full-3-D AHRS, a fixed arm gets none (it "
+                       "doesn't localize) -- and it discloses any unobservable state. No human writes an EKF YAML.",
+        "parameters": {"type": "object", "required": ["robot_id"], "properties": {
+            "robot_id": {"type": "string"},
+            "task": {"type": "string", "description": "the deployment task (affects the sensor suite)"}}},
+        "handler": _generate_fusion, "heavy": False,
+    },
     "train_reward": {
         "description": "Train a control policy for a held robot from an NLP task ('walk forward fast', 'carry "
                        "load over rough ground') with NO hand-written reward: the LLM authors candidate reward "

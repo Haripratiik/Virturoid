@@ -34,6 +34,7 @@ def build_deployment_guide(output_dir) -> str:
     has_ros2 = bool(list((output_dir / "export").rglob("package.xml"))) if (output_dir / "export").exists() else False
     has_control = (output_dir / "software" / "control_program.json").exists()
     has_urdf = (output_dir / "robot" / "robot.urdf").exists()
+    fusion = _load(output_dir, "fusion_manifest.json")
 
     out: list[str] = []
     out.append(f"# Build *{name}* for real - deployment guide")
@@ -95,7 +96,27 @@ def build_deployment_guide(output_dir) -> str:
         out.append("The learned/derived controller is exported at `software/control_program.json` "
                    "(a downstream PD / ros2_control loop tracks its joint targets).")
         out.append("")
-    if not (has_ros2 or has_control):
+    if fusion:
+        kind = fusion.get("kind", "robot")
+        n_sensors = len(fusion.get("sensors", []))
+        out.append(f"**Sensor fusion (state estimation)** — compiled from the BOM, not hand-written. This "
+                   f"{kind} carries {n_sensors} sensor(s); `fusion/` ships the deployable stack:")
+        out.append("")
+        for f in fusion.get("files", []):
+            out.append(f"- `fusion/{f}`")
+        fused = fusion.get("fused_states") or {}
+        if fused:
+            out.append("")
+            out.append("Fused state estimates: " + ", ".join(
+                f"**{st}** ({', '.join(srcs)})" for st, srcs in fused.items()) + ".")
+        for miss in (fusion.get("missing") or [])[:3]:
+            out.append(f"- ⚠️ {miss}")
+        out.append("")
+        out.append("```")
+        out.append("ros2 launch virturoid_robot sensor_fusion.launch.py")
+        out.append("```")
+        out.append("")
+    if not (has_ros2 or has_control or fusion):
         out.append("_No ROS2 package or control program was exported for this build._")
         out.append("")
 

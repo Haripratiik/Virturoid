@@ -888,6 +888,13 @@ def _emit_bom(gene: RobotGene, output_dir: Path, task: str = "") -> dict:
         (output_dir / "reports").mkdir(parents=True, exist_ok=True)
         (output_dir / "reports" / "bill_of_materials.md").write_text(format_bom_markdown(bom), encoding="utf-8")
         gene.metadata["bom"] = bom
+        # The sensor-fusion stack is DERIVED from these same BOM sensors: an EKF/AHRS/odometry config referencing
+        # exactly the parts above, on the links they mount to. Colocated with the BOM so every build ships it.
+        try:
+            from virturoid.services.sensor_fusion_compiler import write_sensor_fusion
+            write_sensor_fusion(gene, output_dir, task=task)   # -> output_dir/fusion/{config,launch}/...
+        except Exception:  # noqa: BLE001 - fusion configs are value-add; never break a build
+            pass
         return bom.get("totals", {})
     except Exception:  # noqa: BLE001 - the BOM is value-add; never let it break a build
         return {}
