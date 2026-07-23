@@ -12,6 +12,8 @@ raise ``EditError`` with a TEACHING message (SWE-agent ACI: the error tells the 
 """
 from __future__ import annotations
 
+import re
+
 
 class EditError(Exception):
     """A localized edit could not be applied (bad group / factor / it broke a validity gate). Message teaches."""
@@ -29,7 +31,7 @@ def _num(value, name, *, cast=float):
 # group name -> substrings that identify its segments (robust across the product's builders; a bespoke LLM gene
 # still names limbs recognizably). "all" matches everything.
 _GROUP_WORDS = {
-    "legs": ("leg", "thigh", "shank", "femur", "tibia", "shin", "calf", "coxa"),
+    "legs": ("leg", "thigh", "shank", "femur", "tibia", "shin", "calf", "coxa", "hip"),
     "arms": ("arm", "forearm", "upper_arm", "wrist", "elbow", "shoulder"),
     "torso": ("torso", "body", "trunk", "chest", "abdomen", "spine", "base_link"),
     "head": ("head", "skull", "snout", "cranium"),
@@ -51,6 +53,23 @@ def _dominant_material(gene) -> str:
     return (mats.most_common(1)[0][0] if mats else "") or "aluminum"
 
 
+# short tokens that are substrings of unrelated words get a WORD boundary so "hip" matches FL_hip / hip_joint
+# but never "battleship"/"microchip"; long distinctive tokens keep cheap substring matching. ("hip" was added to
+# the legs group so `scale_group legs` reaches a Unitree-style FL_hip/FR_hip chain — #216-adjacent.)
+_BOUNDED_WORDS = frozenset({"hip", "arm", "leg", "toe", "shin", "calf"})
+
+
+def _name_in_group(name: str | None, words) -> bool:
+    nm = (name or "").lower()
+    for w in words:
+        if w in _BOUNDED_WORDS:
+            if re.search(rf"(?:^|[^a-z]){re.escape(w)}(?:$|[^a-z])", nm):
+                return True
+        elif w in nm:
+            return True
+    return False
+
+
 def segments_for_group(gene, group: str) -> list:
     """The segments a group name refers to. 'all' -> every segment. Unknown -> EditError listing valid groups."""
     group = (group or "").lower().strip()
@@ -59,7 +78,7 @@ def segments_for_group(gene, group: str) -> list:
     words = _GROUP_WORDS.get(group)
     if words is None:
         raise EditError(f"unknown group '{group}'; valid groups: {sorted(_GROUP_WORDS) + ['all']}")
-    hits = [s for s in gene.segments if any(w in (s.name or "").lower() for w in words)]
+    hits = [s for s in gene.segments if _name_in_group(s.name, words)]
     if group == "arms" and (gene.robot_class or "").lower() == "manipulator":
         # MEASURED live 2026-07-22: the composed manipulator names its REAL links j1/j2 (0.325 m each), so the
         # word list matched only the 0.05 m shoulder/wrist stubs — "make the arm longer" scaled two joints,

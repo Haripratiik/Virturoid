@@ -63,7 +63,7 @@ class AgentTaskToolTests(unittest.TestCase):
         from virturoid.services.agent_tools import tool_specs
         names = [t["name"] for t in tool_specs(view="mcp")]
         self.assertIn("run_task", names)
-        self.assertLessEqual(len(names), 16)
+        self.assertLessEqual(len(names), 17)
 
 
 if __name__ == "__main__":

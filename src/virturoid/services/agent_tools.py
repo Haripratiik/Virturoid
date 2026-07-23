@@ -309,6 +309,7 @@ except Exception:  # noqa: BLE001
 #   the server `instructions`. Ordered by the canonical loop so the menu reads as a workflow.
 MCP_TOOL_VIEW: tuple[str, ...] = (
     "get_design_schema", "submit_design", "create_robot",      # author / generate a robot
+    "ingest_project",                                          # INGEST an existing robot folder (gateway, below)
     "get_robot", "edit_robot", "render_view",                  # inspect / localized-edit / see
     "verify_robot", "evaluate_held", "run_task",               # honest verdict / task score / any-goal task
     "create_scene", "edit_scene",                              # themed scene + re-theme
@@ -316,13 +317,33 @@ MCP_TOOL_VIEW: tuple[str, ...] = (
     "recall_knowledge", "llm_spend",                           # memory recall / zero-token proof
 )
 
+# INGESTION GATEWAY (P0, agentic-ingestion plan): the plan found ZERO ingestion tools in the MCP view, so a
+# customer's own agent (the BYOK model) could not DISCOVER ingestion from tools/list at all. Rather than crowd
+# the lean menu with every importer, ``ingest_project`` is advertised and its description names the sibling
+# importers — each callable by name via call_tool (the registry dispatches all of them). This is the single
+# discovery entry point for "I already have a robot / policy / BOM / dataset; bring it in."
+_INGEST_SIBLINGS: tuple[str, ...] = (
+    "import_robot_model", "import_bom", "import_onnx_policy", "import_dataset",
+    "import_cad", "adopt_control_script", "sandbox_policy",
+)
+
 
 def tool_specs(view: str | None = None) -> list[dict]:
     """The agent/MCP-discoverable tool list: ``[{name, description, parameters, heavy}]``. ``view='mcp'`` returns
     only the consolidated <=15-tool MCP surface (G-G), in workflow order; default returns the full registry."""
     if view == "mcp":
-        return [{"name": n, "description": TOOLS[n]["description"], "parameters": TOOLS[n]["parameters"],
-                 "heavy": TOOLS[n].get("heavy", False)} for n in MCP_TOOL_VIEW if n in TOOLS]
+        out = []
+        for n in MCP_TOOL_VIEW:
+            if n not in TOOLS:
+                continue
+            desc = TOOLS[n]["description"]
+            if n == "ingest_project":                          # advertise the sibling importers by name
+                avail = [s for s in _INGEST_SIBLINGS if s in TOOLS]
+                desc = (desc + " Companion importers, each callable by name via a tools/call: "
+                        + ", ".join(avail) + ".")
+            out.append({"name": n, "description": desc, "parameters": TOOLS[n]["parameters"],
+                        "heavy": TOOLS[n].get("heavy", False)})
+        return out
     return [{"name": n, "description": t["description"], "parameters": t["parameters"],
              "heavy": t.get("heavy", False)} for n, t in TOOLS.items()]
 

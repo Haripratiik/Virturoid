@@ -289,10 +289,10 @@ class ToolConsolidationTests(unittest.TestCase):
     def test_mcp_view_is_at_most_15_and_workflow_shaped(self):
         from virturoid.services.agent_tools import tool_specs, TOOLS
         view = tool_specs(view="mcp")
-        self.assertLessEqual(len(view), 16, "MCP menu must fit the cross-client budget (well under Cursor's ~40)")
+        self.assertLessEqual(len(view), 17, "MCP menu must fit the cross-client budget (well under Cursor's ~40)")
         names = [t["name"] for t in view]
         for essential in ("submit_design", "get_robot", "edit_robot", "verify_robot", "export_held",
-                          "create_scene", "get_job", "llm_spend"):
+                          "create_scene", "get_job", "llm_spend", "ingest_project"):
             self.assertIn(essential, names, f"{essential} must be in the MCP view")
         for n in names:                                          # every advertised tool really dispatches
             self.assertIn(n, TOOLS)
@@ -302,7 +302,7 @@ class ToolConsolidationTests(unittest.TestCase):
     def test_mcp_server_lists_the_consolidated_view(self):
         from virturoid.mcp_server import _handle
         listed = _handle("tools/list", {})["tools"]
-        self.assertLessEqual(len(listed), 16)
+        self.assertLessEqual(len(listed), 17)
         self.assertTrue(all("inputSchema" in t for t in listed))
 
 

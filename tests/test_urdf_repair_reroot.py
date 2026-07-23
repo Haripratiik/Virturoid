@@ -130,3 +130,24 @@ def test_ingest_go2_uses_faithful_lane_and_discloses_it(tmp_path):
     rep = r["ingestion_report"]
     assert rep["understood"] and set(rep) >= {"understood", "guessed", "dropped", "lane_used"}
     assert (tmp_path / "ingestion_report.json").exists()
+
+
+# --- P0 exposure/honesty: ingestion discoverable + amend reaches hip links -------------------------------
+def test_ingestion_is_discoverable_in_the_mcp_view():
+    """BYOK model: a customer's own agent must find ingestion from tools/list (it could not before P0)."""
+    from virturoid.services.agent_tools import tool_specs
+    view = tool_specs(view="mcp")
+    names = [t["name"] for t in view]
+    assert "ingest_project" in names
+    gw = next(t for t in view if t["name"] == "ingest_project")
+    for sib in ("import_onnx_policy", "import_bom", "adopt_control_script", "import_dataset"):
+        assert sib in gw["description"], f"{sib} must be advertised on the gateway so agents can call it"
+
+
+def test_scale_group_legs_reaches_hip_links_but_not_ship():
+    """#216-adjacent: `scale_group legs` on a Unitree-style FL_hip/FR_hip chain must include the hips, and the
+    word-boundary guard must never match unrelated words like 'battleship'."""
+    from virturoid.services.edit_operators import _GROUP_WORDS, _name_in_group
+    legs = _GROUP_WORDS["legs"]
+    assert _name_in_group("FL_hip", legs) and _name_in_group("RR_hip_joint", legs)
+    assert not _name_in_group("battleship", legs) and not _name_in_group("microchip", legs)

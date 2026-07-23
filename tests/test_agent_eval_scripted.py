@@ -79,7 +79,7 @@ class ScriptedAgentEvalTests(unittest.TestCase):
 
         # 2. tools/list is the CONSOLIDATED <=15 view (G-G), and a folded tool is absent from the menu
         tools = [t["name"] for t in self._rpc("tools/list")["tools"]]
-        self.assertLessEqual(len(tools), 16)
+        self.assertLessEqual(len(tools), 17)
         self.assertIn("submit_design", tools)
         self.assertNotIn("simulate_gait", tools)               # folded into verify_robot
 
