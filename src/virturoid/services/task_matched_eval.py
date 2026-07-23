@@ -15,6 +15,17 @@ from __future__ import annotations
 from virturoid.schemas.gene import RobotGene
 
 
+def _has_wheels(segs) -> bool:
+    """A wheel is a cylinder on a CONTINUOUS (unbounded) revolute joint — it spins freely. A leg link is also a
+    cylinder on a revolute joint, but a BOUNDED one (anatomical limits). Requiring the joint to be unbounded is
+    the canonical URDF wheel-vs-leg distinction, and it is exactly how this system emits them: our composed
+    wheels carry joint_lower/upper = None, while every leg/arm joint (incl. an imported Unitree Go2's, measured
+    hip/knee limits like -2.72..-0.84) is bounded. Before this, a Go2's cylinder legs read as wheels, so the
+    quadruped was routed to the DRIVING rubric and verified 'TIPPED while driving' -- a dishonest verdict (#218)."""
+    return any(getattr(s, "shape", None) == "cylinder" and s.joint_type == "revolute"
+               and s.joint_lower is None and s.joint_upper is None for s in segs)
+
+
 def robot_kind(gene: RobotGene) -> str:
     """Classify a robot by STRUCTURE, not its (LLM-authored) class string — so a 'hexapod', 'spider',
     'frog', 'octopod', 'snake' etc. route by what they physically ARE: wheels→mobile, a free-floating
@@ -27,7 +38,7 @@ def robot_kind(gene: RobotGene) -> str:
         return "aerial"                                  # a quadcopter: rotor-thrust driven, no wheels/gripper/legs
     if (gene.robot_class or "") == "aquatic" or md.get("aquatic"):
         return "aquatic"                                 # an undulator: a serial spine that swims, not a land walker
-    has_wheels = any(getattr(s, "shape", None) == "cylinder" and s.joint_type == "revolute" for s in segs)
+    has_wheels = _has_wheels(segs)
     n_revolute = sum(1 for s in segs if s.joint_type == "revolute")
     if ee == "spray_nozzle":
         return "spray"
@@ -48,7 +59,7 @@ def robot_capabilities(gene: RobotGene) -> set[str]:
     ee = gene.end_effector_type or "none"
     segs = gene.segments
     md = getattr(gene, "metadata", None) or {}
-    has_wheels = any(getattr(s, "shape", None) == "cylinder" and s.joint_type == "revolute" for s in segs)
+    has_wheels = _has_wheels(segs)
     n_revolute = sum(1 for s in segs if s.joint_type == "revolute")
     caps: set[str] = set()
     if (gene.robot_class or "") == "aerial" or md.get("rotor_offsets"):

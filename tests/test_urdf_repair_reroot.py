@@ -174,3 +174,28 @@ def test_adopt_control_script_fails_loudly_on_unreadable_params(tmp_path):
     r2 = call_tool("adopt_control_script",
                    {"robot_id": rid, "params": {"freq": 1.5, "hip_amp": 0.9, "kp": 32.0}})["result"]
     assert r2.get("adopted") is True and r2.get("params_source") == "inline"
+
+
+@pytest.mark.skipif(not _MUJOCO, reason="needs MuJoCo")
+def test_imported_quadruped_is_classified_legged_not_mobile():
+    """#218: a Go2's cylinder legs on BOUNDED revolute joints must not read as wheels — the imported quadruped
+    must route to the legged rubric, never the driving rubric (the dishonest 'TIPPED while driving')."""
+    src = _go2_path()
+    if src is None:
+        pytest.skip("Go2 URDF fixture not present")
+    from virturoid.services.robot_import import import_robot
+    from virturoid.services.task_matched_eval import robot_kind
+    gene = import_robot(src).get("gene")
+    assert gene is not None and robot_kind(gene) == "legged"
+
+
+def test_wheel_vs_leg_is_decided_by_joint_bounds():
+    """The rule: a wheel spins on a CONTINUOUS (unbounded) joint; a leg link is a cylinder on a BOUNDED one."""
+    from virturoid.services.task_matched_eval import _has_wheels
+    from virturoid.schemas.gene import GeneSegment
+
+    def seg(name, lo, hi):
+        return GeneSegment(name, parent="torso", shape="cylinder", length_m=0.1, radius_m=0.03, mass_kg=0.2,
+                           joint_type="revolute", joint_lower=lo, joint_upper=hi)
+    assert _has_wheels([seg("wheel", None, None)]) is True         # unbounded -> a real wheel
+    assert _has_wheels([seg("calf", -2.72, -0.84)]) is False       # bounded -> a leg, not a wheel
