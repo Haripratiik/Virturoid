@@ -8,7 +8,103 @@ flows through ``robot_mjcf`` everywhere. Meshed URDFs need their mesh/asset file
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
+
+# ---------------------------------------------------------------------------------------------------------
+# URDF REPAIR PASS (P0, agentic-ingestion plan). Real customer URDFs — the AS-PUBLISHED Unitree Go2 among
+# them — do NOT load in MuJoCo as-is. The repairs here are deterministic, lossless FOR SIMULATION, and each
+# one is REPORTED (never silent) so an ingesting agent can tell the customer exactly what was touched.
+# ---------------------------------------------------------------------------------------------------------
+_MATERIAL_FULL = re.compile(r"<material\s+name=\"(?P<name>[^\"]+)\"\s*>(?P<body>.*?)</material\s*>", re.S)
+# any <material> — a full definition OR a name-only reference (self-closing / empty)
+_ANY_MATERIAL = re.compile(r"<material\b[^>]*?/>|<material\b[^>]*?>.*?</material\s*>", re.S)
+_VISUAL_BLOCK = re.compile(r"<visual\b[^>]*>.*?</visual\s*>", re.S)
+
+
+def repair_urdf_text(text: str, *, mesh_root: Path | None = None) -> tuple[str, list[dict]]:
+    """Make a real-world URDF compile in MuJoCo, reporting every change.
+
+    Returns ``(repaired_text, repairs)`` where each repair is ``{kind, detail, count}``. Fixes, in order:
+
+    1. **Duplicate material definitions** — the exact failure of the as-published Go2 URDF: a named material
+       (e.g. a rubber colour) is FULLY re-defined in many ``<visual>`` blocks, and MuJoCo rejects the second
+       full definition ("repeated element: 'material'"). We keep the FIRST definition of each name and rewrite
+       every later one to a name-only reference ``<material name="X"/>`` — identical rendering, legal XML.
+    2. **``package://`` mesh URIs** — resolved to a real file under ``mesh_root`` when one exists, otherwise
+       left for MuJoCo's missing-mesh tolerance. Reported either way.
+    3. **``<gazebo>`` / ``<transmission>`` blocks** — simulator-plugin metadata MuJoCo doesn't model; stripped.
+    """
+    repairs: list[dict] = []
+
+    # MATERIALS. Real exporters (Blender→URDF, the as-published Go2) violate two MuJoCo rules at once: a single
+    # <visual> carries MANY <material> children, and the same material name is fully re-defined in block after
+    # block. MuJoCo needs exactly ONE material per visual and each name defined ONCE. So:
+    #   (a) in every <visual>, keep only the FIRST <material>, capturing any full definition seen;
+    #   (b) hoist the captured definitions to one top-level block and leave name-only references inline.
+    defs: dict[str, str] = {}
+    extra_dropped = {"n": 0}
+
+    def _first_material_only(vis: re.Match) -> str:
+        block = vis.group(0)
+        mats = list(_ANY_MATERIAL.finditer(block))
+        if not mats:
+            return block
+        for mm in mats:                                     # capture every full def we can, for the hoist
+            full = _MATERIAL_FULL.fullmatch(mm.group(0))
+            if full:
+                defs.setdefault(full.group("name"), full.group(0))
+        first = mats[0]
+        name = re.search(r'name="([^"]+)"', first.group(0))
+        keep = f'<material name="{name.group(1)}"/>' if name else first.group(0)
+        extra_dropped["n"] += len(mats) - 1
+        # rebuild the visual with just the first material (as a reference), all others removed
+        without = _ANY_MATERIAL.sub("", block)
+        return without.replace("</visual>", keep + "</visual>", 1) if "</visual>" in without else without + keep
+
+    text = _VISUAL_BLOCK.sub(_first_material_only, text)
+    # any material still fully-defined OUTSIDE a visual (top-level) -> capture + reference too
+    text = _MATERIAL_FULL.sub(lambda m: (defs.setdefault(m.group("name"), m.group(0)),
+                                         f'<material name="{m.group("name")}"/>')[1], text)
+    if defs:
+        block = "\n  " + "\n  ".join(defs[n] for n in defs) + "\n"
+        m_robot = re.search(r"<robot\b[^>]*>", text)
+        if m_robot:
+            text = text[:m_robot.end()] + block + text[m_robot.end():]
+        repairs.append({"kind": "material_normalize", "count": len(defs),
+                        "detail": f"hoisted {len(defs)} material definition(s) to one top-level block, "
+                                  f"referenced them inline, and dropped {extra_dropped['n']} extra <material> "
+                                  f"stuffed into single <visual> elements (MuJoCo allows one per visual); "
+                                  f"rendering unchanged"})
+
+    pkg = re.findall(r'filename="(package://[^"]+)"', text)
+    if pkg:
+        resolved = missing = 0
+        for uri in pkg:
+            rel = uri[len("package://"):].split("/", 1)[-1]      # drop the ROS package name, keep the path
+            hit = None
+            if mesh_root is not None:
+                cand = mesh_root / rel
+                if cand.exists():
+                    hit = cand
+                elif (mesh_root / Path(rel).name).exists():
+                    hit = mesh_root / Path(rel).name
+            if hit is not None:
+                text = text.replace(uri, hit.as_posix()); resolved += 1
+            else:
+                missing += 1
+        repairs.append({"kind": "package_uri", "count": len(pkg),
+                        "detail": f"resolved {resolved} package:// mesh path(s) locally; "
+                                  f"{missing} left to MuJoCo's missing-mesh tolerance"})
+
+    for tag in ("gazebo", "transmission"):
+        stripped = re.subn(rf"<{tag}\b.*?</{tag}\s*>", "", text, flags=re.S)
+        if stripped[1]:
+            text = stripped[0]
+            repairs.append({"kind": f"strip_{tag}", "count": stripped[1],
+                            "detail": f"removed {stripped[1]} <{tag}> block(s) (simulator-plugin metadata "
+                                      f"MuJoCo does not model)"})
+    return text, repairs
 
 
 def _ensure_floor(xml: str) -> str:
@@ -49,12 +145,28 @@ def import_model(path: str) -> dict:
     if not p.exists():
         return {"ok": False, "note": f"file not found: {path}"}
     sfx = p.suffix.lower()
+    repairs: list[dict] = []
     try:
         if sfx in (".xml", ".mjcf"):
             mjcf = _ensure_floor(p.read_text(encoding="utf-8"))
             model = mujoco.MjModel.from_xml_string(mjcf)            # validate it loads
         elif sfx == ".urdf":
-            model = mujoco.MjModel.from_xml_path(str(p))            # MuJoCo compiles URDF
+            # REPAIR FIRST (P0): a raw customer URDF (Go2!) may not compile. Try as-is, and on failure run the
+            # deterministic repair pass and retry — so a clean file is untouched but a real one still loads.
+            raw = p.read_text(encoding="utf-8")
+            try:
+                model = mujoco.MjModel.from_xml_path(str(p))
+            except Exception:  # noqa: BLE001 - the as-published file did not compile; repair + retry
+                fixed, repairs = repair_urdf_text(raw, mesh_root=p.parent)
+                tmp_urdf = p.with_name(p.stem + ".__repaired__.urdf")
+                tmp_urdf.write_text(fixed, encoding="utf-8")       # sibling so relative mesh paths still resolve
+                try:
+                    model = mujoco.MjModel.from_xml_path(str(tmp_urdf))
+                finally:
+                    try:
+                        tmp_urdf.unlink()
+                    except OSError:
+                        pass
             tmp = tempfile.NamedTemporaryFile(suffix=".xml", delete=False); tmp.close()
             mujoco.mj_saveLastXML(tmp.name, model)
             mjcf = _ensure_floor(Path(tmp.name).read_text(encoding="utf-8"))
@@ -63,7 +175,8 @@ def import_model(path: str) -> dict:
         else:
             return {"ok": False, "note": f"unsupported format {sfx!r} — use .xml/.mjcf or .urdf"}
     except Exception as exc:  # noqa: BLE001
-        return {"ok": False, "note": f"could not load model: {exc}"}
+        return {"ok": False, "note": f"could not load model: {exc}",
+                "repairs": repairs}
 
     if model.nu == 0:                          # URDF joints import without motors -> add them so it's drivable
         try:
@@ -73,5 +186,51 @@ def import_model(path: str) -> dict:
 
     free = any(int(model.jnt_type[j]) == 0 for j in range(model.njnt))   # free joint -> can move/locomote
     note = "ready to iterate on" if model.nu > 0 else "no actuators — can simulate but not learn control"
+    body_names = [mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, b) or "" for b in range(model.nbody)]
     return {"ok": True, "mjcf": mjcf, "name": p.stem, "parts": int(model.nbody) - 1,
-            "actuated": int(model.nu), "free_base": bool(free), "note": note}
+            "actuated": int(model.nu), "free_base": bool(free), "note": note,
+            "repairs": repairs, "body_names": body_names}
+
+
+# ---------------------------------------------------------------------------------------------------------
+def reroot_free_base(mjcf: str) -> tuple[str, bool]:
+    """Give a FIXED-BASE imported body a free joint so it can actually locomote, reporting whether it did.
+
+    MuJoCo welds a URDF's base link to the world when the file has no floating joint, so a real Go2/quadruped
+    imports STANDING-BUT-BOLTED-DOWN — simulable but never walking, and a naive verify reads "WHEELS OFF
+    GROUND" / "TIPPED" (measured #214, and the round-trip of our OWN URDF exports). The base geoms are welded
+    directly into ``<worldbody>`` and the first ``<body>`` is a child link, so there is nothing to hang a joint
+    on — we WRAP the whole robot (every worldbody child except the floor) in a new free-floating base body,
+    placed at a standing height derived from the model's own geometry. Idempotent: an already-free model, or a
+    non-locomotor we can't lift cleanly, is returned unchanged with ``False``.
+    """
+    import mujoco
+    try:
+        m = mujoco.MjModel.from_xml_string(mjcf)
+        if any(int(m.jnt_type[j]) == 0 for j in range(m.njnt)):
+            return mjcf, False                                      # already free-based
+        d = mujoco.MjData(m); mujoco.mj_forward(m, d)
+        lows = [float(d.geom_xpos[g][2] - m.geom_rbound[g]) for g in range(m.ngeom)
+                if int(m.geom_type[g]) != int(mujoco.mjtGeom.mjGEOM_PLANE)]
+        stand_h = max(0.05, -min(lows) + 0.02) if lows else 0.3     # lift so the lowest geom clears the floor
+    except Exception:  # noqa: BLE001
+        return mjcf, False
+
+    mw = re.search(r"<worldbody\s*>", mjcf)
+    mwe = re.search(r"</worldbody\s*>", mjcf)
+    if not (mw and mwe):
+        return mjcf, False
+    inner = mjcf[mw.end():mwe.start()]
+    # keep the floor plane OUT of the moving base; everything else (base geoms + link bodies) goes inside it
+    floor = re.search(r'<geom\b[^>]*type="plane"[^>]*/>', inner)
+    floor_xml = floor.group(0) if floor else ""
+    robot_xml = inner.replace(floor_xml, "", 1) if floor_xml else inner
+    wrapped = (f"\n    {floor_xml}\n"
+               f'    <body name="import_base" pos="0 0 {stand_h:.4f}">\n'
+               f"      <freejoint/>\n{robot_xml}\n    </body>\n  ")
+    candidate = mjcf[:mw.end()] + wrapped + mjcf[mwe.start():]
+    try:
+        mujoco.MjModel.from_xml_string(candidate)                  # only adopt if it still compiles
+    except Exception:  # noqa: BLE001
+        return mjcf, False
+    return candidate, True
