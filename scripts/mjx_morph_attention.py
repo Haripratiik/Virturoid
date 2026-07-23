@@ -181,6 +181,11 @@ def main(argv=None) -> int:
     ap.add_argument("--keep-checkpoints", action="store_true", help="plan v2 T0.1: also save NUMBERED checkpoints "
                     "(runs/<name>_it{N}.npz every 10 iters) so DEPLOY-SIM checkpoint selection can pick best-by-CPU "
                     "(MJX reward can rise while CPU deploy flips sign -- never select on train-sim reward).")
+    ap.add_argument("--reward-expr", type=str, default="", help="R1 (agentic platform): an LLM-authored reward_dsl "
+                    "EXPRESSION over the 10 whitelisted features (forward_vel, upright, height_ratio, contact_frac, "
+                    "alive, slip, foot_clearance, energy, action_smooth, dist_to_goal). When set, it REPLACES the "
+                    "shaped legged_gym reward — the same reward the CPU gait search screened now steers MJX PPO, "
+                    "evaluated natively via reward_dsl.compile_reward_batched(xp=jax.numpy). Empty = shaped reward.")
     args = ap.parse_args(argv)
     if args.smoke:
         args.envs, args.iters, args.ep_len, args.minibatches = 2, 2, 20, 1
@@ -293,6 +298,13 @@ def main(argv=None) -> int:
     TORQUE_W = args.torque_w                              # actuator-effort penalty (anti-crank stabilizer)
     PERIODIC_W = float(args.periodic_w)                   # P1 (plan v4): periodic gait-contact reward weight (0 = off)
     WTW_W = float(args.wtw_w)                              # physical-AI: slide-proof grounded-foot-speed penalty (0=off)
+    # R1 (agentic platform): an LLM-authored reward_dsl expression, compiled to a jax.numpy fn over the 10 features.
+    # When set it REPLACES the shaped reward below — the reward the CPU search screened now steers this MJX PPO run.
+    DSL_REWARD = None
+    if args.reward_expr:
+        from virturoid.services.reward_dsl import compile_reward_batched
+        DSL_REWARD = compile_reward_batched(args.reward_expr, xp=jp)
+        print(f"  R1: steering PPO with LLM-authored reward: {args.reward_expr}", flush=True)
     UPRIGHT_HI = max(0.55, float(args.upright_hi))        # upright-ramp saturation height (anti-crouch; default 0.7)
     # TROT-CPG PRIOR (opt-in --cpg): per-token feed-forward amplitude/phase from the SAME logic as the CPU recipe
     # (morph_policy._trot_cpg_tokens + CPG_DEFAULT), so a GPU-trained policy transfers to / replays on the CPU path.
@@ -618,7 +630,17 @@ def main(argv=None) -> int:
                 # rewards can't fund a reversed gait. Scales with how backward it goes -> backward is driven to 0
                 # reward (never a basin) while a forward gait pays nothing. Kills the MJX backward-convergence.
                 back_pen = BACK_W * jp.maximum(0.0, -fwd) * up
-                rew = alive2 * jp.maximum(0.0, step_r - back_pen)       # non-negative; zero after a fall or if reversing
+                if DSL_REWARD is not None:
+                    # R1: the LLM-authored reward REPLACES the shaped one. The 10 features come from the SAME
+                    # rollout quantities the shaped reward uses, so the CPU-screened reward steers MJX PPO natively.
+                    n_feet = fz.shape[-1]
+                    feats = {"forward_vel": fwd, "upright": upr, "height_ratio": z / (z_stand + 1e-6),
+                             "contact_frac": n_stance / n_feet, "alive": alive2, "slip": jp.abs(qd[:, 1]),
+                             "foot_clearance": clearance, "energy": effort, "action_smooth": -sm,
+                             "dist_to_goal": jp.zeros_like(fwd)}
+                    rew = alive2 * DSL_REWARD(feats)                    # alive gate keeps a fallen episode at 0
+                else:
+                    rew = alive2 * jp.maximum(0.0, step_r - back_pen)   # non-negative; zero after a fall or if reversing
             # carry the action basis used for smoothness next step (applied offset for recipe; clipped for legacy)
             a_next = a_clip if LEGACY else off
             outs = (obs, act, logp, rew, val, fwd, alive2)

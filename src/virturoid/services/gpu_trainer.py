@@ -336,7 +336,7 @@ def train_gene_on_gpu(gene, *, out_path: str, iters: int = 80, envs: int = 1024,
                       decimation: int | None = None, action_lpf: float | None = None,
                       sphere_feet: bool = False, contact_dr: bool = False,
                       phase_obs: bool = False, dr_scale: float = 1.0,
-                      real_actuator: bool = False,
+                      real_actuator: bool = False, reward_expr: str = "",
                       keep_checkpoints: bool = False) -> str | None:
     """Sync repo+gene to the box, run MJX PPO, fetch the trained policy to ``out_path``. Returns the local
     npz path, or ``None`` on any failure so the caller can fall back to CPU. ``reward_weights`` (the AI gait
@@ -400,6 +400,9 @@ def train_gene_on_gpu(gene, *, out_path: str, iters: int = 80, envs: int = 1024,
         for k, v in (reward_weights or {}).items():          # critic weights -> --clear-w / --prog-w / ... flags
             if k in _REWARD_FLAGS:
                 extra += f" --{k.replace('_', '-')} {float(v)}"
+        if reward_expr:                                       # R1: an LLM-authored reward_dsl expression steers PPO
+            import shlex
+            extra += f" --reward-expr {shlex.quote(reward_expr)}"
         say(f"launching MJX PPO on the GPU ({iters} iters{', critic-tuned reward' if reward_weights else ''})…")
         # v7-F4: MEM_FRACTION caps XLA's arena so a killed/leaked trainer can't pin the whole 12 GB (the measured
         # ~9 GB leak-on-kill); previously this guard lived only in the nightshift ops track, not interactive runs.
