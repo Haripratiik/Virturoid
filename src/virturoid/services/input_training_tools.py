@@ -258,9 +258,47 @@ def _ingest_project(args: dict) -> dict:
         except Exception as exc:  # noqa: BLE001
             result["warnings"].append(f"model import failed ({model_rel}): {exc}")
 
+    # 2-faithful) FAITHFUL LANE (P0, plan §P0.2): before we touch the lossy gene twin, load the customer's model
+    # AS-IS through the repair pass and keep it. This is the body with THEIR link names + dimensions (FL_hip,
+    # FL_thigh, ...); the gene twin is a re-derived approximation good for edits but not for fidelity. We DISCLOSE
+    # which lanes ran so an ingesting agent (and the customer) can see exactly what was preserved vs approximated.
+    result["lanes_attempted"] = []
+    result["lane_used"] = None
+    if model_rel and scan_root:
+        model_path = os.path.join(scan_root, model_rel.replace("/", os.sep))
+        try:
+            from virturoid.services.model_import import import_model, reroot_free_base
+            fm = import_model(model_path)
+            result["lanes_attempted"].append("faithful")
+            if fm.get("ok"):
+                mjcf, rerooted = reroot_free_base(fm["mjcf"])
+                names = fm.get("body_names", [])
+                result["faithful"] = {
+                    "ok": True, "parts": fm.get("parts"), "actuated": fm.get("actuated"),
+                    "free_base": bool(fm.get("free_base")) or rerooted,
+                    "reroot_applied": rerooted, "repairs": fm.get("repairs", []),
+                    "link_names_preserved": [n for n in names if n][:12], "mjcf": mjcf,
+                }
+                result["lane_used"] = "faithful"
+                if fm.get("repairs"):
+                    result["notes"].append("faithful lane: applied " + ", ".join(
+                        f"{r['kind']}(x{r['count']})" for r in fm["repairs"]) + " — every change is listed in "
+                        "result['faithful']['repairs']")
+                if rerooted:
+                    result["notes"].append("faithful lane: the imported body was bolted to the world (fixed base) "
+                                           "— added a free base so it can locomote; original geometry unchanged")
+            else:
+                result["faithful"] = {"ok": False, "note": fm.get("note"), "repairs": fm.get("repairs", [])}
+        except Exception as exc:  # noqa: BLE001 - faithful lane is additive; the gene twin still stands
+            result["warnings"].append(f"faithful lane unavailable: {exc}")
+
     # 2b) a legged import that can't stand on its own stance gets the SAME walkable-stance treatment a composed
     # body gets (a wide fanned stance) so it can actually be SIMULATED and its controller improved. A well-formed
     # import that already walks is left untouched; no-op for arms / mobile bases.
+    if gene is not None and result.get("lane_used") is None:
+        result["lane_used"] = "gene_fallback"                 # only the lossy twin is runnable -> say so
+    if gene is not None:
+        result["lanes_attempted"].append("gene")
     if gene is not None and getattr(gene, "robot_class", "") == "quadruped":
         try:
             from virturoid.services.anatomy_compiler import ensure_walkable_quad
@@ -360,12 +398,67 @@ def _ingest_project(args: dict) -> dict:
             except Exception as exc:  # noqa: BLE001
                 result["warnings"].append(f"CAD import failed ({cad_ref}): {exc}")
 
+    # 7) INGESTION REPORT (P0, plan §P0.7): the honest three-ledger account of what the folder yielded —
+    # what we UNDERSTOOD, what we GUESSED, what we DROPPED — the same honesty contract as composition_notes.
+    report = _ingestion_report(result)
+    result["ingestion_report"] = report
+    _persist_ingestion_report(report, scan_root if (path and not str(path).lower().endswith(".zip")) else path)
+
     if workdir:
         shutil.rmtree(workdir, ignore_errors=True)
-    result["summary"] = (f"Ingested -> {result['robot_id']}: "
+    lane = result.get("lane_used") or "none"
+    result["summary"] = (f"Ingested -> {result['robot_id']}: lane={lane}, "
                          f"{len(result['materials_applied'])} material(s) applied, "
                          f"payload={result['payload_kg']} kg, {len(result['warnings'])} warning(s). Ready to edit/verify.")
     return result
+
+
+def _ingestion_report(result: dict) -> dict:
+    """Turn an ingest result into the understood/guessed/dropped ledger a customer can trust."""
+    understood: list[str] = []
+    guessed: list[str] = []
+    dropped: list[str] = list(result.get("warnings", []))
+
+    faithful = result.get("faithful") or {}
+    if faithful.get("ok"):
+        kept = faithful.get("link_names_preserved") or []
+        understood.append(f"faithful model loaded: {faithful.get('parts')} bodies, "
+                          f"{faithful.get('actuated')} actuators; link names preserved e.g. {kept[:4]}")
+        for rep in faithful.get("repairs", []):
+            understood.append(f"repair applied ({rep['kind']}): {rep['detail']}")
+        if faithful.get("reroot_applied"):
+            understood.append("added a free base so the fixed-base import can locomote")
+    elif faithful:
+        dropped.append(f"faithful model did not load: {faithful.get('note')}")
+
+    imp = result.get("import") or {}
+    if imp:
+        guessed.append(f"editable gene twin inferred as {imp.get('robot_class')} "
+                       f"(approximate — use the faithful model for fidelity)")
+    for note in result.get("notes", []):
+        (guessed if "could not" in note or "adopted" in note else understood).append(note)
+    if result.get("bom"):
+        understood.append(f"BOM: {result['bom'].get('line_items')} line items, "
+                          f"{result['bom'].get('total_mass_kg')} kg")
+    if result.get("cad"):
+        understood.append(f"CAD: dims {result['cad'].get('dimensions_m')}")
+    if result.get("control_scripts"):
+        guessed.append(f"{len(result['control_scripts'])} control/policy file(s) found — not yet run "
+                       "(call adopt_control_script)")
+    return {"understood": understood, "guessed": guessed, "dropped": dropped,
+            "lane_used": result.get("lane_used"), "lanes_attempted": result.get("lanes_attempted", [])}
+
+
+def _persist_ingestion_report(report: dict, project_dir) -> None:
+    """Write ingestion_report.json next to the project (best-effort; a write failure never sinks an ingest)."""
+    import json
+    try:
+        base = project_dir if (project_dir and os.path.isdir(str(project_dir))) else "build"
+        out = os.path.join(str(base), "ingestion_report.json")
+        with open(out, "w", encoding="utf-8") as fh:
+            json.dump(report, fh, indent=2, ensure_ascii=False)
+    except Exception:  # noqa: BLE001 - reporting is additive
+        pass
 
 
 def _adopt_control_script(args: dict) -> dict:

@@ -104,3 +104,29 @@ def test_reroot_is_idempotent_on_an_already_free_model():
     mjcf = robot_mjcf(compose_robot("a quadruped robot", llm=None))
     _, added = reroot_free_base(mjcf)
     assert added is False                                        # our composed bodies are already free-based
+
+
+@pytest.mark.skipif(not _MUJOCO, reason="needs MuJoCo")
+def test_ingest_go2_uses_faithful_lane_and_discloses_it(tmp_path):
+    """#215 end-to-end: dropping the Go2 folder holds the FAITHFUL model (FL_* names), names the lane it used,
+    and emits an understood/guessed/dropped ingestion report — no silent generic-proxy swap."""
+    import shutil
+
+    src = _go2_path()
+    if src is None:
+        pytest.skip("Go2 URDF fixture not present")
+    from virturoid.services.input_training_tools import _ingest_project
+    (tmp_path / "robot").mkdir()
+    shutil.copy(src, tmp_path / "robot" / "go2.urdf")
+    r = _ingest_project({"project_path": str(tmp_path), "description": "a Unitree Go2 quadruped robot dog"})
+
+    assert r.get("robot_id")
+    assert r["lane_used"] == "faithful", r.get("lanes_attempted")   # disclosure is schema-required
+    f = r["faithful"]
+    assert f["ok"] and f["actuated"] >= 12
+    kept = " ".join(f["link_names_preserved"])
+    assert "FL_hip" in kept and "FL_thigh" in kept                  # customer geometry, not our skeleton
+    assert any(rp["kind"] == "material_normalize" for rp in f["repairs"])
+    rep = r["ingestion_report"]
+    assert rep["understood"] and set(rep) >= {"understood", "guessed", "dropped", "lane_used"}
+    assert (tmp_path / "ingestion_report.json").exists()
