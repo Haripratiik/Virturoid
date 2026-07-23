@@ -36,9 +36,14 @@ def _steered_rollout_fn(gene, *, generations: int, pop: int, steps: int, seed: i
 
 
 def _one_round(gene, task, *, llm, reflection, n_rewards, screen_generations, screen_pop,
-               final_generations, final_pop, steps, seed):
-    """One propose → screen → select → train pass. Returns the trained result + the verdict + selection stats."""
+               final_generations, final_pop, steps, seed, seed_candidates=None):
+    """One propose → screen → select → train pass. Returns the trained result + the verdict + selection stats.
+    ``seed_candidates`` (R6 flywheel hints: rewards proven on morphology-nearby bodies) are prepended to the
+    proposed pool and compete in the same honest screen — a hint that doesn't win on THIS body is dropped."""
     cands = propose_rewards(task, n=n_rewards, llm=llm, reflection=reflection)
+    if seed_candidates:
+        have = {c.expr for c in cands}
+        cands = [c for c in seed_candidates if c.expr not in have] + cands
     rollout_fn = _steered_rollout_fn(gene, generations=screen_generations, pop=screen_pop, steps=steps, seed=seed)
     sel = select_reward(cands, rollout_fn)
     best = sel.get("best")
@@ -82,11 +87,34 @@ def run_intelligent_reward_loop(gene, task: str = "walk forward", *, llm=None, n
     Returns a compact, honest report. Never raises — a total failure returns ``ok: False`` with a reason."""
     try:
         from virturoid.services.reward_reflection import build_reflection_payload, format_reflection_for_proposer
+
+        # R6: seed the search with reward expressions proven on morphology-nearest banked bodies (the moat, through
+        # the reward loop). These compete in the SAME honest screen as the fresh proposals — a hint that loses on
+        # this body is dropped, so recall accelerates without ever forcing a stale reward.
+        seed_candidates, reward_hints = [], []
+        try:
+            from virturoid.services.gait_flywheel import recall_reward_hints
+            from virturoid.services.memory_db import MemoryDB
+            from virturoid.services.reward_dsl import RewardCandidate, compile_reward
+            _rdb = db or MemoryDB()
+            reward_hints = recall_reward_hints(_rdb, gene, k=6)
+            for i, h in enumerate(reward_hints):
+                try:
+                    seed_candidates.append(RewardCandidate(name=f"flywheel_{i}", expr=h["reward_expr"],
+                                                           compiled=compile_reward(h["reward_expr"])))
+                except Exception:  # noqa: BLE001 - a malformed banked expr is skipped, never fatal
+                    pass
+            if db is None:
+                _rdb.close()
+        except Exception:  # noqa: BLE001 - no bank yet -> cold-start from templates/LLM
+            pass
+
         best_round, iter_log, reflection_text = None, [], ""
         for it in range(max(1, iterations)):
             r = _one_round(gene, task, llm=llm, reflection=reflection_text, n_rewards=n_rewards,
                            screen_generations=screen_generations, screen_pop=screen_pop,
-                           final_generations=final_generations, final_pop=final_pop, steps=steps, seed=seed)
+                           final_generations=final_generations, final_pop=final_pop, steps=steps, seed=seed,
+                           seed_candidates=(seed_candidates if it == 0 else None))
             r["reflection"] = build_reflection_payload(gene, r["final"].best_params, r["reward_expr"], steps=steps)
             v = r["v"]
             iter_log.append({"iteration": it, "reward_expr": r["reward_expr"], "verdict": v["verdict"],
@@ -103,7 +131,10 @@ def run_intelligent_reward_loop(gene, task: str = "walk forward", *, llm=None, n
                "ranked": r["ranked"], "verdict": v["verdict"], "credible": v["credible"],
                "forward_m": round(v["forward"], 3), "height_ratio": round(v.get("height_ratio", 0.0), 3),
                "gait_params": r["final"].best_params, "reflection": r["reflection"],
-               "iterations_run": len(iter_log), "iteration_log": iter_log}
+               "iterations_run": len(iter_log), "iteration_log": iter_log,
+               "reward_hints_recalled": len(reward_hints),
+               "seeded_from_flywheel": bool(seed_candidates) and (r.get("reward_name") or "").startswith("flywheel")}
+
         if r["reward_source"] == "default_fitness_fallback":
             out["note"] = "no reward beat the honesty gate; trained on the default un-gameable fitness"
 
@@ -112,7 +143,7 @@ def run_intelligent_reward_loop(gene, task: str = "walk forward", *, llm=None, n
                 from virturoid.services.gait_flywheel import bank_gait
                 from virturoid.services.memory_db import MemoryDB
                 _db = db or MemoryDB()
-                bank_gait(_db, gene, r["final"])             # bank the verified gait keyed by morphology
+                bank_gait(_db, gene, r["final"], reward_expr=r["reward_expr"] or "")   # bank gait + its reward (R6)
                 out["banked"] = True
                 if db is None:
                     _db.close()

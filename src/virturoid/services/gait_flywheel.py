@@ -57,7 +57,8 @@ def _deploy_sim_config(gene) -> dict:
     return cfg
 
 
-def bank_gait(db, gene, result, *, task: str = LOCOMOTION, cross_eval: bool = False) -> str | None:
+def bank_gait(db, gene, result, *, task: str = LOCOMOTION, cross_eval: bool = False,
+              reward_expr: str = "") -> str | None:
     """Bank a learned gait's PARAMS as a retrievable skill (keyed by class+task+species). Returns the skill_id.
 
     Only banks a DEPLOYABLE result (survived + real forward) — never a fall (honesty: the bank must stay a bank of
@@ -66,6 +67,9 @@ def bank_gait(db, gene, result, *, task: str = LOCOMOTION, cross_eval: bool = Fa
     UN-GAMEABLE: also rejects a non-CREDIBLE result — a body that SLIDES forward (feet never leave the ground) or
     rears/lurches survives and covers distance but is NOT a walk; banking it would let a slide masquerade as a gait
     and be recalled/reused. (A result double without ``best_credible`` is assumed credible for back-compat.)
+
+    ``reward_expr`` (R6): the LLM/template reward EXPRESSION that certified this gait, banked alongside the params
+    so a future morphology-nearby body can seed its reward search with a reward already proven on a body like it.
     """
     if not getattr(result, "best_survived", False) or abs(getattr(result, "best_forward", 0.0)) < 0.15:
         return None
@@ -80,7 +84,7 @@ def bank_gait(db, gene, result, *, task: str = LOCOMOTION, cross_eval: bool = Fa
         skill_id, cls, task, success_rate=success, species=species, gene_id=gene_id,
         base_config={"gait_params": result.best_params, "forward_m": round(result.best_forward, 4),
                      "height_ratio": round(result.best_height_ratio, 3), "controller": "crawl_gait",
-                     "sim_config": _deploy_sim_config(gene)},
+                     "reward_expr": reward_expr or None, "sim_config": _deploy_sim_config(gene)},
         notes="learned deployable gait (gait_search); base_config.gait_params IS the deploy controller")
     # Index the skill into the vector memory by THIS BODY'S morphology embedding (the robotics tokenization), so a
     # future body recalls it by structural similarity — cross-body, not just an exact class-string match.
@@ -195,6 +199,34 @@ def recall_gait(db, gene, *, task: str = LOCOMOTION) -> dict | None:
         if params:
             return params
     return None
+
+
+def recall_reward_hints(db, gene, *, task: str = LOCOMOTION, k: int = 6, min_sim: float = 0.2) -> list[dict]:
+    """R6 — the moat, through the reward loop. Return the reward EXPRESSIONS that certified credible gaits on the
+    morphology-nearest banked bodies, each with the neighbour's similarity + forward distance. A new robot's
+    reward search seeds from these (a reward already proven on a body SHAPED like it) instead of cold-starting
+    from generic templates. Empty when nothing similar is banked. Deduplicated, best (nearest × fastest) first."""
+    try:
+        from virturoid.services.robotics_vector_memory import RoboticsVectorMemory
+        seen, out = set(), []
+        for hit in RoboticsVectorMemory(db).nearest_skills(gene, task, k=k, min_sim=min_sim):
+            row = db.conn.execute("SELECT base_config FROM skills WHERE skill_id=?",
+                                  (str(hit.get("obj_id", "")),)).fetchone()
+            if not row or not row["base_config"]:
+                continue
+            try:
+                bc = json.loads(row["base_config"]) if isinstance(row["base_config"], str) else row["base_config"]
+            except (json.JSONDecodeError, TypeError):
+                continue
+            expr = (bc or {}).get("reward_expr")
+            if isinstance(expr, str) and expr.strip() and expr not in seen:
+                seen.add(expr)
+                out.append({"reward_expr": expr, "similarity": round(float(hit.get("similarity", 0.5)), 3),
+                            "forward_m": float((bc or {}).get("forward_m", 0.0))})
+        out.sort(key=lambda h: (h["similarity"], h["forward_m"]), reverse=True)
+        return out
+    except Exception:  # noqa: BLE001 - no vector index yet -> caller cold-starts from templates
+        return []
 
 
 def _recall_gait_source(db, gene, *, task: str = LOCOMOTION) -> tuple[dict, str] | None:
