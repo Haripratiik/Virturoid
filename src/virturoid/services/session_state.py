@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 import uuid
 from pathlib import Path
@@ -26,12 +27,28 @@ def _dir() -> Path:
     return Path(os.environ.get("VIRTUROID_SESSIONS_DIR") or "build/sessions")
 
 
+_UNSAFE_ID = re.compile(r"[^A-Za-z0-9._-]")
+
+
+def _safe_id(raw: str) -> str:
+    """A filesystem-safe session id — the containment boundary for robot_id / scene_id.
+
+    A caller (e.g. the public ``ingest_project`` MCP tool) may pass an agent-supplied id; without this a value
+    like ``..\\..\\..\\Windows\\Temp\\evil`` escaped the sessions dir and wrote arbitrary JSON at the repo root
+    (measured in the 2026-07-24 audit — B0). We strip every path separator, drive colon, and ``..`` to a single
+    flat token, so a session file can ONLY ever land inside ``build/sessions/{robots,scenes}/``. Sanitized here
+    AND at the path choke point (defense in depth), the same way ``agent_tools.safe_build_path`` confines builds.
+    """
+    s = _UNSAFE_ID.sub("_", str(raw or "")).strip("._")
+    return (s or "session")[:128]
+
+
 def _robot_path(rid: str) -> Path:
-    return _dir() / "robots" / f"{rid}.json"
+    return _dir() / "robots" / f"{_safe_id(rid)}.json"
 
 
 def _scene_path(sid: str) -> Path:
-    return _dir() / "scenes" / f"{sid}.json"
+    return _dir() / "scenes" / f"{_safe_id(sid)}.json"
 
 
 def _rid(prefix: str) -> str:
@@ -112,7 +129,7 @@ _gc_ticks = {"n": 0, "swept_once": False}
 
 
 def put_robot(gene, *, prompt: str = "", label: str = "created", robot_id: str | None = None) -> str:
-    rid = robot_id or _rid("robot")
+    rid = _safe_id(robot_id) if robot_id else _rid("robot")   # confine caller-supplied ids (B0)
     with _LOCK:
         rec = {"gene": gene, "undo": [], "label": label, "prompt": prompt, "_mtime": 0.0}
         _ROBOTS[rid] = rec
@@ -232,7 +249,7 @@ def _fresh_scene(sid: str) -> dict | None:
 
 
 def put_scene(scene: dict, *, task: str = "", theme: str = "", scene_id: str | None = None) -> str:
-    sid = scene_id or _rid("scene")
+    sid = _safe_id(scene_id) if scene_id else _rid("scene")   # confine caller-supplied ids (B0)
     with _LOCK:
         rec = {"scene": dict(scene), "undo": [], "task": task, "theme": theme, "_mtime": 0.0}
         _SCENES[sid] = rec
