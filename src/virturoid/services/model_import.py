@@ -208,6 +208,26 @@ def _add_actuators(mjcf: str, model) -> tuple:
     return mjcf2, mujoco.MjModel.from_xml_string(mjcf2)
 
 
+def _inject_mujoco_compiler(urdf_text: str) -> str:
+    """M3 (2026-07-24 audit): keep a URDF's BASE-LINK inertial alive through MuJoCo's compile.
+
+    MuJoCo's URDF loader defaults to ``fusestatic="true"``, which welds the root link into the world and
+    DISCARDS its ``<inertial>`` -- so a customer's ``mass=2 kg`` base silently vanishes, and after we bolt on a
+    free joint (``reroot_free_base``) the robot weighs less than the URDF declared. MuJoCo reads compiler
+    options from a ``<mujoco>`` extension element inside ``<robot>`` (XMLreference/URDF-extension); adding
+    ``<compiler fusestatic="false" inertiafromgeom="auto"/>`` preserves the real base inertial (and lets links
+    that genuinely ship no ``<inertial>`` derive one from geometry, rather than defaulting to ~1 kg). Idempotent:
+    a URDF that already carries a ``<mujoco>`` block is returned untouched, so we never override a customer's
+    explicit MuJoCo directives (maintainer yuvaltassa, mujoco#1176)."""
+    if re.search(r"<mujoco\b", urdf_text):
+        return urdf_text                                   # respect a customer-provided <mujoco> block
+    m = re.search(r"<robot\b[^>]*>", urdf_text)
+    if not m:
+        return urdf_text
+    block = '\n  <mujoco>\n    <compiler fusestatic="false" inertiafromgeom="auto" balanceinertia="true"/>\n  </mujoco>'
+    return urdf_text[:m.end()] + block + urdf_text[m.end():]
+
+
 def import_model(path: str) -> dict:
     """Load an MJCF/URDF robot file. Returns ``{mjcf, name, parts, actuated, free_base, ok, note}`` —
     ``mjcf`` is a normalized MJCF string (ground ensured) usable everywhere a composed gene is."""
@@ -234,19 +254,22 @@ def import_model(path: str) -> dict:
                         "note": "this is a xacro template with unexpanded macros (${...} / <xacro:...>), not a "
                                 "loadable URDF. Expand it first: `ros2 run xacro xacro robot.urdf.xacro "
                                 "> robot.urdf` (or `rosrun xacro xacro`), then import the generated .urdf."}
+            # M3: compile a copy carrying <compiler fusestatic="false"> (sibling file so relative meshes still
+            # resolve) so the base-link inertial survives -- from_xml_path on the original would fuse it away.
+            tmp_urdf = p.with_name(p.stem + ".__mjcfprep__.urdf")
+            tmp_urdf.write_text(_inject_mujoco_compiler(raw), encoding="utf-8")
             try:
-                model = mujoco.MjModel.from_xml_path(str(p))
-            except Exception:  # noqa: BLE001 - the as-published file did not compile; repair + retry
-                fixed, repairs = repair_urdf_text(raw, mesh_root=p.parent)
-                tmp_urdf = p.with_name(p.stem + ".__repaired__.urdf")
-                tmp_urdf.write_text(fixed, encoding="utf-8")       # sibling so relative mesh paths still resolve
                 try:
                     model = mujoco.MjModel.from_xml_path(str(tmp_urdf))
-                finally:
-                    try:
-                        tmp_urdf.unlink()
-                    except OSError:
-                        pass
+                except Exception:  # noqa: BLE001 - the as-published file did not compile; repair + retry
+                    fixed, repairs = repair_urdf_text(raw, mesh_root=p.parent)
+                    tmp_urdf.write_text(_inject_mujoco_compiler(fixed), encoding="utf-8")
+                    model = mujoco.MjModel.from_xml_path(str(tmp_urdf))
+            finally:
+                try:
+                    tmp_urdf.unlink()
+                except OSError:
+                    pass
             tmp = tempfile.NamedTemporaryFile(suffix=".xml", delete=False); tmp.close()
             mujoco.mj_saveLastXML(tmp.name, model)
             mjcf = _ensure_floor(Path(tmp.name).read_text(encoding="utf-8"))

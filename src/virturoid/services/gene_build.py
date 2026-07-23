@@ -231,6 +231,47 @@ def _export_real_cad(gene: RobotGene, output_dir: Path) -> dict | None:
         return None
 
 
+def ground_and_repair(gene: RobotGene) -> dict:
+    """GROUND a body to real actuators + material mass, then structurally repair under-margined links and
+    re-ground so mass tracks the fix. This is the SINGLE grounding path both exit doors share -- the
+    package builder (``build_gene_package``) and the agent's ``export_held`` -- so one prompt ships the SAME
+    buildable robot (mass, actuators, safety factor) whichever door it leaves by. Before this was shared, the
+    two doors diverged (export_held emitted the ungrounded 3.57 kg fantasy body while the builder grounded to
+    ~8 kg with real motors). ``ground_gene`` is idempotent, so re-running on an already-grounded (e.g. amended)
+    body is a no-op.
+
+    Rationale (fidelity gap-closure §G3): ``ground_gene`` sizes real actuators on RATED torque and sets link
+    mass = structure + motor, so sim, eval, spec sheet and BOM all describe one robot. carbon_fiber/0.25 is the
+    validated-trainable config from the B0 GPU runs. §G3b: the added actuator mass can drop a link below the
+    SF>=2.0 structural target the readiness ledger fail-closes on, so thicken only the under-margined links
+    (SF ~ r^3, +5% headroom) and re-ground -- walking legs stay inside the slenderness band (length/diameter
+    >= 2.25) so the fix never re-creates stub legs. Fail-open: a grounding error is reported, never raised."""
+    try:
+        from virturoid.services.grounded_physics import ground_gene
+        report = ground_gene(gene, material="carbon_fiber", fill=0.25)
+        from virturoid.services.structural_validation import validate_structure
+        for _ in range(3):
+            _st = validate_structure(gene)
+            if _st.get("ok", False):
+                break
+            _by_name = {s.name: s for s in gene.segments}
+            for _link in _st.get("links", []):
+                _s = _by_name.get(str(_link.get("name")))
+                _sf = float(_link.get("safety_factor") or 0.0)
+                if _link.get("feasible") or _s is None or _sf <= 0.0 or float(_s.radius_m) <= 0.0:
+                    continue
+                _f = min(1.6, 1.05 * (2.0 / _sf) ** (1.0 / 3.0))
+                _r = float(_s.radius_m) * _f
+                if ("leg" in _s.name.lower() and (_s.joint_type or "").lower() == "revolute"
+                        and float(_s.length_m) > 0):
+                    _r = min(_r, float(_s.length_m) / 4.5)
+                _s.radius_m = round(max(float(_s.radius_m), _r), 5)
+            report = ground_gene(gene, material="carbon_fiber", fill=0.25)
+    except Exception as _ge:  # noqa: BLE001
+        report = {"error": f"{type(_ge).__name__}: {_ge}"}
+    return report
+
+
 def build_gene_package(gene: RobotGene, prompt: str, output_dir: Path, scene_count: int = 6,
                        controller_params: dict | None = None, gated_export: bool = False,
                        export_tier_counts: dict | None = None) -> dict:
@@ -250,40 +291,7 @@ def build_gene_package(gene: RobotGene, prompt: str, output_dir: Path, scene_cou
     composed gene (no genome->gene reconstruction), so the gate scores exactly the robot that was built.
     """
     output_dir = Path(output_dir)
-    # G3 (fidelity gap-closure): GROUND the body BEFORE anything compiles/evaluates. The e2e test proved the
-    # product shipped the fantasy body (dog 4.54 kg vs its Go2-class ~15 kg; arm 3.04 kg vs UR5e-class 20.6 kg):
-    # ground_gene sizes real actuators on RATED torque and sets link mass = structure + motor, so sim, eval,
-    # spec sheet and BOM all describe the SAME buildable robot. carbon_fiber/0.25 is the validated-trainable
-    # config from the B0 GPU runs. Fail-open: a grounding error is reported, never silently skipped.
-    try:
-        from virturoid.services.grounded_physics import ground_gene
-        _ground_report = ground_gene(gene, material="carbon_fiber", fill=0.25)
-        # G3b: grounding adds the REAL actuator masses, and the heavier body can drop a link below the
-        # SF>=2.0 structural target the readiness ledger fail-closes on (physics_evaluated=collision).
-        # Repair the STRUCTURE for the grounded masses: thicken only the under-margined links (SF ~ r^3,
-        # +5% headroom) and re-ground so mass tracks the new geometry — the shipped gene is grounded AND
-        # structurally sound, re-checked after its last mutation. Walking legs stay strictly inside the
-        # slenderness band (length/diameter >= 2.25) so the structural fix never re-creates stub legs.
-        from virturoid.services.structural_validation import validate_structure
-        for _ in range(3):
-            _st = validate_structure(gene)
-            if _st.get("ok", False):
-                break
-            _by_name = {s.name: s for s in gene.segments}
-            for _link in _st.get("links", []):
-                _s = _by_name.get(str(_link.get("name")))
-                _sf = float(_link.get("safety_factor") or 0.0)
-                if _link.get("feasible") or _s is None or _sf <= 0.0 or float(_s.radius_m) <= 0.0:
-                    continue
-                _f = min(1.6, 1.05 * (2.0 / _sf) ** (1.0 / 3.0))
-                _r = float(_s.radius_m) * _f
-                if ("leg" in _s.name.lower() and (_s.joint_type or "").lower() == "revolute"
-                        and float(_s.length_m) > 0):
-                    _r = min(_r, float(_s.length_m) / 4.5)
-                _s.radius_m = round(max(float(_s.radius_m), _r), 5)
-            _ground_report = ground_gene(gene, material="carbon_fiber", fill=0.25)
-    except Exception as _ge:  # noqa: BLE001
-        _ground_report = {"error": f"{type(_ge).__name__}: {_ge}"}
+    _ground_report = ground_and_repair(gene)
     try:                                                   # persist grounding + the executable-on-BOM certificate
         import json as _json
         _rep_dir = output_dir / "reports"

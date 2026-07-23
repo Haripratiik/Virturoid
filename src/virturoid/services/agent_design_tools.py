@@ -470,6 +470,19 @@ def export_held(args: dict) -> dict:
     gene = S.get_robot(args["robot_id"])
     if gene is None:
         return {"ok": False, "error": f"no robot '{args['robot_id']}'"}
+    # B3c (2026-07-24 audit): GROUND the body up front through the SAME helper build_gene_package uses
+    # (ground_and_repair), so every exported format (mjcf, urdf, cad, bom, spec) describes the SAME buildable
+    # robot -- and it matches what the package builder would ship for this prompt. Before this, export_held
+    # exported the ungrounded held gene for the URDF/sim while the BOM grounded separately -> the two exit doors
+    # shipped physically different robots (3.57 kg URDF vs grounded ~8 kg BOM) for one prompt. Ground a COPY so
+    # the held session gene is untouched; grounding is idempotent so a pre-grounded (amended) body is unaffected.
+    import copy
+    gene = copy.deepcopy(gene)
+    try:
+        from virturoid.services.gene_build import ground_and_repair
+        ground_and_repair(gene)
+    except Exception:  # noqa: BLE001 - grounding is the consistency layer; a failure still exports the raw body
+        pass
     fmts = args.get("formats") or list(_EXPORT_FORMATS)
     bad = [f for f in fmts if f not in _EXPORT_FORMATS]
     if bad:

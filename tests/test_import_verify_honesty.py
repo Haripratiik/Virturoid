@@ -60,6 +60,43 @@ def test_ingest_keeps_customer_body_and_reports_its_own_verdict():
     assert v.get("kind") == "legged"
 
 
+def test_base_link_inertial_survives_import_and_reroot():
+    """M3: MuJoCo fuses a URDF's static root link by default, silently dropping its <inertial>. We inject
+    <compiler fusestatic="false"> so a declared 2 kg base is still 2 kg after import AND after we bolt on a
+    free joint -- the imported+rerooted mass stays within tolerance of the URDF's stated total."""
+    import mujoco
+
+    from virturoid.services.model_import import import_model, reroot_free_base
+
+    tmp = tempfile.mkdtemp()
+    urdf = '<?xml version="1.0"?>\n<robot name="massquad">\n'
+    urdf += ('<link name="trunk"><inertial><mass value="2.0"/><inertia ixx="0.05" iyy="0.05" izz="0.05" '
+             'ixy="0" ixz="0" iyz="0"/></inertial><collision><geometry><box size="0.4 0.2 0.1"/></geometry>'
+             '</collision></link>\n')
+    for nm, x, y in [("FL", 0.18, 0.1), ("FR", 0.18, -0.1), ("HL", -0.18, 0.1), ("HR", -0.18, -0.1)]:
+        urdf += (f'<link name="{nm}"><inertial><mass value="0.8"/><inertia ixx="0.01" iyy="0.01" izz="0.01" '
+                 f'ixy="0" ixz="0" iyz="0"/></inertial><collision><geometry><cylinder radius="0.03" '
+                 f'length="0.25"/></geometry></collision></link>\n'
+                 f'<joint name="{nm}_j" type="revolute"><parent link="trunk"/><child link="{nm}"/>'
+                 f'<axis xyz="0 1 0"/><origin xyz="{x} {y} 0"/>'
+                 f'<limit lower="-1" upper="1" effort="20" velocity="5"/></joint>\n')
+    urdf += "</robot>"
+    p = os.path.join(tmp, "massquad.urdf")
+    open(p, "w").write(urdf)
+    declared = 2.0 + 4 * 0.8
+
+    imp = import_model(p)
+    assert imp["ok"], imp.get("note")
+    m = mujoco.MjModel.from_xml_string(imp["mjcf"])
+    assert abs(sum(m.body_mass) - declared) / declared < 0.05, (
+        f"base inertial lost on import: {sum(m.body_mass):.3f} vs declared {declared}")
+    mjcf2, rer = reroot_free_base(imp["mjcf"])
+    assert rer
+    m2 = mujoco.MjModel.from_xml_string(mjcf2)
+    assert abs(sum(m2.body_mass) - declared) / declared < 0.05, (
+        f"base inertial lost on reroot: {sum(m2.body_mass):.3f} vs declared {declared}")
+
+
 def test_walkable_template_is_opt_in_and_undoable():
     from virturoid.services import session_state as S
     from virturoid.services.agent_tools import call_tool

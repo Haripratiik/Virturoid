@@ -455,6 +455,7 @@ def export_gene_cad(gene, out_dir: str, *, material: str = "aluminum") -> dict:
     parts: list[dict] = []
     solids = []
     total_mass = 0.0
+    used_grounded = False
     for s in gene.segments:
         if getattr(s, "geometry", None):                 # blueprint specified an ARBITRARY shape for this block
             solid = realize_shape(s.geometry)
@@ -464,11 +465,21 @@ def export_gene_cad(gene, out_dir: str, *, material: str = "aluminum") -> dict:
         bd.export_step(solid, str(out / "step" / f"{s.name}.step"))
         bd.export_stl(solid, str(out / "stl" / f"{s.name}.stl"))
         vol_m3 = float(solid.volume) * 1e-9          # mm^3 -> m^3
-        mass = vol_m3 * density
+        solid_mass = vol_m3 * density                # mass IF this link were a SOLID `material` billet
+        # B3b (2026-07-24 audit): prefer the GROUNDED buildable mass the URDF/BOM/sim all report -- a real link
+        # is a hollow CF tube plus a motor, NOT a solid aluminum billet, and treating it as solid invented a
+        # ~35 kg dog. When the gene is grounded, ``s.mass_kg`` = structure(@fill) + actuator; use it as the one
+        # source of truth and scale the solid's inertia tensor to that mass so ixx stays consistent with what
+        # the manifest reports. Ungrounded genes fall back to the solid-volume estimate (flagged in the note).
+        grounded = float(getattr(s, "mass_kg", 0.0) or 0.0)
+        mass = grounded if grounded > 0 else solid_mass
+        used_grounded = used_grounded or grounded > 0
+        scale = (mass / solid_mass) if solid_mass > 0 else 1.0
         total_mass += mass
-        ixx = float(solid.matrix_of_inertia[0][0]) * density * 1e-15   # mm^5*kg/m^3 -> kg*m^2 (approx)
+        ixx = float(solid.matrix_of_inertia[0][0]) * density * 1e-15 * scale   # mm^5*kg/m^3 -> kg*m^2 (approx)
         parts.append({"name": s.name, "volume_cm3": round(float(solid.volume) * 1e-3, 2),
                       "mass_kg": round(mass, 3), "ixx_kg_m2": round(ixx, 6),
+                      "mass_basis": "grounded" if grounded > 0 else "solid_volume",
                       "step": f"step/{s.name}.step", "stl": f"stl/{s.name}.stl"})
         solids.append(solid)
     try:                                             # one manufacturable assembly STEP
