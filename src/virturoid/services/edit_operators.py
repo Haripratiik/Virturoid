@@ -127,17 +127,35 @@ def scale_group(gene, *, group: str = "legs", dims: str = "length", factor: floa
         raise EditError(f"no '{group}' segments on this robot (it is a {g.robot_class}); "
                         f"available groups here: {[k for k in _GROUP_WORDS if segments_for_group(g, k)] + ['all']}")
     from virturoid.services.bom_builder import _scale_geo, _scale_geo_length
+    children_of: dict = {}
+    for c in g.segments:
+        if c.parent is not None:
+            children_of.setdefault(c.parent, []).append(c)
+    target_names = {s.name for s in targets}
     changed = []
     for s in targets:
         before = (round(s.length_m, 4), round(s.radius_m, 4))
         if dims in ("length", "both"):
             s.length_m = round(s.length_m * f, 5)
             if s.geometry:
-                _scale_geo_length(s.geometry, f)          # #216: keep the VISUAL link as long as the collider
+                _scale_geo_length(s.geometry, f)          # #216a: keep the VISUAL link as long as the collider
         if dims in ("girth", "both"):
             s.radius_m = round(s.radius_m * f, 5)
             if s.geometry:
                 _scale_geo(s.geometry, f)                 # cross-section only
+        # #216b: a child attaches at pos = (mount_x, mount_y, parent.length + mount_z). Those offsets bake in
+        # the parent's OLD length (e.g. a thigh mounts at the torso base with mount_z = -torso_length), so when
+        # the parent scales they must scale too or the child drifts off its anchor (detaches). Scale the z
+        # offset with LENGTH and the lateral offsets with GIRTH; skip children already in the target set for
+        # that axis (they'd be double-scaled through their own edit). Ambient/anatomy-graph bodies store
+        # mount_bounds separately, so this only corrects the parametric offsets that actually place the child.
+        for child in children_of.get(s.name, []):
+            mo = list(getattr(child, "mount_offset", (0.0, 0.0, 0.0)) or (0.0, 0.0, 0.0))
+            if dims in ("length", "both"):
+                mo[2] = round(mo[2] * f, 5)
+            if dims in ("girth", "both"):
+                mo[0] = round(mo[0] * f, 5); mo[1] = round(mo[1] * f, 5)
+            child.mount_offset = tuple(mo)
         changed.append({"segment": s.name, "length_m": [before[0], round(s.length_m, 4)],
                         "radius_m": [before[1], round(s.radius_m, 4)]})
     h0 = _standing_height(gene)

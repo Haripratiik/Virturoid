@@ -129,3 +129,23 @@ def test_amending_a_link_length_keeps_the_visual_in_sync_with_the_collider():
     assert abs(j2b.length_m - l0 * 1.3) < 1e-3
     assert abs(j2b.geometry["height"] - h0 * 1.3) < 1e-3
     assert abs(j2b.length_m - j2b.geometry["height"]) < 1e-3      # visual length == collider length, in lockstep
+
+
+def test_scaling_a_parent_keeps_body_attached_limbs_anchored():
+    """#216b: a child's mount_offset bakes in the parent's OLD length (a thigh mounts at the torso base with
+    mount_z = -torso_length). Scaling the parent must rescale those offsets or the limb drifts off its anchor
+    and detaches. After scaling the torso, the thigh must still attach at the torso base (z ~ 0)."""
+    from virturoid.services.edit_operators import scale_group
+    from virturoid.services.morphology_composer import compose_robot
+    g = compose_robot("a humanoid robot", llm=None)
+    by = {s.name: s for s in g.segments}
+    th = by.get("l_thigh")
+    if th is None:                                             # composer variant without this exact name
+        import pytest
+        pytest.skip("no l_thigh on this humanoid variant")
+    attach0 = by[th.parent].length_m + th.mount_offset[2]
+    g2, _ = scale_group(g, group="torso", dims="length", factor=1.5)
+    by2 = {s.name: s for s in g2.segments}
+    th2 = by2["l_thigh"]
+    attach1 = by2[th2.parent].length_m + th2.mount_offset[2]
+    assert abs(attach0) < 1e-3 and abs(attach1) < 1e-3        # stayed at the torso base, did not drift up
