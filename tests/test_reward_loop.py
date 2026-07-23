@@ -99,3 +99,18 @@ def test_batched_reward_matches_scalar_and_vectorizes():
     assert out.shape == (256,) and bool(np.all(np.isfinite(out)))
     # every template compiles under the batched backend too
     assert all(compile_reward_batched(e) is not None for e in _TEMPLATES.values())
+
+
+def test_reward_dsl_rejects_exponent_dos():
+    """B0b: 9**9**9 passes the allowlist but hangs eval building a 370M-digit int. A constant exponent >8 or a
+    huge constant base is rejected fast (features are in [-1,1]); legit powers like **2 still compile."""
+    import pytest as _pt
+    from virturoid.services.reward_dsl import RewardSyntaxError, compile_reward
+    for dos in ("9**9**9", "(10**9)**(10**9)", "forward_vel**100", "1000000000000**upright"):
+        with _pt.raises(RewardSyntaxError):
+            compile_reward(dos)
+    assert compile_reward("(forward_vel - 0.4)**2") is not None      # squared-error pattern still legal
+    # the RCE surface stays closed
+    for rce in ("__import__('os')", "().__class__", "open('x')"):
+        with _pt.raises(RewardSyntaxError):
+            compile_reward(rce)

@@ -61,6 +61,17 @@ def _validate_ast(node: ast.AST) -> None:
             raise RewardSyntaxError(f"unknown name: {sub.id!r} (not a whitelisted feature or function)")
         if isinstance(sub, ast.Call) and not (isinstance(sub.func, ast.Name) and sub.func.id in _SAFE_FUNCS):
             raise RewardSyntaxError("only whitelisted functions may be called")
+        # B0b: the RCE surface is closed, but `9**9**9` / `(10**9)**(10**9)` pass the allowlist and hang eval
+        # building a ~370M-digit int (the float() OverflowError guard never reaches). All 10 features are in
+        # [-1,1], so a constant exponent above ~8 or a huge constant base is never legitimate — reject it. This
+        # bounds compute so an agent-authored (BYOK) reward can't DoS the loop.
+        if isinstance(sub, ast.BinOp) and isinstance(sub.op, ast.Pow):
+            exp = sub.right
+            if isinstance(exp, ast.Constant) and isinstance(exp.value, (int, float)) and abs(exp.value) > 8:
+                raise RewardSyntaxError(f"exponent {exp.value} too large (max 8) — features are in [-1,1]")
+            base = sub.left
+            if isinstance(base, ast.Constant) and isinstance(base.value, (int, float)) and abs(base.value) > 1e6:
+                raise RewardSyntaxError(f"constant base {base.value} too large (max 1e6)")
 
 
 def compile_reward(expr: str):
