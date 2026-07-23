@@ -202,8 +202,8 @@ python -m virturoid.autobuild --prompt "a tabletop arm that sorts red and blue b
 # Build, train a controller, and export a bundle plus a runnable ROS 2 package
 python -m virturoid.build --train --prompt "a tabletop arm that sorts blocks" --output build/arm_train
 
-# Import an existing robot model and learn a controller for it
-python -m virturoid.import_robot --mjcf-file path/to/robot.xml --output build/imported
+# Import an existing robot model (URDF or MJCF) and recover an editable robot from it
+python -m virturoid.import_robot path/to/robot.urdf --save-gene build/imported/gene.json
 
 # Browse a gallery of robots built from text, each verified in real physics
 python scripts/run_mvp_demo.py                      # writes a self-contained build/demo/index.html
@@ -211,6 +211,27 @@ python scripts/run_mvp_demo.py                      # writes a self-contained bu
 # End-to-end: ingest a folder of an existing robot (model + BOM + CAD + description + control script) and improve it
 python scripts/demo_ingest_customer.py
 ```
+
+Real-world URDFs (a Unitree Go2, a Franka arm) often don't load in a strict simulator as-published; the importer
+runs a deterministic repair pass (normalizes materials, resolves mesh paths) and reports every change, so your
+robot comes in with its own link names and structure preserved rather than replaced by a generic body.
+
+## Connect your own AI agent (MCP)
+
+Virturoid is agent-first: it runs on **your** LLM subscription, not ours. Point Claude Code / Claude Desktop
+(or any MCP client) at the built-in server and it can author, edit, verify, train, export, and **ingest** robots
+through one tool surface — with zero tokens billed to Virturoid.
+
+```bash
+# start the server (stdio JSON-RPC; nothing is billed to us)
+python -m virturoid.mcp_server
+
+# or register it with Claude Code
+claude mcp add virturoid -- python -m virturoid.mcp_server
+```
+
+The server advertises a lean workflow menu (`create_robot`, `edit_robot`, `verify_robot`, `export_held`,
+`ingest_project`, …); `ingest_project` is the gateway for bringing in an existing robot/BOM/policy/dataset.
 
 `--co-design` physics-tunes a freshly composed body before building, `--evaluate` scores it on its morphology-matched task, and `--benchmark` scores it across a difficulty suite. Every build writes a complete package: the Robot Genome, the compiled MuJoCo model, generated task and scene sets, the bill of materials, parametric and B-rep CAD, training artifacts, a controller bundle, and browsable reports. Open `reports/index.html` in any package to explore everything it generated.
 
@@ -227,7 +248,14 @@ cp .env.example .env
 | `VIRTUROID_LLM_BACKEND` | Which language-model backend to use: `off`, `openai`, `claude`, or `local` |
 | `OPENAI_API_KEY` | Your key when the backend is `openai` |
 | `VIRTUROID_OPENAI_MODEL` | Model name for the OpenAI backend |
+| `ANTHROPIC_API_KEY` | Your key when the backend is `claude` |
+| `VIRTUROID_CLAUDE_MODEL` | Model name for the Claude backend |
+| `VIRTUROID_LOCAL_LLM_URL` / `VIRTUROID_LOCAL_LLM_MODEL` | Endpoint + model when the backend is `local` (Ollama / vLLM / any OpenAI-compatible server) |
 | `VIRTUROID_GPU_SSH` | SSH target of a GPU box for training, for example `user@host` |
+
+Bring your own subscription: set `VIRTUROID_LLM_BACKEND` to `openai`, `claude`, or `local` and supply the
+matching key/endpoint — the keys are yours and never leave your machine. Everything also runs fully offline
+(`off`), which is the default.
 
 ## Roadmap
 
