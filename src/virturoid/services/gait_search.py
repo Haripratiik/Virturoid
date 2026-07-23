@@ -55,11 +55,38 @@ def _clip(vec: dict) -> dict:
     return {k: float(min(max(vec[k], _LO[k]), _HI[k])) for k in PARAM_NAMES}
 
 
-def evaluate_gait(gene, params: dict, *, steps: int = 1200) -> dict:
-    """Roll out the crawl gait with ``params`` and return {fitness, forward, height_ratio, survived}.
+# The crawl rollout emits episode-summary scalars; map the ones it measures to the reward DSL's per-episode
+# feature vocabulary. HONESTY: only the six marked "real" come from the rollout; the four marked "unavailable"
+# default to 0.0 (the DSL substitutes missing features with 0.0), so a reward TERM over them contributes nothing
+# rather than a fabricated value. Enriching foot_clearance/energy/action_smooth needs per-step torque/foot data
+# from the rollout (a follow-on); the six real features are enough for a reward to genuinely STEER the search.
+def reward_features_from_rollout(r: dict) -> dict:
+    """A ``REWARD_FEATURES`` dict computed from a crawl-gait rollout, for an LLM-authored reward to score."""
+    return {
+        "forward_vel": float(r.get("speed", 0.0)) * (1.0 if float(r.get("forward", 0.0)) >= 0 else -1.0),  # real (signed)
+        "upright": 2.0 * float(r.get("upright_frac", 0.0)) - 1.0,   # real: [0,1] frac -> [-1,1] alignment proxy
+        "height_ratio": float(r.get("height_ratio", 0.0)),         # real
+        "contact_frac": float(r.get("support_frac", 0.0)),         # real
+        "alive": float(r.get("alive", 1.0 if r.get("survived") else 0.0)),  # real
+        "slip": abs(float(r.get("lateral", 0.0))),                 # real proxy (lateral drift = slide cost)
+        "foot_clearance": 0.0,   # unavailable from the summary rollout (needs per-step foot z) -> neutral
+        "energy": 0.0,           # unavailable (needs per-step torque*qvel) -> neutral
+        "action_smooth": 0.0,    # unavailable (needs per-step action deltas) -> neutral
+        "dist_to_goal": 0.0,     # task-specific; not a locomotion-rollout output -> neutral
+    }
 
-    Fitness is UN-GAMEABLE: forward travel counts only when the body stays upright (height_ratio >= 0.6) and
-    survives the full horizon; a fall (survived False / low height) scores negative so it can never win.
+
+def evaluate_gait(gene, params: dict, *, steps: int = 1200, reward_fn=None) -> dict:
+    """Roll out the crawl gait with ``params`` and return {fitness, forward, height_ratio, survived, ...}.
+
+    Default fitness is UN-GAMEABLE: forward travel counts only when the body stays upright (height_ratio >= 0.6)
+    and survives; a fall scores negative so it can never win.
+
+    ``reward_fn`` (a compiled ``reward_dsl`` expression, ``fn(features)->float``) makes an LLM-AUTHORED reward
+    STEER the search: when given, ``fitness`` becomes the reward's return over this rollout's features. The
+    trusted-success signals (``credible``/``verdict`` from ``gait_quality.classify``) are computed the SAME way
+    regardless and reported SEPARATELY, so ``select_reward`` can rank by trusted success and flag a reward that
+    games (high return, low credibility) — the reward is optimized, success is never the reward's to define.
     """
     from virturoid.services.gait_quality import classify
     from virturoid.services.morph_policy import crawl_gait_rollout
@@ -68,29 +95,34 @@ def evaluate_gait(gene, params: dict, *, steps: int = 1200) -> dict:
                            duty=p["duty"], kp=p["kp"], kd=p["kd"], record_qpos=True)
     if not r.get("finite", True):
         return {"fitness": -10.0, "forward": 0.0, "height_ratio": 0.0, "survived": False,
-                "cadence": 0.0, "support_frac": 0.0, "credible": False, "verdict": "non-finite"}
+                "cadence": 0.0, "support_frac": 0.0, "credible": False, "verdict": "non-finite",
+                "reward_return": -10.0}
     fwd = float(r.get("forward", 0.0))
     hr = float(r.get("height_ratio", 0.0))
     cad = float(r.get("cadence", 0.0))
     sup = float(r.get("support_frac", 0.0))
     survived = bool(r.get("survived"))
-    # UN-GAMEABLE: the fitness uses the SAME verdict as verify_robot (gait_quality.classify) so a gait the search
-    # rewards is one verify will also call CREDIBLE. That means: real cadence + stepping support + upright AND a
-    # LEVEL body (no rearing/pitching lurch that games raw distance). Forward is SIGNED, not abs() — a body that
-    # walks BACKWARD (the hexapod's failure mode) must score LOW, not tie a forward walk.
     verdict = classify(r)
     credible = verdict.startswith("CREDIBLE")
     if not survived or hr < 0.5:
-        fitness = hr - 1.2                                    # fell -> negative
+        default_fitness = hr - 1.2                            # fell -> negative
     else:
-        fitness = fwd * (1.0 if credible else 0.3)           # signed forward; non-credible (slide/lurch) discounted
+        default_fitness = fwd * (1.0 if credible else 0.3)   # signed forward; non-credible discounted
+    reward_return = default_fitness
+    if reward_fn is not None:
+        try:
+            reward_return = float(reward_fn(reward_features_from_rollout(r)))
+        except Exception:  # noqa: BLE001 - a bad reward scores -inf-ish, never crashes the search
+            reward_return = -1e6
+    fitness = reward_return if reward_fn is not None else default_fitness
     return {"fitness": fitness, "forward": fwd, "height_ratio": hr, "survived": survived,
-            "cadence": cad, "support_frac": sup, "credible": credible, "verdict": verdict}
+            "cadence": cad, "support_frac": sup, "credible": credible, "verdict": verdict,
+            "reward_return": reward_return}
 
 
 def search_gait(gene, *, generations: int = 8, pop: int = 24, elite_frac: float = 0.3,
                 steps: int = 1000, seed: int = 0, workers: int | None = None,
-                warm_start: dict | None = None, progress=None) -> GaitSearchResult:
+                warm_start: dict | None = None, progress=None, reward_fn=None) -> GaitSearchResult:
     """CEM over the crawl-gait parameters. Returns the best DEPLOYABLE gait found for ``gene``.
 
     ``warm_start`` (a prior gait's params, e.g. recalled from the flywheel for a STRUCTURALLY-SIMILAR body) seeds
@@ -118,9 +150,9 @@ def search_gait(gene, *, generations: int = 8, pop: int = 24, elite_frac: float 
     # baseline = the SHIPPED crawl-gait defaults (crawl_gait_rollout's own defaults), so "improvement" is honest
     # (learned vs the default controller), not vs an arbitrary center-of-bounds point.
     baseline = evaluate_gait(gene, {"freq": 1.5, "hip_amp": 0.9, "knee_amp": 1.0, "duty": 0.25,
-                                    "kp": 32.0, "kd": 1.5}, steps=steps)
+                                    "kp": 32.0, "kd": 1.5}, steps=steps, reward_fn=reward_fn)
     if prior_vec is not None:                                  # transfer-screen the prior ONCE (dossier R3)
-        prior_transfer = evaluate_gait(gene, _clip(as_params(prior_vec)), steps=steps)
+        prior_transfer = evaluate_gait(gene, _clip(as_params(prior_vec)), steps=steps, reward_fn=reward_fn)
     best = {"fitness": -1e9}
     best_params = as_params(mean)
     history: list[float] = []
@@ -130,7 +162,7 @@ def search_gait(gene, *, generations: int = 8, pop: int = 24, elite_frac: float 
         if prior_vec is not None:
             samples[0] = prior_vec                             # inject the prior as one guaranteed candidate
         params_list = [_clip(as_params(s)) for s in samples]
-        results = _eval_batch(gene, params_list, steps, workers)
+        results = _eval_batch(gene, params_list, steps, workers, reward_fn=reward_fn)
         fits = np.array([r["fitness"] for r in results])
         order = np.argsort(fits)[::-1]
         elite = samples[order[:n_elite]]
@@ -154,10 +186,13 @@ def search_gait(gene, *, generations: int = 8, pop: int = 24, elite_frac: float 
         prior_transfer_forward=(float(prior_transfer["forward"]) if prior_transfer is not None else None))
 
 
-def _eval_batch(gene, params_list, steps, workers):
-    """Evaluate a population, in parallel across processes when possible (falls back to serial)."""
-    if workers is None or workers <= 1:
-        return [evaluate_gait(gene, p, steps=steps) for p in params_list]
+def _eval_batch(gene, params_list, steps, workers, reward_fn=None):
+    """Evaluate a population, in parallel across processes when possible (falls back to serial).
+
+    A compiled ``reward_fn`` (a code object closing over ``eval``) is NOT picklable, so a reward-steered search
+    runs SERIAL — correct and safe; the reward loop uses modest pop/generations so the cost is bounded."""
+    if reward_fn is not None or workers is None or workers <= 1:
+        return [evaluate_gait(gene, p, steps=steps, reward_fn=reward_fn) for p in params_list]
     try:
         from concurrent.futures import ProcessPoolExecutor
         with ProcessPoolExecutor(max_workers=workers) as ex:
