@@ -856,6 +856,37 @@ def generic_creature_gene(prompt: str, robot_class: str | None = None, n_legs: i
     return None
 
 
+def _scale_geometry(gene, s: float):
+    """A PURE isometric geometric scale (NO re-grounding), so the body's PROPORTIONS -- and thus the anatomy
+    critic's volume-FRACTION checks and its proven gait -- are preserved exactly; only the size changes. Lengths/
+    radii/mount-offsets × s, mass × s^3 (realistic monotone mass: a small dog is lighter, a large one heavier).
+    Used to fit the walkable template to a requested body size without the mass/proportion drift re-grounding adds."""
+    import copy
+    g = copy.deepcopy(gene)
+    for seg in g.segments:
+        seg.length_m = float(seg.length_m or 0.0) * s
+        seg.radius_m = float(seg.radius_m or 0.0) * s
+        seg.mass_kg = float(seg.mass_kg or 0.0) * s ** 3
+        seg.mount_offset = tuple(float(v) * s for v in (seg.mount_offset or (0.0, 0.0, 0.0)))
+        if getattr(seg, "cross_section", None) is not None:
+            seg.cross_section = tuple(float(v) * s for v in seg.cross_section)
+        if getattr(seg, "torque_req_nm", None) is not None:      # torque ~ mass*length ~ s^4 (re-grounded later anyway)
+            seg.torque_req_nm = float(seg.torque_req_nm) * s ** 4
+        seg.actuator_torque_nm = None                            # let the BOM re-size the motor for the new scale
+    return g
+
+
+def _leg_len(gene) -> float:
+    """The characteristic leg length of a legged body = summed length of its leg segments (the gait-relevant
+    linear scale for Froude similarity). Falls back to the body's summed segment length if no legs are named."""
+    import re as _re
+    legs = [float(getattr(s, "length_m", 0.0) or 0.0) for s in gene.segments
+            if _re.search(r"leg", (s.name or "").lower())]
+    if legs:
+        return sum(legs)
+    return sum(float(getattr(s, "length_m", 0.0) or 0.0) for s in gene.segments) or 1.0
+
+
 def ensure_walkable_quad(gene, prompt: str = "", *, force: bool = False):
     """DIAGNOSIS-DRIVEN, per-request walkability fallback for a QUADRUPED — a HINT the build reaches for, never a
     gait/body forced on every dog. If the body already walks under SOME gait (``evaluate_robot`` is gait-aware:
@@ -908,6 +939,24 @@ def ensure_walkable_quad(gene, prompt: str = "", *, force: bool = False):
         cand = build_from_anatomy(_generic_legged_graph(n_pairs=2, fan=True, girth=0.18))
         if cand is None:
             return gene
+        # B1 (2026-07-24 audit): SCALE the fanned template to the authored body's size instead of substituting a
+        # fixed one, so "small dog" and "large horse" no longer collapse to one byte-identical robot (the 5-prompts
+        # -> 1 render blocker). MEASURED (2026-07-24): the fanned template walks at s in ~[0.7, 1.4] under its own
+        # default crawl gait via dynamic similarity (Alexander/Froude) -- and the DEFAULT gait beats a Froude-tuned
+        # override (which blew kp up with the s^3 mass), so we scale GEOMETRY only and keep the robust gait. Bodies
+        # bigger than ~1.4x roll (heavy + tall), so we clamp; the authored body's honest verdict is kept there.
+        try:
+            s = _leg_len(gene) / max(1e-6, _leg_len(cand))
+            s = min(1.4, max(0.6, s))                        # the measured walkable band for the fanned crawl
+            if abs(s - 1.0) > 0.03:
+                cand = _scale_geometry(cand, s)                  # pure isometric scale -> proportions + gait preserved
+                m1 = sum(float(getattr(x, "mass_kg", 0.0) or 0.0) for x in cand.segments)
+                md0 = dict(getattr(cand, "metadata", None) or {})
+                md0["scaled_to_body"] = {"scale": round(s, 3), "mass_kg": round(m1, 3),
+                                         "note": "fanned walkable template scaled to the requested body size"}
+                cand.metadata = md0
+        except Exception:  # noqa: BLE001 - scaling is an enhancement; fall back to the unscaled template
+            pass
         cval = float(evaluate_robot(cand).get("value", 0.0))
         if cval > max(base, 0.4):                            # the fanned hint walks materially better -> adopt it
             md = dict(getattr(cand, "metadata", None) or {})
