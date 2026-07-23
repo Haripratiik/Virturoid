@@ -20,6 +20,97 @@ _MATERIAL_FULL = re.compile(r"<material\s+name=\"(?P<name>[^\"]+)\"\s*>(?P<body>
 # any <material> — a full definition OR a name-only reference (self-closing / empty)
 _ANY_MATERIAL = re.compile(r"<material\b[^>]*?/>|<material\b[^>]*?>.*?</material\s*>", re.S)
 _VISUAL_BLOCK = re.compile(r"<visual\b[^>]*>.*?</visual\s*>", re.S)
+_MESH_REF = re.compile(r'<mesh\b[^>]*\bfilename="([^"]+)"[^>]*?(?:/>|>\s*</mesh\s*>)', re.S)
+_MESH_OK = (".stl", ".obj", ".msh")            # formats MuJoCo loads natively
+
+
+def _resolve_mesh_path(fname: str, mesh_root: Path | None) -> Path | None:
+    """Resolve a URDF mesh filename (``package://``, ``file://``, absolute, or relative) to an EXISTING local
+    file, or None. Tries the ROS-package-relative path, the mesh_root join, and the bare basename."""
+    f = fname
+    if f.startswith("package://"):
+        f = f[len("package://"):].split("/", 1)[-1]     # drop the ROS package name, keep the path
+    elif f.startswith("file://"):
+        f = f[len("file://"):]
+    p = Path(f)
+    cands = ([p] if p.is_absolute() else []) + (
+        [mesh_root / f, mesh_root / p.name] if mesh_root is not None else []) + [p]
+    for c in cands:
+        try:
+            if c.exists():
+                return c
+        except OSError:
+            pass
+    # last resort: the URDF's mesh subdir often differs from the on-disk layout (Franka references
+    # franka_description/meshes/visual/... but ships them elsewhere) -> find the basename anywhere under mesh_root.
+    if mesh_root is not None:
+        try:
+            return next(mesh_root.rglob(p.name), None)
+        except OSError:
+            pass
+    return None
+
+
+def _try_convert_dae(path: Path) -> Path | None:
+    """Convert a Collada ``.dae`` (Franka/KUKA visual meshes) to an ``.obj`` MuJoCo can load, best-effort via
+    trimesh. Returns the new path or None when trimesh is absent / the load fails (caller then boxes it)."""
+    try:
+        import trimesh
+        mesh = trimesh.load(str(path), force="mesh")
+        if mesh is None or not getattr(mesh, "vertices", None) is not None or len(mesh.vertices) == 0:
+            return None
+        out = path.with_suffix(".virturoid.obj")
+        mesh.export(str(out))
+        return out if out.exists() else None
+    except Exception:  # noqa: BLE001 - no trimesh / unreadable dae -> primitive fallback
+        return None
+
+
+def _mesh_elem_to_box(text: str, fname: str, size: str = "0.05 0.05 0.05") -> str:
+    """Replace every ``<mesh filename="fname" .../>`` with a placeholder ``<box>`` so a link whose mesh is
+    missing/unloadable still imports with its FRAME intact (the kinematics are what control iteration needs)."""
+    pat = re.compile(r'<mesh\b[^>]*\bfilename="' + re.escape(fname) + r'"[^>]*?(?:/>|>\s*</mesh\s*>)', re.S)
+    return pat.sub(f'<box size="{size}"/>', text)
+
+
+def _resolve_meshes(text: str, mesh_root: Path | None, repairs: list) -> str:
+    """Unified mesh pass (I1): resolve every mesh path, convert DAE→OBJ, and fall back a MISSING or unloadable
+    mesh to a placeholder box — so an as-published Franka/KUKA (relative + .dae + un-shipped meshes) INGESTS
+    instead of hard-failing on the first ``Error opening file``. Every outcome is reported, never silent."""
+    names = list(dict.fromkeys(_MESH_REF.findall(text)))
+    if not names:
+        return text
+    resolved = converted = 0
+    boxed: list[str] = []
+    for f in names:
+        real = _resolve_mesh_path(f, mesh_root)
+        suffix = real.suffix.lower() if real is not None else ""
+        if real is not None and suffix in _MESH_OK:
+            if real.as_posix() != f:
+                text = text.replace(f'filename="{f}"', f'filename="{real.as_posix()}"')
+            resolved += 1
+        elif real is not None and suffix == ".dae":
+            obj = _try_convert_dae(real)
+            if obj is not None:
+                text = text.replace(f'filename="{f}"', f'filename="{obj.as_posix()}"')
+                converted += 1
+            else:
+                text = _mesh_elem_to_box(text, f); boxed.append(Path(f).name)
+        else:
+            text = _mesh_elem_to_box(text, f); boxed.append(Path(f).name)
+    parts = []
+    if resolved:
+        parts.append(f"resolved {resolved} mesh path(s) locally")
+    if converted:
+        parts.append(f"converted {converted} Collada .dae mesh(es) to .obj")
+    if boxed:
+        shown = ", ".join(boxed[:4]) + ("..." if len(boxed) > 4 else "")
+        parts.append(f"replaced {len(boxed)} missing/unloadable mesh(es) with placeholder boxes ({shown}) — the "
+                     f"kinematic structure imports; supply the mesh files for full visual/collision fidelity")
+    if parts:
+        repairs.append({"kind": "mesh_resolve", "count": len(names), "detail": "; ".join(parts),
+                        "boxed": len(boxed)})
+    return text
 
 
 def repair_urdf_text(text: str, *, mesh_root: Path | None = None) -> tuple[str, list[dict]]:
@@ -77,25 +168,9 @@ def repair_urdf_text(text: str, *, mesh_root: Path | None = None) -> tuple[str, 
                                   f"stuffed into single <visual> elements (MuJoCo allows one per visual); "
                                   f"rendering unchanged"})
 
-    pkg = re.findall(r'filename="(package://[^"]+)"', text)
-    if pkg:
-        resolved = missing = 0
-        for uri in pkg:
-            rel = uri[len("package://"):].split("/", 1)[-1]      # drop the ROS package name, keep the path
-            hit = None
-            if mesh_root is not None:
-                cand = mesh_root / rel
-                if cand.exists():
-                    hit = cand
-                elif (mesh_root / Path(rel).name).exists():
-                    hit = mesh_root / Path(rel).name
-            if hit is not None:
-                text = text.replace(uri, hit.as_posix()); resolved += 1
-            else:
-                missing += 1
-        repairs.append({"kind": "package_uri", "count": len(pkg),
-                        "detail": f"resolved {resolved} package:// mesh path(s) locally; "
-                                  f"{missing} left to MuJoCo's missing-mesh tolerance"})
+    # MESHES (I1): resolve package://+relative paths, convert DAE→OBJ, and box a MISSING/unloadable mesh so an
+    # as-published Franka/KUKA/a1 ingests instead of hard-failing on the first "Error opening file".
+    text = _resolve_meshes(text, mesh_root, repairs)
 
     for tag in ("gazebo", "transmission"):
         stripped = re.subn(rf"<{tag}\b.*?</{tag}\s*>", "", text, flags=re.S)
@@ -154,6 +229,11 @@ def import_model(path: str) -> dict:
             # REPAIR FIRST (P0): a raw customer URDF (Go2!) may not compile. Try as-is, and on failure run the
             # deterministic repair pass and retry — so a clean file is untouched but a real one still loads.
             raw = p.read_text(encoding="utf-8")
+            if "<xacro:" in raw or "${" in raw:                    # a xacro TEMPLATE, not a URDF — can't repair it
+                return {"ok": False, "repairs": [],
+                        "note": "this is a xacro template with unexpanded macros (${...} / <xacro:...>), not a "
+                                "loadable URDF. Expand it first: `ros2 run xacro xacro robot.urdf.xacro "
+                                "> robot.urdf` (or `rosrun xacro xacro`), then import the generated .urdf."}
             try:
                 model = mujoco.MjModel.from_xml_path(str(p))
             except Exception:  # noqa: BLE001 - the as-published file did not compile; repair + retry
