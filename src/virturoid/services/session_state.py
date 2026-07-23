@@ -82,12 +82,50 @@ def _fresh_robot(rid: str) -> dict | None:
     return rec
 
 
+# The on-disk robot session store is a convenience cache (cross-process reuse), not a database of record — an
+# exported package is the durable artifact. Left uncapped it grows without bound (measured 3,800+ files / 55 MB
+# on a dev box), turning /api/sessions and every dir scan into O(N). Keep the most-recent N by mtime.
+_SESSION_CAP = int(os.environ.get("VIRTUROID_SESSION_CAP", "500"))
+
+
+def prune_sessions(cap: int | None = None) -> int:
+    """Delete the oldest robot session files beyond ``cap`` (most-recent kept). Returns how many were removed.
+    Best-effort and lock-free-safe: a file another process is writing is simply skipped. Never raises."""
+    keep = _SESSION_CAP if cap is None else cap
+    d = _dir() / "robots"
+    if keep <= 0 or not d.exists():
+        return 0
+    try:
+        files = sorted(d.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+    except OSError:
+        return 0
+    removed = 0
+    for p in files[keep:]:
+        try:
+            p.unlink(); removed += 1
+        except OSError:
+            pass
+    return removed
+
+
+_gc_ticks = {"n": 0, "swept_once": False}
+
+
 def put_robot(gene, *, prompt: str = "", label: str = "created", robot_id: str | None = None) -> str:
     rid = robot_id or _rid("robot")
     with _LOCK:
         rec = {"gene": gene, "undo": [], "label": label, "prompt": prompt, "_mtime": 0.0}
         _ROBOTS[rid] = rec
         _write_robot(rid, rec)
+    # GC housekeeping (never fails a build): sweep ONCE on first write in a process so accumulated cruft from
+    # earlier runs clears immediately, then amortize to ~once per cap/10 writes so the hot path stays free.
+    try:
+        _gc_ticks["n"] += 1
+        if not _gc_ticks["swept_once"] or _gc_ticks["n"] % max(1, _SESSION_CAP // 10) == 0:
+            _gc_ticks["swept_once"] = True
+            prune_sessions()
+    except Exception:  # noqa: BLE001 - GC is housekeeping; it must never fail a build
+        pass
     return rid
 
 

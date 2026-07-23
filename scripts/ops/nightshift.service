@@ -9,14 +9,14 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=hari
-WorkingDirectory=/home/hari/virturoid
+User=YOUR_USER
+WorkingDirectory=/home/YOUR_USER/virturoid
 Environment=PYTHONPATH=src
 Environment=XLA_PYTHON_CLIENT_MEM_FRACTION=.85
 Environment=XLA_FLAGS=--xla_gpu_autotune_level=0
 # ExecStart: the night-shift runner CLI (wraps run_night_shift with the NightProposer + laddered_evaluate_for +
 # golden_suite gate + resumable journal). Runner entrypoint is the M4 wiring step; template shown here.
-ExecStart=/home/hari/rl/bin/python -m virturoid.night_runner --resume --journal runs/night.jsonl
+ExecStart=/home/YOUR_USER/rl/bin/python -m virturoid.night_runner --resume --journal runs/night.jsonl
 Restart=on-failure
 RestartSec=30
 StartLimitIntervalSec=600

@@ -1,10 +1,10 @@
 #!/bin/sh
 # Night-shift watchdog (plan v2 §5.5, belt-and-braces). Idempotent relauncher: flock prevents double-start; if
-# the night runner is already up it no-ops. Add to cron on the WSL2 box:  */5 * * * * /home/hari/virturoid/scripts/ops/nightshift_watchdog.sh
+# the night runner is already up it no-ops. Add to cron on the WSL2 box:  */5 * * * * /home/YOUR_USER/virturoid/scripts/ops/nightshift_watchdog.sh
 # Use ONLY if the systemd unit proves flaky; safe to run alongside it (lock + the JSONL journal are idempotent).
 set -eu
-REPO=/home/hari/virturoid
-PY=/home/hari/rl/bin/python
+REPO=/home/YOUR_USER/virturoid
+PY=/home/YOUR_USER/rl/bin/python
 LOCK=/tmp/nightshift.lock
 LOG="$REPO/runs/night_watchdog.log"
 

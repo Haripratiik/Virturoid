@@ -231,7 +231,26 @@ def _load_model(source: str, mujoco, warnings: list[str]):
         return mujoco.MjModel.from_xml_path(str(p)) if is_file else _compile(text)
     except (OSError, ValueError) as exc:
         first_err = str(exc)
-    # 2) URDF with missing meshes -> swap them for primitives and retry
+    # 2) DETERMINISTIC REPAIR PASS + retry — a real exporter's URDF (the as-published Go2) hits MuJoCo's
+    # strict-XML rules (a material re-defined per-visual, many <material> in one <visual>) BEFORE any mesh
+    # issue. Share the same repair the faithful lane uses so the GENE twin is built from the customer's REAL
+    # structure (FL_hip/FL_thigh names, real topology) instead of crashing here and falling back to a generic
+    # description-composed body. Every repair is surfaced as an import warning.
+    if is_urdf:
+        try:
+            from virturoid.services.model_import import repair_urdf_text
+            repaired, repairs = repair_urdf_text(text, mesh_root=Path(base_dir) if base_dir else None)
+            if repairs:
+                for rep in repairs:
+                    warnings.append(f"URDF repair ({rep['kind']}): {rep['detail']}")
+                try:
+                    return _compile(repaired)
+                except (OSError, ValueError) as exc_r:
+                    first_err = str(exc_r)
+                    text = repaired          # carry repairs into the mesh-sanitize retry below
+        except Exception:  # noqa: BLE001 - repair is additive; fall through to mesh handling
+            pass
+    # 3) URDF with missing meshes -> swap them for primitives and retry
     if is_urdf:
         sanitized, n = _sanitize_urdf_meshes(text, base_dir)
         if n:

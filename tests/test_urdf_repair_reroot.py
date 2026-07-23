@@ -55,9 +55,14 @@ def test_repair_strips_gazebo_and_transmission():
 
 # --- the Go2 acceptance properties (need MuJoCo + the file) ----------------------------------------------
 def _go2_path():
+    """The as-published Unitree Go2 URDF, if present. Override with VIRTUROID_GO2_URDF; tests self-skip when
+    absent so the suite stays portable (the fixture is a large external file, not vendored)."""
     import os
-    p = r"C:\Users\harie\AppData\Local\Temp\go2_description.urdf"
-    return p if os.path.exists(p) else None
+    for p in (os.environ.get("VIRTUROID_GO2_URDF"),
+              os.path.join(os.environ.get("TEMP", "/tmp"), "go2_description.urdf")):
+        if p and os.path.exists(p):
+            return p
+    return None
 
 
 @pytest.mark.skipif(not _MUJOCO, reason="needs MuJoCo")
