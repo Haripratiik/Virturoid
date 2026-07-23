@@ -78,3 +78,24 @@ def test_full_loop_is_honest_and_never_banks_a_non_credible_gait():
     assert out["ok"] is True
     assert out["credible"] == out["verdict"].startswith("CREDIBLE")       # the flag never disagrees with the verdict
     assert isinstance(out["reward_expr"], (str, type(None))) and out["n_candidates"] >= 1
+
+
+def test_batched_reward_matches_scalar_and_vectorizes():
+    """R1 MJX-port primitive: compile_reward_batched evaluates the SAME reward over arrays (numpy or jax.numpy),
+    matching the scalar compiler element-wise, so the CPU search and the GPU trainer share one reward."""
+    import numpy as np
+    from virturoid.services.reward_dsl import (REWARD_FEATURES, _TEMPLATES, compile_reward,
+                                               compile_reward_batched)
+    expr = "exp(-(forward_vel - 0.4)**2 / 0.25) * alive + 0.2*upright - 0.1*energy"
+    scalar, batched = compile_reward(expr), compile_reward_batched(expr)
+    rng = np.random.default_rng(0)
+    for _ in range(30):
+        f = {k: float(rng.uniform(-1, 1)) for k in REWARD_FEATURES}
+        fb = {k: np.array([f[k]]) for k in REWARD_FEATURES}
+        assert abs(float(batched(fb)[0]) - scalar(f)) < 1e-9
+    # vectorizes over a batch of "envs" and stays finite
+    fb = {k: rng.uniform(-1, 1, 256) for k in REWARD_FEATURES}
+    out = batched(fb)
+    assert out.shape == (256,) and bool(np.all(np.isfinite(out)))
+    # every template compiles under the batched backend too
+    assert all(compile_reward_batched(e) is not None for e in _TEMPLATES.values())

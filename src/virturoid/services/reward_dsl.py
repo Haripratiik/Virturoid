@@ -83,6 +83,41 @@ def compile_reward(expr: str):
     return fn
 
 
+def _reduce_binop(op, args):
+    out = args[0]
+    for a in args[1:]:
+        out = op(out, a)
+    return out
+
+
+def compile_reward_batched(expr: str, *, xp=None):
+    """R1 (MJX port): the SAME AST-validated reward, evaluated over ARRAYS with an array math backend (``numpy``
+    by default, or ``jax.numpy`` for the on-GPU trainer). Returns ``fn(features: dict[str, array]) -> array`` so
+    the MJX-PPO trainer can compute the 10 features per-env in JAX and score an LLM-authored reward NATIVELY —
+    the CPU gait search and the GPU trainer share one reward definition, no per-step Python ``eval`` in the hot
+    loop. Pure arithmetic + the whitelisted funcs (min/max/abs/exp/tanh/sqrt/clip), all with array equivalents,
+    so the returned fn is ``jit``/``vmap``-friendly. Non-finite results are sanitized to 0 (never poison PPO)."""
+    if xp is None:
+        import numpy as xp
+    tree = ast.parse(expr.strip(), mode="eval")
+    _validate_ast(tree)
+    code = compile(tree, "<reward_batched>", "eval")
+    funcs = {
+        "min": lambda *a: _reduce_binop(xp.minimum, a), "max": lambda *a: _reduce_binop(xp.maximum, a),
+        "abs": xp.abs, "exp": xp.exp, "tanh": xp.tanh,
+        "sqrt": lambda x: xp.sqrt(xp.maximum(0.0, x)),
+        "clip": lambda x, lo, hi: xp.clip(x, lo, hi),
+    }
+
+    def fn(features: dict):
+        env = {k: features.get(k, 0.0) for k in REWARD_FEATURES}   # arrays (or scalars) — no float() coercion
+        env.update(funcs)
+        v = eval(code, {"__builtins__": {}}, env)  # noqa: S307 - AST-allowlisted, no builtins, closed env
+        return xp.nan_to_num(v, nan=0.0, posinf=0.0, neginf=0.0)
+
+    return fn
+
+
 @dataclass
 class RewardCandidate:
     name: str
