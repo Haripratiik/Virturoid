@@ -124,9 +124,12 @@ class IngestAndAdoptE2ETests(unittest.TestCase):
         self.assertTrue(r["robot_id"])
         self.assertTrue(r.get("control_scripts"), "a dropped control script must be surfaced for adopt_control_script")
 
-    def test_ingested_quadruped_actually_walks(self):
-        # the fix: a legged import gets a FREE base + a walkable stance, so the INGESTED robot walks in our sim
-        # (before: welded base -> base_jid=-1 -> cadence 0 -> "control-generalization frontier" that was really 2 bugs)
+    def test_ingested_quadruped_is_honestly_verified_then_walks_on_opt_in(self):
+        # B2 (2026-07-24 audit): the ingest must NOT silently swap the customer's body for a walkable template and
+        # report the template's walk as the customer's. It KEEPS the imported geometry, classifies it legged, and
+        # reports ITS honest verdict; the walkable template is an EXPLICIT opt-in (adopt_walkable_template) that
+        # then walks. (Was: auto-swap -> "the ingested quadruped walks" -- a walk that wasn't the customer's.)
+        from virturoid.services import session_state as S
         from virturoid.services.agent_tools import call_tool
         from virturoid.services.input_training_tools import _ingest_project
         d = tempfile.mkdtemp(prefix="proj_")
@@ -134,10 +137,17 @@ class IngestAndAdoptE2ETests(unittest.TestCase):
         Path(d, "robot", "quad.urdf").write_text(_quad_urdf(), encoding="utf-8")
         r = _ingest_project({"project_path": d, "description": "a quadruped robot"})
         self.assertTrue(r["robot_id"])
+        # the held robot is the customer's OWN geometry, classified legged, honestly verified
         v = call_tool("verify_robot", {"robot_id": r["robot_id"], "mode": "quick"}).get("result", {})
         self.assertEqual(v.get("kind"), "legged")
-        self.assertTrue(v.get("credible_walk"),
-                        f"the ingested quadruped must actually walk, got: {v.get('verdict')}")
+        self.assertIsNotNone(r.get("imported_verdict"))
+        held = [s.name for s in S.get_robot(r["robot_id"]).segments]
+        self.assertNotIn("neck", held)                       # not a composed template body
+        # opting into the walkable template makes it walk (the capability is offered, not forced)
+        call_tool("edit_robot", {"robot_id": r["robot_id"], "ops": [{"op": "adopt_walkable_template"}]})
+        v2 = call_tool("verify_robot", {"robot_id": r["robot_id"], "mode": "quick"}).get("result", {})
+        self.assertTrue(v2.get("credible_walk"),
+                        f"the adopted walkable template must walk, got: {v2.get('verdict')}")
 
     def test_adopt_control_script_utilises_and_improves(self):
         # the user's controller RUNS in our sim and the sim tunes it -> credible walk that beats it (on a body our

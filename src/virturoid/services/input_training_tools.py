@@ -299,16 +299,46 @@ def _ingest_project(args: dict) -> dict:
         result["lane_used"] = "gene_fallback"                 # only the lossy twin is runnable -> say so
     if gene is not None:
         result["lanes_attempted"].append("gene")
-    if gene is not None and getattr(gene, "robot_class", "") == "quadruped":
+    # B2 (2026-07-24 audit): NEVER silently swap the customer's imported body for a canonical template before we
+    # verify it. That made the ingest verdict describe OUR template's walk, not the customer's robot -- the exact
+    # honesty failure the strategy is built to avoid. We KEEP the imported geometry (with the customer's link
+    # names) as the held robot, report ITS OWN honest verdict, and OFFER a walkable reference template as a
+    # clearly-labelled, opt-in alternative the customer can adopt -- never a hidden substitution.
+    if gene is not None:
         try:
-            from virturoid.services.anatomy_compiler import ensure_walkable_quad
-            gene = ensure_walkable_quad(gene, "imported quadruped", force=True)  # imports are geometrically lossy;
-            #                                       don't trust the "already walks?" shortcut, but only adopt the
-            #                                       fanned stance if it materially out-walks what was imported
-            if dict(getattr(gene, "metadata", None) or {}).get("walkability_fallback", {}).get("applied"):
-                result["notes"].append("the imported quadruped could not stand on its own stance -> adopted a "
-                                       "walkable fanned stance for its class so it simulates and its gait can be improved")
+            from virturoid.services.task_matched_eval import evaluate_robot, robot_kind
+            _kind = robot_kind(gene)
+            # #214: reconcile a fixed-base legged import that the string classifier mislabelled an arm, so the
+            # BOM/fusion/verify pipeline all treat it consistently as the quadruped it structurally is.
+            if _kind == "legged" and getattr(gene, "robot_class", "") not in ("quadruped", "legged", "hexapod"):
+                result["notes"].append(f"reclassified the import from '{gene.robot_class}' to a legged body "
+                                       f"(it has multiple symmetric limbs off a common base)")
+                gene.robot_class = "quadruped"
         except Exception:  # noqa: BLE001
+            _kind = getattr(gene, "robot_class", "")
+    if gene is not None and _kind == "legged":
+        try:
+            own = float(evaluate_robot(gene).get("value", 0.0))
+            result["imported_verdict"] = {"walks_as_imported": own >= 0.5, "distance_m": round(own, 3),
+                                          "body": "the customer's own imported geometry (not a substitute)"}
+            if own < 0.5:
+                # measure (do NOT adopt) what a walkable template would do, so the offer is honest + quantified
+                try:
+                    from virturoid.services.anatomy_compiler import ensure_walkable_quad
+                    tmpl = ensure_walkable_quad(gene, "imported quadruped", force=True)
+                    tval = float(evaluate_robot(tmpl).get("value", 0.0))
+                    result["walkable_template_offer"] = {
+                        "available": tval > own, "template_distance_m": round(tval, 3),
+                        "how_to_adopt": "call amend/edit with op 'adopt_walkable_template', or train the imported "
+                                        "body directly with train_reward — its geometry is preserved either way"}
+                except Exception:  # noqa: BLE001
+                    pass
+                result["notes"].append(
+                    f"the imported {getattr(gene, 'robot_class', 'legged')} does not walk credibly as imported "
+                    f"({round(own, 3)} m under the scripted gait) -- its ORIGINAL geometry is kept as-is; a walkable "
+                    f"reference template is available as an explicit opt-in (see walkable_template_offer), and "
+                    f"train_reward can learn a gait for the real body.")
+        except Exception:  # noqa: BLE001 - the honest-verdict probe is best-effort; never block the ingest
             pass
 
     # 3) parse the NLP description into typed, provenance-tagged properties + edit ops

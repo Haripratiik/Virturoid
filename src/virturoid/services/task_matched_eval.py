@@ -48,6 +48,14 @@ def robot_kind(gene: RobotGene) -> str:
         return "manipulator"
     if gene.base_mount == "free" and n_revolute >= 2:    # free-floating, jointed, no wheels/gripper → legged
         return "legged"
+    # #214 (2026-07-24 audit): a FIXED-BASE import (base_mount 'table'/'floor', e.g. a Go2 whose base MuJoCo
+    # fused to the world) with MANY symmetric revolute LIMB-CHAINS off a common root is a legged body, not an
+    # arm. Count the distinct revolute-jointed limbs that branch from the root; >=3 (tripod/quadruped/hexapod)
+    # with no gripper is legged. A manipulator has 1 serial chain; a dual-arm has 2 -> both stay manipulator.
+    roots = {s.name for s in segs if s.parent is None}
+    limbs = sum(1 for s in segs if s.parent in roots and s.joint_type == "revolute")
+    if limbs >= 3 and ee == "none":
+        return "legged"
     return "manipulator"
 
 

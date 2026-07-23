@@ -269,6 +269,20 @@ def set_payload(gene, *, payload_kg: float = 2.0, girth_scale: bool = True):
 
 
 # op name -> callable(gene, **args). The typed operator library the intent-classifier maps requests onto.
+def adopt_walkable_template(gene, **_):
+    """B2: EXPLICITLY replace an imported/composed quadruped's body with a size-matched walkable fanned template.
+    Only ever invoked by the customer (never automatically) -- ingest KEEPS the original geometry and merely
+    OFFERS this. Lands as one undo step, so 'undo' restores the customer's original body exactly."""
+    from virturoid.services.anatomy_compiler import ensure_walkable_quad
+    before = len(gene.segments)
+    new = ensure_walkable_quad(gene, "adopt walkable template", force=True)
+    applied = bool(dict(getattr(new, "metadata", None) or {}).get("walkability_fallback", {}).get("applied"))
+    return new, {"op": "adopt_walkable_template", "applied": applied, "segments_before": before,
+                 "segments_after": len(new.segments),
+                 "note": ("adopted a size-matched walkable template (undo to restore the original body)" if applied
+                          else "the original body already walks or no better template was found -- unchanged")}
+
+
 OPERATORS = {
     "scale_group": scale_group,
     "set_height": set_height,
@@ -276,8 +290,9 @@ OPERATORS = {
     "set_material": set_material,
     "set_leg_count": set_leg_count,
     "set_payload": set_payload,
+    "adopt_walkable_template": adopt_walkable_template,
 }
-_STRUCTURAL = {"set_leg_count"}
+_STRUCTURAL = {"set_leg_count", "adopt_walkable_template"}
 
 
 def op_specs() -> list[dict]:
@@ -292,6 +307,8 @@ def op_specs() -> list[dict]:
         {"op": "set_leg_count", "args": {"n_pairs": "1-8"}, "for": "STRUCTURAL: change how many legs (rebuilds)"},
         {"op": "set_payload", "args": {"payload_kg": "0.1-50.0", "girth_scale": "true|false"},
          "for": "make it CARRY/LIFT heavier: upsize actuators (+ load-path girth) for the payload; BOM/mass rise"},
+        {"op": "adopt_walkable_template", "args": {},
+         "for": "OPT-IN: replace an imported quadruped that can't walk with a size-matched walkable template (undoable)"},
     ]
 
 
