@@ -151,3 +151,21 @@ def test_scale_group_legs_reaches_hip_links_but_not_ship():
     legs = _GROUP_WORDS["legs"]
     assert _name_in_group("FL_hip", legs) and _name_in_group("RR_hip_joint", legs)
     assert not _name_in_group("battleship", legs) and not _name_in_group("microchip", legs)
+
+
+@pytest.mark.skipif(not _MUJOCO, reason="needs MuJoCo")
+def test_adopt_control_script_fails_loudly_on_unreadable_params(tmp_path):
+    """F8: a .py controller whose parameters we cannot extract must return adopted=False with a reason naming
+    the file — never silently run a fallback gait and claim it 'improved your controller'."""
+    from virturoid.services.agent_tools import call_tool
+    rid = call_tool("create_robot", {"prompt": "a robot dog"})["result"]["robot_id"]
+    scr = tmp_path / "ctl.py"
+    scr.write_text("FREQ=1.2\nKP=60\ndef control(obs, t):\n    return [0.0]*4\n", encoding="utf-8")
+
+    r = call_tool("adopt_control_script", {"robot_id": rid, "script_path": str(scr)})["result"]
+    assert r.get("adopted") is False
+    assert "ctl.py" in r.get("reason", "") and "NOT run" in r.get("reason", "")
+    # inline params, by contrast, actually run and are attributed
+    r2 = call_tool("adopt_control_script",
+                   {"robot_id": rid, "params": {"freq": 1.5, "hip_amp": 0.9, "kp": 32.0}})["result"]
+    assert r2.get("adopted") is True and r2.get("params_source") == "inline"

@@ -479,6 +479,7 @@ def _adopt_control_script(args: dict) -> dict:
 
     params = args.get("params") if isinstance(args.get("params"), dict) else None
     script_meta = None
+    params_source = "inline" if params else None
     ppath = args.get("params_path") or args.get("script_path")
     if params is None and not ppath:
         return {"error": "provide params (inline dict), params_path (a policy_params.json), or script_path (a .py controller)"}
@@ -498,17 +499,34 @@ def _adopt_control_script(args: dict) -> dict:
             jp = next((c for c in sib if os.path.exists(c)), None)
             if jp:
                 params = json.load(open(jp, encoding="utf-8"))
+                params_source = f"sibling:{os.path.basename(jp)}"
         elif params is None:
             try:
                 params = json.load(open(ppath, encoding="utf-8"))
+                params_source = os.path.basename(ppath)
             except Exception as exc:  # noqa: BLE001
                 return {"error": f"could not read control params from {ppath}: {exc}"}
-    params = params or {}                                       # no readable params -> adopter falls back to a mid gait
+
+    # HONEST FAIL (F8): if the caller pointed at a .py controller but we could NOT extract runnable parameters
+    # from it (no inline params, no sibling policy_params.json / params.json), the adopter would run a FALLBACK
+    # gait — and claiming that "improved your controller" is a lie about a controller we never ran. Say so.
+    if not params and ppath and str(ppath).endswith(".py"):
+        looked = os.path.join(os.path.dirname(ppath), "policy_params.json")
+        return {"ok": True, "adopted": False, "params_source": None, "control_script": script_meta,
+                "reason": (f"could not extract runnable parameters from {os.path.basename(ppath)}: a Python "
+                           f"controller's behaviour lives in its code, which is not executed for safety. Provide "
+                           f"a policy_params.json next to it (looked at {looked}), pass params inline, or export "
+                           f"an ONNX policy and use import_onnx_policy. The controller was NOT run and nothing "
+                           f"was improved."),
+                "how_to_fix": "supply params inline, ship a sibling policy_params.json, or use import_onnx_policy"}
+    params = params or {}
 
     from virturoid.services.control_adopter import adopt_control_script
     out = adopt_control_script(gene, params, steps=int(args.get("steps", 800)),
                                generations=int(args.get("generations", 6)), pop=int(args.get("pop", 16)),
                                seed=int(args.get("seed", 0)))
+    out.setdefault("adopted", True)
+    out["params_source"] = params_source
     if script_meta:
         out["control_script"] = script_meta
     return out
