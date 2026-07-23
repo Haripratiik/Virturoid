@@ -37,6 +37,25 @@ def import_robot(source: str, *, robot_id: str | None = None, species: str | Non
     import mujoco
 
     warnings: list[str] = []
+
+    # M4 (2026-07-24 audit): a xacro TEMPLATE is not a loadable URDF. MuJoCo can't expand ${...}/<xacro:...>, so
+    # it used to crash into the generic fallback and hold a PHANTOM "mobile_base" that has nothing to do with the
+    # file. Detect it up front and REFUSE with the same expand instructions import_model gives (now also matching
+    # the .urdf.xacro suffix), instead of inventing a body.
+    try:
+        _p = Path(source)
+        _text = _p.read_text(encoding="utf-8", errors="replace") if (len(source) < 512 and _p.exists()) else source
+    except OSError:
+        _text = source
+    _is_xacro_suffix = len(source) < 512 and (source.endswith(".xacro") or source.endswith(".urdf.xacro"))
+    if "<xacro:" in _text or "${" in _text or _is_xacro_suffix:
+        return {
+            "gene": None, "backend_support": {}, "species": None, "robot_class": None, "valid": False,
+            "warnings": ["this is a xacro template with unexpanded macros (${...} / <xacro:...>), not a loadable "
+                         "URDF. Expand it first: `ros2 run xacro xacro robot.urdf.xacro > robot.urdf` (or "
+                         "`rosrun xacro xacro`), then import the generated .urdf."],
+        }
+
     mj = _load_model(source, mujoco, warnings)
 
     name_of = lambda obj, i: (mujoco.mj_id2name(mj, obj, i) or "")  # noqa: E731

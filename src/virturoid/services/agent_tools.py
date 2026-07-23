@@ -320,6 +320,8 @@ MCP_TOOL_VIEW: tuple[str, ...] = (
     "verify_robot", "evaluate_held", "run_task",               # honest verdict / task score / any-goal task
     "create_scene", "edit_scene",                              # themed scene + re-theme
     "train_held", "get_job", "export_held",                    # train (job) / poll / export
+    "train_reward", "generate_fusion", "generate_control_scripts",  # M5: advanced authoring — LLM reward loop /
+                                                               # sensor-fusion (EKF/AHRS) config / control scripts
     "recall_knowledge", "llm_spend",                           # memory recall / zero-token proof
 )
 

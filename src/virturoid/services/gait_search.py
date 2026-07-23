@@ -67,7 +67,13 @@ def reward_features_from_rollout(r: dict) -> dict:
         "upright": 2.0 * float(r.get("upright_frac", 0.0)) - 1.0,   # real: [0,1] frac -> [-1,1] alignment proxy
         "height_ratio": float(r.get("height_ratio", 0.0)),         # real
         "contact_frac": float(r.get("support_frac", 0.0)),         # real
-        "alive": float(r.get("alive", 1.0 if r.get("survived") else 0.0)),  # real
+        # M6 (2026-07-24 audit): `alive` is the DOCUMENTED 0/1 survival flag (reward_dsl: "1.0 while upright,
+        # 0.0 after a fall"), NOT the raw step count. The rollout reports `alive` as a STEP COUNT (steps survived
+        # before a fall, e.g. 500), so passing it through scaled every `*alive` reward term by ~500x and let a
+        # barely-moving body score huge. Derive the flag from `survived` (the honest all-steps-upright signal);
+        # partial survival is already carried by `upright` and `height_ratio`.
+        "alive": 1.0 if r.get("survived") else 0.0,  # real: 0/1 survival flag, never the step count
+
         "slip": abs(float(r.get("lateral", 0.0))),                 # real proxy (lateral drift = slide cost)
         "foot_clearance": 0.0,   # unavailable from the summary rollout (needs per-step foot z) -> neutral
         "energy": 0.0,           # unavailable (needs per-step torque*qvel) -> neutral

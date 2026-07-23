@@ -29,6 +29,10 @@ def test_feature_extractor_reports_real_and_neutral_features_honestly():
                       "foot_clearance", "energy", "action_smooth", "dist_to_goal"}
     assert f["foot_clearance"] == 0.0 and f["energy"] == 0.0 and f["action_smooth"] == 0.0  # unavailable -> neutral
     assert -1.0 <= f["upright"] <= 1.0 and 0.0 <= f["contact_frac"] <= 1.0                    # real, in-range
+    # M6 (2026-07-24 audit): `alive` is the documented 0/1 survival flag, NOT the raw step count (was ~500x).
+    assert f["alive"] in (0.0, 1.0), f"alive must be the 0/1 flag, got {f['alive']}"
+    assert reward_features_from_rollout({"survived": True, "alive": 500})["alive"] == 1.0     # step count -> flag
+    assert reward_features_from_rollout({"survived": False, "alive": 137})["alive"] == 0.0
 
 
 def test_a_reward_steers_evaluate_gait_and_success_is_separate():

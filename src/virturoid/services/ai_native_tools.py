@@ -624,6 +624,31 @@ def _base_body_id(model):
     return (1 if model.nbody > 1 else 0), False
 
 
+def _ensure_scene_materials(xml: str) -> str:
+    """M10 (2026-07-24 audit): the authored-scene geoms reference SHARED materials (mat_gray/red/blue/metal/
+    shell) that a ROBOT mjcf's <asset> may not define -- measured: robot_mjcf defines mat_metal/mat_shell but
+    NOT mat_gray/red/blue, so every sorting/pick-place scene failed to compile and fell back to a BARE FLOOR
+    with no obstacles. Inject any missing scene material into the composed model's <asset> so the authored
+    scene actually renders + simulates (rgba matches mujoco_exporter's canonical scene palette)."""
+    defs = {
+        "mat_gray":  '<material name="mat_gray" rgba="0.5 0.5 0.5 1"/>',
+        "mat_red":   '<material name="mat_red" rgba="0.8 0.1 0.1 1"/>',
+        "mat_blue":  '<material name="mat_blue" rgba="0.1 0.2 0.8 1"/>',
+        "mat_metal": '<material name="mat_metal" rgba="0.47 0.49 0.53 1"/>',
+        "mat_shell": '<material name="mat_shell" rgba="0.20 0.42 0.72 1"/>',
+    }
+    missing = [d for name, d in defs.items() if f'name="{name}"' not in xml]
+    if not missing:
+        return xml
+    inject = "\n    " + "\n    ".join(missing)
+    if "<asset>" in xml:
+        return xml.replace("<asset>", "<asset>" + inject, 1)
+    m = re.search(r"<mujoco\b[^>]*>", xml)                     # no <asset> -> create one right after <mujoco ...>
+    if m:
+        return xml[:m.end()] + "\n  <asset>" + inject + "\n  </asset>" + xml[m.end():]
+    return xml
+
+
 def _compose_scene_xml(gene, sg) -> str | None:
     """B2: robot MJCF + the held scene's OBSTACLES spliced into the worldbody (the robot MJCF already brings a
     floor, so the scene's own floor is skipped). Returns None if the composed model won't compile — the caller
@@ -637,6 +662,7 @@ def _compose_scene_xml(gene, sg) -> str | None:
         return None
     geoms = "\n".join(_scene_objects_xml(objs))
     composed = xml.replace("</worldbody>", geoms + "\n</worldbody>", 1)
+    composed = _ensure_scene_materials(composed)              # M10: define mat_gray/red/blue so it doesn't bare-floor
     try:
         mujoco.MjModel.from_xml_string(composed)               # validate it compiles before committing to it
         return composed

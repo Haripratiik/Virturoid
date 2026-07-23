@@ -233,6 +233,8 @@ claude mcp add virturoid -- python -m virturoid.mcp_server
 The server advertises a lean workflow menu (`create_robot`, `edit_robot`, `verify_robot`, `export_held`,
 `ingest_project`, …); `ingest_project` is the gateway for bringing in an existing robot/BOM/policy/dataset.
 
+Advanced authoring tools round out the loop: `train_reward` runs the closed reward-as-code loop (author an objective, optimize it, and bank the verified reward pattern to the flywheel), `generate_fusion` compiles an EKF/AHRS/odometry sensor-fusion config from the robot's real BOM sensors, and `generate_control_scripts` emits the obs-assembler + state-machine + safety-filter + watchdog control stack.
+
 `--co-design` physics-tunes a freshly composed body before building, `--evaluate` scores it on its morphology-matched task, and `--benchmark` scores it across a difficulty suite. Every build writes a complete package: the Robot Genome, the compiled MuJoCo model, generated task and scene sets, the bill of materials, parametric and B-rep CAD, training artifacts, a controller bundle, and browsable reports. Open `reports/index.html` in any package to explore everything it generated.
 
 ## Configuration
