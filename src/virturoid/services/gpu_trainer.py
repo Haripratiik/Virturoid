@@ -94,20 +94,33 @@ def _poll_and_fetch(remote_npz: str, out_path: str, *, progress, timeout: float,
         try:
             out = _ssh(f"pgrep -f '[{proc_name[0]}]{proc_name[1:]}' >/dev/null && echo RUN || echo DONE; "
                        "grep -E 'iter|fwd_vel|reward|success|lift|saved|Error|Traceback' ~/app_train.log "
-                       "2>/dev/null | tail -1", timeout=40).stdout.decode("utf-8", "ignore")
+                       "2>/dev/null | tail -40", timeout=40).stdout.decode("utf-8", "ignore")
         except Exception:  # noqa: BLE001 - transient Tailscale hiccup; keep polling
             misses += 1
             if misses > 12:
                 break
             continue
         misses = 0
-        m = re.search(r"iter\s+(\d+).*?(fwd_vel=[-+]?\d*\.?\d+|reward=\s*[-+]?\d*\.?\d+|success[=:\s]+[-+]?\d*\.?\d+)", out)
-        if m:
-            last_iter = m.group(1)
-            say(f"training on the GPU — iter {m.group(1)}, {m.group(2)}  ({int(time.time() - started)}s elapsed)")
+        # R4: the babysitter reads the metric window and decides health. A hard failure (NaN / policy divergence
+        # / crash) is KILLED within one poll and reported — never left running detached; a soft alarm (reward
+        # climbing without forward progress = the hacking signature; a stall at zero) is surfaced, not hidden.
+        from virturoid.services.training_babysitter import assess_training_health
+        health = assess_training_health(out)
+        if health["latest_iter"] is not None:
+            last_iter = str(health["latest_iter"])
+            say(f"training on the GPU — {health['reason']}  ({int(time.time() - started)}s elapsed)")
         elif last_iter is None:
             # still compiling (no iter line yet): heartbeat so the user sees it's alive, not hung
             say(f"compiling on the GPU — {int(time.time() - started)}s elapsed (first iteration coming up)…")
+        if health["status"] == "warn":
+            say(f"⚠️  babysitter: {health['reason']}")
+        if health["kill"]:
+            say(f"babysitter is stopping this run early — {health['reason']}")
+            try:
+                _ssh(f"pkill -f '[{proc_name[0]}]{proc_name[1:]}'", timeout=30)
+            except Exception:  # noqa: BLE001
+                pass
+            break
         if out.startswith("DONE"):
             completed = True
             break
