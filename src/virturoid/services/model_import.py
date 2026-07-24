@@ -24,9 +24,25 @@ _MESH_REF = re.compile(r'<mesh\b[^>]*\bfilename="([^"]+)"[^>]*?(?:/>|>\s*</mesh\
 _MESH_OK = (".stl", ".obj", ".msh")            # formats MuJoCo loads natively
 
 
+def _within(path: Path, root: Path | None) -> bool:
+    """True iff ``path`` canonicalizes INSIDE ``root``. The confinement that stops a HOSTILE URDF from resolving
+    a 'mesh' to an absolute path (``file:///etc/passwd``) or a ``../../..`` escape outside the imported project
+    -- which would let it use us as a host-filesystem read oracle, and (via _try_convert_dae) write the converted
+    .obj outside the project too. mesh_root is the URDF's own directory; a mesh that isn't under it is treated as
+    MISSING (the caller then boxes the link), never followed."""
+    if root is None:
+        return False
+    try:
+        rp = path.resolve(); rr = root.resolve()
+        return rp == rr or rr in rp.parents
+    except (OSError, RuntimeError):
+        return False
+
+
 def _resolve_mesh_path(fname: str, mesh_root: Path | None) -> Path | None:
     """Resolve a URDF mesh filename (``package://``, ``file://``, absolute, or relative) to an EXISTING local
-    file, or None. Tries the ROS-package-relative path, the mesh_root join, and the bare basename."""
+    file CONFINED under ``mesh_root``, or None. Tries the ROS-package-relative path, the mesh_root join, and the
+    bare basename. A path that resolves OUTSIDE mesh_root (absolute or ``../`` escape) is rejected as missing."""
     f = fname
     if f.startswith("package://"):
         f = f[len("package://"):].split("/", 1)[-1]     # drop the ROS package name, keep the path
@@ -37,7 +53,7 @@ def _resolve_mesh_path(fname: str, mesh_root: Path | None) -> Path | None:
         [mesh_root / f, mesh_root / p.name] if mesh_root is not None else []) + [p]
     for c in cands:
         try:
-            if c.exists():
+            if c.exists() and _within(c, mesh_root):        # only follow meshes that stay inside the project
                 return c
         except OSError:
             pass
@@ -45,7 +61,8 @@ def _resolve_mesh_path(fname: str, mesh_root: Path | None) -> Path | None:
     # franka_description/meshes/visual/... but ships them elsewhere) -> find the basename anywhere under mesh_root.
     if mesh_root is not None:
         try:
-            return next(mesh_root.rglob(p.name), None)
+            hit = next(mesh_root.rglob(p.name), None)
+            return hit if (hit is not None and _within(hit, mesh_root)) else None  # a symlink under root may escape
         except OSError:
             pass
     return None

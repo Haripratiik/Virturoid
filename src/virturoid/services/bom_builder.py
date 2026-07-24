@@ -600,7 +600,10 @@ def build_bom_from_genome(genome: dict, *, task: str = "", capabilities=None) ->
             lines.append(BomLine(m.name, "material", len(links), round(est_mass / len(links), 4),
                                  round(est_mass * m.cost_per_kg_usd / len(links), 2),
                                  f"{len(links)} links ({m.tier}) - template-path structural estimate"))
-    scale_kg = sum(ln.mass_kg * ln.qty for ln in lines)
+    # BomLine.mass_kg / .price_usd are PROPERTIES that already fold in qty (qty * unit_*), so summing them
+    # directly IS the line-total roll-up -- multiplying by qty again double-counted (qty^2) every multi-unit
+    # line (4 wheels, 12 leg motors). Roll up FROM the mass column exactly like build_bom does (2026-07-24 audit).
+    scale_kg = sum(ln.mass_kg for ln in lines)
     for name, qty, mounting in (_sensor_suite(robot_class, capabilities, task, scale_kg)
                                 + _compute_and_power(robot_class, len(joints), task=task,
                                                      capabilities=capabilities, bus_w=bus_w)):
@@ -608,11 +611,11 @@ def build_bom_from_genome(genome: dict, *, task: str = "", capabilities=None) ->
         if c is None:
             continue
         lines.append(BomLine(c.name, c.category, qty, c.mass_kg, c.price_usd, f"{c.spec} - {mounting}"))
-    total_mass = round(sum(ln.mass_kg * ln.qty for ln in lines), 3)
-    total_price = round(sum(ln.price_usd * ln.qty for ln in lines), 2)
+    total_mass = round(sum(ln.mass_kg for ln in lines), 3)
+    total_price = round(sum(ln.price_usd for ln in lines), 2)
     elec_w = sum(ln.qty * (component(ln.part).power_w if component(ln.part) else 0.0) for ln in lines)
     return {"robot_class": robot_class, "dof": len(joints), "actuator_map": actuator_map,
-            "lines": [asdict(ln) for ln in lines],
+            "lines": [asdict(ln) | {"mass_kg": ln.mass_kg, "price_usd": ln.price_usd} for ln in lines],
             "totals": {"line_items": len(lines), "actuators": len(joints), "mass_kg": total_mass,
                        "price_usd": total_price, "est_power_w": round(elec_w + bus_w, 1)},
             "note": ("Template-path BOM derived from the genome's joint effort limits + class suite. "

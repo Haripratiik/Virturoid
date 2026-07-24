@@ -125,8 +125,16 @@ def _summary(spec: dict) -> str:
     sr = perf.get("success_rate")
     if perf.get("task") == "locomotion" and perf.get("cadence_hz"):
         # 'walks' is gated upstream on forward + upright + cadence; the raw cadence_hz (total foot-lifts/sec) is
-        # left to the detailed table rather than this one-liner, where it reads misleadingly high.
-        bits.append(f"walks ({sr:.0%} task success)" if sr is not None else "walks")
+        # left to the detailed table rather than this one-liner, where it reads misleadingly high. For a legged
+        # body locomotion IS the task, so success_rate is the fraction of the forward-distance target reached ON
+        # A CREDIBLE WALK (0 if it did NOT walk). Never print "walks (0% task success)" -- the audit's self-
+        # contradiction: a 0 means it did not achieve a credible walk, so don't claim it walks.
+        if sr:
+            bits.append(f"walks ({sr:.0%} of the distance target)")
+        elif sr is None:
+            bits.append("walks")
+        else:
+            bits.append("does not reach a credible walk")
     elif sr is not None:
         bits.append(f"{sr:.0%} task success at {perf.get('task')}")
     return ", ".join(bits) + "."
