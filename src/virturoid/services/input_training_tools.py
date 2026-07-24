@@ -240,6 +240,22 @@ def _ingest_project(args: dict) -> dict:
                 scan_root = os.path.abspath(path)
             bundle = scan_folder(scan_root)
             result["project_graph"] = project_graph_summary(bundle)
+            # Auto-read a NOTES / README the customer dropped in the folder into the NLP payload, so specs
+            # written in notes.md ("aluminum body, carbon-fiber legs, 5 kg payload") are parsed the same as a
+            # typed description -- a drop-a-folder customer shouldn't have to re-type what's already in the box
+            # (2026-07-24 audit). Capped so a long README can't swamp the props extractor.
+            for _nm in ("notes.md", "notes.txt", "README.md", "readme.md", "README.txt"):
+                _np = os.path.join(scan_root, _nm)
+                try:
+                    if os.path.isfile(_np):
+                        with open(_np, encoding="utf-8", errors="replace") as _f:
+                            _txt = _f.read(4000).strip()
+                        if _txt:
+                            description = (description + "\n" + _txt).strip() if description else _txt
+                            result["notes"].append(f"folded {_nm} from the project into the NLP description")
+                            break
+                except OSError:
+                    pass
         except Exception as exc:  # noqa: BLE001
             result["warnings"].append(f"project scan failed: {exc}")
 

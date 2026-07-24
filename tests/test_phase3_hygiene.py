@@ -63,6 +63,26 @@ def test_imported_mesh_resolution_is_confined_to_the_project():
     assert _resolve_mesh_path("../evil.stl", root) is None                   # ../ escape rejected
 
 
+@pytest.mark.skipif(not _MUJOCO, reason="ingest compiles the URDF")
+def test_ingest_folds_notes_md_into_the_nlp_description():
+    """A customer who drops a folder with a notes.md ("aluminum body, 5 kg payload") shouldn't have to re-type
+    it -- ingest reads the notes into the NLP payload and applies the parsed properties."""
+    from virturoid.services import session_state as S  # noqa: F401 - ensures session dir env is honored
+    from virturoid.services.input_training_tools import _ingest_project
+
+    os.environ["VIRTUROID_SESSION_DIR"] = tempfile.mkdtemp(prefix="notes_")
+    d = tempfile.mkdtemp(prefix="proj_")
+    (Path(d) / "robot").mkdir()
+    (Path(d) / "robot" / "q.urdf").write_text(
+        '<?xml version="1.0"?>\n<robot name="q"><link name="b"><inertial><mass value="2"/>'
+        '<inertia ixx="0.02" iyy="0.02" izz="0.02" ixy="0" ixz="0" iyz="0"/></inertial></link></robot>',
+        encoding="utf-8")
+    (Path(d) / "notes.md").write_text("Aluminum body, carbon-fiber legs.", encoding="utf-8")
+    r = _ingest_project({"project_path": d})                 # NO description arg -> must come from notes.md
+    assert any("notes.md" in n for n in r.get("notes", [])), r.get("notes")
+    assert any(m.get("material") == "aluminum" for m in r.get("materials_applied", [])), r.get("materials_applied")
+
+
 @pytest.mark.skipif(not _MUJOCO, reason="URDF import needs MuJoCo")
 def test_confinement_does_not_break_a_legit_relative_mesh_import():
     """A normal URDF referencing an in-tree mesh still imports (confinement only rejects escapes)."""
