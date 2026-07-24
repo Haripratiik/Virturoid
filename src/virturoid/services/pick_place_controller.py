@@ -377,8 +377,15 @@ def run_pick_place_episode(model, scene: dict, params: dict | None = None, perce
     elif reach_mode == "task":
         use_task_space = high_dof
     else:
-        use_task_space = high_dof and not _joint_pd_can_reach(
-            model, ee_site, actuated, clamps, kp, kd, objects, addrs, grasp_z)
+        # M9/#185 (2026-07-24 audit): a KINEMATICALLY REDUNDANT arm (>=7 revolute DOF) has a null space, so
+        # joint-PD to a single IK seed drifts (~0.22 m off, measured) and the grasp misses -> trust redundancy
+        # and go straight to task-space, which servos the EE directly. The single-seed reach PROBE was too
+        # optimistic here (it found a good seed config for the probe targets while the multi-seed episode
+        # drifted), forcing a wrong joint-PD pick. For the exactly-/under-determined 5-6 DOF range the probe is
+        # still the right call -- it catches a body that genuinely can't reach. 4-DOF stays joint-PD (high_dof).
+        redundant = n_revolute >= 7
+        use_task_space = high_dof and (redundant or not _joint_pd_can_reach(
+            model, ee_site, actuated, clamps, kp, kd, objects, addrs, grasp_z, engage_radius=engage_radius))
 
     def drive(targets, steps, grasp=None, engage=None, point=None):
         nonlocal stable, last_targets
@@ -588,7 +595,7 @@ def _pin_block(data, addrs: tuple[int, int], ee_pos) -> None:
 
 
 def joint_pd_reaches_point(model, ee_site, actuated, clamps, kp, kd, point,
-                           *, tol: float = 0.06, steps: int = 320) -> bool:
+                           *, tol: float = 0.06, steps: int = 320, full_3d: bool = False) -> bool:
     """Probe whether joint-PD to the seed-IK target can actually settle the EE onto ``point`` for THIS arm —
     on a throwaway copy of the state. Returns True (-> joint-PD reaches it precisely) or False (-> the arm is
     redundant/under-damped enough that task-space servoing is more reliable). One short rollout; lets any
@@ -612,15 +619,27 @@ def joint_pd_reaches_point(model, ee_site, actuated, clamps, kp, kd, point,
         mujoco.mj_step(model, d)
         if not np.all(np.isfinite(d.qpos)):
             return False
-    return float(np.linalg.norm(_ee_position(d, ee_site)[:2] - pt[:2])) < tol
+    ee = _ee_position(d, ee_site)
+    # M9/#185 (2026-07-24 audit): measure the FULL 3D residual when asked. The XY-only slice reported a redundant
+    # 7-DOF arm 'reachable' while it settled ~0.22 m off in Z and then missed the grasp — auto-select then wrongly
+    # kept joint-PD. spray_coverage still calls this XY-only (full_3d default False), so its behavior is unchanged.
+    err = (ee - pt) if full_3d else (ee[:2] - pt[:2])
+    return float(np.linalg.norm(err)) < tol
 
 
 def _joint_pd_can_reach(model, ee_site, actuated, clamps, kp, kd, objects, addrs, grasp_z,
-                        *, tol: float = 0.06, steps: int = 320) -> bool:
-    """Pick-place probe: can joint-PD settle the EE onto a representative grasp target (the first block)?"""
-    block = next(iter(addrs), None)
-    if block is None or block not in objects:
+                        *, engage_radius: float = 0.15, steps: int = 320) -> bool:
+    """Pick-place probe: can joint-PD settle the EE close enough to LATCH the grasp on the representative targets?
+
+    M9/#185: this decides joint-PD vs task-space for THIS arm. It now (1) measures the FULL 3D distance (not an
+    XY-only slice that ignored a 0.22 m Z error), (2) compares against a tolerance tied to the real ``engage_radius``
+    (0.15 m) with margin — joint-PD is only trusted if it lands comfortably inside the latch window — and (3)
+    probes EVERY block, not just the first, requiring joint-PD to reach ALL of them. A redundant 7-DOF arm that
+    settles ~0.22 m off now correctly fails the probe -> task-space (which reaches it), while a 6-DOF arm that
+    nails ~0.03 m still passes -> joint-PD. Empty scene -> True (nothing to disqualify joint-PD)."""
+    targets = [(objects[b][0], objects[b][1], grasp_z) for b in addrs if b in objects]
+    if not targets:
         return True
-    bx, by = objects[block][0], objects[block][1]
-    return joint_pd_reaches_point(model, ee_site, actuated, clamps, kp, kd, (bx, by, grasp_z),
-                                  tol=tol, steps=steps)
+    tol = 0.8 * float(engage_radius)                          # must land well inside the latch window, not just graze it
+    return all(joint_pd_reaches_point(model, ee_site, actuated, clamps, kp, kd, t,
+                                      tol=tol, steps=steps, full_3d=True) for t in targets)
