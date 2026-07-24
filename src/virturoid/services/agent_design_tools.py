@@ -674,16 +674,35 @@ def run_train_gene_job(args: dict, progress=None) -> dict:
         try:
             import types
 
+            import numpy as np
+
             from virturoid.services.agent_tools import safe_build_path
             from virturoid.services.gait_flywheel import bank_gait
+            from virturoid.services.gait_quality import classify
             from virturoid.services.memory_db import MemoryDB
-            mem = safe_build_path(None, "memory")
-            mem.mkdir(parents=True, exist_ok=True)
-            _r = types.SimpleNamespace(best_survived=True, best_credible=True, best_forward=_fwd,
-                                       best_height_ratio=float(b.result.get("height_ratio", 0.7) or 0.7),
-                                       best_params=b.spec.get("params"))
-            with MemoryDB(mem / "virturoid_memory.db") as _db:
-                banked_gait_id = bank_gait(_db, gene, _r, task="locomotion")
+            from virturoid.services.morph_graph import encode_robot
+            from virturoid.services.morph_policy import (MorphPolicy, compiled_model, recipe_rollout_morph,
+                                                         robot_mjcf)
+            # BANK-POISONING GUARD (2026-07-24 audit): the search's `solved` gate is forward+cadence+upright, which
+            # is STRICTLY WEAKER than the un-gameable classify() -- it has NO roll/pitch orientation gate, so a
+            # pitch-dive LURCH can clear `solved`. Banking used to hardcode best_credible=True on that weaker
+            # signal, so a non-credible gait could be banked as "credible" and every future body would recall it.
+            # Re-run the winning params with a qpos trace and DEMAND a real classify() CREDIBLE verdict first.
+            _graph = encode_robot(compiled_model(robot_mjcf(gene)))
+            _zero = MorphPolicy(_graph.feature_dim); _zero.set_params(np.zeros(_zero.n_params))
+            _g = b.result.get("gains") or {}
+            _rr = recipe_rollout_morph(gene, _zero, steps=600, cpg=b.result.get("cpg"),
+                                       kp=float(_g.get("kp", 32.0)), kd=float(_g.get("kd", 1.5)),
+                                       adaptive=bool(_g.get("adaptive", False)), record_qpos=True)
+            if classify(_rr).startswith("CREDIBLE"):        # verified-CREDIBLE only -> never poison the flywheel
+                mem = safe_build_path(None, "memory")
+                mem.mkdir(parents=True, exist_ok=True)
+                _r = types.SimpleNamespace(best_survived=True, best_credible=True,
+                                           best_forward=float(_rr.get("forward", _fwd)),
+                                           best_height_ratio=float(_rr.get("height_ratio", 0.7) or 0.7),
+                                           best_params=b.spec.get("params"))
+                with MemoryDB(mem / "virturoid_memory.db") as _db:
+                    banked_gait_id = bank_gait(_db, gene, _r, task="locomotion")
         except Exception:  # noqa: BLE001 - banking is an accelerant; a train result is still returned
             banked_gait_id = None
     return {"mode": "gait_search", "solved": rep.solved, "n_evals": rep.n_evals, "banked_gait": banked_gait_id,
