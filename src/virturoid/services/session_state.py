@@ -125,6 +125,29 @@ def prune_sessions(cap: int | None = None) -> int:
     return removed
 
 
+def prune_scene_sessions(cap: int | None = None) -> int:
+    """Cap SCENE sessions the same way prune_sessions caps robots -- delete the oldest scene files (and drop them
+    from the in-memory map) beyond ``cap``, most-recent kept. Before this, robots were capped but scenes grew
+    without bound over a long agent session (2026-07-24 audit). Best-effort; never raises."""
+    keep = _SESSION_CAP if cap is None else cap
+    d = _dir() / "scenes"
+    if keep <= 0 or not d.exists():
+        return 0
+    try:
+        files = sorted(d.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+    except OSError:
+        return 0
+    removed = 0
+    for p in files[keep:]:
+        try:
+            p.unlink(); removed += 1
+            with _LOCK:
+                _SCENES.pop(p.stem, None)                     # drop the in-memory record too
+        except OSError:
+            pass
+    return removed
+
+
 _gc_ticks = {"n": 0, "swept_once": False}
 
 
@@ -254,6 +277,7 @@ def put_scene(scene: dict, *, task: str = "", theme: str = "", scene_id: str | N
         rec = {"scene": dict(scene), "undo": [], "task": task, "theme": theme, "_mtime": 0.0}
         _SCENES[sid] = rec
         _write_scene(sid, rec)
+    prune_scene_sessions()                                    # cap scenes too, not just robots (2026-07-24 audit)
     return sid
 
 
