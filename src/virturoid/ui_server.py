@@ -300,9 +300,9 @@ def build_ui_html() -> str:
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Virturoid Local Build Workbench</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" />
+  <!-- No external font CDN: this is a LOCAL-FIRST offline console (2026-07-24 audit). Loading Google Fonts
+       hung/flashed with no network and leaked a request off-box; styles.css already declares system fallbacks
+       ("Segoe UI"/system-ui/Consolas) so the console renders cleanly with zero external dependencies. -->
   <link rel="stylesheet" href="/app/styles.css" />
   <script type="importmap">
     {
