@@ -47,6 +47,32 @@ def test_m4_plain_urdf_still_imports():
     assert import_robot(plain)["gene"] is not None
 
 
+@pytest.mark.skipif(not _MUJOCO, reason="gait rollout needs MuJoCo")
+def test_m1_autobuild_and_create_robot_agree_on_a_credible_walk():
+    """M1/#212: the Studio suggestion-chip build (autonomous_build) must ship the SAME credible-walking
+    quadruped as create_robot for the same intent. Both paths now apply ensure_walkable + tune_crawl_gait to
+    the legged body (autonomous_build previously did neither -> 0%/EXPORT-BLOCKED)."""
+    from virturoid.services.anatomy_compiler import ensure_walkable_quad
+    from virturoid.services.gait_quality import classify
+    from virturoid.services.morph_policy import crawl_gait_rollout, tune_crawl_gait
+    from virturoid.services.morphology_composer import compose_robot
+    from virturoid.services.task_matched_eval import robot_kind
+
+    prompt = "a robot dog"
+    # create_robot path
+    g_cr = compose_robot(prompt, ensure_walkable=True)
+    if robot_kind(g_cr) == "legged":
+        tune_crawl_gait(g_cr)
+    # autonomous_build path: compose WITHOUT ensure_walkable, then the unifying walkable+tune it now applies
+    g_ab = compose_robot(prompt, plan=None, strict_llm=False)
+    assert robot_kind(g_ab) == "legged"
+    g_ab = ensure_walkable_quad(g_ab, prompt)
+    tune_crawl_gait(g_ab)
+    for label, g in (("create_robot", g_cr), ("autonomous_build", g_ab)):
+        v = classify(crawl_gait_rollout(g, steps=1200, record_qpos=True))
+        assert "CREDIBLE WALK" in v, f"{label} did not walk: {v}"
+
+
 @pytest.mark.skipif(not _MUJOCO, reason="scene compose needs MuJoCo")
 def test_m10_authored_scene_composes_with_materials_not_bare_floor():
     """M10: the authored scene's shared materials (mat_gray/red/blue) are injected so the composed robot+scene

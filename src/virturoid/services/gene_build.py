@@ -766,6 +766,25 @@ def _build_legged_package(gene: RobotGene, prompt: str, output_dir: Path, contro
     # on the bare CPG -- the headline contradicted the 3D replay. A genuinely unstable anatomy body still reads 'fell'.
     use_pol = pol if (pol is not None and getattr(pol, "obs_mean", None) is not None) else None
     rr = recipe_rollout_morph(gene, use_pol, steps=900, record_qpos=True)   # qpos -> classify's ROLL/PITCH gate
+    # M1/#212 (2026-07-24 audit): the build must not report EXPORT-BLOCKED for a body that verify_robot / create_robot
+    # certify as a CREDIBLE WALK. Those use the tuned CRAWL gait; the trot recipe above drifts a fresh composed quad
+    # BACKWARD. So ALSO score the walkable crawl gait (the exact controller verify_robot uses, with the gene's cached
+    # tuned params) and keep whichever is the better credible walk -- the build headline then agrees with the
+    # product's own verdict instead of contradicting it. The winning rollout's frames drive the viewer replay below,
+    # so headline == viewport still holds.
+    try:
+        from virturoid.services.gait_quality import classify as _classify
+        from virturoid.services.morph_policy import crawl_gait_rollout
+        rr_crawl = crawl_gait_rollout(gene, steps=900, record_qpos=True)
+        _recipe_cred = _classify(rr).startswith("CREDIBLE")
+        _crawl_cred = _classify(rr_crawl).startswith("CREDIBLE")
+        _crawl_wins = (_crawl_cred and not _recipe_cred) or (
+            _crawl_cred == _recipe_cred
+            and abs(float(rr_crawl.get("forward", 0.0))) > abs(float(rr.get("forward", 0.0))))
+        if _crawl_wins:
+            rr = rr_crawl
+    except Exception:  # noqa: BLE001 - the crawl cross-check is an honesty accelerant; a miss keeps the recipe score
+        pass
     forward_m = float(rr.get("forward", 0.0))
     cadence = float(rr.get("cadence", 0.0)); upright_frac = float(rr.get("upright_frac", 0.0))
     n_feet = int(rr.get("n_feet", 0))
@@ -811,6 +830,21 @@ def _build_legged_package(gene: RobotGene, prompt: str, output_dir: Path, contro
     cad = _export_real_cad(gene, output_dir)   # REAL B-rep STEP/STL for the walker too
     summary["cad_real"] = bool(cad)
     summary["cad_part_count"] = (cad or {}).get("part_count", 0)
+    # M1/#212: persist the WINNING rollout's qpos trace so the viewer replays the SAME gait the headline scored
+    # (when the walkable crawl beat the trot, the viewer must show that forward walk, not the trot's drift). The
+    # viewer replays these qpos on the robot model and falls back to its live rollout if the shape doesn't match.
+    try:
+        _qf = rr.get("qpos_frames") or []
+        if _qf and float(rr.get("forward", 0.0)) != 0.0:
+            _stride = max(1, len(_qf) // 150)                  # ~150 frames is plenty for a smooth replay
+            (output_dir / "simulation").mkdir(parents=True, exist_ok=True)
+            (output_dir / "simulation" / "locomotion_qpos.json").write_text(json.dumps({
+                "nq": len(_qf[0]), "frame_every": _stride,
+                "qpos_frames": [[round(float(v), 6) for v in _qf[i]] for i in range(0, len(_qf), _stride)],
+                "forward_m": round(float(rr.get("forward", 0.0)), 4),
+            }), encoding="utf-8")
+    except Exception:  # noqa: BLE001 - the replay trace is a presentation aid; never break the build
+        pass
     (output_dir / "reports").mkdir(parents=True, exist_ok=True)
     (output_dir / "reports" / "gene_evaluation_report.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     summary["bom"] = _emit_bom(gene, output_dir, task=prompt)  # real per-joint actuators + sensors + materials
