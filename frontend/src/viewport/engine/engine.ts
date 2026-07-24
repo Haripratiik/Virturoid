@@ -55,6 +55,7 @@ export class ViewportEngine {
   private currentObject: THREE.Object3D | null = null;
   private loadSeq = 0; // bumped on every (re)load; a stale async load aborts
   private raf = 0;
+  private _sizeTmp = new THREE.Vector2(); // reused by resize()'s change-guard, no per-frame allocation
   private raycaster = new THREE.Raycaster();
   private highlighted: THREE.Mesh | null = null;
   private highlightPrev: THREE.Color | null = null;
@@ -152,6 +153,11 @@ export class ViewportEngine {
 
     const animate = (now: number) => {
       this.raf = requestAnimationFrame(animate);
+      // M2 (2026-07-24 audit): the GL buffer was freezing at a stale layout size (measured 136x436 while the
+      // CSS box was 785x533), so the robot rendered stretched. resize() is now change-guarded (a no-op when the
+      // size and DPR are unchanged), so calling it every frame GUARANTEES the buffer tracks the container even
+      // if a ResizeObserver event is missed or fires before layout settles — it can never stay frozen.
+      this.resize();
       this.controls.update();
       this.stepEpisode(now || 0);
       renderer.render(scene, this.camera);
@@ -179,6 +185,13 @@ export class ViewportEngine {
     const w = this.container.clientWidth;
     const h = this.container.clientHeight;
     if (!w || !h) return;
+    // Change-guarded so it's safe to call every frame: bail unless the CSS box or the device-pixel-ratio
+    // actually changed (a monitor move / browser zoom changes DPR). setSize(w,h,false) keeps the canvas CSS at
+    // 100% (the container drives display size) and sizes only the drawing BUFFER to w*h*DPR.
+    const pr = Math.min(window.devicePixelRatio || 1, 2);
+    const size = this.renderer.getSize(this._sizeTmp);
+    if (size.x === w && size.y === h && this.renderer.getPixelRatio() === pr) return;
+    if (this.renderer.getPixelRatio() !== pr) this.renderer.setPixelRatio(pr);
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(w, h, false);
