@@ -63,6 +63,25 @@ def test_imported_mesh_resolution_is_confined_to_the_project():
     assert _resolve_mesh_path("../evil.stl", root) is None                   # ../ escape rejected
 
 
+def test_scene_sessions_are_capped_like_robots(monkeypatch, tmp_path):
+    """put_scene must prune old scene files past the cap (robots were capped, scenes were not), and never prune
+    the scene it just wrote."""
+    monkeypatch.setenv("VIRTUROID_SESSIONS_DIR", str(tmp_path))
+    monkeypatch.setenv("VIRTUROID_SESSION_CAP", "3")
+    import importlib
+
+    from virturoid.services import session_state as S
+    importlib.reload(S)                                       # pick up the cap + dir from the env
+    try:
+        sids = [S.put_scene({"id": f"s{i}", "objects": []}, task="t") for i in range(6)]
+        files = list((tmp_path / "scenes").glob("*.json"))
+        assert len(files) <= 3, f"scenes not capped: {len(files)} files"
+        assert S.get_scene(sids[-1]) is not None, "the just-written scene was pruned"
+        assert S.get_scene(sids[0]) is None, "the oldest scene should have been pruned"
+    finally:
+        importlib.reload(S)                                  # restore default cap/dir for other tests
+
+
 @pytest.mark.skipif(not _MUJOCO, reason="ingest compiles the URDF")
 def test_ingest_folds_notes_md_into_the_nlp_description():
     """A customer who drops a folder with a notes.md ("aluminum body, 5 kg payload") shouldn't have to re-type

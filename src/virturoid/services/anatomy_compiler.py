@@ -872,7 +872,15 @@ def _scale_geometry(gene, s: float):
             seg.cross_section = tuple(float(v) * s for v in seg.cross_section)
         if getattr(seg, "torque_req_nm", None) is not None:      # torque ~ mass*length ~ s^4 (re-grounded later anyway)
             seg.torque_req_nm = float(seg.torque_req_nm) * s ** 4
-        seg.actuator_torque_nm = None                            # let the BOM re-size the motor for the new scale
+        # Keep a real actuator clamp (never null it): nulling dropped the walkable body's actuator-fidelity from
+        # L1 to L0 before grounding ran (cert_v2 regression). Size it to the scaled load (demand ~ s^4) WITH real
+        # motor margin, and never below the template's proven-walking value: a plain s^4 scale STARVES a small
+        # body (s<1) so the leg can't drive the gait, while a demand-tight clamp clips the scripted gait's
+        # transient peaks on a large body -- either way the template stops walking. `max(1, s^4) x margin` keeps
+        # a heavier body's clamp above its (s^4) demand and a smaller one's at the template value. Grounding
+        # re-sizes the real motor honestly at build time (ground_gene is idempotent).
+        if getattr(seg, "actuator_torque_nm", None) is not None:
+            seg.actuator_torque_nm = round(float(seg.actuator_torque_nm) * max(1.0, s ** 4) * 3.0, 3)
     return g
 
 

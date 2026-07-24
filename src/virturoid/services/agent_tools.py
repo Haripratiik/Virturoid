@@ -320,10 +320,14 @@ MCP_TOOL_VIEW: tuple[str, ...] = (
     "verify_robot", "evaluate_held", "run_task",               # honest verdict / task score / any-goal task
     "create_scene", "edit_scene",                              # themed scene + re-theme
     "train_held", "get_job", "export_held",                    # train (job) / poll / export
-    "train_reward", "generate_fusion", "generate_control_scripts",  # M5: advanced authoring — LLM reward loop /
-                                                               # sensor-fusion (EKF/AHRS) config / control scripts
     "recall_knowledge", "llm_spend",                           # memory recall / zero-token proof
 )
+
+# ADVANCED AUTHORING (M5, 2026-07-24 audit): the reward-loop / sensor-fusion / control-script compilers are
+# callable-by-name but kept OUT of the lean core menu (which must stay within the cross-client budget). Like the
+# ingestion siblings, they are advertised by name in the anchor tool's description so an MCP client can discover
+# and call them without bloating tools/list.
+_ADVANCED_SIBLINGS: tuple[str, ...] = ("train_reward", "generate_fusion", "generate_control_scripts")
 
 # INGESTION GATEWAY (P0, agentic-ingestion plan): the plan found ZERO ingestion tools in the MCP view, so a
 # customer's own agent (the BYOK model) could not DISCOVER ingestion from tools/list at all. Rather than crowd
@@ -349,6 +353,11 @@ def tool_specs(view: str | None = None) -> list[dict]:
                 avail = [s for s in _INGEST_SIBLINGS if s in TOOLS]
                 desc = (desc + " Companion importers, each callable by name via a tools/call: "
                         + ", ".join(avail) + ".")
+            if n == "train_held":                              # M5: advertise the advanced authoring compilers
+                adv = [s for s in _ADVANCED_SIBLINGS if s in TOOLS]
+                if adv:
+                    desc = (desc + " Advanced authoring companions, each callable by name via a tools/call: "
+                            + ", ".join(adv) + " (reward-as-code loop / sensor-fusion config / control scripts).")
             out.append({"name": n, "description": desc, "parameters": TOOLS[n]["parameters"],
                         "heavy": TOOLS[n].get("heavy", False)})
         return out

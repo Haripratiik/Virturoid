@@ -14,13 +14,17 @@ os.environ.setdefault("VIRTUROID_NO_LOCAL_ENV", "1")
 _MUJOCO = importlib.util.find_spec("mujoco") is not None
 
 
-def test_m5_advanced_tools_are_discoverable_in_the_mcp_view():
-    """M5: train_reward / generate_fusion / generate_control_scripts must appear in the consolidated MCP
-    tools/list so a BYOK client can discover them (they were callable-by-name but invisible)."""
-    from virturoid.services.agent_tools import tool_specs
-    names = {s["name"] for s in tool_specs(view="mcp")}
+def test_m5_advanced_tools_are_discoverable_and_callable():
+    """M5: train_reward / generate_fusion / generate_control_scripts must be DISCOVERABLE (advertised by name in
+    the MCP view, like the ingest siblings) and CALLABLE by name -- without bloating the lean core menu past its
+    cross-client budget (the ≤17 contract test_agent_first enforces)."""
+    from virturoid.services.agent_tools import TOOLS, tool_specs
+    view = tool_specs(view="mcp")
+    assert len(view) <= 17, f"MCP core menu must stay lean, got {len(view)}"
+    blob = " ".join(s["description"] for s in view)
     for t in ("train_reward", "generate_fusion", "generate_control_scripts"):
-        assert t in names, f"{t} not discoverable in the MCP tools/list"
+        assert t in TOOLS, f"{t} not registered/callable"
+        assert t in blob, f"{t} not advertised (discoverable) in the MCP tools/list descriptions"
 
 
 @pytest.mark.skipif(not _MUJOCO, reason="import needs MuJoCo")
