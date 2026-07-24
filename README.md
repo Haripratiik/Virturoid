@@ -179,14 +179,18 @@ verdict it actually earned — including the ones that fail. Nothing here calls 
 with no keys configured. Add `VIRTUROID_LLM_BACKEND=openai` + `OPENAI_API_KEY` to have a language model author
 the anatomy instead of the offline composer; the physics, verdicts, and exports are identical either way.
 
-### Build Console (the studio)
+### Virturoid Studio (the app)
+
+Studio is the real frontend — a React + Vite desktop/web app (source in [`frontend/`](frontend/), built to `site/`) served by the Python backend:
 
 ```bash
-python -m virturoid.ui_server                       # native window
-python -m virturoid.ui_server --web --port 8765     # or in the browser at http://127.0.0.1:8765
+python scripts/run_ui.py --ui studio --web --port 8765   # Studio in the browser at http://127.0.0.1:8765/studio/
+python scripts/run_ui.py --ui studio                     # or as a native desktop window
 ```
 
-Describe a robot to the build assistant and it builds it in the live 3D viewport. Switch the viewport to **Episode** to replay the trained motion, open **Memory** for the cross-robot species tree, and **Analysis** for evaluation detail.
+Describe a robot to the build assistant and it builds it in the live 3D viewport. Switch the viewport to **Episode** to replay the trained motion, open **Memory** for the cross-robot species tree, and **Analysis** for evaluation detail. To develop the frontend with hot reload, run the backend as above and `cd frontend && npm install && npm run dev` (Vite serves `http://localhost:5173/studio/` and proxies the API to the backend).
+
+The original lightweight Build Console is still available with `python -m virturoid.ui_server [--web --port 8765]`.
 
 ### Command line
 
