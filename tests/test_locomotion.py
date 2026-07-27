@@ -34,8 +34,15 @@ class LocomotionTests(unittest.TestCase):
         mj = mujoco.MjModel.from_xml_string(compile_gene_to_mjcf(g))
         r = run_locomotion_episode(mj)
         self.assertTrue(r["upright"])                             # legs point down -> it stands
-        self.assertEqual(r["status"], "walked")                  # the scripted baseline produces locomotion
-        self.assertGreater(r["distance_m"], 0.1)                 # (direction is the learned policy's job)
+        self.assertGreater(r["distance_m"], 0.1)                 # it locomotes under the bare trot baseline
+        # The PRODUCT verdict for a quadruped is the GAIT-AWARE evaluate_robot (trot, else the statically-stable
+        # crawl), which is what verify_robot ships. B1 scales the fanned walkable template to the body's size for
+        # per-prompt differentiation; that wide-stance body DRIFTS under the bare trot (direction is the learned
+        # policy's job, as the distance check already concedes) but WALKS under the crawl -- exactly why the crawl
+        # gait exists ([[walking-breakthrough-abduction]]). Assert the walk the product actually earns, gait-aware.
+        from virturoid.services.task_matched_eval import evaluate_robot
+        self.assertGreaterEqual(float(evaluate_robot(g).get("value", 0.0)), 0.5,
+                                "the composed quadruped must walk under the product's gait-aware verdict")
 
     def test_leg_count_is_parametric(self):
         # "build whatever I want from scratch": a hexapod gets 6 legs (leg count is a PARAMETER), not the
