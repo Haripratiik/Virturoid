@@ -231,6 +231,12 @@ def _export_real_cad(gene: RobotGene, output_dir: Path) -> dict | None:
         return None
 
 
+# A limb must be able to HOUSE the actuator that drives it: the visual housing may exceed the limb
+# radius by at most this factor. 1.5x keeps a believable "shell over motor" look while still letting
+# the real datasheet envelope show; beyond it the render reads as a drum threaded on a pencil.
+_MAX_HOUSING_TO_LIMB = 1.5
+
+
 def ground_and_repair(gene: RobotGene) -> dict:
     """GROUND a body to real actuators + material mass, then structurally repair under-margined links and
     re-ground so mass tracks the fix. This is the SINGLE grounding path both exit doors share -- the
@@ -267,6 +273,35 @@ def ground_and_repair(gene: RobotGene) -> dict:
                     _r = min(_r, float(_s.length_m) / 4.5)
                 _s.radius_m = round(max(float(_s.radius_m), _r), 5)
             report = ground_gene(gene, material="carbon_fiber", fill=0.25)
+        # A LINK MUST BE BIG ENOUGH TO HOUSE THE MOTOR THAT DRIVES IT (visual-fidelity defect T1). Actuator
+        # housings are drawn at their true datasheet envelope, which is right -- but nothing forced the LIMB to
+        # be able to carry that part, so the compiler emitted a 5.6 mm rod mounting a 98 mm-diameter T-Motor
+        # AK10-9 (housing/limb = 8.86x on a hexapod hip; 3.23x worst on the dog). That is both physically
+        # impossible and the single most damaging "toy" cue in every render: fat drums threaded on pencil
+        # sticks. Real limbs enclose their actuator, so GROW THE LIMB rather than shrink an honest datasheet.
+        # Bounded by the same slenderness rule the loop above uses, so a leg never becomes a stub, and followed
+        # by a re-ground so mass/inertia track the new geometry.
+        try:
+            from virturoid.services.component_geometry import actuator_for_joint
+            _grew = False
+            for _s in gene.segments:
+                _ds = actuator_for_joint(_s)
+                if _ds is None or float(_s.radius_m or 0.0) <= 0.0:
+                    continue
+                _env = _ds["envelope_m"]
+                _need = (max(float(_env[0]), float(_env[1])) / 2.0) / _MAX_HOUSING_TO_LIMB
+                # NB: no slenderness clamp here. That rule exists to stop the STRESS pass above from fattening a
+                # long limb into a stub, but applied to physical fit it does the opposite harm: a SHORT segment
+                # (a hip abduction block) would be pinned thinner than the motor bolted to it -- which is how the
+                # hexapod ended up as a 5.6 mm rod under a 98 mm motor. A short, chunky joint housing is what a
+                # real hip assembly looks like; fitting the part is the honest constraint, so let it win.
+                if _need > float(_s.radius_m):
+                    _s.radius_m = round(_need, 5)
+                    _grew = True
+            if _grew:
+                report = ground_gene(gene, material="carbon_fiber", fill=0.25)
+        except Exception:  # noqa: BLE001 - housing fit is a fidelity pass, never a build blocker
+            pass
     except Exception as _ge:  # noqa: BLE001
         report = {"error": f"{type(_ge).__name__}: {_ge}"}
     return report

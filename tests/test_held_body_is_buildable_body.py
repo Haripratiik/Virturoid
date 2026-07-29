@@ -69,6 +69,36 @@ def test_the_held_body_is_already_the_exported_body(prompt, tmp_path, monkeypatc
         f"({export_mass / max(held_mass, 1e-9):.2f}x) -- the verdict was earned on a different robot.")
 
 
+@pytest.mark.parametrize(
+    "prompt",
+    ["a robot dog", "a hexapod robot", "a 6-axis robot arm with a gripper", "a four-wheeled warehouse rover"],
+)
+def test_every_link_can_house_the_motor_that_drives_it(prompt, tmp_path, monkeypatch):
+    """Visual-fidelity defect T1. Actuator housings are drawn at their true datasheet envelope, but nothing
+    forced the LIMB to be able to carry that part -- the compiler emitted a 5.6 mm rod mounting a 98 mm-diameter
+    T-Motor AK10-9 (housing/limb 8.86x on a hexapod hip, 3.23x on the dog). That is physically impossible and it
+    is the dominant "toy" cue in every render: fat drums threaded onto pencil sticks."""
+    monkeypatch.setenv("VIRTUROID_SESSIONS_DIR", str(tmp_path))
+    from virturoid.services import session_state as S
+    from virturoid.services.agent_tools import call_tool
+    from virturoid.services.component_geometry import actuator_for_joint
+
+    rid = call_tool("create_robot", {"prompt": prompt})["result"]["robot_id"]
+    worst, worst_name = 0.0, ""
+    for seg in S.get_robot(rid).segments:
+        ds = actuator_for_joint(seg)
+        limb_r = float(getattr(seg, "radius_m", 0.0) or 0.0)
+        if ds is None or limb_r <= 0.0:
+            continue
+        env = ds["envelope_m"]
+        ratio = (max(float(env[0]), float(env[1])) / 2.0) / limb_r
+        if ratio > worst:
+            worst, worst_name = ratio, seg.name
+    assert worst <= 1.55, (
+        f"{prompt!r}: {worst_name} has a housing/limb ratio of {worst:.2f}x -- the motor is far wider than the "
+        "link it bolts to, which cannot be built and reads as a toy.")
+
+
 def test_grounding_the_held_body_did_not_cost_the_walk(tmp_path, monkeypatch):
     """The honest failure mode of grounding would be 'now it's realistic but it can't move'. It isn't:
     measured, the grounded dog walks FURTHER than the styrofoam one (1.70 m vs 0.64 m)."""
