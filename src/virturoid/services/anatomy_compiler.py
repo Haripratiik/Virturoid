@@ -194,13 +194,6 @@ def _role_geometry(role: str, size: float, girth: float, aspect: str = "", *, au
     return _tapered(L, g, max(0.004, 0.65 * g)), L, g
 
 
-# A real quadruped/insect leg is a SHORT proximal abduction block plus long load-bearing links (a Go2
-# thigh and calf are 213 mm each). This is the proximal segment's share of one average link length.
-_HIP_LENGTH_SHARE = 0.45
-# A real foot is a CONTACT PAD, not a limb link (a Go2's is a ~22 mm sphere on a 426 mm leg).
-_FOOT_LENGTH_SHARE = 0.5
-
-
 def _anatomy_role_for(seg_role: str, index: int, n_segments: int) -> str | None:
     """Map this compiler's SEMANTIC role onto ``cad_geometry.build_anatomy``'s detailed-solid vocabulary.
 
