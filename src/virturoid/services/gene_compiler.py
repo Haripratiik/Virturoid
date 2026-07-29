@@ -130,6 +130,7 @@ def compile_gene_to_mjcf(gene: RobotGene, *, include_floor: bool = True, spawn_z
     self_collision_excludes = _self_collision_excludes_xml(gene)
     actuators = _actuator_xml(gene)
     keyframe = _pose_keyframe(gene, base_z)   # render the body in its baked rest stance (if any)
+    sensors = "" if physics_only else _sensor_xml(gene)
 
     mesh_assets = "".join(
         f'    <mesh name="{escape(n)}_vis" file="{p}" scale="0.001 0.001 0.001"/>\n'
@@ -143,11 +144,13 @@ def compile_gene_to_mjcf(gene: RobotGene, *, include_floor: bool = True, spawn_z
     return (
         f'<mujoco model="{escape(gene.id)}">\n'
         '  <compiler angle="radian" autolimits="true"/>\n'
-        '  <option timestep="0.002" gravity="0 0 -9.81"/>\n'
+        '  <option timestep="0.002" gravity="0 0 -9.81" integrator="implicitfast" cone="elliptic"/>\n'
         f'{_VISUAL_XML}'
         '  <default>\n'
-        '    <joint damping="0.8" armature="0.01"/>\n'
+        '    <joint damping="0.8" armature="0.01" frictionloss="0.05"/>\n'
         '    <geom friction="1 0.05 0.001"/>\n'
+        '    <default class="visual"><geom mass="0" contype="0" conaffinity="0"/></default>\n'
+        '    <default class="collision"><geom friction="1 0.05 0.001"/></default>\n'
         '  </default>\n'
         '  <asset>\n'
         f'{_SCENE_ASSETS}'
@@ -161,6 +164,7 @@ def compile_gene_to_mjcf(gene: RobotGene, *, include_floor: bool = True, spawn_z
         '  </worldbody>\n'
         f'{self_collision_excludes}'
         f'{actuators}'
+        f'{sensors}'
         f'{keyframe}'
         '</mujoco>\n'
     )
@@ -196,10 +200,9 @@ def _pose_keyframe(gene: RobotGene, base_z: float) -> str:
     """Emit a MuJoCo ``<keyframe>`` from ``gene.metadata['rest_pose']`` (joint_name -> angle) so the body
     renders/spawns in a recognizable baked stance instead of a default straight-out star. The qpos vector
     follows MuJoCo's joint order EXACTLY: a free base contributes 7 (xyz + identity quat) then each actuated
-    joint contributes 1, in the same pre-order DFS as ``_body_xml``. No-op when there is no rest pose."""
-    pose = (getattr(gene, "metadata", None) or {}).get("rest_pose")
-    if not pose:
-        return ""
+    joint contributes 1, in the same pre-order DFS as ``_body_xml``. Every actuated/free body gets a named
+    ``home`` key; ``rest`` is retained as a compatibility alias for existing rollout and render paths."""
+    pose = (getattr(gene, "metadata", None) or {}).get("rest_pose") or {}
     qpos: list[float] = []
     if gene.base_mount == "free":
         qpos += [0.0, 0.0, float(base_z), 1.0, 0.0, 0.0, 0.0]
@@ -215,7 +218,8 @@ def _pose_keyframe(gene: RobotGene, base_z: float) -> str:
     if len(qpos) == base_len:                 # nothing actuated -> a keyframe adds nothing
         return ""
     qstr = " ".join(f"{v:.5f}" for v in qpos)
-    return f'  <keyframe>\n    <key name="rest" qpos="{qstr}"/>\n  </keyframe>\n'
+    return (f'  <keyframe>\n    <key name="home" qpos="{qstr}"/>\n'
+            f'    <key name="rest" qpos="{qstr}"/>\n  </keyframe>\n')
 
 
 def gene_to_meshed_mjcf(gene: RobotGene, cache_dir: str = "build/_viewmesh", *,
@@ -337,14 +341,12 @@ def standing_spawn_z(gene: RobotGene, *, clearance: float | None = None, meshed:
     collider, which was the visible foot-penetration bug); pass ``meshed=False`` on hot training paths to
     measure the cheap primitive model instead. Falls back to the legacy height if MuJoCo is unavailable.
 
-    ``clearance`` default is kind-aware: a WHEELED body rests on its wheels (~2 mm) instead of hovering the
-    legged 30 mm foot-safety margin — a rover spawned 30 mm up reads as 'floating wheels' in the viewport
-    (measured bug) and only touched down after a settle. Legged bodies keep the 30 mm margin so a mesh foot
-    that hangs below its collider doesn't spawn penetrating."""
+    ``clearance`` defaults to 2 mm for every free body. Visual/collision disagreement is rejected by the
+    visual-physics gate instead of being hidden behind an airborne legged-body safety margin."""
     if clearance is None:
-        has_wheels = any(getattr(s, "shape", None) == "cylinder" and s.joint_type == "revolute"
-                         for s in gene.segments)
-        clearance = 0.002 if has_wheels else 0.03
+        # The former 30 mm legged margin hid foot visual/collider mismatches by spawning robots visibly airborne.
+        # The visual-physics CI gate now rejects those mismatches, so every free body starts at its real contact.
+        clearance = 0.002
     if gene.base_mount != "free":
         return _MOUNT_Z.get(gene.base_mount, TABLE_TOP_Z)
     ref = _MOUNT_Z["free"]                                       # measure the body's downward reach at 0.1
@@ -396,11 +398,13 @@ def compile_gene_with_scene(gene: RobotGene, scene_objects, *, table: bool = Tru
     lines = [
         f'<mujoco model="{escape(gene.id)}">',
         '  <compiler angle="radian" autolimits="true"/>',
-        '  <option timestep="0.002" gravity="0 0 -9.81"/>',
+        '  <option timestep="0.002" gravity="0 0 -9.81" integrator="implicitfast" cone="elliptic"/>',
         _VISUAL_XML.rstrip("\n"),
         '  <default>',
-        '    <joint damping="0.8" armature="0.01"/>',
-        '    <geom friction="1 0.1 0.01"/>',
+        '    <joint damping="0.8" armature="0.01" frictionloss="0.05"/>',
+        '    <geom friction="1 0.05 0.001"/>',
+        '    <default class="visual"><geom mass="0" contype="0" conaffinity="0"/></default>',
+        '    <default class="collision"><geom friction="1 0.05 0.001"/></default>',
         '  </default>',
         '  <asset>',
         '    <material name="mat_red" rgba="0.8 0.1 0.1 1"/>',
@@ -420,6 +424,8 @@ def compile_gene_with_scene(gene: RobotGene, scene_objects, *, table: bool = Tru
         # spurious impulses against its own structure. Robot↔scene-object + floor contacts stay enabled.
         _self_collision_excludes_xml(gene).rstrip("\n"),
         _actuator_xml(gene).rstrip("\n") or "  <actuator></actuator>",
+        *( [] if physics_only else [_sensor_xml(gene).rstrip("\n")] ),
+        _pose_keyframe(gene, base_z).rstrip("\n"),
         '</mujoco>',
     ]
     return "\n".join(lines) + "\n"
@@ -447,9 +453,11 @@ def _body_xml(gene: RobotGene, seg, pos: tuple[float, float, float], indent: int
         rng = ""
         if seg.joint_lower is not None and seg.joint_upper is not None:
             rng = f' range="{seg.joint_lower:.4f} {seg.joint_upper:.4f}"'
+        damping, armature, frictionloss = _joint_dynamics(gene, seg)
         lines.append(
             f'{pad}  <joint name="{escape(seg.name)}_joint" type="{_JOINT_KIND[seg.joint_type]}" '
-            f'axis="{ax}"{rng}/>'
+            f'axis="{ax}"{rng} damping="{damping:.4f}" armature="{armature:.4f}" '
+            f'frictionloss="{frictionloss:.4f}"/>'
         )
 
     # Per-part MATERIAL drives the colour/finish: a coloured shell body, metal feet/hands, dark carbon limbs,
@@ -462,6 +470,8 @@ def _body_xml(gene: RobotGene, seg, pos: tuple[float, float, float], indent: int
         "mat_joint" if seg.joint_type == "prismatic" else "mat_cf")
     meshed = bool(meshes) and seg.name in meshes and not physics_only
     lines.append(_geom_xml(seg, pad + "  ", material=material, meshed=meshed, physics_only=physics_only))
+    if seg.parent is None and not physics_only:
+        lines.append(f'{pad}  <site name="imu_site" pos="0 0 {seg.length_m / 2.0:.5f}" size="0.005" rgba="0 0 0 0"/>')
     # physics_only strips ALL visual-only decoration (cylinder motor cans, collars, housings, sensor pucks)
     # so the model is MJX/GPU-safe — those cosmetic cylinders crash mjx.put_model even at contype=0.
     if not meshed and not physics_only:    # the visual mesh already has housings/collars; primitives get them added
@@ -506,6 +516,11 @@ def _body_xml(gene: RobotGene, seg, pos: tuple[float, float, float], indent: int
             lines.append(
                 f'{pad}  <geom name="{escape(seg.name)}_palm" type="box" pos="0 0 {seg.length_m:.5f}" '
                 f'size="{hx:.5f} {hy:.5f} {hz:.5f}" material="mat_joint" mass="0" contype="0" conaffinity="0"/>')
+    name_l = (seg.name or "").lower()
+    if (not physics_only and seg.joint_type in (None, "fixed")
+            and any(token in name_l for token in ("foot", "paw", "leg", "hoof"))):
+        lines.append(f'{pad}  <site name="{escape(seg.name)}_touch" pos="0 0 {seg.length_m:.5f}" '
+                     f'type="sphere" size="{seg.radius_m:.5f}" rgba="0 0 0 0"/>')
 
     # Children attach at this segment's distal tip (0,0,length), plus any translational mount_offset
     # (lets e.g. two gripper fingers sit side-by-side in y rather than overlapping at the tip).
@@ -519,12 +534,52 @@ def _body_xml(gene: RobotGene, seg, pos: tuple[float, float, float], indent: int
     return "\n".join(lines) + "\n"
 
 
+def _joint_dynamics(gene: RobotGene, seg) -> tuple[float, float, float]:
+    """Conservative identified-dynamics priors selected from structure, not a closed class taxonomy.
+
+    A table/floor-mounted articulated chain has the reflected inertia and transmission friction of an arm;
+    rolling joints and free-base load-bearing limbs use their own lighter priors. New named robot classes still
+    receive a useful prior because topology, mounting and the joint's physical role drive the choice.
+    """
+    name = (seg.name or "").lower()
+    if seg.joint_type == "prismatic":
+        return (1.2, 0.02, 0.12)
+    if _segment_role(seg) == "wheel" or "wheel" in name or "drive" in name:
+        return (0.25, 0.02, 0.05)
+    if gene.base_mount in ("table", "floor", "torso"):
+        # Scale reflected inertia/friction with the selected actuator instead of
+        # assigning a shoulder-sized gearbox to every wrist. The fixed 0.45 Nm
+        # Coulomb loss left a grounded 0.52 Nm wrist only 0.07 Nm to move, so the
+        # arm could never reach its physically valid grasp pose.
+        capacity = max(0.1, abs(float(getattr(seg, "actuator_torque_nm", 0.0) or 0.0)))
+        # A fixed-base industrial/manipulator axis carries gearbox and motor
+        # inertia even when its output-torque rating is small. Keep the
+        # identified manipulator floor for reflected inertia/damping; only
+        # Coulomb friction scales down for a light wrist so it can still move.
+        damping = max(1.0, min(2.0, 0.2 + 0.08 * capacity))
+        armature = max(0.1, min(0.14, 0.003 * capacity))
+        friction = max(0.01, min(0.45, 0.02 * capacity))
+        return (damping, armature, friction)
+    if any(token in name for token in ("leg", "hip", "knee", "ankle", "thigh", "shin", "calf")):
+        # Preserve the tuned quadruped's measured reflected inertia anchor. A
+        # 0.04 armature shifted the closed-loop damping ratio by 37% and broke
+        # policy/control parity; the arm/cobot branch retains its identified 0.14.
+        return (0.8, 0.01, 0.12)
+    return (0.6, 0.03, 0.08)
+
+
 def _geom_xml(seg, pad: str, material: str = "mat_body", meshed: bool = False, physics_only: bool = False) -> str:
     name = f'{escape(seg.name)}_geom'
     # When meshed, the primitive becomes collision-only: invisible (alpha 0) + group 3, but its shape/size/
     # mass are untouched, so dynamics & contacts stay byte-identical to the primitive model. The visible
     # surface is the detailed mesh appended below.
-    surf = ' rgba="0 0 0 0" group="3"' if meshed else f' material="{material}"'
+    contact = ""
+    name_l = (seg.name or "").lower()
+    if seg.joint_type in (None, "fixed") and any(token in name_l for token in ("foot", "paw", "leg", "hoof")):
+        contact = ' condim="6" priority="1" solimp="0.9 0.95 0.001"'
+    surf = (' class="collision" rgba="0 0 0 0" group="3"' if meshed
+            else f' class="collision" material="{material}"')
+    surf += contact
     if seg.shape == "sphere":
         coll = (f'{pad}<geom name="{name}" type="sphere" pos="0 0 {seg.radius_m:.5f}" '
                 f'size="{seg.radius_m:.5f}" mass="{seg.mass_kg:.5f}"{surf}/>')
@@ -538,11 +593,16 @@ def _geom_xml(seg, pad: str, material: str = "mat_body", meshed: bool = False, p
         # MJX has no cylinder collision; in physics_only mode a cylinder COLLIDER becomes a capsule (the closest
         # MJX-safe round primitive) so a cylinder-shaped link can still train on GPU.
         gtype = "cylinder" if (seg.shape == "cylinder" and not physics_only) else "capsule"
-        coll = (f'{pad}<geom name="{name}" type="{gtype}" fromto="0 0 0 0 0 {seg.length_m:.5f}" '
+        # A wheel's mount offset denotes its axle CENTER; ordinary links attach at their proximal end. The old
+        # shared [0,L] convention shifted both mirrored wheels in the same local direction, leaving one side
+        # visibly detached and the other buried in the chassis.
+        fromto = (f'0 0 {-seg.length_m / 2.0:.5f} 0 0 {seg.length_m / 2.0:.5f}'
+                  if _segment_role(seg) == "wheel" else f'0 0 0 0 0 {seg.length_m:.5f}')
+        coll = (f'{pad}<geom name="{name}" type="{gtype}" fromto="{fromto}" '
                 f'size="{seg.radius_m:.5f}" mass="{seg.mass_kg:.5f}"{surf}/>')
     if not meshed:
         return coll
-    vis = (f'{pad}<geom name="{escape(seg.name)}_vis" type="mesh" mesh="{escape(seg.name)}_vis" '
+    vis = (f'{pad}<geom class="visual" name="{escape(seg.name)}_vis" type="mesh" mesh="{escape(seg.name)}_vis" '
            f'material="{material}" mass="0" contype="0" conaffinity="0"/>')
     return coll + "\n" + vis
 
@@ -559,10 +619,20 @@ def _detail_geoms_xml(seg, pad: str, *, suppress_motor: bool = False) -> str:
     """
     R = float(seg.radius_m)
     L = float(seg.length_m)
-    vis = ' mass="0" contype="0" conaffinity="0"'
+    vis = ' class="visual" mass="0" contype="0" conaffinity="0"'
     parts: list[str] = []
+    name_l = (seg.name or "").lower()
+    is_limb = any(k in name_l for k in _LIMB_HINT)
+    welded_limb_tip = is_limb and (seg.joint_type or "") not in ("revolute", "prismatic")
     if seg.shape == "cylinder":
-        return ""                          # a WHEEL is a clean cylinder — no motor-can/collar/fairing limb hardware
+        if _segment_role(seg) == "wheel":
+            # A centered axle hub extends past the tire sidewalls and visually mates the wheel to its chassis.
+            # It stays above the contact patch, so the tire remains the only contact-visible surface.
+            half = L / 2.0 + min(0.025, R * 0.3)
+            return (f'{pad}<geom name="{escape(seg.name)}_hub" type="cylinder" '
+                    f'fromto="0 0 {-half:.5f} 0 0 {half:.5f}" size="{R * 0.42:.5f}" '
+                    f'material="mat_joint"{vis}/>')
+        return ""
     # Actuator housing: a slightly-fat "motor can" coaxial with the joint axis, centered at the joint
     # (which sits at this body's local origin). This is the single biggest "robot vs toy" cue.
     if seg.joint_type == "revolute" and not suppress_motor:
@@ -577,19 +647,19 @@ def _detail_geoms_xml(seg, pad: str, *, suppress_motor: bool = False) -> str:
             f'size="{cr:.5f}" material="mat_joint"{vis}/>'
         )
     # Distal collar/flange on a slender structural link (skip boxes, fingers, and short stubs).
-    if seg.shape in ("capsule", "cylinder") and L > 0.06 and seg.joint_type != "prismatic":
+    if (seg.shape in ("capsule", "cylinder") and L > 0.06 and seg.joint_type != "prismatic"
+            and not welded_limb_tip):
         t = min(0.012, L * 0.10)
         parts.append(
             f'{pad}<geom name="{escape(seg.name)}_collar" type="cylinder" '
-            f'fromto="0 0 {L - t:.5f} 0 0 {L + t:.5f}" size="{R * 1.22:.5f}" material="mat_joint"{vis}/>'
+            f'fromto="0 0 {L - 2 * t:.5f} 0 0 {L:.5f}" size="{R:.5f}" material="mat_joint"{vis}/>'
         )
     # R2 FAIRING + BOOT (visual-only): give a walking limb bodywork so it reads as a DESIGNED limb, not a bare
     # capsule chain (the render's remaining toy tell after styling + proportions). The PROXIMAL segments get a
     # shell-accent fairing sleeve over the mid-span (clear of the joint cans); the welded terminal segment (the
     # foot) gets a rubber boot at its contact tip. Distal structural segments stay bare dark, so the limb reads
     # two-tone — accent bodywork over dark structure, the Go2/Spot design language validated in the A/B/C study.
-    name_l = (seg.name or "").lower()
-    if any(k in name_l for k in _LIMB_HINT):
+    if is_limb:
         welded = (seg.joint_type or "") not in ("revolute", "prismatic")
         tail = name_l.rsplit("_", 1)
         idx = int(tail[1]) if len(tail) == 2 and tail[1].isdigit() else 0
@@ -598,7 +668,7 @@ def _detail_geoms_xml(seg, pad: str, *, suppress_motor: bool = False) -> str:
             # distal cap (L + R) — a boot at the tip with a bigger radius hangs below the collision contact and
             # reads as a spawn penetration (the standing-spawn test measures EVERY geom's oriented AABB). Aligned,
             # the visible pad wraps the foot without ever protruding past the surface the robot actually stands on.
-            boot_r = R * 1.35
+            boot_r = R
             boot_z = L + R - boot_r
             parts.append(
                 f'{pad}<geom name="{escape(seg.name)}_boot" type="sphere" pos="0 0 {boot_z:.5f}" '
@@ -614,6 +684,11 @@ def _detail_geoms_xml(seg, pad: str, *, suppress_motor: bool = False) -> str:
     return "\n".join(parts)
 
 
+def _segment_role(seg) -> str:
+    geometry = getattr(seg, "geometry", None)
+    return str(geometry.get("semantic_role") or "").lower() if isinstance(geometry, dict) else ""
+
+
 def _actuator_xml(gene: RobotGene) -> str:
     """Torque (motor) actuators — the pick-place controller PD-computes torques and writes
     them to data.ctrl, clamped to forcerange. Must match the legacy exporter (gear=1 motors),
@@ -626,7 +701,26 @@ def _actuator_xml(gene: RobotGene) -> str:
         effort = float(s.actuator_torque_nm or 10.0)
         lines.append(
             f'    <motor name="{escape(s.name)}_motor" joint="{escape(s.name)}_joint" '
-            f'gear="1" forcerange="{-effort:.2f} {effort:.2f}"/>'
+            f'gear="1" ctrllimited="true" ctrlrange="{-effort:.2f} {effort:.2f}" '
+            f'forcerange="{-effort:.2f} {effort:.2f}"/>'
         )
     lines.append("  </actuator>")
+    return "\n".join(lines) + "\n"
+
+
+def _sensor_xml(gene: RobotGene) -> str:
+    """Shipped proprioception: IMU, joint state and contact sensors over sites emitted by ``_body_xml``."""
+    lines = ['  <sensor>',
+             '    <accelerometer name="imu_accel" site="imu_site"/>',
+             '    <gyro name="imu_gyro" site="imu_site"/>']
+    for seg in gene.actuated_joints():
+        name = escape(seg.name)
+        lines.append(f'    <jointpos name="{name}_position" joint="{name}_joint"/>')
+        lines.append(f'    <jointvel name="{name}_velocity" joint="{name}_joint"/>')
+    for seg in gene.segments:
+        name_l = (seg.name or "").lower()
+        if seg.joint_type in (None, "fixed") and any(token in name_l for token in ("foot", "paw", "leg", "hoof")):
+            name = escape(seg.name)
+            lines.append(f'    <touch name="{name}_contact" site="{name}_touch"/>')
+    lines.append('  </sensor>')
     return "\n".join(lines) + "\n"

@@ -32,8 +32,16 @@ class MorphGraph:
     def n_tokens(self) -> int:
         return len(self.act_u)
 
-    # per-token feature layout: [static S] + [qpos, qvel, sin, cos] + [base: z, upright, linvel3, angvel3]
+    # Per-token feature layout (schema v2):
+    # [legacy static 11] + [joint limits + actuator capacity 3] +
+    # [qpos, qvel, sin, cos] + [base: mounted, z, upright, linvel3, angvel3].
+    # The three v2 columns make control conditioning sensitive to the actual joint
+    # datasheet, not just limb shape. MorphPolicy contains an explicit v1 adapter so
+    # already-banked 24-D policies continue to receive their byte-identical layout.
+    LEGACY_STATIC_DIM = 11
+    STATIC_DIM = 14
     GLOBAL_DIM = 4 + 9                                # dynamic-per-token (4) + base-global broadcast (9)
+    SCHEMA_VERSION = 2
 
     @property
     def feature_dim(self) -> int:
@@ -105,8 +113,17 @@ def encode_robot(model) -> MorphGraph:
             if int(model.geom_bodyid[gi]) == body:
                 radius = float(model.geom_size[gi][0]); break
         is_hinge = 1.0 if jt == int(mujoco.mjtJoint.mjJNT_HINGE) else 0.0
+        limited = bool(model.jnt_limited[j])
+        scale = 3.141592653589793 if is_hinge else max(0.05, link_off)
+        lower = float(model.jnt_range[j, 0]) / scale if limited else -1.0
+        upper = float(model.jnt_range[j, 1]) / scale if limited else 1.0
+        force = max(abs(float(model.actuator_forcerange[u, 0])),
+                    abs(float(model.actuator_forcerange[u, 1])))
+        force_capacity = float(np.log1p(force) / np.log1p(300.0))
         static_rows.append([is_hinge, 1.0 - is_hinge, axis[0], axis[1], axis[2],
-                            link_off, radius, mass])    # parent/depth filled below
+                            link_off, radius, mass, float(np.tanh(lower)),
+                            float(np.tanh(upper)), float(np.clip(force_capacity, 0.0, 1.5))])
+        # parent/depth/position are filled below, yielding a 14-D joint description.
 
     # parent token + depth: walk up the body tree to the nearest ancestor body that owns a token
     parents, depths = [], []
@@ -136,7 +153,9 @@ def encode_robot(model) -> MorphGraph:
         # positional id (token order ~ tree traversal) breaks symmetry between otherwise-identical limbs
         # so an attention policy can phase them differently (MetaMorph's morphology positional embedding).
         pos = k / max(1, n - 1)
-        rows.append(srow + [depths[k] / 10.0, n_children[k] / 4.0, pos])
-    g.static = np.array(rows, dtype=float) if rows else np.zeros((0, 11))
+        # Preserve the complete v1 static prefix byte-for-byte, then append the
+        # three v2 datasheet values. This is what makes old-policy adaptation safe.
+        rows.append(srow[:8] + [depths[k] / 10.0, n_children[k] / 4.0, pos] + srow[8:])
+    g.static = np.array(rows, dtype=float) if rows else np.zeros((0, MorphGraph.STATIC_DIM))
     g.clamps = np.array([float(model.actuator_forcerange[u, 1]) or 10.0 for u in g.act_u], dtype=float)
     return g

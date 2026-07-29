@@ -171,7 +171,7 @@ def banked_policy_for(gene, *, models_dir: str = "models"):
         from virturoid.services.morph_policy import MorphPolicy
         pol = MorphPolicy.from_npz(str(path))
         fd = encode_robot(mujoco.MjModel.from_xml_string(compile_gene_to_mjcf(gene))).feature_dim
-        return pol if pol.feature_dim == fd else None
+        return pol if pol.accepts_feature_dim(fd) else None
     except Exception:  # noqa: BLE001 - a missing/incompatible bank just means "no learned policy yet"
         return None
 
@@ -279,7 +279,7 @@ def rollout_view(robot, policy, *, steps: int = 360, frame_every: int = 4) -> tu
     frames = [snap()]
     p0 = float(data.qpos[bq]) if bq >= 0 else 0.0
     for t in range(steps):
-        obs = graph.observe(model, data)
+        obs = policy.adapt_observation(graph.observe(model, data))
         if recipe:
             a = policy.act((obs - policy.obs_mean) / policy.obs_std)
             cphase = _two_pi * cpg_freq * t * _dt if cpg_on else 0.0

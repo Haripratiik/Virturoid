@@ -52,6 +52,9 @@ virturoid-desktop = "virturoid.desktop:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+virturoid = ["data/*.json"]
+
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 markers = [

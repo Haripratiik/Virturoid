@@ -178,6 +178,7 @@ def train_assisted(gene, *, target: float = 0.35, models_dir: str = "models", me
     from virturoid.services.learn_locomotion import banked_policy_for, learn_locomotion
     from virturoid.services.memory_db import MemoryDB
     from virturoid.services.morph_graph import encode_robot
+    from virturoid.schemas.training_tip import TrainingTip, tip_from_budget_change
 
     cls = gene.robot_class or "legged"
     workers = _resolve_workers(workers)
@@ -190,22 +191,32 @@ def train_assisted(gene, *, target: float = 0.35, models_dir: str = "models", me
 
     # 1) RECALL the banked training tip (the budget that reached target before) for this class.
     used_tip = False
+    typed_tip = None
     budget = dict(_DEFAULT_BUDGET)
     try:
         with MemoryDB(db_path) as db:
             tip = db.recall_lesson(cls, _LESSON_CODE)
         if tip and tip.get("params"):
             p = tip["params"]
-            budget = {"generations": int(p.get("generations", budget["generations"])),
-                      "pop": int(p.get("pop", budget["pop"])), "steps": int(p.get("steps", budget["steps"]))}
-            used_tip = True
-            say(f"recalled training tip for {cls}: {budget} (worked before)")
+            if isinstance(p.get("typed_tip"), dict):
+                candidate = TrainingTip.from_dict(p["typed_tip"])
+                typed_tip = candidate if candidate.validate().ok else None
+                if typed_tip:
+                    say(f"recalled scoped training tip for {cls}; it will apply only if its verdict matches")
+            else:  # backwards compatibility for the earlier absolute-budget lesson format
+                budget = {"generations": int(p.get("generations", budget["generations"])),
+                          "pop": int(p.get("pop", budget["pop"])), "steps": int(p.get("steps", budget["steps"]))}
+                used_tip = True
+                say(f"recalled legacy training budget for {cls}: {budget}")
     except Exception:  # noqa: BLE001 - memory is best-effort
         pass
 
     # 2) WARM-START from the banked species policy (the flywheel), and FIRST measure its travel: if it already
     # clears the target, REUSE it with NO training (the cheapest, fastest path — the whole point of the flywheel).
     travel_of = lambda pol: _measure_travel(gene, pol, steps=2400)  # route recipe/cpg vs plain (deploy==measure) # noqa: E731
+    token_count = encode_robot(mujoco.MjModel.from_xml_string(
+        compile_gene_to_mjcf(gene, include_floor=True, spawn_z=standing_spawn_z(gene, meshed=False))
+    )).n_tokens
     warm = banked_policy_for(gene, models_dir=models_dir)
     warm_started = warm is not None
     best_policy, best_travel, best_upright, baseline = None, float("-inf"), False, None
@@ -267,6 +278,8 @@ def train_assisted(gene, *, target: float = 0.35, models_dir: str = "models", me
     # degraded one), and we KEEP THE BEST by the real task metric (2400-step travel) — so the result is never
     # worse than the banked policy or any round. The sim diagnosis drives the budget escalation.
     rounds = 0
+    escalation_tip = None
+    escalation_start_travel = None
     while best_travel < target and rounds < max_rounds:
         rounds += 1
         say(f"round {rounds}: training {budget} on {workers} cores"
@@ -282,7 +295,12 @@ def train_assisted(gene, *, target: float = 0.35, models_dir: str = "models", me
         if best_travel >= target:
             break
         diag = _diagnose(travel, upright, target)
-        if diag == "barely_moves":
+        before = dict(budget)
+        if typed_tip and typed_tip.applies(stage="locomotion_search", verdict=diag, n_tokens=token_count):
+            budget = typed_tip.apply(budget)
+            used_tip = True
+            escalation_tip = typed_tip
+        elif diag == "barely_moves":
             budget = {"generations": int(budget["generations"] * 1.8), "pop": min(64, int(budget["pop"] * 1.5)),
                       "steps": budget["steps"]}
         elif diag == "fell_over":
@@ -290,6 +308,10 @@ def train_assisted(gene, *, target: float = 0.35, models_dir: str = "models", me
                       "steps": int(budget["steps"] * 1.3)}
         else:
             budget = {"generations": int(budget["generations"] * 1.4), "pop": budget["pop"], "steps": budget["steps"]}
+        if escalation_tip is None or escalation_tip is not typed_tip:
+            escalation_tip = tip_from_budget_change(
+                verdict=diag, before=before, after=budget, n_tokens=token_count, source_gene=gene.id)
+        escalation_start_travel = best_travel
         say(f"  sim diagnosis: {diag} (best travel {best_travel:+.3f} < {target}) -> escalating to {budget}")
 
     travel, upright = best_travel, best_upright
@@ -297,8 +319,13 @@ def train_assisted(gene, *, target: float = 0.35, models_dir: str = "models", me
     # 5) BANK the working budget as the tip for next time (idempotent; keeps the best).
     if reached:
         try:
+            if escalation_tip is not None and escalation_start_travel is not None:
+                escalation_tip.expected_effect.observed_delta = round(float(travel - escalation_start_travel), 4)
+            lesson_params = dict(budget)
+            if escalation_tip is not None and escalation_tip.validate().ok:
+                lesson_params["typed_tip"] = escalation_tip.to_dict()
             with MemoryDB(db_path) as db:
-                db.record_lesson(cls, _LESSON_CODE, operator="es_budget", params=budget,
+                db.record_lesson(cls, _LESSON_CODE, operator="es_budget", params=lesson_params,
                                  improvement=float(travel), task_type="locomotion", source_gene=gene.id)
             say(f"banked tip for {cls}: this body reached {travel:+.3f} m with {budget}")
         except Exception:  # noqa: BLE001

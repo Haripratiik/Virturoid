@@ -78,7 +78,7 @@ def recall_skill(gene, skill: str, *, db):
         pol = MorphPolicy.from_npz(meta["params_path"])
     except Exception:  # noqa: BLE001 - corrupt/missing -> cold-start
         return None, None
-    if pol.feature_dim != _feature_dim_for(gene):              # incompatible body encoding -> can't transfer
+    if not pol.accepts_feature_dim(_feature_dim_for(gene)):    # incompatible body encoding -> can't transfer
         return None, None
     return pol, meta
 

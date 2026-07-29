@@ -166,7 +166,7 @@ def _load_locomotion_policy(package_dir: Path, feature_dim: int, models_dir: str
         if cand.exists():
             try:
                 pol = MorphPolicy.from_npz(str(cand))
-                if pol.feature_dim == feature_dim:
+                if pol.accepts_feature_dim(feature_dim):
                     return pol
             except Exception:  # noqa: BLE001
                 pass
@@ -243,7 +243,7 @@ def _locomotion_episode(model, package_dir: Path, *, record_frames: list, steps:
     cpg_freq = float(cpg["freq"]); res_scale = float(cpg.get("residual_scale", 0.3))
     two_pi = 2.0 * np.pi; dt = float(model.opt.timestep)
     for t in range(steps):
-        obs = gr.observe(model, data)
+        obs = pol.adapt_observation(gr.observe(model, data))
         a = (pol.act((obs - pol.obs_mean) / pol.obs_std) if normalizer else pol.act(obs)) if has_policy else None
         cphase = two_pi * cpg_freq * t * dt if cpg_gate else 0.0
         for k in range(gr.n_tokens):
@@ -433,7 +433,21 @@ def _geom_metadata(model, mesh_uris: dict | None = None) -> list:
             "type": _GEOM_TYPE.get(int(model.geom_type[gid]), "box"),
             "size": [round(float(v), 4) for v in model.geom_size[gid]],
             "rgba": rgba,
+            "metalness": 0.08,
+            "roughness": 0.68,
         }
+        if matid >= 0:
+            # MuJoCo 3 exposes native PBR values.  Older/generated models generally use
+            # specular + shininess, so translate those conservatively instead of making
+            # every part look like the same grey plastic in Studio.
+            if hasattr(model, "mat_metallic"):
+                item["metalness"] = round(float(model.mat_metallic[matid]), 3)
+            else:
+                item["metalness"] = round(0.55 * float(model.mat_specular[matid]), 3)
+            if hasattr(model, "mat_roughness"):
+                item["roughness"] = round(float(model.mat_roughness[matid]), 3)
+            else:
+                item["roughness"] = round(max(0.12, 1.0 - float(model.mat_shininess[matid])), 3)
         mesh = (mesh_uris or {}).get(name)
         if item["type"] == "mesh" and isinstance(mesh, dict) and isinstance(mesh.get("uri"), str):
             item["mesh_uri"] = mesh["uri"]

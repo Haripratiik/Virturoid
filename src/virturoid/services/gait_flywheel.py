@@ -18,6 +18,7 @@ Deterministic; CPU MuJoCo (via gait_search); standard-library persistence (Memor
 
 from __future__ import annotations
 
+import hashlib
 import json
 
 LOCOMOTION = "locomotion"
@@ -36,6 +37,42 @@ def _class_of(gene) -> str:
         return robot_kind(gene)
     except Exception:  # noqa: BLE001
         return "legged"
+
+
+def structural_gait_key(gene) -> str:
+    """Name-independent hash of the physical kinematic tree a gait controls.
+
+    IDs, species labels and prompts are excluded: equivalent bodies share a cache, while different dimensions,
+    masses, joint limits, mounts, actuators or topology cannot collide in keep-best. Symmetric child branches are
+    sorted by recursive content, so LLM-chosen segment names/order do not create false structural differences.
+    """
+    def q(value):
+        return None if value is None else round(float(value), 6)
+
+    def local(seg) -> dict:
+        return {
+            "shape": seg.shape, "length_m": q(seg.length_m), "radius_m": q(seg.radius_m),
+            "mass_kg": q(seg.mass_kg), "joint_type": seg.joint_type or "fixed",
+            "joint_axis": [q(v) for v in seg.joint_axis], "joint_lower": q(seg.joint_lower),
+            "joint_upper": q(seg.joint_upper), "mount_euler": [q(v) for v in seg.mount_euler],
+            "mount_offset": [q(v) for v in seg.mount_offset],
+            "actuator_torque_nm": q(seg.actuator_torque_nm), "torque_req_nm": q(seg.torque_req_nm),
+            "cross_section": ([q(v) for v in seg.cross_section] if seg.cross_section else None),
+            "is_end_effector": bool(seg.is_end_effector),
+        }
+
+    def node(seg) -> dict:
+        kids = [node(child) for child in gene.children_of(seg.name)]
+        kids.sort(key=lambda value: json.dumps(value, sort_keys=True, separators=(",", ":")))
+        return {"link": local(seg), "children": kids}
+
+    root = gene.root() if hasattr(gene, "root") else None
+    payload = {"schema": "gait-structure-v1", "robot_class": _class_of(gene),
+               "base_mount": getattr(gene, "base_mount", None),
+               "end_effector_type": getattr(gene, "end_effector_type", None),
+               "tree": node(root) if root is not None else []}
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()[:16]
 
 
 def _deploy_sim_config(gene) -> dict:
@@ -78,13 +115,15 @@ def bank_gait(db, gene, result, *, task: str = LOCOMOTION, cross_eval: bool = Fa
     cls = _class_of(gene)
     species = getattr(gene, "species", None) or cls
     gene_id = getattr(gene, "id", None) or cls
-    skill_id = f"gait::{cls}::{gene_id}"[:96]
+    structure_key = structural_gait_key(gene)
+    skill_id = f"gait::{cls}::{structure_key}"[:96]
     success = min(1.0, abs(result.best_forward) / _FWD_NORM)
     db.record_skill(
         skill_id, cls, task, success_rate=success, species=species, gene_id=gene_id,
         base_config={"gait_params": result.best_params, "forward_m": round(result.best_forward, 4),
                      "height_ratio": round(result.best_height_ratio, 3), "controller": "crawl_gait",
-                     "reward_expr": reward_expr or None, "sim_config": _deploy_sim_config(gene)},
+                     "reward_expr": reward_expr or None, "structure_key": structure_key,
+                     "sim_config": _deploy_sim_config(gene)},
         notes="learned deployable gait (gait_search); base_config.gait_params IS the deploy controller")
     # Index the skill into the vector memory by THIS BODY'S morphology embedding (the robotics tokenization), so a
     # future body recalls it by structural similarity — cross-body, not just an exact class-string match.
@@ -96,7 +135,7 @@ def bank_gait(db, gene, result, *, task: str = LOCOMOTION, cross_eval: bool = Fa
         # the gene rides INLINE in the vector meta so transfer cross-eval can recover the neighbour's BODY
         # (not just its params) without depending on the species vault being populated
         vm.upsert(SKILL, skill_id, vec, {"robot_class": cls, "task_type": task, "species": species,
-                                         "gene": gene.to_dict()})
+                                         "structure_key": structure_key, "gene": gene.to_dict()})
     except Exception:  # noqa: BLE001 - vector indexing is a retrieval accelerant; the DB bank is the source of truth
         pass
     # TRANSFER LEDGER (opt-in; batch contexts like night-shift): replay this gait on the K nearest banked bodies
@@ -152,8 +191,7 @@ def _structural_recall(db, gene, task: str) -> tuple[dict, str, str] | None:
     body INLINE in the skill vector meta; a candidate with no inline gene is only a last-resort fallback.
     """
     from virturoid.schemas.gene import RobotGene
-    from virturoid.services.heldout_set import body_key
-    q_legs, q_key = _leg_count(gene), body_key(gene)
+    q_legs, q_key = _leg_count(gene), structural_gait_key(gene)
     try:
         from virturoid.services.robotics_vector_memory import RoboticsVectorMemory
         hits = RoboticsVectorMemory(db).nearest_skills(gene, task, k=8, min_sim=_MIN_GAIT_TRANSFER_SIMILARITY)
@@ -173,7 +211,7 @@ def _structural_recall(db, gene, task: str) -> tuple[dict, str, str] | None:
                 bg = RobotGene.from_dict(meta["gene"])
             except Exception:  # noqa: BLE001
                 bg = None
-        if bg is not None and body_key(bg) == q_key:
+        if bg is not None and structural_gait_key(bg) == q_key:
             return params, sid, "exact_cache"                # deterministic same-body reuse wins outright
         if bg is None:
             no_gene = no_gene or (params, sid, "fallback")   # can't verify structure -> last resort
@@ -265,7 +303,7 @@ class _DeployResult:
 
 def learn_gait_flywheel(gene, db, *, generations: int = 10, pop: int = 20, steps: int = 900,
                         deploy_steps: int = 1500, seed: int = 0, workers: int = 1, bank: bool = True,
-                        vm=None) -> dict:
+                        vm=None, max_evals: int | None = None, stop_on_credible: bool = False) -> dict:
     """Recall a specific prior -> SCREENED warm-start search -> DEPLOY-SELECT vs the default -> bank -> provenance.
 
     Deploy-select (honesty): the search optimizes at ``steps``, but the winner is re-measured at the longer
@@ -277,7 +315,8 @@ def learn_gait_flywheel(gene, db, *, generations: int = 10, pop: int = 20, steps
     recalled = _recall_gait_source(db, gene)
     prior, prior_skill_id = recalled if recalled is not None else (None, None)
     res = search_gait(gene, generations=generations, pop=pop, steps=steps, seed=seed,
-                      workers=workers, warm_start=prior)
+                      workers=workers, warm_start=prior, max_evals=max_evals,
+                      stop_on_credible=stop_on_credible)
     # DEPLOY-SELECT at the deploy horizon: learned winner vs the shipped default. Bank ONLY a CREDIBLE walk that
     # beats the default — a slide (fast but no real stepping) must never enter the bank.
     learned = evaluate_gait(gene, res.best_params, steps=deploy_steps)
@@ -340,6 +379,8 @@ def learn_gait_flywheel(gene, db, *, generations: int = 10, pop: int = 20, steps
         "search_forward_m": round(res.best_forward, 4),
         "default_forward_m": round(default["forward"], 4),
         "beats_default": bool(beats_default),
+        "n_evals": int(getattr(res, "n_evals", 0)),
+        "stopped_reason": getattr(res, "stopped_reason", "generation_limit"),
         "height_ratio": round(learned["height_ratio"], 3), "survived": bool(learned["survived"]),
         "reused_prior": prior is not None,
         "prior_transfer_forward": (round(res.prior_transfer_forward, 4)

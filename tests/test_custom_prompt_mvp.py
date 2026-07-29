@@ -30,7 +30,7 @@ class CustomPromptMvpTests(unittest.TestCase):
         self.assertEqual("pick_place_box", project["task_graph"].task_type)
         self.assertEqual("box", project["scene_set"].scenes[0].objects[0].name)
         self.assertEqual("conveyor_zone", project["scene_set"].scenes[0].objects[2].name)
-        self.assertEqual("cmp_actuator_vx20", project["bom"].items[0].component_id)
+        self.assertEqual("cmp_actuator_cubemars_ak70_10", project["bom"].items[0].component_id)
         self.assertEqual("synchronize_pick", project["policy_plan"].steps[1].step_id)
         self.assertEqual("match_conveyor_then_grasp", project["policy_plan"].steps[2].command)
         self.assertTrue(any(check.check.startswith("actuator_torque") and check.status == "pass" for check in project["compatibility_report"].checks))

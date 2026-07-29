@@ -379,6 +379,33 @@ def submit_design(args: dict) -> dict:
         ground_gene(gene, material=str(args.get("material") or "aluminum"), fill=0.25)
     except Exception:  # noqa: BLE001 - grounding is value-add; a valid gene is still usable
         pass
+    # This is a true build gate, not a visual score: a contact-visible foot/wheel may not disagree with the
+    # collider that simulation trains against, and a free body may not start airborne. Return a teaching error
+    # before the invalid design is held or banked so an agent can amend the graph and resubmit it.
+    try:
+        from virturoid.services.visual_physics_gate import audit_gene
+
+        visual_physics = audit_gene(gene)
+        if not visual_physics.ok:
+            reasons = "; ".join(issue.detail for issue in visual_physics.issues[:3])
+            return {"ok": False, "error": f"design failed the visual/physics alignment gate: {reasons}",
+                    "visual_physics": visual_physics.to_dict()}
+    except ImportError:  # MuJoCo is optional for schema-only clients; the later verify step remains mandatory
+        visual_physics = None
+    except Exception as exc:  # a compiler/load failure is not safe to silently bank as a usable body
+        return {"ok": False, "error": f"design could not clear the visual/physics gate: {exc}"}
+    try:
+        from virturoid.services.structural_assertions import evaluate_structural_assertions
+
+        structural_contract = evaluate_structural_assertions(gene)
+        if not structural_contract.ok:
+            reasons = "; ".join(a.detail for a in structural_contract.assertions if not a.ok)
+            return {"ok": False, "error": f"design failed structural seam assertions: {reasons}",
+                    "structural_contract": structural_contract.to_dict()}
+    except ImportError:
+        structural_contract = None
+    except Exception as exc:
+        return {"ok": False, "error": f"design could not execute structural assertions: {exc}"}
     # NB (flywheel_breakthrough §3.M/§5d): in-place stance_repair was tried on this path and REVERTED — 0/5
     # measured product walk-rate lift (dominant failure is fore-aft LURCH, not lateral roll-over). Module kept
     # for the factory verify-build only.
@@ -392,6 +419,22 @@ def submit_design(args: dict) -> dict:
     except Exception:  # noqa: BLE001 - corpus growth is an accelerant, never blocks a valid design
         banked = []
     out = {"ok": True, **_summary(gene, rid), "name": graph.get("name")}
+    # Expose the same evidence used by the inline see→critique→fix loop. This keeps an accepted design useful
+    # to the external reasoning model: it sees which engineering checks passed and any non-blocking anatomy
+    # observations instead of receiving only a pretty render.
+    try:
+        from virturoid.services.gene_validation import validate_gene_design
+        from virturoid.services.anatomy_critic import critique_gene
+
+        out["design_review"] = {
+            "engineering": validate_gene_design(gene, material=str(args.get("material") or "aluminum")),
+            "anatomy": critique_gene(gene),
+            "visual_physics": visual_physics.to_dict() if visual_physics is not None else {"status": "not_run"},
+            "structural_contract": (structural_contract.to_dict()
+                                    if structural_contract is not None else {"status": "not_run"}),
+        }
+    except Exception:  # noqa: BLE001 - evidence is additive after the hard alignment gate
+        pass
     rg = _robotics_grounding(gene)                             # the robotics AI grounds the LLM's design in verified precedent
     if rg:
         out["robotics_grounding"] = rg
@@ -415,6 +458,69 @@ def submit_design(args: dict) -> dict:
     if img:
         out["artifacts"] = [img]
     return out
+
+
+def critique_design(args: dict) -> dict:
+    """Render and measure a held design so the external model can propose a localized edit.
+
+    The model is never the acceptance gate: this tool exposes deterministic engineering/anatomy/contact
+    findings plus the actual render, while ``edit_robot`` applies a proposed patch and the same gates can be
+    rerun. Keeping critique separate also lets callers stop when a round is non-improving.
+    """
+    from virturoid.services import session_state as S
+    from virturoid.services.ai_native_tools import _render_gene
+    from virturoid.services.anatomy_critic import critique_gene
+    from virturoid.services.gene_validation import validate_gene_design
+    from virturoid.services.structural_assertions import evaluate_structural_assertions
+    from virturoid.services.visual_physics_gate import audit_gene
+
+    rid = args.get("robot_id")
+    round_number = int(args.get("round") or 1)
+    if round_number < 1 or round_number > 4:
+        return {"ok": False, "error": "critique round must be 1..4; stop after the hard cap instead of over-repairing"}
+    gene = S.get_robot(rid)
+    if gene is None:
+        return {"ok": False, "error": f"no robot '{rid}'"}
+    engineering = validate_gene_design(
+        gene, material=str(args.get("material") or "aluminum"),
+        payload_kg=float(args.get("payload_kg") or 0.0),
+    )
+    anatomy = critique_gene(gene)
+    visual_physics = audit_gene(gene).to_dict()
+    structural_contract = evaluate_structural_assertions(gene).to_dict()
+    findings = [
+        {"source": "engineering", "severity": f["severity"], "detail": f["detail"]}
+        for f in engineering["risk_flags"] if f["severity"] in ("fatal", "high", "med")
+    ] + [
+        {"source": "anatomy", "severity": f["severity"], "detail": f["detail"]}
+        for f in anatomy["issues"] if f["severity"] in ("fatal", "high", "med")
+    ] + [
+        {"source": "visual_physics", "severity": "high", "detail": f["detail"]}
+        for f in visual_physics["issues"]
+    ] + [
+        {"source": "structural_contract", "severity": "high", "detail": f["detail"]}
+        for f in structural_contract["assertions"] if not f["ok"]
+    ]
+    img = _render_gene(
+        gene, f"{rid}_critique", azimuth=float(args.get("azimuth", 50.0)),
+        elevation=float(args.get("elevation", -16.0)),
+    )
+    return {
+        "ok": True,
+        "accepted": (engineering["ok"] and not anatomy["issues"] and visual_physics["ok"]
+                     and structural_contract["ok"]),
+        "findings": findings,
+        "engineering": engineering,
+        "anatomy": anatomy,
+        "visual_physics": visual_physics,
+        "structural_contract": structural_contract,
+        "artifacts": [img] if img else [],
+        "repair_contract": (
+            "Use edit_robot for one localized patch, rerun critique_design, and keep the edit only if fatal/high "
+            "findings do not increase. Stop after three total critique rounds (hard cap four)."
+        ),
+        "round": round_number,
+    }
 
 
 def submit_scene_spec(args: dict) -> dict:
@@ -652,63 +758,32 @@ def run_train_gene_job(args: dict, progress=None) -> dict:
                                     progress=lambda m: say("train", m), **recipe)
             return {"mode": "gpu_rl", "policy": npz, "trained": bool(npz)}
         say("train", "GPU not reachable — falling back to the CPU gait search")
-    # gait_search: the bounded, honesty-gated CPG search on THIS gene (the verified multi-step search)
-    say("search", "sweeping CPG gait params, physics-evaluating each")
-    from virturoid.services.design_search import run_design_search
-    from virturoid.services.search_adapters import cpg_grid_proposer, make_cpg_evaluate
-    evaluate = make_cpg_evaluate(gene, steps=600)
-    gates = {"forward_m": 0.12, "cadence": 3.0, "upright": 0.5}
-    rep = run_design_search(propose=cpg_grid_proposer(), evaluate=evaluate, task_type="locomotion",
-                            max_evals=int(args.get("max_evals", 8)), gates=gates)
-    b = rep.best
-    say("done", f"searched {rep.n_evals} configs; solved={rep.solved}")
-    # B4: bank the real trained OUTCOME (walking distance -> success) into the flywheel, source=agent
-    _fwd = float(b.result.get("forward", 0)) if b else 0.0
-    _bank_to_flywheel(gene, prompt=f"[agent-trained] {gene.robot_class}", task="locomotion",
-                      success_rate=min(1.0, max(0.0, _fwd / 0.5)), source="agent_trained")
-    # FLYWHEEL FIX (flywheel_breakthrough_plan §3.I1): train_held FOUND working gait params but never banked them
-    # as a reusable skill — so a hard-won controller was discarded every run. Bank the winner (verified-only:
-    # solved => it cleared the un-gameable forward+cadence+upright gates) so the NEXT body can recall it.
-    banked_gait_id = None
-    if b and rep.solved and abs(_fwd) >= 0.15:
-        try:
-            import types
-
-            import numpy as np
-
-            from virturoid.services.agent_tools import safe_build_path
-            from virturoid.services.gait_flywheel import bank_gait
-            from virturoid.services.gait_quality import classify
-            from virturoid.services.memory_db import MemoryDB
-            from virturoid.services.morph_graph import encode_robot
-            from virturoid.services.morph_policy import (MorphPolicy, compiled_model, recipe_rollout_morph,
-                                                         robot_mjcf)
-            # BANK-POISONING GUARD (2026-07-24 audit): the search's `solved` gate is forward+cadence+upright, which
-            # is STRICTLY WEAKER than the un-gameable classify() -- it has NO roll/pitch orientation gate, so a
-            # pitch-dive LURCH can clear `solved`. Banking used to hardcode best_credible=True on that weaker
-            # signal, so a non-credible gait could be banked as "credible" and every future body would recall it.
-            # Re-run the winning params with a qpos trace and DEMAND a real classify() CREDIBLE verdict first.
-            _graph = encode_robot(compiled_model(robot_mjcf(gene)))
-            _zero = MorphPolicy(_graph.feature_dim); _zero.set_params(np.zeros(_zero.n_params))
-            _g = b.result.get("gains") or {}
-            _rr = recipe_rollout_morph(gene, _zero, steps=600, cpg=b.result.get("cpg"),
-                                       kp=float(_g.get("kp", 32.0)), kd=float(_g.get("kd", 1.5)),
-                                       adaptive=bool(_g.get("adaptive", False)), record_qpos=True)
-            if classify(_rr).startswith("CREDIBLE"):        # verified-CREDIBLE only -> never poison the flywheel
-                mem = safe_build_path(None, "memory")
-                mem.mkdir(parents=True, exist_ok=True)
-                _r = types.SimpleNamespace(best_survived=True, best_credible=True,
-                                           best_forward=float(_rr.get("forward", _fwd)),
-                                           best_height_ratio=float(_rr.get("height_ratio", 0.7) or 0.7),
-                                           best_params=b.spec.get("params"))
-                with MemoryDB(mem / "virturoid_memory.db") as _db:
-                    banked_gait_id = bank_gait(_db, gene, _r, task="locomotion")
-        except Exception:  # noqa: BLE001 - banking is an accelerant; a train result is still returned
-            banked_gait_id = None
-    return {"mode": "gait_search", "solved": rep.solved, "n_evals": rep.n_evals, "banked_gait": banked_gait_id,
-            "best": ({"params": b.spec.get("params"), "forward_m": round(float(b.result.get("forward", 0)), 3),
-                      "cadence": round(float(b.result.get("cadence", 0)), 1),
-                      "failure_mode": b.artifact.get("failure_mode")} if b else None)}
+    # One gait path owns recall, bounded search, classify()-credible early-stop, deploy comparison and banking.
+    say("search", "recalling prior gait hints, then physics-evaluating a bounded per-body search")
+    from virturoid.services.agent_tools import safe_build_path
+    from virturoid.services.gait_flywheel import learn_gait_flywheel
+    from virturoid.services.memory_db import MemoryDB
+    max_evals = max(1, int(args.get("max_evals", 8)))
+    mem = safe_build_path(None, "memory")
+    mem.mkdir(parents=True, exist_ok=True)
+    with MemoryDB(mem / "virturoid_memory.db") as db:
+        learned = learn_gait_flywheel(
+            gene, db, generations=max_evals, pop=min(8, max_evals), steps=600, deploy_steps=600,
+            seed=int(args.get("seed", 0)), workers=1, max_evals=max_evals, stop_on_credible=True,
+        )
+    solved = bool(learned.get("survived")) and bool(learned.get("beats_default"))
+    say("done", f"searched {learned['n_evals']} configs; credible stop="
+                f"{learned['stopped_reason'] == 'credible_walk'}; beats default={learned['beats_default']}")
+    if learned.get("banked_skill"):
+        _bank_to_flywheel(gene, prompt=f"[agent-trained] {gene.robot_class}", task="locomotion",
+                          success_rate=min(1.0, max(0.0, abs(float(learned["forward_m"])) / 0.5)),
+                          source="agent_trained")
+    return {"mode": "gait_search", "solved": solved, "credible": bool(learned.get("survived")),
+            "n_evals": learned["n_evals"], "stopped_reason": learned["stopped_reason"],
+            "reused_prior": learned["reused_prior"], "banked_gait": learned["banked_skill"],
+            "default_forward_m": learned["default_forward_m"], "beats_default": learned["beats_default"],
+            "best": {"params": learned["params"], "forward_m": learned["forward_m"],
+                     "height_ratio": learned["height_ratio"]}}
 
 
 def list_skills(_args: dict) -> dict:
@@ -817,6 +892,15 @@ AGENT_DESIGN_TOOLS: dict[str, dict] = {
                       "parameters": {"type": "object", "required": ["graph"], "properties": {
                           "graph": {"type": "object", "description": "anatomy graph: {robot_class, name, parts:[...]}"},
                           "material": {"type": "string"}}}},
+    "critique_design": {"description": "SEE + CRITIQUE a held design: returns an inline render plus deterministic "
+                        "engineering, anatomy, and visible-contact-vs-physics findings. The model proposes edits; "
+                        "Python remains the gate. Use at most three rounds (hard cap four).", "heavy": True,
+                        "handler": critique_design,
+                        "parameters": {"type": "object", "required": ["robot_id"], "properties": {
+                            "robot_id": {"type": "string"}, "material": {"type": "string"},
+                            "payload_kg": {"type": "number"}, "azimuth": {"type": "number"},
+                            "elevation": {"type": "number"}, "round": {"type": "integer", "minimum": 1,
+                            "maximum": 4}}}},
     "submit_scene_spec": {"description": "AUTHOR a scene: a list of objects + a robot spawn -> a validated held "
                           "scene (you are the scene designer).", "heavy": False, "handler": submit_scene_spec,
                           "parameters": {"type": "object", "required": ["objects"], "properties": {

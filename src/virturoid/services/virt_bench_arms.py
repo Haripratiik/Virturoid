@@ -93,7 +93,10 @@ def run_arm_b(task_id: str, *, steps: int = 600, max_evals: int = 12, on_node=No
     trains the rung COLD, B warm from memory -- so ``transfer_delta`` isolates the flywheel, not the compute).
     Returns the best-verified verdict + ``searched``/``recalled``/``gpu_npz`` provenance, a per-arm ``budget``
     ledger (CPU evals, GPU iters, LLM calls -- N16 budget parity), and ``claimed_pass`` = the WINNING candidate's
-    own pre-verify belief (the honesty axis; over-claim = claimed but not verified)."""
+    own pre-verify belief (the honesty axis; over-claim = claimed but not verified). ``gpu_npz`` is populated only
+    when the GPU artifact wins promotion; ``gpu_candidate_npz`` and ``gpu_candidate_verdict`` retain the attempted
+    artifact and its independent verdict even when deploy verification rejects it.
+    """
     from virturoid.services.design_search import run_design_search
     from virturoid.services.search_adapters import cpg_grid_proposer, make_locomotion_evaluate
     task = get_task(task_id)
@@ -157,6 +160,8 @@ def run_arm_b(task_id: str, *, steps: int = 600, max_evals: int = 12, on_node=No
     # spend (AlphaEvolve cascade discipline); warm-start from the recalled seed iff memory is on (A+ cold, B warm).
     gpu_iters_spent = 0
     gpu_npz = None
+    gpu_candidate_verdict = None
+    gpu_error = None
     if use_gpu:
         try:
             from virturoid.services.morph_policy import MorphPolicy
@@ -173,11 +178,17 @@ def run_arm_b(task_id: str, *, steps: int = 600, max_evals: int = 12, on_node=No
                 gpu_npz = tr["npz"]
                 gp = MorphPolicy.from_npz(gpu_npz)
                 gv = verify_submission(task_id, gene, gp, seed=seed)   # independent FROZEN-horizon verify (honest gate)
+                gpu_candidate_verdict = {
+                    "verified_pass": bool(gv.get("verified_pass")),
+                    "failure_mode": gv.get("failure_mode"),
+                    "metrics": dict(gv.get("metrics") or {}),
+                    "verifier": dict(gv.get("verifier") or {}),
+                }
                 warm = "warm(mem)" if (use_memory and recalled) else "cold"
                 candidates.append((gv, f"GPU residual ({gpu_iters} iters, {warm})", {"gpu_npz": gpu_npz},
                                    bool(gv.get("verified_pass"))))     # selected by deploy verify: claim==verify
-        except Exception:  # noqa: BLE001 - GPU is best-effort; memory+search still stand
-            pass
+        except Exception as exc:  # noqa: BLE001 - GPU is best-effort; memory+search still stand
+            gpu_error = f"{type(exc).__name__}: {exc}"
 
     # keep the BEST-verified candidate: a pass beats a fail, then higher forward travel
     def _key(c):
@@ -188,6 +199,9 @@ def run_arm_b(task_id: str, *, steps: int = 600, max_evals: int = 12, on_node=No
     out["arm"] = "B"; out["method"] = method; out["n_evals"] = report.n_evals
     out["searched"] = best_cpg; out["recalled"] = recalled if extras.get("recalled") else None
     out["gpu_npz"] = extras.get("gpu_npz")
+    out["gpu_candidate_npz"] = gpu_npz
+    out["gpu_candidate_verdict"] = gpu_candidate_verdict
+    out["gpu_error"] = gpu_error
     out["claimed_pass"] = bool(claimed)                        # the WINNING candidate's own pre-verify belief
     out["budget"] = {"cpu_evals": int(report.n_evals), "gpu_iters": int(gpu_iters_spent), "llm_calls": 0}
     return out

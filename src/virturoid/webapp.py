@@ -17,7 +17,7 @@ import uuid
 from pathlib import Path
 
 from fastapi import FastAPI
-from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
 
 from virturoid.services.agent import VirturoidAgent, parse_intent
 
@@ -147,18 +147,25 @@ def create_app(workspace: Path) -> FastAPI:
         import mujoco
         import numpy as np
 
-        from virturoid.services.gene_compiler import compile_gene_to_mjcf, gene_to_meshed_mjcf
+        from virturoid.services.gene_compiler import compile_gene_to_mjcf, write_packaged_visual_mjcf
         from virturoid.services.robot_factory import build_robot
         from virturoid.services.viewer_sim import _geom_metadata
 
         try:
             result = build_robot(prompt)
             gene = result["gene"]
-            try:
-                model_xml = gene_to_meshed_mjcf(gene)
-            except Exception:  # noqa: BLE001 - degrade preview to primitive geometry instead of failing
-                model_xml = compile_gene_to_mjcf(gene)
-            model = mujoco.MjModel.from_xml_string(model_xml)
+            mesh_uris = {}
+            preview_root = project_dir / ".preview"
+            visual = write_packaged_visual_mjcf(gene, preview_root, include_floor=True)
+            if visual:
+                model = mujoco.MjModel.from_xml_path(str(preview_root / visual["model_uri"]))
+                index = json.loads((preview_root / visual["mesh_index_uri"]).read_text(encoding="utf-8"))
+                mesh_uris = {
+                    name: {**meta, "uri": (Path(".preview") / meta["uri"]).as_posix()}
+                    for name, meta in index.get("meshes", {}).items()
+                }
+            else:
+                model = mujoco.MjModel.from_xml_string(compile_gene_to_mjcf(gene))
         except Exception as exc:  # noqa: BLE001 - a bad/unbuildable prompt must not 500
             return JSONResponse({"error": f"Could not compose a robot: {exc}"}, status_code=400)
 
@@ -174,7 +181,7 @@ def create_app(workspace: Path) -> FastAPI:
         ee = gene.end_effector_type
         return {
             "preview": True, "task": "preview",
-            "geoms": _geom_metadata(model),
+            "geoms": _geom_metadata(model, mesh_uris),
             "frames": [frame], "frame_count": 1,
             "outcome": {"status": "preview", "placed_count": 0, "block_count": 0},
             "robot": {
@@ -218,6 +225,18 @@ def create_app(workspace: Path) -> FastAPI:
         if project_dir.resolve() not in target.parents or not target.exists():
             return JSONResponse({"error": "not found"}, status_code=404)
         return PlainTextResponse(target.read_text(encoding="utf-8"))
+
+    @app.get("/api/artifact-binary")
+    def artifact_binary(path: str):
+        """Serve one package asset to the local Studio viewer.
+
+        The containment check is deliberately identical to the text artifact endpoint;
+        exposing an arbitrary local-file route for a convenience viewer would be unsafe.
+        """
+        target = (project_dir / path).resolve()
+        if project_dir.resolve() not in target.parents or not target.is_file():
+            return JSONResponse({"error": "not found"}, status_code=404)
+        return FileResponse(target, media_type="application/octet-stream")
 
     return app
 

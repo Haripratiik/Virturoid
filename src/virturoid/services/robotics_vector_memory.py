@@ -362,6 +362,19 @@ class RoboticsVectorMemory:
         return {"edges": edges, "seeded_builds": seeded, "measured_deltas": len(deltas),
                 "mean_delta": mean_delta, "positive_fraction": positive}
 
+    def hint_reuse_summary(self) -> dict:
+        """Measured flywheel-hint deployments, with failures in the denominator as well as wins."""
+        rows = self.conn.execute(
+            "SELECT delta FROM provenance WHERE kind='gait_hint_deploy' AND delta IS NOT NULL"
+        ).fetchall()
+        deltas = [float(r["delta"]) for r in rows]
+        wins = sum(1 for d in deltas if d > 1e-9)
+        losses = sum(1 for d in deltas if d < -1e-9)
+        ties = len(deltas) - wins - losses
+        return {"trials": len(deltas), "wins": wins, "losses": losses, "ties": ties,
+                "hit_rate": round(wins / len(deltas), 4) if deltas else None,
+                "mean_delta_m": round(sum(deltas) / len(deltas), 6) if deltas else None}
+
     # ----------------------------------------------------------------- integrators (backfill)
     def index_runs(self) -> int:
         """Embed every run's (prompt + task_type) into the ``run`` sub-space; skip already-indexed.

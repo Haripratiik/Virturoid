@@ -38,6 +38,14 @@ class DesignSubmissionTests(unittest.TestCase):
         r = self._call("submit_design", {"graph": sch["examples"]["hexapod"]})
         self.assertTrue(r["ok"])
         self.assertEqual(r["appendages"]["legs"], 6)
+        self.assertTrue(r["design_review"]["engineering"]["checks"]["visual_physics"])
+        self.assertTrue(r["design_review"]["visual_physics"]["ok"])
+        self.assertIn("anatomy", r["design_review"])
+        critique = self._call("critique_design", {"robot_id": r["robot_id"]})
+        self.assertTrue(critique["ok"])
+        self.assertIn("engineering", critique)
+        self.assertIn("visual_physics", critique)
+        self.assertIn("repair_contract", critique)
 
     def test_broken_graph_teaches(self):
         r = self._call("submit_design", {"graph": {"robot_class": "quadruped", "parts": [{"name": "x", "role": "leg"}]}})
@@ -289,10 +297,10 @@ class ToolConsolidationTests(unittest.TestCase):
     def test_mcp_view_is_at_most_15_and_workflow_shaped(self):
         from virturoid.services.agent_tools import tool_specs, TOOLS
         view = tool_specs(view="mcp")
-        self.assertLessEqual(len(view), 17, "MCP menu must fit the cross-client budget (well under Cursor's ~40)")
+        self.assertLessEqual(len(view), 15, "MCP menu must fit the cross-client budget")
         names = [t["name"] for t in view]
         for essential in ("submit_design", "get_robot", "edit_robot", "verify_robot", "export_held",
-                          "create_scene", "get_job", "llm_spend", "ingest_project"):
+                          "critique_design", "create_scene", "get_job", "llm_spend", "ingest_project"):
             self.assertIn(essential, names, f"{essential} must be in the MCP view")
         for n in names:                                          # every advertised tool really dispatches
             self.assertIn(n, TOOLS)
@@ -302,7 +310,7 @@ class ToolConsolidationTests(unittest.TestCase):
     def test_mcp_server_lists_the_consolidated_view(self):
         from virturoid.mcp_server import _handle
         listed = _handle("tools/list", {})["tools"]
-        self.assertLessEqual(len(listed), 17)
+        self.assertLessEqual(len(listed), 15)
         self.assertTrue(all("inputSchema" in t for t in listed))
 
 

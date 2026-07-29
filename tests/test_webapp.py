@@ -26,6 +26,9 @@ class WebAppRouteTests(unittest.TestCase):
             self.assertEqual({"built": False}, c.get("/api/project").json())
             # No robot yet -> viewer rejects.
             self.assertEqual(409, c.post("/api/viewer", json={}).status_code)
+            source = c.get("/app.js").text
+            self.assertIn("hydrateStlMesh", source)
+            self.assertIn("parseStl", source)
 
     def test_chat_starts_a_job(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -97,6 +100,12 @@ class WebAppRouteTests(unittest.TestCase):
             self.assertTrue(view["scene"]["objects"])
             self.assertGreaterEqual(len(view["scenes"]), 1)
             self.assertEqual(0, view["scene_index"])
+
+            relative = proj["artifacts"][0]
+            binary = c.get("/api/artifact-binary", params={"path": relative})
+            self.assertEqual(200, binary.status_code)
+            self.assertTrue(binary.content)
+            self.assertEqual(404, c.get("/api/artifact-binary", params={"path": "../secret"}).status_code)
 
 
 if __name__ == "__main__":

@@ -62,11 +62,16 @@ _CODE_SCHEMA = {
 
 
 def available_backend() -> str | None:
-    """Which synthesis backend is usable right now. Preference: a real GPU box (photoreal, your own
-    hardware) > cloud mesh-diffusion > LLM-CAD (parametric, CPU). None if nothing is configured."""
+    """Which synthesis backend is usable right now.
+
+    Remote execution is never inferred from a generic SSH setting: the GPU box requires the explicit
+    ``VIRTUROID_MESH_BACKEND=gpu_box`` opt-in. An unrelated training host can therefore never silently become the
+    geometry hot path. Cloud providers and LLM-CAD remain credential/config driven.
+    """
     from virturoid.services.llm_client import _load_local_env
     _load_local_env()
-    if os.environ.get("VIRTUROID_GPU_SSH"):          # text->image->3D on your own GPU box over Tailscale
+    requested = os.environ.get("VIRTUROID_MESH_BACKEND", "").strip().lower()
+    if requested == "gpu_box" and os.environ.get("VIRTUROID_GPU_SSH"):
         return "gpu_box"
     if os.environ.get("REPLICATE_API_TOKEN"):
         return "replicate"

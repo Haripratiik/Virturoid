@@ -1,8 +1,8 @@
 """The assisted training loop measures each candidate with the CONTROLLER IT WAS TRAINED UNDER.
 
 A recipe/CPG policy (banked GPU policies, recipe-ES policies) driven by the bare-residual ``rollout_morph`` runs
-WITHOUT its gait prior and reads as FALLEN. train_assisted used to measure EVERY candidate that way, so it
-under-measured banked/GPU recipe policies -> it skipped reuse and retrained needlessly (the same misrouting
+WITHOUT its gait prior and produces a different, invalid measurement. train_assisted used to measure EVERY candidate
+that way, so it under-measured banked/GPU recipe policies -> it skipped reuse and retrained needlessly (the same misrouting
 ``learn_locomotion.locomotion_episode`` already fixed). ``_measure_travel`` routes a recipe/cpg policy to
 ``recipe_rollout_morph`` (deploy == measure) and a plain policy to ``rollout_morph``.
 """
@@ -39,9 +39,9 @@ class MeasureTravelRoutingTests(unittest.TestCase):
         m = _measure_travel(g, cpg, steps=800)
         # routed to recipe_rollout_morph -> its forward matches that rollout exactly (deterministic, same controller)
         self.assertAlmostEqual(m["forward"], float(recipe["forward"]), places=5)
-        # routing MATTERS: a CPG policy holds up under its own rollout but the bare-residual one FELLS it
+        # Routing matters: only the recipe result is admissible for a policy trained with a CPG prior. The exact
+        # failure mode of the mismatched controller may change as token features improve, but its result must differ.
         self.assertTrue(m["upright"], "a CPG policy stays upright under recipe_rollout_morph")
-        self.assertFalse(bool(wrong.get("upright")), "the no-CPG rollout wrongly reads the CPG policy as fallen")
         self.assertNotAlmostEqual(float(recipe["forward"]), float(wrong["forward"]), places=3,
                                   msg="the two rollouts must differ for a CPG policy, else the routing is moot")
 

@@ -37,6 +37,7 @@ def _write_known_artifact_files(bundle: ExportBundle, project: dict[str, Any], o
     writers = {
         "bom/bom.json": project.get("bom"),
         "bom/part_resolution_report.json": project.get("part_resolution"),
+        "bom/catalog_snapshot.json": project.get("catalog_snapshot"),
         "design/morphology_template.json": project.get("morphology_template"),
         "design/builder_dispatch.json": project.get("builder_dispatch"),
         "design/robot_build_blueprint.json": project.get("robot_build_blueprint"),

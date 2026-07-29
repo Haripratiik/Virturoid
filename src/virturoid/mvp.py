@@ -4,7 +4,7 @@ import argparse
 import json
 from pathlib import Path
 
-from virturoid.fixtures.components import curated_component_library
+from virturoid.adapters.real_component_catalog import reference_catalog_manifest, reference_component_catalog
 from virturoid.fixtures.morphologies import morphology_template_catalog
 from virturoid.schemas.exports import ExportBundle
 from virturoid.schemas.runs import PolicyRecord
@@ -70,7 +70,8 @@ def build_mvp_robot_arm_project(requirements: RequirementsRecord | None = None) 
         sensor_requirements=["rgbd_camera"],
     )
 
-    component_library = curated_component_library()
+    component_library = reference_component_catalog()
+    catalog_manifest = reference_catalog_manifest()
     morphology_templates = morphology_template_catalog()
     task = build_task_graph(requirements)
     morphology_selection = select_morphology_template(requirements, task, morphology_templates)
@@ -192,6 +193,7 @@ def build_mvp_robot_arm_project(requirements: RequirementsRecord | None = None) 
         bom_artifacts=[
             ArtifactRef(uri="bom/bom.json", media_type="application/json"),
             ArtifactRef(uri="bom/part_resolution_report.json", media_type="application/json"),
+            ArtifactRef(uri="bom/catalog_snapshot.json", media_type="application/json"),
         ],
         robot_artifacts=[
             ArtifactRef(uri="power/power_architecture.json", media_type="application/json"),
@@ -257,6 +259,7 @@ def build_mvp_robot_arm_project(requirements: RequirementsRecord | None = None) 
     return {
         "requirements": requirements,
         "component_library": component_library,
+        "catalog_snapshot": catalog_manifest,
         "morphology_templates": morphology_templates,
         "morphology_selection": morphology_selection,
         "morphology_template": morphology_selection.selected_template,

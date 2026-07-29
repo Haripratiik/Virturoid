@@ -92,10 +92,11 @@ def validate_gene_design(gene, *, material: str = "aluminum", payload_kg: float 
     total_mass = None
     try:
         from virturoid.schemas.gene import RobotGene
-        from virturoid.services.grounded_physics import ground_gene
+        from virturoid.services.grounded_physics import ground_gene, physical_prior_for
         g2 = RobotGene.from_dict(gene.to_dict())
         total_mass = ground_gene(g2)["total_mass_kg"]
-        lo, hi = _MASS_BAND.get(cls, (0.1, 200.0))
+        prior = physical_prior_for(g2)
+        lo, hi = prior.mass_band_kg if prior is not None else _MASS_BAND.get(cls, (0.1, 200.0))
         checks["mass_budget"] = lo <= total_mass <= hi
         if not (lo <= total_mass <= hi):
             flag("mass_budget", "med", f"total mass {total_mass:.1f} kg is outside the plausible "
@@ -105,6 +106,29 @@ def validate_gene_design(gene, *, material: str = "aluminum", payload_kg: float 
 
     # 4) + 5) + 6) MuJoCo rest-pose checks (best-effort): static stability, self-collision, MJCF round-trip.
     _mujoco_checks(gene, cls, checks, flag)
+
+    # 7) A contact-visible surface must agree with the geometry the simulator actually collides with. This
+    # catches the otherwise easy-to-miss failure where a decorative foot touches the floor while its collider
+    # floats above it (or the whole free-base body is spawned in mid-air). The check is executable rather than
+    # a class/template rule, so it applies to newly authored morphologies too.
+    try:
+        from virturoid.services.visual_physics_gate import audit_gene
+        visual_physics = audit_gene(gene)
+        checks["visual_physics"] = visual_physics.ok
+        if not visual_physics.ok:
+            detail = "; ".join(issue.detail for issue in visual_physics.issues[:3])
+            flag("visual_physics", "high", detail, visual_physics.support_gap_m)
+    except Exception:  # noqa: BLE001 - no MuJoCo -> analytic-only report
+        pass
+    try:
+        from virturoid.services.structural_assertions import evaluate_structural_assertions
+        structural_contract = evaluate_structural_assertions(gene)
+        checks["structural_seams"] = structural_contract.ok
+        if not structural_contract.ok:
+            failed = [a.detail for a in structural_contract.assertions if not a.ok]
+            flag("structural_seams", "high", "; ".join(failed[:3]), len(failed))
+    except Exception:  # noqa: BLE001 - optional MuJoCo geometry contract
+        pass
 
     parts_grounded = not [r for r in bom if r.get("under_spec")] if bom else True
     try:

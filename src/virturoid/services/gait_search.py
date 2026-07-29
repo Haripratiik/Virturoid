@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 
 # search bounds per parameter (physically sensible ranges for a wide-stance quad crawl).
 PARAM_NAMES = ("freq", "hip_amp", "knee_amp", "duty", "kp", "kd")
-_LO = {"freq": 0.8, "hip_amp": 0.4, "knee_amp": 0.5, "duty": 0.12, "kp": 40.0, "kd": 2.0}
+_LO = {"freq": 0.8, "hip_amp": 0.4, "knee_amp": 0.5, "duty": 0.12, "kp": 24.0, "kd": 1.0}
 _HI = {"freq": 3.2, "hip_amp": 1.5, "knee_amp": 1.5, "duty": 0.42, "kp": 240.0, "kd": 14.0}
 
 
@@ -38,6 +38,8 @@ class GaitSearchResult:
     best_credible: bool = False
     history: list = field(default_factory=list)   # per-generation best fitness
     prior_transfer_forward: float | None = None   # zero-shot forward of a warm-start prior on THIS body (R3 screen)
+    n_evals: int = 0                              # candidate rollouts; baseline/deploy checks are separate
+    stopped_reason: str = "generation_limit"
 
     def to_dict(self) -> dict:
         return {
@@ -45,6 +47,7 @@ class GaitSearchResult:
             "best_forward": round(self.best_forward, 4), "best_height_ratio": round(self.best_height_ratio, 3),
             "best_survived": self.best_survived, "best_credible": self.best_credible,
             "baseline_forward": round(self.baseline_forward, 4),
+            "n_evals": self.n_evals, "stopped_reason": self.stopped_reason,
             "improvement_x": (round(abs(self.best_forward) / abs(self.baseline_forward), 2)
                               if self.baseline_forward else None),
             "history": [round(h, 4) for h in self.history],
@@ -128,7 +131,8 @@ def evaluate_gait(gene, params: dict, *, steps: int = 1200, reward_fn=None) -> d
 
 def search_gait(gene, *, generations: int = 8, pop: int = 24, elite_frac: float = 0.3,
                 steps: int = 1000, seed: int = 0, workers: int | None = None,
-                warm_start: dict | None = None, progress=None, reward_fn=None) -> GaitSearchResult:
+                warm_start: dict | None = None, progress=None, reward_fn=None,
+                max_evals: int | None = None, stop_on_credible: bool = False) -> GaitSearchResult:
     """CEM over the crawl-gait parameters. Returns the best DEPLOYABLE gait found for ``gene``.
 
     ``warm_start`` (a prior gait's params, e.g. recalled from the flywheel for a STRUCTURALLY-SIMILAR body) seeds
@@ -136,6 +140,12 @@ def search_gait(gene, *, generations: int = 8, pop: int = 24, elite_frac: float 
     — this is the flywheel compounding: a learned gait for one quadruped accelerates the next quadruped's search.
     """
     import numpy as np
+
+    if generations < 1 or pop < 1:
+        raise ValueError("generations and pop must both be >= 1")
+    budget = generations * pop if max_evals is None else int(max_evals)
+    if budget < 1:
+        raise ValueError("max_evals must be >= 1")
 
     rng = np.random.default_rng(seed)
     # Exploration stays BROAD whether or not there is a prior — a prior must never straitjacket the search
@@ -162,19 +172,42 @@ def search_gait(gene, *, generations: int = 8, pop: int = 24, elite_frac: float 
     best = {"fitness": -1e9}
     best_params = as_params(mean)
     history: list[float] = []
+    n_evals = 0
+    stopped_reason = "max_evals" if max_evals is not None else "generation_limit"
 
     for g in range(generations):
-        samples = rng.normal(mean, std, size=(pop, len(PARAM_NAMES)))
+        remaining = budget - n_evals
+        if remaining <= 0:
+            break
+        batch_n = min(pop, remaining)
+        samples = rng.normal(mean, std, size=(batch_n, len(PARAM_NAMES)))
         if prior_vec is not None:
             samples[0] = prior_vec                             # inject the prior as one guaranteed candidate
         params_list = [_clip(as_params(s)) for s in samples]
-        results = _eval_batch(gene, params_list, steps, workers, reward_fn=reward_fn)
+        # Credibility is a semantic stop signal, not a scalar fitness threshold. Evaluate serially in this mode so
+        # the first verified walk actually saves rollouts; pre-launching a population would only pretend to stop.
+        if stop_on_credible:
+            results = []
+            for params in params_list:
+                result = evaluate_gait(gene, params, steps=steps, reward_fn=reward_fn)
+                results.append(result)
+                n_evals += 1
+                if bool(result.get("credible")):
+                    stopped_reason = "credible_walk"
+                    break
+        else:
+            results = _eval_batch(gene, params_list, steps, workers, reward_fn=reward_fn)
+            n_evals += len(results)
+        samples = samples[:len(results)]
+        params_list = params_list[:len(results)]
         fits = np.array([r["fitness"] for r in results])
         order = np.argsort(fits)[::-1]
-        elite = samples[order[:n_elite]]
+        elite = samples[order[:min(len(results), n_elite)]]
         mean = elite.mean(axis=0)
         std = elite.std(axis=0) + 1e-3                          # keep exploration alive
-        gbest_i = int(order[0])
+        credible_indices = [i for i, r in enumerate(results) if bool(r.get("credible"))]
+        gbest_i = (max(credible_indices, key=lambda i: float(results[i]["fitness"]))
+                   if stopped_reason == "credible_walk" and credible_indices else int(order[0]))
         if fits[gbest_i] > best["fitness"]:
             best = results[gbest_i]
             best_params = params_list[gbest_i]
@@ -183,13 +216,16 @@ def search_gait(gene, *, generations: int = 8, pop: int = 24, elite_frac: float 
             progress(f"gen {g + 1}/{generations}: best fitness {best['fitness']:+.3f} "
                      f"(forward {best['forward']:+.3f} m, hr {best['height_ratio']:.2f}, "
                      f"survived {best['survived']})")
+        if stopped_reason == "credible_walk":
+            break
 
     return GaitSearchResult(
         best_params=best_params, best_fitness=float(best["fitness"]), best_forward=float(best["forward"]),
         best_height_ratio=float(best["height_ratio"]), best_survived=bool(best["survived"]),
         best_credible=bool(best.get("credible", False)),
         baseline_forward=float(baseline["forward"]), history=history,
-        prior_transfer_forward=(float(prior_transfer["forward"]) if prior_transfer is not None else None))
+        prior_transfer_forward=(float(prior_transfer["forward"]) if prior_transfer is not None else None),
+        n_evals=n_evals, stopped_reason=stopped_reason)
 
 
 def _eval_batch(gene, params_list, steps, workers, reward_fn=None):

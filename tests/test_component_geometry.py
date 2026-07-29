@@ -50,6 +50,15 @@ class ComponentGeometryTests(unittest.TestCase):
             self.assertTrue(row["supplier"])                              # a real, named supplier (vendor)
             self.assertGreaterEqual(row["stall_nm"], 0.0)
 
+    def test_grounded_bom_render_and_cad_resolve_the_same_motor(self):
+        from virturoid.services.grounded_physics import ground_gene
+        g = compose_robot("a 6-axis robot arm with a gripper", llm=None)
+        grounded = ground_gene(g)
+        by_role = {row["role"]: row["part"] for row in grounded["bom"]}
+        for segment in g.segments:
+            if segment.joint_type == "revolute":
+                self.assertEqual(by_role[segment.name], actuator_for_joint(segment)["part"])
+
     def test_humanoid_hips_are_now_grounded_not_under_spec(self):
         # The catalog must cover humanoid-class joint torques (a hip ~42 Nm). Before adding the high-torque
         # geared actuator, the largest part topped out ~34 Nm and the hip was honestly under-spec.

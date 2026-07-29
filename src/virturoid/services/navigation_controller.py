@@ -8,6 +8,7 @@ with task-grounded outcomes (reached / collision / timeout) and failure clusters
 from __future__ import annotations
 
 import collections
+import heapq
 import json
 import math
 from pathlib import Path
@@ -18,8 +19,9 @@ from virturoid.services.mujoco_runner import mujoco_available
 # radius overshoots it and then drives off a wall-less arena until timeout. ~the goal-zone footprint lets it
 # stop AT the goal (a delivered package), which is both the right behaviour and what reads well on replay.
 GOAL_RADIUS_M = 0.35
+WAYPOINT_RADIUS_M = 0.12
 OBSTACLE_CLEARANCE_M = 0.17
-REPULSE_RADIUS_M = 0.6                    # heading-repulsion reaction radius (P7: unstick the grazing stall)
+REPULSE_RADIUS_M = 0.45                   # emergency near-field correction; global waypoints do the routing
 
 
 def _corridor_waypoints(goal_xy, obstacle_xy: list, *, side_lane_m: float = 0.45, forward_offset_m: float = 0.2):
@@ -35,13 +37,157 @@ def _corridor_waypoints(goal_xy, obstacle_xy: list, *, side_lane_m: float = 0.45
     obstacles = sorted(obstacle_xy or [], key=lambda o: float(o[0]))
     if not obstacles:
         return [np.array(goal_xy, dtype=float)]
+
+    def candidate(side: float):
+        return [np.array([float(ob[0]) + forward_offset_m, side * side_lane_m], dtype=float)
+                for ob in obstacles] + [np.array(goal_xy, dtype=float)]
+
+    def point_segment_distance(point, a, b):
+        segment = b - a
+        t = float(np.dot(point - a, segment) / max(float(np.dot(segment, segment)), 1e-9))
+        projection = a + np.clip(t, 0.0, 1.0) * segment
+        return float(np.linalg.norm(point - projection))
+
+    def clearance(path):
+        nodes = [np.zeros(2), *path]
+        return min(point_segment_distance(np.asarray(ob[:2], dtype=float), nodes[i], nodes[i + 1])
+                   for ob in obstacles for i in range(len(nodes) - 1))
+
+    # Keep one side through a short obstacle corridor. Alternating "away from
+    # this obstacle" sides created an S-curve through the narrowest gap and
+    # trapped the skid-steer between two crates. Choose the globally clearer
+    # of the left/right polylines from the actual obstacle arrangement.
+    left, right = candidate(1.0), candidate(-1.0)
+    return left if clearance(left) >= clearance(right) else right
+
+
+def _two_wheel_corridor_waypoints(goal_xy, obstacle_xy: list, *, side_lane_m: float = 0.45,
+                                  forward_offset_m: float = 0.2):
+    """Compatibility planner for the light caster-supported differential base.
+
+    That body can pivot tightly and was validated with a short alternating
+    corridor; the conservative four-wheel visibility inflation needlessly
+    pins it beside obstacles. Selection is structural (two driven wheels), not
+    a robot-class/name exception.
+    """
+    import numpy as np
+
+    obstacles = sorted(obstacle_xy or [], key=lambda o: float(o[0]))
+    if not obstacles:
+        return [np.array(goal_xy, dtype=float)]
     waypoints = []
     for obstacle in obstacles:
         ox, oy = float(obstacle[0]), float(obstacle[1])
         pass_side = -1.0 if oy >= 0.0 else 1.0
         waypoints.append(np.array([ox + forward_offset_m, pass_side * side_lane_m], dtype=float))
-    waypoints.append(np.array(goal_xy, dtype=float))
-    return waypoints
+    return [*waypoints, np.array(goal_xy, dtype=float)]
+
+
+def _visibility_waypoints(model, start_xy, goal_xy, obstacle_xy: list, robot_radius: float):
+    """Plan a collision-clear polyline around compiled obstacle footprints.
+
+    Nodes sampled around inflated obstacle circles form a tiny visibility
+    graph; Dijkstra chooses the shortest clear route and a line-of-sight pass
+    removes unnecessary nodes. This is deterministic geometry, independent of
+    robot names/classes, and falls back to the legacy corridor if the scene is
+    missing usable bounds.
+    """
+    import mujoco
+    import numpy as np
+
+    start = np.asarray(start_xy, dtype=float)
+    goal = np.asarray(goal_xy, dtype=float)
+    if not obstacle_xy:
+        return [goal]
+
+    # Room bounds come from the actual compiled wall geoms. Defaults keep the
+    # planner usable for an open arena.
+    xmin, xmax = min(-0.25, float(start[0]) - 0.25), max(float(goal[0]) + 0.5, 0.5)
+    ymin, ymax = min(-1.0, float(goal[1]) - 0.8), max(1.0, float(goal[1]) + 0.8)
+    for gi in range(model.ngeom):
+        name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, gi) or ""
+        x, y = float(model.geom_pos[gi, 0]), float(model.geom_pos[gi, 1])
+        if name == "wall_left":
+            xmin = x + 0.03
+        elif name == "wall_right":
+            xmax = x - 0.03
+        elif name == "wall_bottom":
+            ymin = y + 0.03
+        elif name == "wall_top":
+            ymax = y - 0.03
+    margin = robot_radius + 0.035
+    xmin += margin; xmax -= margin; ymin += margin; ymax -= margin
+
+    circles = []
+    for raw in obstacle_xy:
+        center = np.asarray(raw[:2], dtype=float)
+        closest = min(range(model.ngeom),
+                      key=lambda gi: float(np.linalg.norm(model.geom_pos[gi, :2] - center)))
+        if int(model.geom_type[closest]) == int(mujoco.mjtGeom.mjGEOM_BOX):
+            hx, hy = float(model.geom_size[closest, 0]), float(model.geom_size[closest, 1])
+            obstacle_radius = math.hypot(hx, hy)
+        else:
+            obstacle_radius = float(model.geom_rbound[closest])
+        circles.append((center, obstacle_radius + margin))
+
+    def in_bounds(point):
+        return xmin <= point[0] <= xmax and ymin <= point[1] <= ymax
+
+    def point_segment_distance(point, a, b):
+        ab = b - a
+        t = float(np.dot(point - a, ab) / max(float(np.dot(ab, ab)), 1e-9))
+        return float(np.linalg.norm(point - (a + np.clip(t, 0.0, 1.0) * ab)))
+
+    def visible(a, b):
+        if not in_bounds(a) or not in_bounds(b):
+            return False
+        return all(point_segment_distance(center, a, b) >= radius - 1e-4
+                   for center, radius in circles)
+
+    nodes = [start, goal]
+    for center, radius in circles:
+        sample_radius = radius + 0.045
+        for k in range(16):
+            angle = 2.0 * math.pi * k / 16.0
+            point = center + sample_radius * np.array([math.cos(angle), math.sin(angle)])
+            if in_bounds(point) and all(float(np.linalg.norm(point - c)) >= r for c, r in circles):
+                nodes.append(point)
+
+    edges = [[] for _ in nodes]
+    for i in range(len(nodes)):
+        for j in range(i + 1, len(nodes)):
+            if visible(nodes[i], nodes[j]):
+                distance = float(np.linalg.norm(nodes[j] - nodes[i]))
+                edges[i].append((j, distance)); edges[j].append((i, distance))
+    distance = [float("inf")] * len(nodes); previous = [-1] * len(nodes); distance[0] = 0.0
+    queue = [(0.0, 0)]
+    while queue:
+        cost, current = heapq.heappop(queue)
+        if cost != distance[current]:
+            continue
+        if current == 1:
+            break
+        for nxt, weight in edges[current]:
+            new_cost = cost + weight
+            if new_cost < distance[nxt]:
+                distance[nxt], previous[nxt] = new_cost, current
+                heapq.heappush(queue, (new_cost, nxt))
+    if not math.isfinite(distance[1]):
+        return []
+    route, current = [], 1
+    while current >= 0:
+        route.append(nodes[current]); current = previous[current]
+    route.reverse()
+
+    # Greedily keep only the furthest directly-visible point.
+    simplified = [route[0]]; index = 0
+    while index < len(route) - 1:
+        furthest = index + 1
+        for j in range(index + 1, len(route)):
+            if visible(route[index], route[j]):
+                furthest = j
+        simplified.append(route[furthest]); index = furthest
+    return simplified[1:]
 
 
 def run_navigation_episode(model, goal_xy, obstacle_xy: list, horizon: int = 1500, record_frames=None, frame_every: int = 25) -> dict:
@@ -101,7 +247,31 @@ def run_navigation_episode(model, goal_xy, obstacle_xy: list, horizon: int = 150
         return fsign, tsign
 
     fwd_sign, turn_sign = _calibrate()
-    waypoints = _corridor_waypoints(goal_xy, obstacle_xy)
+    drive_effort = min(float(model.actuator_forcerange[u, 1]) for u in left_act + right_act)
+    # Size the avoidance lane from the actual compiled rover footprint. A
+    # fixed 0.45 m lane was barely wider than a warehouse AMR plus obstacle,
+    # so the potential field could settle in physical contact. Three rover
+    # radii leaves maneuvering clearance while smaller bases keep the compact
+    # default lane.
+    wheel_outer = 0.0
+    for u in left_act + right_act:
+        wheel_joint = int(model.actuator_trnid[u, 0])
+        wheel_body = int(model.jnt_bodyid[wheel_joint])
+        lateral = abs(float(data.xpos[wheel_body][1]) - base_y)
+        radius = max((float(model.geom_rbound[g]) for g in range(model.ngeom)
+                      if int(model.geom_bodyid[g]) == wheel_body), default=0.0)
+        wheel_outer = max(wheel_outer, lateral + radius)
+    side_lane = max(0.45, 3.0 * wheel_outer)
+    legacy_two_wheel = len(set(left_act + right_act)) <= 2
+    if legacy_two_wheel:
+        waypoints = _two_wheel_corridor_waypoints(goal_xy, obstacle_xy)
+        planner = "two_wheel_corridor"
+    else:
+        waypoints = _visibility_waypoints(model, data.qpos[qadr:qadr + 2], goal_xy, obstacle_xy, wheel_outer)
+        planner = "visibility_graph"
+    if not waypoints:
+        waypoints = _corridor_waypoints(goal_xy, obstacle_xy, side_lane_m=side_lane)
+        planner = "corridor_fallback"
     waypoint_index = 0
     waypoint_best_dist = 1e9
     waypoint_stale_steps = 0
@@ -127,7 +297,9 @@ def run_navigation_episode(model, goal_xy, obstacle_xy: list, horizon: int = 150
         if status == "collision":
             break
 
-        while waypoint_index < len(waypoints) - 1 and float(np.linalg.norm(waypoints[waypoint_index] - pos)) < 0.35:
+        waypoint_radius = 0.35 if legacy_two_wheel else WAYPOINT_RADIUS_M
+        while (waypoint_index < len(waypoints) - 1
+               and float(np.linalg.norm(waypoints[waypoint_index] - pos)) < waypoint_radius):
             waypoint_index += 1
             waypoint_best_dist = 1e9
             waypoint_stale_steps = 0
@@ -138,7 +310,12 @@ def run_navigation_episode(model, goal_xy, obstacle_xy: list, horizon: int = 150
             waypoint_stale_steps = 0
         else:
             waypoint_stale_steps += 1
-        if waypoint_stale_steps > 550 and waypoint_index < len(waypoints) - 1:
+        # Never declare a four-wheel obstacle waypoint complete from elapsed time alone.
+        # The former stale-step shortcut skipped the avoidance point while the
+        # rover was still beside an obstacle, leaving the final-goal controller
+        # to drive straight through it. Progress is a geometric fact: the loop
+        # above advances only after entering the waypoint radius.
+        if legacy_two_wheel and waypoint_stale_steps > 550 and waypoint_index < len(waypoints) - 1:
             waypoint_index += 1
             waypoint_best_dist = 1e9
             waypoint_stale_steps = 0
@@ -149,10 +326,16 @@ def run_navigation_episode(model, goal_xy, obstacle_xy: list, horizon: int = 150
         # of away-vectors within a reaction radius, added to the (normalized) waypoint direction.
         repulse = np.zeros(2)
         for ob in obstacle_xy:
-            d = pos - np.array(ob[:2], dtype=float)
+            obstacle = np.array(ob[:2], dtype=float)
+            d = pos - obstacle
             dn = float(np.linalg.norm(d))
-            if 1e-6 < dn < REPULSE_RADIUS_M:
-                repulse += (d / dn) * (REPULSE_RADIUS_M - dn) / REPULSE_RADIUS_M
+            # Once an obstacle is behind the direction of travel it must stop
+            # steering the robot away from the goal. This avoids a local
+            # minimum between the final goal and an already-cleared obstacle.
+            relevant = legacy_two_wheel or float(np.dot(obstacle - pos, to_waypoint)) >= -0.02
+            reaction_radius = 0.6 if legacy_two_wheel else REPULSE_RADIUS_M
+            if relevant and 1e-6 < dn < reaction_radius:
+                repulse += (d / dn) * (reaction_radius - dn) / reaction_radius
         heading = to_waypoint / max(1e-6, waypoint_dist) + 1.3 * repulse
         desired_yaw = math.atan2(float(heading[1]), float(heading[0]))
         yaw_err = math.atan2(math.sin(desired_yaw - yaw), math.cos(desired_yaw - yaw))
@@ -164,7 +347,10 @@ def run_navigation_episode(model, goal_xy, obstacle_xy: list, horizon: int = 150
         # execute the SHARP turn an alternating-obstacle path demands, instead of the old 0.2 forward floor that
         # drove it into a stuck equilibrium at ~0.95 m (measured: scene_000 froze there for 12000 steps).
         forward = fwd_sign * 8.0 * min(waypoint_dist, 0.7) * max(0.0, 1.0 - 1.3 * abs(yaw_err))
-        turn = turn_sign * 16.0 * math.tanh(1.6 * yaw_err)
+        # Use the selected drive's transient authority. A fixed 16 Nm command
+        # left a correctly-sized 48 Nm AMR motor idle while the 110 kg
+        # skid-steer sat in a potential-field equilibrium beside a crate.
+        turn = turn_sign * max(16.0, 0.8 * drive_effort) * math.tanh(1.6 * yaw_err)
         left = forward - turn
         right = forward + turn
         for u in left_act:
@@ -178,7 +364,14 @@ def run_navigation_episode(model, goal_xy, obstacle_xy: list, horizon: int = 150
         if record_frames is not None and step % frame_every == 0:
             record_frames.append(_capture_geom_frame(data, model))
 
-    return {"status": status, "final_goal_distance_m": round(min_goal_dist, 4), "steps": step + 1}
+    final_pos = [round(float(v), 4) for v in data.qpos[qadr:qadr + 2]]
+    return {"status": status, "final_goal_distance_m": round(min_goal_dist, 4), "steps": step + 1,
+            "final_position_xy": final_pos, "final_yaw_rad": round(float(_yaw()), 4),
+            "waypoint_index": int(waypoint_index), "waypoint_count": len(waypoints),
+            "planner": planner,
+            "final_ctrl": [round(float(v), 4) for v in data.ctrl],
+            "final_base_velocity": [round(float(v), 4) for v in data.qvel[int(model.jnt_dofadr[jid]):int(model.jnt_dofadr[jid]) + 6]],
+            "drive_calibration": {"forward_sign": float(fwd_sign), "turn_sign": float(turn_sign)}}
 
 
 def run_navigation_evaluation(package_dir: Path, scene_uri: str = "simulation/scene_set.json") -> dict:

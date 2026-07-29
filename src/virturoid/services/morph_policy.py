@@ -20,6 +20,10 @@ class MorphPolicy:
     # velocity command) fed through ONE extra global token. Fixed across morphologies so the perception
     # weights transfer like the rest of the policy (see [[perception-next-keystone]]).
     PERCEPT_DIM = 10                                          # 8 rangefinder distances + (vx_cmd, wz_cmd)
+    LEGACY_FEATURE_DIM = 24                                   # morph-token schema v1: 11 static + 13 runtime
+    DATASHEET_FEATURE_DIM = 27                                # schema v2: + limits low/high + torque capacity
+    LEGACY_VELOCITY_FEATURE_DIM = 26                          # v1 base token + [vx_cmd, wz_cmd]
+    DATASHEET_VELOCITY_FEATURE_DIM = 29                       # v2 base token + the same command suffix
 
     def __init__(self, feature_dim: int, hidden: int = 32, seed: int = 0, *,
                  film: bool = False, topo_bias: bool = False, topo_buckets: int = 8):
@@ -90,6 +94,7 @@ class MorphPolicy:
         policy is byte-identical to before."""
         import numpy as np
 
+        obs = self.adapt_observation(obs)
         if obs.shape[0] == 0:
             return np.zeros(0)
         a = self._arrs
@@ -119,6 +124,41 @@ class MorphPolicy:
         u = np.tanh(e + z)                                   # residual
         out = np.tanh(u @ a["Wh"] + a["bh"])                 # (N(+1), 1)
         return out[: obs.shape[0], 0]                        # drop the perception token's action
+
+    def accepts_feature_dim(self, observed_dim: int) -> bool:
+        """Whether an observation schema can be losslessly adapted for this policy.
+
+        V2 only appends physical datasheet meaning to the old token schema. A v1
+        policy can therefore ignore those three new columns and run exactly as it
+        did when banked; arbitrary dimension mismatches remain rejected.
+        """
+        observed_dim = int(observed_dim)
+        compatible_pairs = {
+            (self.LEGACY_FEATURE_DIM, self.DATASHEET_FEATURE_DIM),
+            (self.LEGACY_VELOCITY_FEATURE_DIM, self.DATASHEET_VELOCITY_FEATURE_DIM),
+        }
+        return (observed_dim == self.feature_dim
+                or tuple(sorted((observed_dim, self.feature_dim))) in compatible_pairs)
+
+    def adapt_observation(self, obs):
+        """Translate between morph-token schemas v1 and v2 without shifting runtime fields."""
+        import numpy as np
+
+        obs = np.asarray(obs, dtype=float)
+        if obs.ndim != 2:
+            raise ValueError(f"morph observation must be rank 2, got shape {obs.shape}")
+        observed = int(obs.shape[1])
+        if observed == self.feature_dim:
+            return obs
+        legacy_to_v2 = {
+            self.LEGACY_FEATURE_DIM: self.DATASHEET_FEATURE_DIM,
+            self.LEGACY_VELOCITY_FEATURE_DIM: self.DATASHEET_VELOCITY_FEATURE_DIM,
+        }
+        if legacy_to_v2.get(self.feature_dim) == observed:
+            return np.concatenate([obs[:, :11], obs[:, 14:]], axis=1)
+        if legacy_to_v2.get(observed) == self.feature_dim:
+            return np.concatenate([obs[:, :11], np.zeros((obs.shape[0], 3)), obs[:, 11:]], axis=1)
+        raise ValueError(f"policy feature_dim {self.feature_dim} is incompatible with observation {observed}")
 
     # flat parameter vector — for black-box optimization (ES) on CPU before MJX/PPO
     _ORDER = ("We", "be", "Wq", "Wk", "Wv", "Wo", "Wh", "bh", "Wrange", "brange")
@@ -304,7 +344,7 @@ def rollout_morph(gene, policy: MorphPolicy | None = None, *, steps: int = 600, 
     graph = encode_robot(model)
     if policy is None:
         policy = MorphPolicy(graph.feature_dim, seed=seed)
-    if policy.feature_dim != graph.feature_dim:
+    if not policy.accepts_feature_dim(graph.feature_dim):
         raise ValueError(f"policy feature_dim {policy.feature_dim} != graph {graph.feature_dim}")
 
     p0 = (np.array(data.qpos[graph.base_qadr:graph.base_qadr + 2], dtype=float)
@@ -708,7 +748,7 @@ def recipe_rollout_morph(gene, policy: MorphPolicy | None = None, *, steps: int 
     graph = encode_robot(model)
     if policy is None:
         policy = MorphPolicy(graph.feature_dim, seed=seed)
-    if policy.feature_dim != graph.feature_dim:
+    if not policy.accepts_feature_dim(graph.feature_dim):
         raise ValueError(f"policy feature_dim {policy.feature_dim} != graph {graph.feature_dim}")
     # Phase-5 topo-bias: a policy trained WITH the topology attention bias must DEPLOY with it too, or the
     # learned control mismatches. Compute the body's hop-distance matrix once (None for non-topo policies ->
@@ -830,7 +870,7 @@ def recipe_rollout_morph(gene, policy: MorphPolicy | None = None, *, steps: int 
     a = a_filt = None                                        #   HOLD it between (the CPG clock + PD loop still run
     for t in range(steps):                                   #   every step). dec=1 + action_lpf=0 -> byte-identical.
         if t % dec == 0:
-            obs = graph.observe(model, data)
+            obs = policy.adapt_observation(graph.observe(model, data))
             if mean is not None:
                 obs = (obs - mean) / std
             if phase_obs_deploy and cpg_on:                  # P1 phase-clock: feed the global gait clock [sin,cos] via

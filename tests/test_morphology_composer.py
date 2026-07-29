@@ -242,6 +242,14 @@ class MorphologyComposerTests(unittest.TestCase):
         self.assertGreaterEqual(pitch, 2)
         self.assertEqual(g.validate(), [])
 
+    def test_prompt_axis_numeral_is_honored_exactly(self):
+        for n in (3, 5, 6, 8):
+            g = compose_robot(f"a {n}-axis robot arm with a gripper")
+            arm = [s for s in g.segments if s.joint_type == "revolute" and "finger" not in s.name]
+            self.assertEqual(n, len(arm), f"{n}-axis prompt produced {len(arm)} arm joints")
+            self.assertGreaterEqual(len({s.joint_axis for s in arm}), 2 if n > 1 else 1)
+            self.assertTrue(all(s.joint_lower is not None and s.joint_upper is not None for s in arm))
+
     def test_dexterous_prompt_composes_a_multi_finger_hand(self):
         g = compose_robot("pick up delicate irregular fruit without crushing it")
         fingers = [s for s in g.segments if s.joint_type == "prismatic"]

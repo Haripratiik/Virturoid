@@ -11,6 +11,8 @@ the MJCF *path* (not a flattened string) so MuJoCo resolves the model's mesh ass
 from __future__ import annotations
 
 import importlib
+import os
+from pathlib import Path
 
 # intent/class -> (robot_descriptions MJCF module, human label, kind). Broad coverage of MuJoCo Menagerie
 # so most requests resolve to a REAL production robot; anything unmatched falls to the procedural path.
@@ -116,6 +118,31 @@ def available_real_models() -> list[dict]:
             for k, (m, lbl, kind) in _REGISTRY.items()]
 
 
+def _cached_mjcf_path(module: str) -> str | None:
+    """Find a complete, already-downloaded Menagerie model without invoking Git.
+
+    ``robot_descriptions`` imports call ``clone_to_cache`` and may fetch a pinned
+    commit even when the requested model files are already present. That makes
+    an offline/local reference load depend on network access and Git ownership
+    configuration. Resolve exact model filenames in the package's documented
+    cache first; importing remains the fallback that can populate a missing
+    cache. The match is data-driven from the module name, not robot-class
+    dispatch (``go1_mj_description`` -> ``go1.xml``).
+    """
+    suffix = "_mj_description"
+    stem = module[:-len(suffix)] if module.endswith(suffix) else module
+    cache = Path(os.path.expanduser(os.environ.get(
+        "ROBOT_DESCRIPTIONS_CACHE", "~/.cache/robot_descriptions")))
+    menagerie = cache / "mujoco_menagerie"
+    if not menagerie.is_dir():
+        return None
+    candidates = sorted(
+        (path for path in menagerie.glob(f"**/{stem}.xml") if path.name.lower() != "scene.xml"),
+        key=lambda path: (len(path.parts), len(str(path)), str(path)),
+    )
+    return str(candidates[0]) if candidates else None
+
+
 def load_real_model(prompt: str = "", robot_class: str | None = None) -> dict:
     """Resolve a prompt/class to a REAL model and load it. Returns ``{ok, path, label, kind, key, bodies,
     actuated, meshes, note}`` — ``path`` is the MJCF file (load via ``from_xml_path`` so meshes resolve)."""
@@ -126,15 +153,19 @@ def load_real_model(prompt: str = "", robot_class: str | None = None) -> dict:
     try:
         import mujoco
 
-        mod = importlib.import_module(f"robot_descriptions.{module}")
-        path = mod.MJCF_PATH
+        path = _cached_mjcf_path(module)
+        source = "local_cache"
+        if path is None:
+            mod = importlib.import_module(f"robot_descriptions.{module}")
+            path = mod.MJCF_PATH
+            source = "robot_descriptions"
         m = mujoco.MjModel.from_xml_path(path)
     except Exception as exc:  # noqa: BLE001 - missing package/model -> caller falls back to procedural
         return {"ok": False, "note": f"could not load real model {module!r}: {exc}", "key": key}
     free = any(int(m.jnt_type[j]) == 0 for j in range(m.njnt))   # free joint -> can locomote
     return {"ok": True, "path": path, "label": label, "kind": kind, "key": key,
             "bodies": int(m.nbody) - 1, "actuated": int(m.nu), "meshes": int(m.nmesh),
-            "free_base": bool(free), "note": f"real model: {label}"}
+            "free_base": bool(free), "source": source, "note": f"real model: {label} ({source})"}
 
 
 def real_model_mjcf(prompt: str = "", robot_class: str | None = None) -> dict:

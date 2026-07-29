@@ -49,12 +49,24 @@ _PRECISION_WORDS = ("precise", "precision", "orientation", "6-dof", "7-dof", "si
 
 # Anthropomorphic joint axes per DOF: base yaw, shoulder/elbow pitch, then a wrist (roll/pitch/yaw) for
 # orientation control — the standard serial-arm layout (z=yaw/roll about the link, y=pitch).
-_ARM_AXES = {
-    2: [(0, 0, 1), (0, 1, 0)],
-    3: [(0, 0, 1), (0, 1, 0), (0, 1, 0)],
-    6: [(0, 0, 1), (0, 1, 0), (0, 1, 0), (0, 0, 1), (0, 1, 0), (0, 0, 1)],
-    7: [(0, 0, 1), (0, 1, 0), (0, 1, 0), (0, 0, 1), (0, 1, 0), (0, 0, 1), (0, 1, 0)],
-}
+def _arm_axes(dof: int) -> list[tuple[int, int, int]]:
+    """Generate a non-degenerate serial-arm axis sequence for any supported requested DOF."""
+    pattern = [(0, 0, 1), (0, 1, 0), (0, 1, 0), (0, 0, 1), (0, 1, 0), (0, 0, 1), (0, 1, 0)]
+    return [pattern[i % len(pattern)] for i in range(max(1, dof))]
+
+
+def _requested_arm_dof(prompt: str) -> int | None:
+    """A numeral next to axis/DOF is a requirement, not a vague precision hint."""
+    import re
+    words = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+             "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10}
+    match = re.search(r"\b(10|[1-9]|one|two|three|four|five|six|seven|eight|nine|ten)"
+                      r"\s*[- ]?\s*(?:axis|axes|dof|d\.o\.f|degrees?\s+of\s+freedom)\b",
+                      (prompt or "").lower())
+    if not match:
+        return None
+    value = int(match.group(1)) if match.group(1).isdigit() else words[match.group(1)]
+    return value if 1 <= value <= 10 else None
 
 
 def _role(role: str, length: float, radius: float) -> dict:
@@ -82,7 +94,7 @@ def _arm_links(reach: float, dof: int, torque: float) -> list[dict]:
     """Anthropomorphic serial-arm link specs for ``dof`` joints. The PITCH joints (axis~y) extend the
     arm and share the reach; the YAW/ROLL joints (axis~z) are short orientation joints — so a 6-7 DOF
     arm has a real reachable workspace + wrist orientation, like an industrial/Franka-class arm."""
-    axes = _ARM_AXES.get(dof, _ARM_AXES[3])
+    axes = _arm_axes(dof)
     pitch = [i for i, a in enumerate(axes) if abs(a[1]) > 0.5] or [0]
     seg_len = round(reach / len(pitch), 3)
     links = []
@@ -99,6 +111,8 @@ def _arm_links(reach: float, dof: int, torque: float) -> list[dict]:
             "joint": "revolute", "axis": a, "radius": rad_i,
             "mass": 0.4 if i == 0 else 0.3,
             "torque": torque if i == 0 else round(torque * max(0.85 ** i, 0.45), 1),
+            "lower": (-2.97 if i == 0 else -2.62 if is_pitch else -3.05),
+            "upper": (2.97 if i == 0 else 2.62 if is_pitch else 3.05),
             # chamfered mechanical link beam (matches the legged/humanoid limbs); joint motors via show_actuators
             "geometry": _mech_beam(seg_len_i, rad_i)})
     return links
@@ -420,7 +434,10 @@ def morphology_from_requirements(reach_m: float, payload_kg: float, *, prompt: s
     # with wrist roll/pitch/yaw (§23 Franka-class). A GRASP arm (gripper/hand) gets a wrist PITCH so the
     # palm can be levelled for a top-down approach — a wrist-less arm reaches the object tilted and the
     # jaws sweep it away (findings §12). A spray/reach arm just needs 2-3 pitch links.
-    if any(w in p for w in _PRECISION_WORDS):
+    requested_dof = _requested_arm_dof(p)
+    if requested_dof is not None:
+        dof = requested_dof
+    elif any(w in p for w in _PRECISION_WORDS):
         dof = 7 if any(w in p for w in ("7-dof", "seven", "redundant", "panda", "franka")) else 6
     elif ee["kind"] in ("gripper", "hand"):
         dof = 4                                           # yaw + 2 reach pitches + wrist pitch
@@ -591,6 +608,16 @@ def propose_morphology_spec(prompt: str, *, reach_m: float | None = None, payloa
                             if i["severity"] in ("high", "fatal")]
             except Exception:  # noqa: BLE001 - critic is best-effort (needs MuJoCo); never block on it
                 pass
+            try:                                          # + contact-visible vs physical geometry alignment
+                from virturoid.services.visual_physics_gate import audit_gene
+                quality += [i.detail for i in audit_gene(gene).issues]
+            except Exception:  # noqa: BLE001 - optional MuJoCo gate
+                pass
+            try:
+                from virturoid.services.structural_assertions import evaluate_structural_assertions
+                quality += [a.detail for a in evaluate_structural_assertions(gene).assertions if not a.ok]
+            except Exception:  # noqa: BLE001 - optional MuJoCo gate
+                pass
             if quality:
                 errors = quality                          # repair: feed the problems back and retry
                 continue
@@ -641,6 +668,18 @@ def _ground_anatomy_graph(prompt: str, plan, req, llm, *, repair_tries: int = 2)
                 issues += [i["detail"] for i in critique_gene(gene)["issues"]
                            if i["severity"] in ("high", "fatal")]
             except Exception:  # noqa: BLE001 - optional visual/physics critic
+                pass
+            try:
+                from virturoid.services.visual_physics_gate import audit_gene
+
+                issues += [i.detail for i in audit_gene(gene).issues]
+            except Exception:  # noqa: BLE001 - optional MuJoCo gate
+                pass
+            try:
+                from virturoid.services.structural_assertions import evaluate_structural_assertions
+
+                issues += [a.detail for a in evaluate_structural_assertions(gene).assertions if not a.ok]
+            except Exception:  # noqa: BLE001 - optional MuJoCo gate
                 pass
             issues = list(dict.fromkeys(str(issue) for issue in issues if issue))
             if not issues:

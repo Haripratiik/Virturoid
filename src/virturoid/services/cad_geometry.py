@@ -145,18 +145,28 @@ def realize_shape(spec: dict):
                         bd.Cylinder(cr, cd, mode=bd.Mode.SUBTRACT)
                 except Exception:  # noqa: BLE001 - a bad cutout just doesn't bore; keep the solid
                     pass
-            fil = float(spec.get("fillet", 0) or 0) * 1000.0
-            if fil > 0:
-                try:
-                    bd.fillet(p.edges(), min(fil, R * 0.4))
-                except Exception:  # noqa: BLE001 - fillet can fail on some topology; skip it
-                    pass
+            # Edge finishing is deliberately LAST. Chamfer establishes the robust machined silhouette first;
+            # fillet is terminal because vent/cutout edges make an all-edge fillet fail in OpenCascade. If the
+            # terminal fillet cannot be built, the already-chamfered part remains instead of silently reverting
+            # the entire link to a sharp primitive.
             cham = float(spec.get("chamfer", 0) or 0) * 1000.0
             if cham > 0:
                 try:
                     bd.chamfer(p.edges(), min(cham, R * 0.35))
-                except Exception:  # noqa: BLE001 - chamfer can fail on some topology; skip it
-                    pass
+                except Exception:  # noqa: BLE001 - retry only long exterior edges, away from small vent loops
+                    try:
+                        bd.chamfer(p.edges().filter_by(bd.Axis.Z), min(cham, R * 0.25))
+                    except Exception:  # noqa: BLE001 - keep the valid unchamfered solid
+                        pass
+            fil = float(spec.get("fillet", 0) or 0) * 1000.0
+            if fil > 0:
+                try:
+                    bd.fillet(p.edges(), min(fil, R * 0.4))
+                except Exception:  # noqa: BLE001 - preserve the chamfer and retry exterior axial edges only
+                    try:
+                        bd.fillet(p.edges().filter_by(bd.Axis.Z), min(fil, R * 0.25))
+                    except Exception:  # noqa: BLE001 - chamfered fallback intentionally survives
+                        pass
         part = p.part
         if part is not None and fam in ("loft", "sole"):     # floor to z=0 in the link's [0,length] frame
             try:
@@ -172,7 +182,8 @@ def realize_shape(spec: dict):
     return fb.part
 
 
-def build_link_solid(shape: str, length_m: float, radius_m: float, actuated: bool):
+def build_link_solid(shape: str, length_m: float, radius_m: float, actuated: bool,
+                     actuator_spec: dict | None = None):
     """A DETAILED, manufacturable link solid (mm): a slim structural body, mounting collars at both ends,
     and — for an actuated link — a real servo housing with an output horn at the proximal (joint) end.
     This is what closes the mechanical-detail gap vs a bare capsule (real robots show housings/brackets)."""
@@ -188,10 +199,50 @@ def build_link_solid(shape: str, length_m: float, radius_m: float, actuated: boo
         for z in (L / 2, -L / 2):                    # small mounting collars where it bolts to its neighbours
             with bd.Locations((0, 0, z)):
                 bd.Cylinder(R * 0.8, R * 0.35)
-        if actuated:                                 # a compact CYLINDRICAL motor can across the joint
-            with bd.Locations(bd.Location((0, 0, -L / 2), (0, 90, 0))):
-                bd.Cylinder(R * 0.95, R * 2.0)       # slim can spanning the joint width
+        if actuated:
+            # The motor boss is a property of the selected BUYABLE actuator, not of the link radius. It is
+            # centered on the proximal joint and oriented across the link, matching the viewport/BOM source.
+            env = tuple(float(v) * 1000.0 for v in (actuator_spec or {}).get("envelope_m", ()))
+            if len(env) == 3 and (actuator_spec or {}).get("shape") == "cylinder":
+                axis_dim = int((actuator_spec or {}).get("axis_dim", 2))
+                can_len = env[axis_dim]
+                can_radius = max(env[i] for i in range(3) if i != axis_dim) / 2.0
+                with bd.Locations(bd.Location((0, 0, -L / 2), (0, 90, 0))):
+                    bd.Cylinder(can_radius, can_len)
+            elif len(env) == 3:
+                axis_dim = int((actuator_spec or {}).get("axis_dim", 0))
+                other = [env[i] for i in range(3) if i != axis_dim]
+                with bd.Locations((0, 0, -L / 2)):
+                    bd.Box(env[axis_dim], other[0], other[1])
+            else:                                    # explicit offline fallback; not used after grounding
+                with bd.Locations(bd.Location((0, 0, -L / 2), (0, 90, 0))):
+                    bd.Cylinder(R * 0.95, R * 2.0)
     return p.part
+
+
+def _add_selected_actuator_housing(solid, seg, *, proximal_z_mm: float):
+    """Fuse the selected actuator envelope onto an arbitrary/role CAD solid."""
+    if getattr(seg, "joint_type", None) != "revolute":
+        return solid
+    from virturoid.services.component_geometry import actuator_for_joint
+    spec = actuator_for_joint(seg)
+    if not spec:
+        return solid
+    import build123d as bd
+    env = tuple(float(v) * 1000.0 for v in spec["envelope_m"])
+    axis_dim = int(spec.get("axis_dim", 2))
+    with bd.BuildPart() as combined:
+        bd.add(solid)
+        if spec.get("shape") == "cylinder":
+            can_len = env[axis_dim]
+            can_radius = max(env[i] for i in range(3) if i != axis_dim) / 2.0
+            with bd.Locations(bd.Location((0, 0, proximal_z_mm), (0, 90, 0))):
+                bd.Cylinder(can_radius, can_len)
+        else:
+            other = [env[i] for i in range(3) if i != axis_dim]
+            with bd.Locations((0, 0, proximal_z_mm)):
+                bd.Box(env[axis_dim], other[0], other[1])
+    return combined.part
 
 
 # Role-keyed ANATOMY library: a small set of MULTI-FEATURE link solids so a generated body reads as real
@@ -408,9 +459,12 @@ def build_visual_meshes(gene, out_dir: str, *, cache: bool = True, kitbash: bool
                 except Exception:  # noqa: BLE001 - degenerate bbox -> assume already floored
                     minz = 0.0
                 solid = solid.moved(bd.Location((0, 0, -minz)))
+                solid = _add_selected_actuator_housing(solid, s, proximal_z_mm=0.0)
                 bd.export_stl(solid, str(fp))
             elif baked is None:                      # generic detailed link: centered [-L/2,L/2] -> +L/2 to [0,L]
-                solid = build_link_solid(s.shape, s.length_m, s.radius_m, actuated)
+                from virturoid.services.component_geometry import actuator_for_joint
+                solid = build_link_solid(s.shape, s.length_m, s.radius_m, actuated,
+                                         actuator_spec=actuator_for_joint(s))
                 solid = solid.moved(bd.Location((0, 0, s.length_m * 1000.0 / 2.0)))
                 bd.export_stl(solid, str(fp))
         meshes[s.name] = str(fp.resolve()).replace("\\", "/")
@@ -459,9 +513,12 @@ def export_gene_cad(gene, out_dir: str, *, material: str = "aluminum") -> dict:
     for s in gene.segments:
         if getattr(s, "geometry", None):                 # blueprint specified an ARBITRARY shape for this block
             solid = realize_shape(s.geometry)
+            solid = _add_selected_actuator_housing(solid, s, proximal_z_mm=0.0)
         else:                                            # default detailed link (tube + collars + motor can)
+            from virturoid.services.component_geometry import actuator_for_joint
             solid = build_link_solid(s.shape, s.length_m, s.radius_m,
-                                     s.joint_type in ("revolute", "prismatic"))
+                                     s.joint_type in ("revolute", "prismatic"),
+                                     actuator_spec=actuator_for_joint(s))
         bd.export_step(solid, str(out / "step" / f"{s.name}.step"))
         bd.export_stl(solid, str(out / "stl" / f"{s.name}.stl"))
         vol_m3 = float(solid.volume) * 1e-9          # mm^3 -> m^3

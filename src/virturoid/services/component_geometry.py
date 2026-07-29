@@ -37,7 +37,14 @@ def actuator_for_joint(seg, *, margin: float = 1.3) -> dict | None:
     matches ``grounded_physics.ground_gene`` so the rendered part is the one the BOM/physics would also pick."""
     if getattr(seg, "joint_type", None) != "revolute":
         return None
-    return select_actuator(abs(seg.actuator_torque_nm or 8.0) * margin)
+    required = abs(getattr(seg, "torque_req_nm", None) or seg.actuator_torque_nm or 8.0)
+    # Use the exact same thermal-aware selector as grounding. A grounded segment stores the selected motor's
+    # PEAK in ``actuator_torque_nm``; multiplying that peak by margin selected a second, larger motor for render/
+    # CAD than the BOM actually named. ``torque_req_nm`` is the stable design load and is the correct input.
+    from virturoid.services.component_catalog import select_actuator as select_catalog_actuator
+    chosen = select_catalog_actuator(required, margin=margin, continuous_torque_nm=required * margin)
+    return next((item for item in ACTUATOR_CATALOG if item["part"] == chosen.name),
+                select_actuator(required * margin))
 
 
 def actuator_housing_xml(seg, pad: str, *, margin: float = 1.3) -> str:
@@ -82,7 +89,10 @@ def bill_of_materials(gene, *, margin: float = 1.3) -> list[dict]:
         ds = actuator_for_joint(s, margin=margin)
         if ds is None:
             continue
-        required = round(abs(s.actuator_torque_nm or 8.0) * margin, 2)
+        # ``actuator_torque_nm`` is the selected part's PEAK after grounding, not
+        # the design load. Re-multiplying that peak by margin made every largest
+        # catalog motor appear under-spec and caused safe edits to auto-revert.
+        required = round(abs(getattr(s, "torque_req_nm", None) or s.actuator_torque_nm or 8.0) * margin, 2)
         bom.append({"joint": s.name, "part": ds["part"], "mass_kg": ds["mass_kg"],
                     "stall_nm": ds["stall_nm"], "supplier": ds["supplier"],
                     "required_nm": required, "under_spec": required > ds["stall_nm"] + 1e-6})

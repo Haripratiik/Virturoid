@@ -297,6 +297,7 @@ _ROLE_MATERIAL = {
     "wing": "carbon_fiber", "fin": "carbon_fiber", "flipper": "carbon_fiber",
     "leg": "skeleton", "arm": "skeleton", "leg_upper": "skeleton", "leg_lower": "skeleton",
     "arm_upper": "skeleton", "arm_lower": "skeleton", "limb": "skeleton",
+    "wheel": "rubber",
     "neck": "frame", "tail": "frame", "antenna": "frame", "ear": "frame", "shell": "shell",
 }
 
@@ -537,6 +538,8 @@ def build_from_anatomy(graph: dict) -> RobotGene:
             _cg = part.get("geometry")
             if isinstance(_cg, dict) and n == 1:
                 geo = _cg
+            if isinstance(geo, dict):
+                geo = {**geo, "semantic_role": seg_role}
             if is_wheel:
                 joint_type = "revolute"                            # a wheel is always a (continuous) hinge
             elif explicit_joint == "fixed" or (last and is_limb and n > 1):
@@ -568,8 +571,9 @@ def build_from_anatomy(graph: dict) -> RobotGene:
                     if is_wheel:
                         # a WHEEL sits OUTSIDE the chassis side (ay past the half-width) at the SAME bottom height
                         # the legs use (az - length_m), so it hangs at the bottom corner like a real wheel.
-                        wr = 0.5 * float(part.get("size") or 0.12)
-                        ay_w = sign_y * (abs(pdim["half_w"]) + 0.5 * wr) if sign_y else ay
+                        # Mount offsets describe the axle center. Seat the inner tire sidewall on the chassis
+                        # using the wheel WIDTH (length_m), not a fraction of its rolling radius.
+                        ay_w = sign_y * (abs(pdim["half_w"]) + 0.5 * length_m) if sign_y else ay
                         mount_offset = (ax, ay_w, az - pdim["length_m"])
                     else:
                         ay = sign_y * abs(pdim["half_w"]) * 0.9 if sign_y else ay
@@ -965,11 +969,25 @@ def ensure_walkable_quad(gene, prompt: str = "", *, force: bool = False):
                 cand.metadata = md0
         except Exception:  # noqa: BLE001 - scaling is an enhancement; fall back to the unscaled template
             pass
+        # A geometry fallback can survive and cover distance while still
+        # rearing/rocking enough to fail the orientation credibility gate.
+        # Tune the general structural crawl on the candidate before judging
+        # it. The tuner is morphology-driven, confirms a candidate on a
+        # longer rollout, and only caches a CREDIBLE result; it contains no
+        # species branch or closed robot-class table.
+        gait_tuning = None
+        try:
+            from virturoid.services.morph_policy import tune_crawl_gait
+            gait_tuning = tune_crawl_gait(cand, steps=800, cache=True)
+        except Exception:  # noqa: BLE001 - fallback selection remains fail-safe if tuning is unavailable
+            gait_tuning = None
         cval = float(evaluate_robot(cand).get("value", 0.0))
         if cval > max(base, 0.4):                            # the fanned hint walks materially better -> adopt it
             md = dict(getattr(cand, "metadata", None) or {})
             md["walkability_fallback"] = {"applied": True, "from_distance_m": round(base, 3),
                                           "to_distance_m": round(cval, 3), "hint": "fanned_stance+crawl_gait"}
+            if gait_tuning is not None:
+                md["walkability_fallback"]["gait_tuning"] = gait_tuning
             cand.metadata = md
             cand.design_source = src or "anatomy_generic"
             # HONESTY AT THE TOOL SURFACE (final-drive finding 2026-07-22): the substituted body inherited the

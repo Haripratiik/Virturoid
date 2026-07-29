@@ -16,6 +16,7 @@ the dynamics — and the parts list — real rather than plausible-looking.
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 
 # material density (kg/m^3) — real values for common robot-structure materials
 MATERIALS: dict[str, float] = {
@@ -40,6 +41,106 @@ ACTUATOR_CATALOG: list[dict] = [
 ]
 # Backward-compatible (name, mass_kg, stall_nm) view — derived from the catalog so there is ONE source of truth.
 ACTUATORS: list[tuple[str, float, float]] = [(a["part"], a["mass_kg"], a["stall_nm"]) for a in ACTUATOR_CATALOG]
+
+
+@dataclass(frozen=True)
+class PhysicalPrior:
+    id: str
+    mass_band_kg: tuple[float, float]
+    source: str
+
+
+_QUADRUPED_PRIOR = PhysicalPrior("legged.quadruped", (12.0, 15.0), "commercial mid-size quadruped envelope")
+_COBOT_PRIOR = PhysicalPrior("manipulator.cobot", (17.0, 21.0), "6/7-axis collaborative-arm envelope")
+_AMR_PRIOR = PhysicalPrior("mobile.amr", (70.0, 150.0), "warehouse autonomous-mobile-robot envelope")
+
+
+def _leg_branches(gene) -> list:
+    root = gene.root()
+    if root is None:
+        return []
+    out = []
+    for child in gene.children_of(root.name):
+        stack, revolute, fixed_leaf = [child], 0, False
+        while stack:
+            node = stack.pop()
+            if node.joint_type == "revolute":
+                revolute += 1
+            kids = gene.children_of(node.name)
+            fixed_leaf |= not kids and node.joint_type in (None, "fixed")
+            stack.extend(kids)
+        if revolute >= 2 and fixed_leaf:
+            out.append(child)
+    return out
+
+
+def physical_prior_for(gene) -> PhysicalPrior | None:
+    """Resolve an extensible evidence prior from structure; unknown morphologies remain unforced."""
+    wheels = [s for s in gene.segments if s.shape == "cylinder" and s.joint_type == "revolute"]
+    arm_joints = [s for s in gene.segments if s.joint_type == "revolute" and s not in wheels]
+    if len(_leg_branches(gene)) == 4:
+        return _QUADRUPED_PRIOR
+    if len(wheels) >= 4 and len(_leg_branches(gene)) == 0:
+        return _AMR_PRIOR
+    if len(arm_joints) in (6, 7) and len(_leg_branches(gene)) == 0:
+        return _COBOT_PRIOR
+    return None
+
+
+def _required_joint_loads(gene, structural_mass: dict[str, float], *, total_mass_hint: float | None = None) -> dict[str, float]:
+    """Derive joint requirements from distal mass, lever arm and support role—not chain position."""
+    by = {s.name: s for s in gene.segments}
+    children: dict[str, list[str]] = {}
+    for seg in gene.segments:
+        children.setdefault(seg.parent, []).append(seg.name)
+
+    def descendants(name: str) -> list[str]:
+        out, stack = [], [(name, 0.0)]
+        while stack:
+            current, distance = stack.pop()
+            out.append((current, distance))
+            seg = by[current]
+            stack.extend((child, distance + seg.length_m) for child in children.get(current, []))
+        return out
+
+    leg_roots = {s.name for s in _leg_branches(gene)}
+    total_mass = float(total_mass_hint or sum(structural_mass.values()))
+    wheel_count = max(1, sum(1 for s in gene.segments if s.shape == "cylinder" and s.joint_type == "revolute"))
+    loads: dict[str, float] = {}
+    for seg in gene.segments:
+        if seg.joint_type not in ("revolute", "prismatic"):
+            continue
+        desc = descendants(seg.name)
+        distal_hold = 9.81 * sum(structural_mass[name] * (distance + 0.5 * by[name].length_m)
+                                 for name, distance in desc)
+        if seg.shape == "cylinder":
+            # A skid-steer drive must overcome lateral scrub while turning, not
+            # only low straight-line rolling resistance. Sizing at rolling loss
+            # alone moved a 110 kg AMR forward but left it unable to yaw at all.
+            rolling = 2.0 * 0.03 * total_mass * 9.81 * max(seg.radius_m, 0.02) / wheel_count
+            # Four fixed wheels must also scrub laterally during an in-place
+            # skid turn.  The 0.25 effective scrub coefficient is deliberately
+            # below dry-rubber Coulomb friction: tyre/contact compliance and
+            # partial slip reduce the sustained load.  Keeping it explicit in
+            # the load model lets a lighter or smaller-wheeled base select a
+            # smaller drive naturally, while a warehouse-scale AMR is no
+            # longer undersized by a straight-line-only calculation.
+            skid_turn = 2.0 * 0.25 * total_mass * 9.81 * max(seg.radius_m, 0.02) / wheel_count
+            required = max(rolling, skid_turn)
+        elif seg.joint_type == "prismatic":
+            required = 1.5 * 9.81 * sum(structural_mass[name] for name, _ in desc)
+        else:
+            branch = seg.name
+            while by[branch].parent is not None and by[branch].parent != gene.root().name:
+                branch = by[branch].parent
+            if branch in leg_roots:
+                reach = max((distance + by[name].length_m for name, distance in desc), default=seg.length_m)
+                support = 9.81 * (total_mass / max(1, len(leg_roots))) * reach
+                required = 2.2 * max(distal_hold, support)
+            else:
+                required = 1.5 * distal_hold
+        loads[seg.name] = round(max(0.2, required), 3)
+    return loads
 
 
 def _link_volume_m3(shape: str, length_m: float, radius_m: float) -> float:
@@ -71,9 +172,14 @@ def ground_gene(gene, *, material: str = "aluminum", fill: float = 0.3, margin: 
     from virturoid.services.component_catalog import select_actuator
     density = MATERIALS.get(material, MATERIALS["aluminum"])
     bom: list[dict] = []
+    structural_mass = {s.name: _link_volume_m3(s.shape, s.length_m, s.radius_m) * density * fill
+                       for s in gene.segments}
+    prior = physical_prior_for(gene)
+    target_mass = (sum(prior.mass_band_kg) / 2.0) if prior else None
+    derived_loads = _required_joint_loads(gene, structural_mass, total_mass_hint=target_mass)
     total = 0.0
     for s in gene.segments:
-        struct = _link_volume_m3(s.shape, s.length_m, s.radius_m) * density * fill
+        struct = structural_mass[s.name]
         act_mass = 0.0
         if s.joint_type in ("revolute", "prismatic"):
             # The joint's torque REQUIREMENT is fixed by the design -- pin it the first time so re-grounding is
@@ -82,8 +188,28 @@ def ground_gene(gene, *, material: str = "aluminum", fill: float = 0.3, margin: 
             # bigger motor -- a 120 Nm joint ratcheted to 520 Nm after two grounds, silently over-sizing every arm
             # (and its housing geom, which then collided in grasp scenes). Now the requirement is remembered.
             if s.torque_req_nm is None:
-                s.torque_req_nm = abs(s.actuator_torque_nm or 8.0)
+                s.torque_req_nm = derived_loads.get(s.name, abs(s.actuator_torque_nm or 8.0))
             required = s.torque_req_nm
+            if s.joint_type == "prismatic":
+                # A slider needs LINEAR FORCE, while the catalog describes motor
+                # shaft torque. Size a real rotary actuator through a short pinion/
+                # leadscrew equivalent and expose its output force to MuJoCo. The
+                # former torque-as-force mixup reduced grounded finger clamps from
+                # 8 N to 1.5 N and made every real contact grasp miss.
+                transmission_m = max(0.01, min(0.025, float(s.radius_m)))
+                equivalent_torque = float(required) * transmission_m
+                act = select_actuator(equivalent_torque, margin=margin,
+                                      continuous_torque_nm=equivalent_torque * margin)
+                act_mass = act.mass_kg
+                output_force = act.peak_torque_nm / transmission_m
+                s.actuator_torque_nm = round(output_force, 3)
+                bom.append({"role": s.name, "part": act.name, "mass_kg": act.mass_kg,
+                            "peak_force_n": round(output_force, 2), "rated_force_n": round(act.rated_torque_nm / transmission_m, 2),
+                            "required_force_n": round(float(required), 2), "transmission_m": transmission_m,
+                            "max_speed_radps": act.max_speed_radps})
+                s.mass_kg = round(max(0.02, struct + act_mass), 3)
+                total += s.mass_kg
+                continue
             # rated torque must cover the sustained requirement (with margin) -> thermal headroom; peak then has
             # a real transient reserve above it. This is what makes a grounded body BOTH walk and certify.
             act = select_actuator(required, margin=margin, continuous_torque_nm=required * margin)
@@ -94,5 +220,20 @@ def ground_gene(gene, *, material: str = "aluminum", fill: float = 0.3, margin: 
                         "max_speed_radps": act.max_speed_radps, "required_nm": round(required, 2)})
         s.mass_kg = round(max(0.02, struct + act_mass), 3)     # grounded mass = structure + actuator
         total += s.mass_kg
+    balance_mass = 0.0
+    if prior and total < prior.mass_band_kg[0]:
+        target = sum(prior.mass_band_kg) / 2.0
+        balance_mass = max(0.0, target - total)
+        root = gene.root()
+        if root is not None:
+            root.mass_kg = round(root.mass_kg + balance_mass, 3)
+            total = sum(float(s.mass_kg) for s in gene.segments)
+            gene.metadata["physical_prior"] = {
+                "id": prior.id, "mass_band_kg": list(prior.mass_band_kg), "source": prior.source,
+                "balance_of_system_mass_kg": round(balance_mass, 3),
+                "balance_of_system": ["battery", "compute", "wiring", "fasteners", "covers"],
+            }
     return {"material": material, "bom": bom, "total_mass_kg": round(total, 3),
-            "actuator_count": len(bom)}
+            "actuator_count": len(bom), "physical_prior": (prior.id if prior else None),
+            "mass_band_kg": (list(prior.mass_band_kg) if prior else None),
+            "balance_of_system_mass_kg": round(balance_mass, 3)}

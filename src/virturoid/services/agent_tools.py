@@ -314,11 +314,11 @@ except Exception:  # noqa: BLE001
 #   build_robot/evaluate_robot/design_search/start_training/submit_scene_spec -> covered by the loop tools +
 #   the server `instructions`. Ordered by the canonical loop so the menu reads as a workflow.
 MCP_TOOL_VIEW: tuple[str, ...] = (
-    "get_design_schema", "submit_design", "create_robot",      # author / generate a robot
+    "get_design_schema", "submit_design", "critique_design",  # author / see-measure-critique
     "ingest_project",                                          # INGEST an existing robot folder (gateway, below)
     "get_robot", "edit_robot", "render_view",                  # inspect / localized-edit / see
-    "verify_robot", "evaluate_held", "run_task",               # honest verdict / task score / any-goal task
-    "create_scene", "edit_scene",                              # themed scene + re-theme
+    "verify_robot", "run_task",                                # honest verdict / any-goal task
+    "create_scene",                                             # themed scene (edit_scene stays callable)
     "train_held", "get_job", "export_held",                    # train (job) / poll / export
     "recall_knowledge", "llm_spend",                           # memory recall / zero-token proof
 )
@@ -328,6 +328,8 @@ MCP_TOOL_VIEW: tuple[str, ...] = (
 # ingestion siblings, they are advertised by name in the anchor tool's description so an MCP client can discover
 # and call them without bloating tools/list.
 _ADVANCED_SIBLINGS: tuple[str, ...] = ("train_reward", "generate_fusion", "generate_control_scripts")
+_DESIGN_SIBLINGS: tuple[str, ...] = ("create_robot", "evaluate_held")
+_SCENE_SIBLINGS: tuple[str, ...] = ("edit_scene", "submit_scene_spec")
 
 # INGESTION GATEWAY (P0, agentic-ingestion plan): the plan found ZERO ingestion tools in the MCP view, so a
 # customer's own agent (the BYOK model) could not DISCOVER ingestion from tools/list at all. Rather than crowd
@@ -353,6 +355,14 @@ def tool_specs(view: str | None = None) -> list[dict]:
                 avail = [s for s in _INGEST_SIBLINGS if s in TOOLS]
                 desc = (desc + " Companion importers, each callable by name via a tools/call: "
                         + ", ".join(avail) + ".")
+            if n == "submit_design":
+                avail = [s for s in _DESIGN_SIBLINGS if s in TOOLS]
+                if avail:
+                    desc = desc + " Callable companions: " + ", ".join(avail) + "."
+            if n == "create_scene":
+                avail = [s for s in _SCENE_SIBLINGS if s in TOOLS]
+                if avail:
+                    desc = desc + " Callable companions: " + ", ".join(avail) + "."
             if n == "train_held":                              # M5: advertise the advanced authoring compilers
                 adv = [s for s in _ADVANCED_SIBLINGS if s in TOOLS]
                 if adv:

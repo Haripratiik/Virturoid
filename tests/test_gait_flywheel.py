@@ -48,6 +48,31 @@ class GaitFlywheelTests(unittest.TestCase):
         self.assertIsNotNone(recalled)
         self.assertAlmostEqual(recalled["kp"], 200.0, places=3)
 
+    def test_structural_keys_do_not_collapse_animal_bodies(self):
+        from virturoid.services.gait_flywheel import structural_gait_key
+        from virturoid.services.morphology_composer import compose_robot
+        prompts = ["a robot dog", "a robot horse", "a robot fox", "a robot wolf",
+                   "a robot cat", "a robot goat", "a robot deer", "a robot gecko"]
+        genes = [compose_robot(prompt, llm=None, ensure_walkable=True) for prompt in prompts]
+        keys = {structural_gait_key(gene) for gene in genes}
+        self.assertGreaterEqual(len(keys), 6, f"eight animal prompts collapsed to {len(keys)} structures")
+        self.assertEqual(structural_gait_key(genes[0]), structural_gait_key(genes[0]))
+
+    def test_keep_best_is_scoped_to_one_structure(self):
+        from virturoid.services.gait_flywheel import bank_gait
+        from virturoid.services.morphology_composer import compose_robot
+        db = self._db()
+
+        class _Walk:
+            best_survived, best_height_ratio, best_credible = True, 0.85, True
+            best_forward = 0.7
+            best_params = {"freq": 1.5, "hip_amp": 0.9, "knee_amp": 1.0,
+                           "duty": 0.25, "kp": 32.0, "kd": 1.5}
+
+        dog = compose_robot("a robot dog", llm=None, ensure_walkable=True)
+        horse = compose_robot("a robot horse", llm=None, ensure_walkable=True)
+        self.assertNotEqual(bank_gait(db, dog, _Walk()), bank_gait(db, horse, _Walk()))
+
     def test_bank_rejects_a_non_credible_slide(self):
         # UN-GAMEABLE: a body that SLIDES forward (survives + travels past the 0.15 m floor but never steps) is not a
         # walk and must never enter the bank — else a slide masquerades as a gait and gets recalled/reused. This is

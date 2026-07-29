@@ -229,8 +229,18 @@ def train_morph_es(genes, *, feature_dim: int, generations: int = 12, pop: int =
 
     rng = np.random.default_rng(seed)
     policy = MorphPolicy(feature_dim, seed=seed)
-    if init_policy is not None and getattr(init_policy, "feature_dim", None) == feature_dim:
-        policy.set_params(init_policy.get_params())          # warm-start from prior learning
+    if init_policy is not None:
+        prior_dim = getattr(init_policy, "feature_dim", None)
+        if prior_dim == feature_dim:
+            policy.set_params(init_policy.get_params())      # warm-start from prior learning
+        else:
+            import warnings
+            warnings.warn(
+                f"warm-start rejected: prior feature_dim={prior_dim!r}, requested feature_dim={feature_dim}; "
+                "training starts cold instead of silently pretending the prior was reused",
+                RuntimeWarning,
+                stacklevel=2,
+            )
     theta = policy.get_params()
     n = theta.size
 

@@ -55,9 +55,20 @@ def brain_metrics(db) -> dict:
         r = _q(f"SELECT COUNT(*) n FROM vectors WHERE obj_type='{otype}'")
         out[key] = int(r["n"]) if r is not None else 0
     try:
-        for r in conn.execute("SELECT kind, COUNT(*) n, AVG(delta) d FROM provenance GROUP BY kind").fetchall():
+        for r in conn.execute(
+                "SELECT kind, COUNT(*) n, AVG(delta) d, "
+                "SUM(CASE WHEN delta > 0 THEN 1 ELSE 0 END) wins, "
+                "SUM(CASE WHEN delta < 0 THEN 1 ELSE 0 END) losses, "
+                "SUM(CASE WHEN delta = 0 THEN 1 ELSE 0 END) ties "
+                "FROM provenance GROUP BY kind").fetchall():
+            measured = int(r["wins"] or 0) + int(r["losses"] or 0) + int(r["ties"] or 0)
             out["provenance_by_kind"][r["kind"]] = {"edges": int(r["n"]),
-                                                    "avg_delta": round(float(r["d"]), 4) if r["d"] is not None else None}
+                                                    "avg_delta": round(float(r["d"]), 4) if r["d"] is not None else None,
+                                                    "wins": int(r["wins"] or 0),
+                                                    "losses": int(r["losses"] or 0),
+                                                    "ties": int(r["ties"] or 0),
+                                                    "hit_rate": (round(int(r["wins"] or 0) / measured, 4)
+                                                                 if measured else None)}
     except Exception:  # noqa: BLE001
         pass
     try:                                                          # the gated embedding metric's state (honest)
@@ -158,6 +169,8 @@ def moat_status(memory_dir=DEFAULT_MEMORY_DIR) -> dict:
         "warm_started_builds": warm,
         "utilization": round(warm / trainable, 3) if trainable else 0.0,
         "provenance_reuse_edges": reuse_edges,
+        "hint_reuse": brain.get("provenance_by_kind", {}).get(
+            "gait_hint_deploy", {"edges": 0, "wins": 0, "losses": 0, "ties": 0, "hit_rate": None}),
     }
     # HONEST compounding: the flywheel COMPOUNDS only when later builds actually REUSE prior learning — a warm-start
     # or a recorded provenance edge. Merely accumulating designs is NOT compounding (the old flag conflated them).

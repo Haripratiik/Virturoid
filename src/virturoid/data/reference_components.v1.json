@@ -1,0 +1,86 @@
+{
+  "catalog_id": "virturoid.reference_components",
+  "version": "2026.07.28",
+  "frozen_at": "2026-07-28",
+  "sources": [
+    "https://www.cubemars.com/product/ak70-10-kv100-r-link-cable-package.html",
+    "https://www.intel.com/content/www/us/en/products/sku/190004/intel-realsense-depth-camera-d435i/specifications.html",
+    "https://assets.robotiq.com/website-assets/support_documents/document/online/2F-85_2F-140_TM_InstructionManual_HTML5_20190503.zip/2F-85_2F-140_TM_InstructionManual_HTML5/Content/6.%20Specifications.htm",
+    "https://developer.nvidia.com/embedded/jetson-modules"
+  ],
+  "components": [
+    {
+      "id": "cmp_actuator_cubemars_ak70_10", "version": "2026.07.28",
+      "manufacturer": "CubeMars", "part_number": "AK70-10 KV100",
+      "normalized_name": "CubeMars AK70-10 integrated robotic actuator", "category": "actuator",
+      "aliases": ["ak70-10", "ak70 10", "cubemars ak70", "24.8 nm actuator", "can actuator"],
+      "mass_kg": 0.521, "voltage_range": [24.0, 48.0], "max_current_a": 23.2,
+      "actuator": {"actuator_type": "qdd_can", "stall_torque_nm": 24.8,
+        "no_load_speed_rpm": 480.0, "rated_torque_nm": 8.3, "rated_speed_rpm": 310.0,
+        "control_frequency_hz": null, "communication_protocol": "CAN/UART"},
+      "datasheet": {"uri": "https://www.cubemars.com/product/ak70-10-kv100-r-link-cable-package.html", "media_type": "text/html", "description": "Official product specifications"},
+      "cad_assets": [{"uri": "https://www.cubemars.com/cn/technical-support-and-software-download.html", "media_type": "text/html", "description": "Official vendor STEP-download index; file must be fetched and checksummed before fabrication"}],
+      "spec_confidence": 0.96,
+      "source_urls": ["https://www.cubemars.com/product/ak70-10-kv100-r-link-cable-package.html", "https://www.cubemars.com/cn/technical-support-and-software-download.html"]
+    },
+    {
+      "id": "cmp_camera_intel_realsense_d435i", "version": "2026.07.28",
+      "manufacturer": "Intel RealSense", "part_number": "D435i",
+      "normalized_name": "Intel RealSense Depth Camera D435i", "category": "sensor",
+      "aliases": ["d435i", "realsense d435i", "rgbd camera", "depth camera"],
+      "mass_kg": 0.072, "voltage_range": [5.0, 5.0], "max_current_a": null,
+      "sensor": {"sensor_type": "rgbd_camera", "resolution": [1280, 720],
+        "field_of_view_deg": [87.0, 58.0], "frame_rate_hz": 30.0, "range_m": [0.3, 3.0],
+        "ros_message_type": "sensor_msgs/Image"},
+      "datasheet": {"uri": "https://www.intel.com/content/www/us/en/products/sku/190004/intel-realsense-depth-camera-d435i/specifications.html", "media_type": "text/html", "description": "Official Intel product specifications"},
+      "cad_assets": [{"uri": "https://dev.intelrealsense.com/docs/stereo-depth-camera-d400#section-cad-files", "media_type": "text/html", "description": "Official RealSense D400-series CAD download index; fetch the matching D435i file and checksum it before fabrication"}], "spec_confidence": 0.95,
+      "source_urls": ["https://www.intel.com/content/www/us/en/products/sku/190004/intel-realsense-depth-camera-d435i/specifications.html"]
+    },
+    {
+      "id": "cmp_camera_logitech_c920", "version": "2026.07.28",
+      "manufacturer": "Logitech", "part_number": "C920",
+      "normalized_name": "Logitech C920 HD Pro Webcam", "category": "sensor",
+      "aliases": ["c920", "rgb camera", "normal camera", "webcam"],
+      "mass_kg": 0.162, "voltage_range": [5.0, 5.0], "max_current_a": null,
+      "sensor": {"sensor_type": "rgb_camera", "resolution": [1920, 1080],
+        "field_of_view_deg": [78.0, 44.0], "frame_rate_hz": 30.0, "range_m": null,
+        "ros_message_type": "sensor_msgs/Image"},
+      "datasheet": {"uri": "https://www.logitech.com/en-us/products/webcams/c920-pro-hd-webcam.960-000764.html", "media_type": "text/html", "description": "Official Logitech product page"},
+      "cad_assets": [], "spec_confidence": 0.9,
+      "source_urls": ["https://www.logitech.com/en-us/products/webcams/c920-pro-hd-webcam.960-000764.html"]
+    },
+    {
+      "id": "cmp_lidar_slamtec_rplidar_a2m12", "version": "2026.07.28",
+      "manufacturer": "Slamtec", "part_number": "RPLIDAR A2M12",
+      "normalized_name": "Slamtec RPLIDAR A2M12", "category": "sensor",
+      "aliases": ["a2m12", "rplidar a2", "lidar", "laser scanner"],
+      "mass_kg": 0.19, "voltage_range": [5.0, 5.0], "max_current_a": null,
+      "sensor": {"sensor_type": "lidar", "resolution": [8000, 1],
+        "field_of_view_deg": [360.0, 1.0], "frame_rate_hz": 15.0, "range_m": [0.15, 12.0],
+        "ros_message_type": "sensor_msgs/LaserScan"},
+      "datasheet": {"uri": "https://www.slamtec.com/en/Lidar/A2", "media_type": "text/html", "description": "Official Slamtec product page"},
+      "cad_assets": [], "spec_confidence": 0.9,
+      "source_urls": ["https://www.slamtec.com/en/Lidar/A2"]
+    },
+    {
+      "id": "cmp_gripper_robotiq_2f85", "version": "2026.07.28",
+      "manufacturer": "Robotiq", "part_number": "2F-85",
+      "normalized_name": "Robotiq 2F-85 adaptive gripper", "category": "gripper",
+      "aliases": ["2f-85", "2f85", "robotiq gripper", "parallel gripper", "two finger gripper"],
+      "mass_kg": 0.925, "voltage_range": [24.0, 24.0], "max_current_a": null,
+      "datasheet": {"uri": "https://assets.robotiq.com/website-assets/support_documents/document/online/2F-85_2F-140_TM_InstructionManual_HTML5_20190503.zip/2F-85_2F-140_TM_InstructionManual_HTML5/Content/6.%20Specifications.htm", "media_type": "text/html", "description": "Official Robotiq mechanical specifications"},
+      "cad_assets": [], "spec_confidence": 0.96,
+      "source_urls": ["https://assets.robotiq.com/website-assets/support_documents/document/online/2F-85_2F-140_TM_InstructionManual_HTML5_20190503.zip/2F-85_2F-140_TM_InstructionManual_HTML5/Content/6.%20Specifications.htm"]
+    },
+    {
+      "id": "cmp_compute_jetson_orin_nano_8gb", "version": "2026.07.28",
+      "manufacturer": "NVIDIA", "part_number": "Jetson Orin Nano 8GB",
+      "normalized_name": "NVIDIA Jetson Orin Nano 8GB production module", "category": "compute",
+      "aliases": ["jetson orin nano", "orin nano 8gb", "edge compute", "robotics compute"],
+      "mass_kg": null, "voltage_range": null, "max_current_a": null,
+      "datasheet": {"uri": "https://developer.nvidia.com/embedded/jetson-modules", "media_type": "text/html", "description": "Official NVIDIA module specifications"},
+      "cad_assets": [], "spec_confidence": 0.95,
+      "source_urls": ["https://developer.nvidia.com/embedded/jetson-modules"]
+    }
+  ]
+}

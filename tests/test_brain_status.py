@@ -26,6 +26,9 @@ class BrainStatusTests(unittest.TestCase):
             record_transfer_trial(db, src_gene=b, dst_gene=a, gait_params=gp,
                                   result={"survived": True, "credible": False, "forward": 0.05})
             RoboticsVectorMemory(db).index_episode("e1", {"forward_m": 0.8, "cadence": 2.0}, {"status": "walked"})
+            vm = RoboticsVectorMemory(db)
+            vm.record_provenance("gene", "hint-win", kind="gait_hint_deploy", delta=0.2)
+            vm.record_provenance("gene", "hint-loss", kind="gait_hint_deploy", delta=-0.1)
             db.record_run(prompt="p", robot_class="quadruped", task_type="locomotion",
                           converged_design={"x": 1}, success_rate=0.7)
 
@@ -34,6 +37,10 @@ class BrainStatusTests(unittest.TestCase):
         self.assertEqual(st["brain"]["transfer_ledger"]["trials"], 2)
         self.assertEqual(st["brain"]["transfer_ledger"]["credible"], 1)
         self.assertEqual(st["brain"]["episodes"], 1)
+        hint = st["brain"]["provenance_by_kind"]["gait_hint_deploy"]
+        self.assertEqual((hint["wins"], hint["losses"]), (1, 1))
+        self.assertEqual(0.5, hint["hit_rate"])
+        self.assertEqual(0.5, st["warm_start"]["hint_reuse"]["hit_rate"])
         self.assertFalse(st["brain"]["embedding"]["metric_proven"])          # nothing proven -> honest baseline
         self.assertEqual(st["brain"]["embedding"]["active"], "baseline_29d")
         self.assertIn("verified transfer trials", st["summary"])             # user-facing headline traces to ledger
