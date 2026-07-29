@@ -194,6 +194,37 @@ def _role_geometry(role: str, size: float, girth: float, aspect: str = "", *, au
     return _tapered(L, g, max(0.004, 0.65 * g)), L, g
 
 
+def _limb_length_shares(role: str, n: int, has_foot: bool) -> list[float]:
+    """How one limb's total length divides among its ``n`` segments (fractions, summing to 1).
+
+    A leg was cut into n EQUAL pieces, which is the single biggest reason our legged bodies read as toys. Real
+    legged robots are nothing like that -- they put a SHORT proximal abduction block, then two LONG load-bearing
+    links, then a small contact pad:
+
+        Unitree Go2      hip/abad ~0.08, thigh 0.213, calf 0.213, foot = a 22 mm sphere   (leg 0.426 m)
+        MIT Mini Cheetah abad 0.062, thigh 0.209, calf 0.195, foot radius 0.02
+        ANYmal C         hip 0.09, thigh 0.285, shank 0.33
+
+    Measured on our own dog, 4 equal 105 mm stubs put an 82 mm motor can on a 105 mm segment -- can/length 0.78,
+    where a Go2 hangs the same size motor on a 213 mm thigh (0.38). At 0.78 the ACTUATOR IS THE SILHOUETTE, which
+    is exactly the bead-chain look; the shares below bring us to ~0.4, in the real range.
+
+    Arms are deliberately left UNIFORM: a manipulator's links really are near-equal (a UR5 is 0.425/0.392), and
+    the arm is the one archetype that already renders convincingly -- there is nothing here to fix."""
+    n = max(1, int(n))
+    if n == 1:
+        return [1.0]
+    if not role.startswith("leg"):
+        return [1.0 / n] * n                          # arms/tails/necks: unchanged
+    foot = 0.07 if has_foot else 0.0                  # a foot is a CONTACT PAD, not a limb link
+    n_links = n - (1 if has_foot else 0)
+    if n_links <= 1:
+        return [1.0 - foot] + ([foot] if has_foot else [])
+    hip = 0.16 * (1.0 - foot)                         # short proximal abduction/rotation block
+    each = (1.0 - foot - hip) / (n_links - 1)
+    return [hip] + [each] * (n_links - 1) + ([foot] if has_foot else [])
+
+
 def _anatomy_role_for(seg_role: str, index: int, n_segments: int) -> str | None:
     """Map this compiler's SEMANTIC role onto ``cad_geometry.build_anatomy``'s detailed-solid vocabulary.
 
@@ -551,6 +582,12 @@ def build_from_anatomy(graph: dict) -> RobotGene:
             curl = float(part.get("curl") or 0.0)             # total rest-bend (rad) spread across the chain
         except (TypeError, ValueError):
             curl = 0.0
+        # REVERTED 2026-07-29: an anatomical split (short hip + two long links + a contact pad) is measurably
+        # closer to a real leg -- it took stride-link aspect from 2.27 to 4.33/5.28, the band our own priors
+        # file asks for -- but it moved every legged body off the operating point the SCRIPTED crawl gait was
+        # co-tuned with, and 12 locomotion tests went red. The geometry was right and the control was not, and
+        # shipping a prettier robot that stopped walking is the wrong trade. See _limb_length_shares: the work
+        # to land it is re-fitting the gait layer to non-uniform limbs, not reshaping the body again.
         seg_len = size / n if n > 1 else size
         prev = parent_seg
         prev_world_R = world_R.get(parent_seg, np.eye(3))
@@ -560,8 +597,6 @@ def build_from_anatomy(graph: dict) -> RobotGene:
             seg_role = ("foot" if is_foot else role)
             is_wheel = seg_role == "wheel"
             g_i = girth * (0.82 ** i)
-            # authored=True when the role "foot" came from the PART itself (the model authored this foot's dims);
-            # an auto-foot promoted from a leg's last segment keeps the leg-girth-calibrated widening.
             geo, length_m, radius_m = _role_geometry(seg_role, seg_len * (1.0 if not last or n == 1 else 0.6), g_i,
                                                      authored=(seg_role == role))
             geo = _apply_detail(geo, detail, length_m, g_i, part_chamfer)
@@ -972,6 +1007,21 @@ def ensure_walkable_quad(gene, prompt: str = "", *, force: bool = False):
         if len(legs) != 4 and getattr(gene, "robot_class", "") != "quadruped":
             return gene
         base = float(evaluate_robot(gene).get("value", 0.0))
+        if base < 0.5:
+            # TRIED AND REVERTED 2026-07-29: tune the authored body BEFORE deciding to substitute it, so we never
+            # throw away a customer's design to fix what is really an untuned controller. The instinct is right
+            # ([[make-it-learn-dont-teach-it]]) and the evidence was real -- a body scoring 0.000 under the
+            # default crawl reached CREDIBLE WALK at 1.220 once tune_crawl_gait picked its op-point.
+            #
+            # It cannot be done HERE, because this runs at COMPOSE time, before grounding embodies real actuator
+            # and structure mass: a horse is 4.2 kg at this point and 21 kg once grounded, so an op-point fitted
+            # now is fitted to a 5x lighter robot. Caching it shipped that wrong gait; NOT caching it made the
+            # gate incoherent -- it decided "this walks WITH tuning" and then shipped the body WITHOUT the
+            # tuning, which measured as design-bench verdict@1 0.45 -> 0.40 (the animal family to 0/6).
+            #
+            # The sound version tunes AFTER grounding, where the mass is real, and keeps the result. That means
+            # moving this decision out of the composer into the build path, which is its own change.
+            pass
         if base >= 0.5 and not force:                        # already walks under some gait -> leave it sleek
             return gene                                      # (force skips this shortcut but STILL only adopts the
         #                                                      fanned stance below if it beats the original materially)

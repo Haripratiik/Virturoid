@@ -13,10 +13,17 @@ MJX-unsafe geoms rather than quietly papering over them. The returned gene is be
 
 from __future__ import annotations
 
+import os
+import re
 import tempfile
 from pathlib import Path
 
 from virturoid.schemas.gene import RobotGene, GeneSegment
+
+
+def _slug_name(value: str) -> str:
+    """Filesystem-safe stem for a link/robot name (customer link names are arbitrary)."""
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value or "part")).strip("_") or "part"
 
 # MuJoCo joint-type ints -> our gene joint types (mjtJoint: FREE=0, BALL=1, SLIDE=2, HINGE=3).
 _JNT = {3: "revolute", 2: "prismatic"}
@@ -26,6 +33,142 @@ _GEOM = {2: "sphere", 3: "capsule", 5: "cylinder", 6: "box"}
 _EE_NAME_HINTS = ("gripper", "hand", "finger", "effector", "tcp", "grasp")
 # Site names are deliberate (ee_site, tcp, tool0), so a short "ee" hint is safe there.
 _EE_SITE_HINTS = ("ee", "tcp", "tool", "grasp", "effector", "tip")
+
+
+def _quat_to_euler_xyz(quat) -> tuple[float, float, float]:
+    """MuJoCo body quaternion (w, x, y, z) -> the intrinsic XYZ euler MuJoCo's ``euler=`` attribute expects
+    (its default ``eulerseq`` is "xyz"), i.e. R = Rx(a) @ Ry(b) @ Rz(c)."""
+    import math
+
+    w, x, y, z = (float(v) for v in quat)
+    n = math.sqrt(w * w + x * x + y * y + z * z) or 1.0
+    w, x, y, z = w / n, x / n, y / n, z / n
+    r02 = 2.0 * (x * z + w * y)
+    r12 = 2.0 * (y * z - w * x)
+    r22 = 1.0 - 2.0 * (x * x + y * y)
+    r00 = 1.0 - 2.0 * (y * y + z * z)
+    r01 = 2.0 * (x * y - w * z)
+    b = math.asin(max(-1.0, min(1.0, r02)))
+    if abs(r02) > 0.999999:                        # gimbal lock: fold the free rotation into a
+        return (math.atan2(2.0 * (y * z + w * x), 1.0 - 2.0 * (x * x + y * y)), b, 0.0)
+    return (math.atan2(-r12, r22), b, math.atan2(-r01, r00))
+
+
+def _quat_mat(quat):
+    """MuJoCo quaternion (w, x, y, z) -> 3x3 rotation matrix."""
+    import numpy as np
+
+    w, x, y, z = (float(v) for v in quat)
+    n = (w * w + x * x + y * y + z * z) ** 0.5 or 1.0
+    w, x, y, z = w / n, x / n, y / n, z / n
+    return np.array([
+        [1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)],
+        [2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
+        [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)]])
+
+
+def _mat_to_euler_xyz(R) -> tuple[float, float, float]:
+    """3x3 -> the intrinsic XYZ euler MuJoCo's ``euler=`` attribute expects (R = Rx(a) @ Ry(b) @ Rz(c))."""
+    import math
+
+    b = math.asin(max(-1.0, min(1.0, float(R[0, 2]))))
+    if abs(float(R[0, 2])) > 0.999999:                       # gimbal lock
+        return (math.atan2(float(R[2, 1]), float(R[1, 1])), b, 0.0)
+    return (math.atan2(-float(R[1, 2]), float(R[2, 2])), b, math.atan2(-float(R[0, 1]), float(R[0, 0])))
+
+
+def _rot_z_to(v):
+    """Smallest rotation taking +z onto ``v`` (Rodrigues). Identity when v is already +z."""
+    import numpy as np
+
+    v = np.asarray(v, dtype=float)
+    n = float(np.linalg.norm(v))
+    if n < 1e-9:
+        return np.eye(3)
+    u = v / n
+    z = np.array([0.0, 0.0, 1.0])
+    c = float(np.dot(z, u))
+    if c > 1 - 1e-9:
+        return np.eye(3)
+    if c < -1 + 1e-9:                                        # antiparallel: flip 180 deg about x
+        return np.array([[1.0, 0, 0], [0, -1.0, 0], [0, 0, -1.0]])
+    a = np.cross(z, u)
+    K = np.array([[0, -a[2], a[1]], [a[2], 0, -a[0]], [-a[1], a[0], 0]])
+    return np.eye(3) + K + K @ K * (1.0 / (1.0 + c))
+
+
+def _link_vector(mj, body_id: int, children: dict):
+    """The link's own AXIS in its body frame: origin -> next joint (or, for a leaf, -> its farthest geom).
+
+    A RobotGene segment spans [0, length] along its local +z, but a real robot's links point wherever the design
+    puts them -- a Go2's thigh and calf both run DOWN (-z) from their joints. Importing without this, every link
+    was extruded along +z and came out MIRRORED ABOUT ITS OWN JOINT: joints in the right places, link bodies on
+    the wrong side of them, which rendered an imported Go2 as a bundle of pipes standing through its own chassis.
+    """
+    import numpy as np
+
+    kids = children.get(body_id, [])
+    if kids:
+        best = max(kids, key=lambda c: float(np.linalg.norm(mj.body_pos[c])))
+        return np.asarray(mj.body_pos[best], dtype=float)
+    far, best_n = np.zeros(3), 0.0
+    for g in range(mj.ngeom):
+        if int(mj.geom_bodyid[g]) != body_id:
+            continue
+        sz = mj.geom_size[g]
+        ext = float(sz[2] if int(mj.geom_type[g]) in (6, 7) else sz[max(0, len(sz) - 2)])
+        p = np.asarray(mj.geom_pos[g], dtype=float)
+        nrm = float(np.linalg.norm(p))
+        reach = nrm + abs(ext)
+        if reach > best_n:
+            best_n, far = reach, (p * (reach / nrm) if nrm > 1e-9 else np.array([0.0, 0.0, reach]))
+    return far
+
+
+def _bake_source_mesh(mj, body_id: int, S, out_path) -> bool:
+    """Write THIS body's own mesh geoms, transformed into our LINK frame, as one binary STL (millimetres).
+
+    The importer builds two lanes: a FAITHFUL one that keeps the customer's MJCF + meshes, and an EDITABLE
+    RobotGene the amend operators work on. Measured, the editable lane carried the customer's geometry on
+    0 of 13 segments -- every link was rebuilt as a plain capsule -- so the robot you could edit and the robot
+    you saw rendered was a stick figure of the one you imported, no matter how exact the kinematics became.
+    Their real meshes were sitting in the faithful lane, unused. This baker is the bridge: each editable
+    segment gets the source geometry of the link it stands for, expressed in that segment's own frame.
+    """
+    import struct
+
+    import numpy as np
+
+    tris = []
+    for g in range(mj.ngeom):
+        if int(mj.geom_bodyid[g]) != body_id or int(mj.geom_type[g]) != 7:      # 7 = mjGEOM_MESH
+            continue
+        mid = int(mj.geom_dataid[g])
+        if mid < 0:
+            continue
+        v0, vn = int(mj.mesh_vertadr[mid]), int(mj.mesh_vertnum[mid])
+        f0, fn = int(mj.mesh_faceadr[mid]), int(mj.mesh_facenum[mid])
+        verts = np.asarray(mj.mesh_vert, dtype=float).reshape(-1, 3)[v0:v0 + vn]
+        faces = np.asarray(mj.mesh_face, dtype=int).reshape(-1, 3)[f0:f0 + fn]
+        R = _quat_mat(mj.geom_quat[g])
+        p = np.asarray(mj.geom_pos[g], dtype=float)
+        world = (verts @ R.T + p) @ S                       # geom -> body -> LINK frame (S maps link->body)
+        tris.append(world[faces] * 1000.0)                  # STL is millimetres, matching the compiler
+    if not tris:
+        return False
+    T = np.concatenate(tris, axis=0)
+    try:
+        with open(out_path, "wb") as fh:
+            fh.write(b"\0" * 80)
+            fh.write(struct.pack("<I", len(T)))
+            for t in T:
+                n = np.cross(t[1] - t[0], t[2] - t[0])
+                ln = float(np.linalg.norm(n))
+                n = n / ln if ln > 1e-12 else np.zeros(3)
+                fh.write(struct.pack("<12fH", *n, *t[0], *t[1], *t[2], 0))
+    except OSError:
+        return False
+    return True
 
 
 def import_robot(source: str, *, robot_id: str | None = None, species: str | None = None) -> dict:
@@ -87,6 +230,14 @@ def import_robot(source: str, *, robot_id: str | None = None, species: str | Non
                         "a RobotGene needs a single root. Imported as a multi-root tree — pick a base or split.")
 
     segments: list[GeneSegment] = []
+    seg_len_by_name: dict[str, float] = {}      # a child's mount z is measured from its parent's TIP
+    _rot_by_id: dict[int, object] = {}          # body id -> S_i, the body-frame -> LINK-frame rotation
+    try:                                        # per-link STLs of the customer's own meshes (visual only)
+        from pathlib import Path as _P
+        _mesh_dir = _P("build/_importmesh") / _slug_name(robot_id or os.path.basename(str(source)) or "import")
+        _mesh_dir.mkdir(parents=True, exist_ok=True)
+    except Exception:  # noqa: BLE001 - baking source meshes is a fidelity aid, never an import blocker
+        _mesh_dir = None
     ee_candidates: list[str] = []
     for i in range(1, mj.nbody):
         bname = body_name[i]
@@ -100,24 +251,67 @@ def import_robot(source: str, *, robot_id: str | None = None, species: str | Non
         # Recover a link's LENGTH from the kinematic span to its child joint. A URDF's joint origins encode link
         # lengths even when the visual/collision MESH is missing (it imported as a tiny placeholder box) — so a
         # limb whose geom underrepresents the span to the next joint is rebuilt as a capsule of that real length.
-        child_ids = children.get(i, [])
-        if child_ids:
-            span = max(float((mj.body_pos[c][0] ** 2 + mj.body_pos[c][1] ** 2 + mj.body_pos[c][2] ** 2) ** 0.5)
-                       for c in child_ids)
-            placeholder = shape == "box" and length_m <= 0.09 and abs(length_m - radius_m) < 0.03
-            if span >= 0.04 and (placeholder or span > length_m * 1.8):
-                length_m = float(min(1.5, span))
-                shape = "capsule"
-                radius_m = float(min(max(radius_m, 0.02), 0.12, max(0.02, span * 0.18)))
+        # JOINT-TO-JOINT DISTANCE IS THE GROUND TRUTH, so prefer it whenever a child exists rather than only
+        # when the geom looks like a placeholder. A geom bbox is the visual HULL -- it includes housings,
+        # brackets and overhang -- so it systematically over-reads: the Go2's thigh measured 0.373 m from its
+        # mesh against a true 0.213 m joint span, and the resulting oversized links drove grounded mass to
+        # 39.9 kg for a 15.2 kg robot. The old condition (`span > length_m * 1.8`) meant the exact span was
+        # DISCARDED exactly when the mesh was big, i.e. on every real mesh-based robot.
+        import numpy as _np
+        _v = _link_vector(mj, i, children)
+        _span = float(_np.linalg.norm(_v))
+        if _span >= 0.02:
+            length_m = float(min(1.5, _span))
+            shape = "capsule" if shape != "box" or length_m > 2.5 * radius_m else shape
+            radius_m = float(min(max(radius_m, 0.015), 0.12, max(0.015, _span * 0.28)))
+        # S_i rotates the segment so its local +z runs along the REAL link axis (see _link_vector).
+        _S = _rot_z_to(_v) if _span >= 1e-6 else _np.eye(3)
+        _rot_by_id[i] = _S
 
         joint_type, axis, lo, hi, torque = _joint_for_body(mj, i, jnts_of, jnt_force, bname, warnings)
+        axis = tuple(float(a) for a in (_S.T @ _np.asarray(axis, dtype=float)))   # axis into the segment frame
         is_leaf = i in leaves
         name_hit = any(h in bname.lower() for h in _EE_NAME_HINTS)
         if is_leaf or name_hit:
             ee_candidates.append(bname)
+        # CARRY THE CUSTOMER'S ACTUAL KINEMATICS. body_pos/body_quat are where this link really sits on its
+        # parent; without them every child defaults to mount_offset (0,0,0) and the whole robot COLLAPSES ONTO
+        # ONE POINT. Measured on the real Unitree Go2: our editable twin had all 13 links at (0,0,0) while the
+        # source places FL_hip at (0.193, 0.047, 0), FL_thigh at (0, 0.096, 0) and FL_calf at (0, 0, -0.213).
+        # The twin kept their link NAMES and masses but not their geometry, so "amend the customer's robot" was
+        # amending a pile of links -- and it verified CROUCH for a robot that walks. Note the span heuristic
+        # above already reads body_pos to infer a LENGTH; it just never kept the position itself.
+        #
+        # Two frames differ, and BOTH have to be converted or the twin is wrong in a different way each time:
+        #   * ORIGIN vs TIP  - MuJoCo's body_pos is relative to the parent's ORIGIN; our mount_offset is
+        #     relative to the parent's TIP (the compiler places a child at (mo.x, mo.y, parent.length + mo.z)).
+        #   * BODY vs LINK   - our segment's local +z IS the link axis, while a MuJoCo body's frame is whatever
+        #     the author chose. So everything expressed in the parent's body frame must be rotated into the
+        #     parent's LINK frame by S_p, and this segment's own rotation composes with its own S_i.
+        # Skipping the second conversion left joints correctly placed but every link body mirrored onto the
+        # wrong side of its joint (a Go2 rendered as pipes standing up through its own chassis).
+        if parent:
+            _Sp = _rot_by_id.get(int(mj.body_parentid[i]), _np.eye(3))
+            _p_len = float(seg_len_by_name.get(parent, 0.0))
+            _local = _Sp.T @ _np.asarray(mj.body_pos[i], dtype=float)      # parent body frame -> parent link frame
+            mount_offset = (float(_local[0]), float(_local[1]), float(_local[2]) - _p_len)
+            mount_euler = _mat_to_euler_xyz(_Sp.T @ _quat_mat(mj.body_quat[i]) @ _S)
+        else:
+            mount_offset, mount_euler = (0.0, 0.0, 0.0), _mat_to_euler_xyz(_S)
+        seg_len_by_name[bname] = length_m
+        # Keep the customer's OWN geometry on the editable segment (see _bake_source_mesh). Visual only: the
+        # collider stays the primitive derived above, so physics/MJX behaviour is unchanged and every existing
+        # amend operator keeps working on numbers it understands.
+        _geo = None
+        if _mesh_dir is not None:
+            _fp = _mesh_dir / f"{_slug_name(bname)}.stl"
+            if _bake_source_mesh(mj, i, _S, _fp):
+                _geo = {"family": "source_mesh", "path": str(_fp.resolve()).replace("\\", "/"),
+                        "provenance": "customer_import"}
         segments.append(GeneSegment(
             name=bname, parent=parent, shape=shape, length_m=length_m, radius_m=radius_m, mass_kg=mass,
             joint_type=joint_type, joint_axis=axis, joint_lower=lo, joint_upper=hi,
+            mount_offset=mount_offset, mount_euler=mount_euler, geometry=_geo,
             actuator_torque_nm=torque, is_end_effector=False))
 
     # Normalize the base: a RobotGene needs exactly ONE WELDED root. MuJoCo merges a URDF's fixed base
@@ -298,6 +492,13 @@ def _primary_geom(mj, body_id: int, GEOM, name_of, warnings: list[str]):
     if gtype == 2:        # sphere: size = (radius,)
         r = max(float(size[0]), 1e-3)
         return "capsule", 2 * r, r
+    if gtype == 7:        # MESH: geom_size carries the bbox half-extents, same convention as a box.
+        # This used to fall through to the generic branch below, which reads size[0] -- the X half-extent -- as
+        # the LENGTH. Real limb meshes are long in Z and thin in X, so every mesh link imported as its own
+        # thickness: a Unitree Go2 calf (half-extents 0.019 x 0.029 x 0.158) came in at 2*0.0188 = 37.6 mm
+        # against a true 213 mm, 5.7x too short. That is what left visible gaps between hip/thigh/calf in the
+        # render and made an imported Go2 verify CROUCH. Mesh links are the norm in any real robot description.
+        return "capsule", max(2 * float(size[2]), 1e-3), max(float(max(size[0], size[1])), 1e-3)
     return "box", max(2 * float(size[0]), 1e-3), max(float(size[0]), 1e-3)
 
 

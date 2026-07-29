@@ -260,8 +260,32 @@ def import_model(path: str) -> dict:
     repairs: list[dict] = []
     try:
         if sfx in (".xml", ".mjcf"):
-            mjcf = _ensure_floor(p.read_text(encoding="utf-8"))
-            model = mujoco.MjModel.from_xml_string(mjcf)            # validate it loads
+            # COMPILE FROM A PATH IN THE MODEL'S OWN DIRECTORY, never from a bare string. MuJoCo resolves
+            # <include file=...>, meshdir and every asset RELATIVE TO THE XML'S LOCATION, so from_xml_string has
+            # no directory context and any real-world model that ships its meshes beside it fails to load.
+            # Measured: all three canonical MuJoCo Menagerie robots failed this way --
+            #   unitree_go2/go2.xml   -> "Error opening file 'assets/base_0.obj'"
+            #   unitree_go2/scene.xml -> "Error opening file 'go2.xml'"   (the <include> itself)
+            #   unitree_h1/h1.xml     -> "Error opening file 'assets/pelvis.stl'"
+            # and each still returned a 0-body import. Menagerie is the most common source a customer brings, so
+            # "bring your own robot" was broken for the format it is most often brought in. The URDF branch below
+            # already had this right (it writes a SIBLING temp file "so relative meshes still resolve"); the MJCF
+            # branch never got the same treatment.
+            tmp_xml = p.with_name(p.stem + ".__mjcfprep__.xml")
+            try:
+                tmp_xml.write_text(_ensure_floor(p.read_text(encoding="utf-8")), encoding="utf-8")
+                model = mujoco.MjModel.from_xml_path(str(tmp_xml))
+            finally:
+                try:
+                    tmp_xml.unlink()
+                except OSError:
+                    pass
+            # Round-trip through the compiled model so the MJCF we hand downstream is self-contained (includes
+            # expanded, asset paths absolute) rather than only loadable from the source directory.
+            tmp = tempfile.NamedTemporaryFile(suffix=".xml", delete=False); tmp.close()
+            mujoco.mj_saveLastXML(tmp.name, model)
+            mjcf = _ensure_floor(Path(tmp.name).read_text(encoding="utf-8"))
+            os.unlink(tmp.name)
         elif sfx == ".urdf":
             # REPAIR FIRST (P0): a raw customer URDF (Go2!) may not compile. Try as-is, and on failure run the
             # deterministic repair pass and retry — so a clean file is untouched but a real one still loads.

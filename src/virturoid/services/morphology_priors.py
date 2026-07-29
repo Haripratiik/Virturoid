@@ -26,6 +26,12 @@ class MorphReport:
 QUAD_BANDS = {
     "dof_per_leg": (3, 4),          # abduction + hip + knee minimum (Go2 = 3/leg, 12 total)
     "leg_seg_aspect": (2.2, 30.0),  # length/diameter of thigh/shank; Go2-class ~4-6, blob dog was ~1.0
+    # The PROXIMAL abduction/rotation block is not a stride link and is a STUB on every real quadruped -- a Go2's
+    # is ~80 mm long on an ~80 mm body (aspect ~1.0), an MIT Mini Cheetah's abad is 62 mm. Holding it to the
+    # thigh/shank band would reject the real anatomy: it rejected OUR dog the moment we stopped cutting legs into
+    # equal stubs and gave it a real short hip, even though the same change took thigh/shank from 2.27 (barely
+    # clearing, i.e. sausages) to 4.33/5.28 (dead centre of the "real quads ~4-6" this file asks for).
+    "hip_block_aspect": (0.6, 30.0),
     "torso_LW": (1.2, 4.5),         # torso longer than wide (blob dog was 0.31: WIDER than long)
     "leg_len_frac": (0.35, 1.6),    # (thigh+shank)/torso_length
     "foot_limb_ratio": (0.0, 1.6),  # foot radius / shank radius (giant ball feet read as toys)
@@ -97,13 +103,18 @@ def validate_morphology(gene) -> MorphReport:
         measured["n_leg_chains"] = len(chains)
         if len(chains) < 4:
             issues.append(f"only {len(chains)} leg chains found (a quadruped needs 4)")
-        dofs, aspects, leg_lens = [], [], []
+        dofs, aspects, hip_aspects, leg_lens = [], [], [], []
         for ch in chains:
             act = actuated(ch)
             dofs.append(len(act))
-            for s in act:
-                if float(s.radius_m) > 1e-6:
-                    aspects.append(float(s.length_m) / (2.0 * float(s.radius_m)))
+            for i, s in enumerate(act):
+                if float(s.radius_m) <= 1e-6:
+                    continue
+                a = float(s.length_m) / (2.0 * float(s.radius_m))
+                # Split the PROXIMAL abduction block out of the stride-link band -- see hip_block_aspect. Only
+                # when there is a real 3+ DOF chain to split; a 2-segment leg has no separate abduction block,
+                # so its first link IS a stride link and stays in the strict band.
+                (hip_aspects if (i == 0 and len(act) >= 3) else aspects).append(a)
             leg_lens.append(sum(float(s.length_m) for s in act))
         if dofs:
             measured["dof_per_leg"] = dofs
@@ -117,6 +128,12 @@ def validate_morphology(gene) -> MorphReport:
             if min(aspects) < lo:
                 issues.append(f"leg segment aspect {min(aspects):.2f} < {lo} (length/diameter): stub 'sausage' "
                               f"segments read as a blob and give no stride (real quads ~4-6)")
+        if hip_aspects:
+            measured["min_hip_aspect"] = round(min(hip_aspects), 2)
+            lo, _ = QUAD_BANDS["hip_block_aspect"]
+            if min(hip_aspects) < lo:
+                issues.append(f"proximal hip block aspect {min(hip_aspects):.2f} < {lo}: even an abduction block "
+                              f"cannot be a pancake (a Go2's is ~1.0)")
         if base is not None and leg_lens and not _base_has_geo:
             frac = (sum(leg_lens) / len(leg_lens)) / max(1e-6, float(base.length_m))
             measured["leg_len_frac"] = round(frac, 2)

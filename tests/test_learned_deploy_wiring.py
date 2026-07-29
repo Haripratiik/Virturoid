@@ -124,7 +124,12 @@ def test_honest_gait_skips_learned_when_scripted_credible(monkeypatch, quad):
         raise AssertionError("learned recall must not run when the scripted gait is credible")
     monkeypatch.setattr(AIT, "_learned_gait_attempt", must_not_run)
     out = AIT._honest_gait(quad, steps=60)
-    assert str(out["verdict"]).startswith("CREDIBLE") and out["gait_source"] == "default_crawl"
+    # The contract is SCRIPTED-not-learned, not one particular scripted label. verify now reports the more
+    # precise provenance when the body carries its own tuned op-point ("tuned_for_this_body") instead of
+    # flattening everything scripted to "default_crawl" -- both are the scripted path, and the thing this test
+    # guards (the learned recall never running) is asserted by the must_not_run monkeypatch above.
+    assert str(out["verdict"]).startswith("CREDIBLE")
+    assert out["gait_source"] in ("default_crawl", "tuned_for_this_body"), out["gait_source"]
 
 
 # ---------------------------------------------------------------------------- F3: parity as an enforced gate

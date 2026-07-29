@@ -217,6 +217,118 @@ def set_leg_count(gene, *, n_pairs: int):
                "note": "topology changed (legs rebuilt); torso/appendage customization not carried over"}
 
 
+_ATTACH_SITES = {                      # where on the parent, as a fraction of its own extent (x_frac, y_frac, z_frac)
+    "top": (0.0, 0.0, 1.0), "bottom": (0.0, 0.0, -1.0), "front": (1.0, 0.0, 0.0),
+    "back": (-1.0, 0.0, 0.0), "left": (0.0, 1.0, 0.0), "right": (0.0, -1.0, 0.0), "tip": (0.0, 0.0, 0.0),
+}
+
+
+def add_limb(gene, *, parent: str | None = None, segments: int = 3, length_m: float = 0.25,
+             radius_m: float = 0.03, attach: str = "top", joint_axes: list | None = None,
+             end_effector: str = "gripper", name: str = "limb", taper: float = 0.82,
+             payload_kg: float = 0.5):
+    """STRUCTURAL edit: GROW A NEW ARTICULATED CHAIN on an existing body. 'Give it a third arm', 'add a tail',
+    'put a sensor mast on the back' are all this one op.
+
+    Every other operator RESIZES or RESTYLES what is already there -- measured, the whole edit vocabulary was
+    scale_group / set_height / scale_robot / set_material / set_leg_count / set_payload / adopt_walkable_template,
+    so a customer could make their robot taller but could not add anything to it. set_leg_count looks like an
+    exception but it REBUILDS the body from a template, discarding the customer's own robot.
+
+    Deliberately NOT ``add_arm``: an arm, a tail, a neck, a mast and a leg are the same structure -- a serial
+    chain of N tapering links with revolute joints, optionally ending in a tool. Encoding the ROLE in the op name
+    would mean a new op per body part, which is the enum-per-species trap this codebase keeps paying off. The
+    caller says how many links, how long, where they attach and what tops them; the role is just the name.
+
+    ``attach`` names a face of the parent ('top' for a back-mounted arm, 'front' for a head, 'tip' for a serial
+    extension) and is resolved against the PARENT'S OWN size, so the same call works on a Go2 and on a humanoid.
+    """
+    n = _num(segments, "segments", cast=int)
+    if not (1 <= n <= 8):
+        raise EditError(f"segments {segments} out of range [1, 8]")
+    seg_len = _num(length_m, "length_m")
+    seg_rad = _num(radius_m, "radius_m")
+    if not (0.01 <= seg_len <= 2.0):
+        raise EditError(f"length_m {length_m} out of range [0.01, 2.0] per link")
+    if not (0.004 <= seg_rad <= 0.3):
+        raise EditError(f"radius_m {radius_m} out of range [0.004, 0.3]")
+    site = str(attach or "top").lower()
+    if site not in _ATTACH_SITES:
+        raise EditError(f"attach {attach!r} unknown; use one of {sorted(_ATTACH_SITES)}")
+
+    from virturoid.schemas.gene import GeneSegment
+    g = _clone(gene)
+    by = {s.name: s for s in g.segments}
+    if parent:
+        host = by.get(str(parent))
+        if host is None:
+            raise EditError(f"no segment named {parent!r}; this robot has "
+                            f"{sorted(by)[:12]}{' ...' if len(by) > 12 else ''}")
+    else:                                          # default to the ROOT (the trunk/chassis), the usual mount
+        host = next((s for s in g.segments if s.parent is None), None)
+        if host is None:
+            raise EditError("this robot has no root segment to attach a limb to")
+
+    base = name if name not in by else f"{name}_{sum(1 for k in by if k.startswith(name)) + 1}"
+    fx, fy, fz = _ATTACH_SITES[site]
+    hr = float(host.radius_m or 0.03)
+    hl = float(host.length_m or 0.1)
+    # mount_offset is measured from the PARENT'S TIP (the compiler puts a child at (x, y, parent.length + z)),
+    # so a 'top' mount sits at the tip and a 'back' mount steps back along the parent's own length.
+    off = (round(fx * hl * 0.5, 5), round(fy * hr, 5), round((fz - 1.0) * hl * 0.5 if fz else -hl * 0.5, 5))
+    axes = list(joint_axes or [])
+    added = []
+    prev = host.name
+    for i in range(n):
+        axis = tuple(axes[i]) if i < len(axes) else ((0.0, 0.0, 1.0) if i == 0 else (0.0, 1.0, 0.0))
+        r_i = round(max(0.004, seg_rad * (taper ** i)), 5)
+        seg = GeneSegment(
+            name=f"{base}_{i}", parent=prev, shape="capsule", length_m=round(seg_len, 5), radius_m=r_i,
+            mass_kg=round(max(0.02, 1.2 * seg_len * r_i * 30), 4), joint_type="revolute", joint_axis=axis,
+            joint_lower=-2.6, joint_upper=2.6,
+            mount_offset=off if i == 0 else (0.0, 0.0, 0.0),
+            actuator_torque_nm=round(max(2.0, 40.0 * (taper ** i)), 2), is_end_effector=False)
+        g.segments.append(seg)
+        added.append(seg.name)
+        prev = seg.name
+    tool = str(end_effector or "").lower()
+    if tool in ("gripper", "hand", "tool", "pad"):
+        tip = GeneSegment(
+            name=f"{base}_{tool}", parent=prev, shape="box",
+            length_m=round(max(0.03, 0.28 * seg_len), 5), radius_m=round(max(0.008, seg_rad * 0.9), 5),
+            mass_kg=round(max(0.02, 0.35 * seg_len * seg_rad * 30), 4), joint_type="fixed",
+            is_end_effector=False)
+        g.segments.append(tip)
+        added.append(tip.name)
+
+    # SIZE EACH MOTOR FROM THE LOAD IT ACTUALLY HOLDS, not a constant. Measured with a flat 40 N.m placeholder,
+    # re-grounding drove every joint of a 0.22 m arm link to 520 N.m and the catalog -- correctly -- answered
+    # with a 104 mm motor, giving a can/tube ratio of 2.21. That is the "long stick with two circles": the
+    # actuator models are real, the SPEC handed to them was not. For reference a Unitree Z1 (the arm that
+    # actually mounts on a Go2) lifts 3 kg at 0.7 m on ~30 N.m joints, and on every real arm the joint housing
+    # and the link tube are near the SAME diameter (UR5e ~127 mm tapering to ~90 mm, housings matching) -- the
+    # arm reads as a continuous limb, never as beads on a rod.
+    #
+    # Static worst case: everything distal to this joint held at full extension. Mass acts at the sub-chain's
+    # centroid, so torque = m_downstream * g * r_centroid, x1.5 for dynamics/grip margin.
+    _new = [s for s in g.segments if s.name in added]
+    _pk = max(0.0, _num(payload_kg, "payload_kg"))
+    for idx, s in enumerate(_new):
+        if s.joint_type != "revolute":
+            continue
+        downstream = _new[idx:]
+        m_down = sum(float(x.mass_kg or 0.0) for x in downstream) + _pk
+        reach = sum(float(x.length_m or 0.0) for x in downstream)
+        r_com = (0.5 * reach) if _pk <= 0 else (0.5 * reach * (1 - _pk / max(m_down, 1e-6))
+                                                + reach * (_pk / max(m_down, 1e-6)))
+        s.torque_req_nm = round(max(1.0, m_down * 9.81 * max(r_com, 0.02) * 1.5), 2)
+        s.actuator_torque_nm = s.torque_req_nm
+    _reground_and_gate(g, material=_dominant_material(gene))
+    return g, {"op": "add_limb", "parent": host.name, "attach": site, "segments_added": added,
+               "n_actuated_added": n, "structural": True,
+               "note": f"grew a {n}-link chain on {host.name!r}; the robot's existing structure is untouched"}
+
+
 def set_payload(gene, *, payload_kg: float = 2.0, girth_scale: bool = True):
     """CAPABILITY amend: make the robot CARRY / LIFT a target payload by upsizing its actuators (and, optionally,
     the load-path link girth) so its joints can hold the extra load. The actuated joints must support the robot's
@@ -290,9 +402,10 @@ OPERATORS = {
     "set_material": set_material,
     "set_leg_count": set_leg_count,
     "set_payload": set_payload,
+    "add_limb": add_limb,
     "adopt_walkable_template": adopt_walkable_template,
 }
-_STRUCTURAL = {"set_leg_count", "adopt_walkable_template"}
+_STRUCTURAL = {"set_leg_count", "adopt_walkable_template", "add_limb"}
 
 
 def op_specs() -> list[dict]:
@@ -305,6 +418,12 @@ def op_specs() -> list[dict]:
         {"op": "set_material", "args": {"group": list(_GROUP_WORDS) + ["all"], "material": "steel|aluminum|carbon_fiber|titanium|..."},
          "for": "change what a part is made of"},
         {"op": "set_leg_count", "args": {"n_pairs": "1-8"}, "for": "STRUCTURAL: change how many legs (rebuilds)"},
+        {"op": "add_limb", "args": {"parent": "<segment name, default the root>", "segments": "1-8",
+                                    "length_m": "0.01-2.0", "radius_m": "0.004-0.3",
+                                    "attach": sorted(_ATTACH_SITES), "end_effector": "gripper|hand|tool|pad|none",
+                                    "name": "<prefix, e.g. arm3 / tail / mast>"},
+         "for": "STRUCTURAL: GROW a new articulated chain on the existing body — 'add a third arm', 'add a "
+                "tail', 'put a sensor mast on the back'. Keeps the robot; only adds."},
         {"op": "set_payload", "args": {"payload_kg": "0.1-50.0", "girth_scale": "true|false"},
          "for": "make it CARRY/LIFT heavier: upsize actuators (+ load-path girth) for the payload; BOM/mass rise"},
         {"op": "adopt_walkable_template", "args": {},

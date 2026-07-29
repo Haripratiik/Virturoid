@@ -335,7 +335,10 @@ def morphology_from_requirements(reach_m: float, payload_kg: float, *, prompt: s
                  "geometry": _role("quad_calf", _cl, 0.030 * s)},                             # calf (shin)
                 {"length": 0.05 * s, "axis": (0, 1, 0), "torque": round(6.0 * st, 2), "radius": 0.038 * s,
                  "mass": 0.3 * sm * mp, "joint": "fixed", "shape": "box",
-                 "geometry": {"family": "extrude", "height": 0.05 * s,
+                 # anatomy_role is ADDITIVE: family stays "extrude" so _physics_proxy_from_geometry picks the
+                 # identical box collider, but the mesh layer builds the real heel->toe sole instead of the
+                 # rectangular slab that rendered as a white brick under every leg.
+                 "geometry": {"family": "extrude", "height": 0.05 * s, "anatomy_role": "foot_pad",
                               "profile": [[-0.045 * s, -0.022 * s], [0.045 * s, -0.022 * s],
                                           [0.045 * s, 0.022 * s], [-0.045 * s, 0.022 * s]],
                               "fillet": 0.006 * s}}]                                          # foot pad

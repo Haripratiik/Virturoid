@@ -238,10 +238,15 @@ def _visual_matches_link(geom: dict, seg) -> dict:
 
 
 def build_link_solid(shape: str, length_m: float, radius_m: float, actuated: bool,
-                     actuator_spec: dict | None = None):
+                     actuator_spec: dict | None = None, *, motor_boss: bool = True):
     """A DETAILED, manufacturable link solid (mm): a slim structural body, mounting collars at both ends,
     and — for an actuated link — a real servo housing with an output horn at the proximal (joint) end.
-    This is what closes the mechanical-detail gap vs a bare capsule (real robots show housings/brackets)."""
+    This is what closes the mechanical-detail gap vs a bare capsule (real robots show housings/brackets).
+
+    ``motor_boss=False`` builds the STRUCTURE only (body + collars, no motor). Use it when the consumer draws
+    the actuator itself — the MJCF render path emits a datasheet-sized ``_act`` geom per revolute joint, and
+    fusing a second copy here put two coincident surfaces in the same place, which z-fights into a visible
+    sawtooth seam around every joint."""
     import build123d as bd
 
     L = max(20.0, length_m * 1000.0)
@@ -254,7 +259,7 @@ def build_link_solid(shape: str, length_m: float, radius_m: float, actuated: boo
         for z in (L / 2, -L / 2):                    # small mounting collars where it bolts to its neighbours
             with bd.Locations((0, 0, z)):
                 bd.Cylinder(R * 0.8, R * 0.35)
-        if actuated:
+        if actuated and motor_boss:
             # The motor boss is a property of the selected BUYABLE actuator, not of the link radius. It is
             # centered on the proximal joint and oriented across the link, matching the viewport/BOM source.
             env = tuple(float(v) * 1000.0 for v in (actuator_spec or {}).get("envelope_m", ()))
@@ -395,15 +400,19 @@ def build_anatomy(role: str, length_m: float, radius_m: float):
             (0.35 * L, R * 1.0, R * 0.55),
             (0.75 * L, R * 0.9, R * 0.45),
             (L,        R * 0.5, R * 0.30)])
-    if role == "foot_pad":                           # a forward-pointing sole (heel -> toe), +x = forward
-        with bd.BuildPart() as p:
-            with bd.BuildSketch(bd.Plane.XY) as _sk:
-                with bd.BuildLine():
-                    bd.Polyline((-0.5 * R, -0.95 * R), (2.4 * R, -0.72 * R),
-                                (2.4 * R, 0.72 * R), (-0.5 * R, 0.95 * R), close=True)
-                bd.make_face()
-            bd.extrude(amount=max(8.0, 0.9 * L))
-        return _fil(p.part, 0.28 * R)
+    if role == "foot_pad":
+        # A SOLE: long FORWARD, wide laterally, THIN vertically. The link frame is [0, L] along +z and the ankle
+        # re-aims +z forward, so forward=z, thickness=x, width=y — matching the anatomy compiler's own foot spec.
+        # This used to lay a heel->toe polyline in XY and THEN extrude 0.9L along z, making the part long in x
+        # AND long in z: a ~174 x 114 x 144 mm cube for a humanoid foot, and a brick standing on its end for a
+        # quadruped. A foot that is as tall as it is long is the single most toy-like part on the whole robot.
+        # NB _loft_solid takes (z, half_Y, half_X) — y is the lateral WIDTH, x the vertical THICKNESS, matching
+        # the anatomy compiler's own foot profile [[-th, -w/2], [th, ...]].
+        return _loft_solid(bd, [
+            (0.00,     R * 0.84, R * 0.55),           # heel — narrower across, thicker
+            (0.18 * L, R * 0.98, R * 0.62),           # widest, just ahead of the heel
+            (0.62 * L, R * 0.92, R * 0.46),           # midfoot
+            (L,        R * 0.60, R * 0.32)])          # toe — thin and tapered
     if role == "mount_base":                         # pedestal: wide base flange + a motor drum
         with bd.BuildPart() as p:
             with bd.Locations((0, 0, 0.12 * L)):
@@ -414,10 +423,10 @@ def build_anatomy(role: str, length_m: float, radius_m: float):
     return _spindle(R)                               # actuator_segment / thigh / shin / arm / quad limb roles
 
 
-def _seg_mesh_fp(out, s, *, kitbash: bool, synth: bool):
+def _seg_mesh_fp(out, s, *, kitbash: bool, synth: bool, actuator_in_mesh: bool = True):
     """The per-segment visual-mesh cache path + resolved kit-bash role. Shared by ``build_visual_meshes`` and
     ``prebake_synth_meshes`` so a parallel pre-bake writes the exact files the compiler later reads. The
-    content hash includes geometry + kit-bash/synth flags, so any change re-bakes."""
+    content hash includes geometry + kit-bash/synth/actuator flags, so any change re-bakes."""
     import hashlib
     import json
     actuated = s.joint_type in ("revolute", "prismatic")
@@ -429,11 +438,13 @@ def _seg_mesh_fp(out, s, *, kitbash: bool, synth: bool):
         if not has_part(kit_role):
             kit_role = None
     sig = json.dumps([s.shape, round(s.length_m, 5), round(s.radius_m, 5), actuated, geom,
-                      bool(kit_role), bool(synth)], sort_keys=True, default=str)
+                      bool(kit_role), bool(synth)]
+                     + ([] if actuator_in_mesh else ["noact"]), sort_keys=True, default=str)
     return out / f"{s.name}_{hashlib.md5(sig.encode()).hexdigest()[:10]}.stl", kit_role
 
 
-def prebake_synth_meshes(gene, out_dir: str, *, kitbash: bool = True, llm=None, max_workers: int = 6) -> int:
+def prebake_synth_meshes(gene, out_dir: str, *, kitbash: bool = True, llm=None, max_workers: int = 6,
+                         actuator_in_mesh: bool = True) -> int:
     """Pre-synthesize, IN PARALLEL, the AI mesh for every ``geometry.family=='synth'`` segment into the
     cache, so a later ``gene_to_meshed_mjcf(gene, synth=True)`` is instant. LLM calls are I/O-bound and the
     mesh build is pure numpy, so threading is safe and a whole body takes ~one part's wall-clock instead of
@@ -450,7 +461,7 @@ def prebake_synth_meshes(gene, out_dir: str, *, kitbash: bool = True, llm=None, 
         geom = getattr(s, "geometry", None)
         if not (isinstance(geom, dict) and geom.get("family") == "synth"):
             continue
-        fp, _ = _seg_mesh_fp(out, s, kitbash=kitbash, synth=True)
+        fp, _ = _seg_mesh_fp(out, s, kitbash=kitbash, synth=True, actuator_in_mesh=actuator_in_mesh)
         if fp.exists():
             continue
         jobs.append((geom.get("desc") or f"a robot {s.name} part", s.length_m, s.radius_m, str(fp)))
@@ -467,7 +478,7 @@ def prebake_synth_meshes(gene, out_dir: str, *, kitbash: bool = True, llm=None, 
 
 
 def build_visual_meshes(gene, out_dir: str, *, cache: bool = True, kitbash: bool = False,
-                        synth: bool = False) -> dict:
+                        synth: bool = False, actuator_in_mesh: bool = True) -> dict:
     """Generate a per-segment VISUAL STL normalized to the link's ``[0, length]`` body frame so it drops
     straight onto the compiler's primitive (which spans 0..length along local +z). This is the mesh layer
     that makes a compiled body render like real hardware instead of a bare capsule.
@@ -477,6 +488,12 @@ def build_visual_meshes(gene, out_dir: str, *, cache: bool = True, kitbash: bool
     (slim body + collars + motor housing). Only PRISMATIC segments (gripper/hand fingers) are skipped — they
     keep their primitive. (Previously geometry segments were ALSO skipped, which silently discarded the
     detailed shapes and was the second root cause of the toy look.)
+
+    ``actuator_in_mesh`` decides who owns the JOINT MOTOR. Default True fuses the selected actuator's envelope
+    into the STL, which is right for URDF/CAD consumers that have no other way to show it. The MJCF render path
+    passes False, because ``compile_gene_to_mjcf(show_actuators=True)`` already emits a datasheet-sized ``_act``
+    geom per revolute joint: with both on, the same can was drawn TWICE from two sources, and the coincident
+    surfaces z-fought into a sawtooth seam ringing every joint on every legged body.
 
     Cached by a content hash of the segment's shape params INCLUDING its geometry spec, so re-rendering the
     same body is instant but a changed shape re-bakes. Returns ``{segment_name: absolute_stl_path}``.
@@ -497,7 +514,15 @@ def build_visual_meshes(gene, out_dir: str, *, cache: bool = True, kitbash: bool
         geom = getattr(s, "geometry", None)
         # Kit-bash a real, license-clean link mesh for this part when enabled and one is catalogued for the
         # role; otherwise synth / procedural anatomy / generic detail. Flags are in the cache key (toggle rebakes).
-        fp, kit_role = _seg_mesh_fp(out, s, kitbash=kitbash, synth=synth)
+        # THE CUSTOMER'S OWN MESH WINS. An imported segment carries family="source_mesh" pointing at that link's
+        # real geometry, baked into this segment's frame at import. Never re-synthesize over it: the whole point
+        # of ingesting someone's robot is that the robot stays theirs.
+        if isinstance(geom, dict) and geom.get("family") == "source_mesh":
+            src = Path(str(geom.get("path") or ""))
+            if src.is_file():
+                meshes[s.name] = str(src.resolve()).replace("\\", "/")
+                continue
+        fp, kit_role = _seg_mesh_fp(out, s, kitbash=kitbash, synth=synth, actuator_in_mesh=actuator_in_mesh)
         if not (cache and fp.exists()):
             baked = None
             if kit_role is not None:                 # real Menagerie link mesh, fitted to this link's frame
@@ -514,12 +539,13 @@ def build_visual_meshes(gene, out_dir: str, *, cache: bool = True, kitbash: bool
                 except Exception:  # noqa: BLE001 - degenerate bbox -> assume already floored
                     minz = 0.0
                 solid = solid.moved(bd.Location((0, 0, -minz)))
-                solid = _add_selected_actuator_housing(solid, s, proximal_z_mm=0.0)
+                if actuator_in_mesh:
+                    solid = _add_selected_actuator_housing(solid, s, proximal_z_mm=0.0)
                 bd.export_stl(solid, str(fp))
             elif baked is None:                      # generic detailed link: centered [-L/2,L/2] -> +L/2 to [0,L]
                 from virturoid.services.component_geometry import actuator_for_joint
                 solid = build_link_solid(s.shape, s.length_m, s.radius_m, actuated,
-                                         actuator_spec=actuator_for_joint(s))
+                                         actuator_spec=actuator_for_joint(s), motor_boss=actuator_in_mesh)
                 solid = solid.moved(bd.Location((0, 0, s.length_m * 1000.0 / 2.0)))
                 bd.export_stl(solid, str(fp))
         meshes[s.name] = str(fp.resolve()).replace("\\", "/")

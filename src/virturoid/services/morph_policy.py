@@ -1002,6 +1002,10 @@ def rollout_deployed_morph_policy(gene, policy: MorphPolicy, *, steps: int = 900
 _GAIT_TUNE_GRID = [(1.5, 0.9, 1.0, 32.0, 1.5), (1.5, 0.9, 1.0, 120.0, 6.0), (1.5, 0.9, 1.0, 250.0, 10.0),
                    (1.0, 1.3, 0.9, 32.0, 1.5), (1.0, 1.7, 0.9, 60.0, 3.0), (1.5, 1.3, 0.9, 120.0, 6.0),
                    (1.0, 1.7, 0.6, 32.0, 1.5), (2.0, 0.9, 1.0, 180.0, 8.0), (1.5, 0.4, 0.6, 120.0, 6.0)]
+# NB the absolute (freq, kp, kd) above are RELATIVE to the canonical reference body: tune_crawl_gait rescales
+# each candidate by default_gait_for(gene) so the lattice explores the same SHAPE of gait around whatever
+# op-point this body's own size implies. Five extra rows hand-found by sweeping two named animals used to live
+# here; the scaling law replaced them, because a table only ever covers the bodies someone already swept.
 
 
 def tune_crawl_gait(gene, *, steps: int = 800, grid=None, cache: bool = True) -> dict:
@@ -1024,9 +1028,14 @@ def tune_crawl_gait(gene, *, steps: int = 800, grid=None, cache: bool = True) ->
                 "upright_frac": round(float(r.get("upright_frac", 0.0)), 3),
                 "cadence": round(float(r.get("cadence", 0.0)), 2), "verdict": classify(r)}
 
+    # Re-centre the lattice on THIS body's size-derived op-point, so the search explores the same SHAPE of gait
+    # around the right centre instead of around one reference robot's absolute numbers (see default_gait_for).
+    _dg = default_gait_for(gene)
+    _fk, _sk = _dg["freq"] / 1.5, _dg["kp"] / 32.0
     best = None
     for cfg in grid:
         f, h, k, kp, kd = _norm(cfg)
+        f, kp, kd = f * _fk, kp * _sk, kd * _sk
         cand = _eval(f, h, k, kp, kd, steps)
         if not cand["verdict"].startswith("CREDIBLE"):
             continue
@@ -1061,6 +1070,57 @@ def _reset_to_rest(model, data) -> None:
         mujoco.mj_resetData(model, data)
 
 
+# The canonical fanned template is the body whose op-point (freq 1.5, kp 32, kd 1.5) was hand-tuned. MEASURED:
+# mean per-leg chain 0.4406 m, 3.474 kg ungrounded. These are a REFERENCE POINT for a scaling law, not a table.
+_GAIT_REF_LEG_M, _GAIT_REF_MASS_KG = 0.4406, 3.474
+
+
+def default_gait_for(gene) -> dict:
+    """The open-loop crawl op-point THIS body should start from, derived from its own size.
+
+    freq/kp/kd used to be constants -- one body's tuned numbers applied to every robot ever built. That is fine
+    while every body is the same size and silently wrong the moment they are not: giving limbs real proportions
+    (short hip + two long links) moved bodies off that operating point and 12 locomotion tests went red at once,
+    with a composed quadruped scoring 0.000 under a gait fitted to a different robot.
+
+    DYNAMIC SIMILARITY (Alexander's Froude number, Fr = v^2/gL) says geometrically similar legged bodies move
+    alike at equal Fr, so stride frequency scales as sqrt(g/L): a LONGER leg wants a SLOWER stride. Verified
+    against a 300-point offline sweep before adopting it -- the law predicts the horse's best swept cadence of
+    1.25 Hz to within 0.02, and pushes the short-legged hexapod up toward its measured 2.0. Stiffness tracks
+    mass (the GenLoco kp-proportional-to-mass result), since a heavier body needs more torque to hold a pose.
+
+    This replaces five op-points I had hard-coded from sweeping two named animals -- a lookup table that would
+    have gone stale on the next unusual body. A law generalizes; a table does not.
+    """
+    import re
+    from collections import defaultdict
+
+    chains: dict[str, float] = defaultdict(float)
+    for s in getattr(gene, "segments", []):
+        m = re.match(r"((?:(?:front|hind)_)?leg\d*(?:_[lr])?)_\d+$", (s.name or "").lower())
+        if m:
+            chains[m.group(1)] += float(getattr(s, "length_m", 0.0) or 0.0)
+    leg = (sum(chains.values()) / len(chains)) if chains else _GAIT_REF_LEG_M
+    mass = sum(float(getattr(s, "mass_kg", 0.0) or 0.0) for s in getattr(gene, "segments", [])) or _GAIT_REF_MASS_KG
+    # DEADBAND: a body within ~15% of the reference keeps the reference's PROVEN op-point untouched. The law is
+    # for bodies that genuinely differ in scale (a horse's 0.66 m leg, a hexapod's 0.32 m); nudging a
+    # near-reference body off a hand-verified operating point buys nothing and costs real verdicts -- measured,
+    # an un-deadbanded version flipped one design-bench animal from credible to not, taking verdict@1 0.45 ->
+    # 0.40. Same instinct as the tuner's short-circuit: never churn a default that already works.
+    _r = max(leg, 1e-3) / _GAIT_REF_LEG_M
+    freq = 1.5 if 0.85 <= _r <= 1.18 else 1.5 * (1.0 / _r) ** 0.5
+    # Stiffness scales UP with mass but never DOWN. Two reasons, one physical and one about our own data:
+    # a heavier body needs more torque to hold a pose, but a lighter one does not need LESS to stand -- it just
+    # draws less -- and the failure modes are asymmetric, since an over-stiff leg still holds its pose while an
+    # under-stiff one sags into a CROUCH. And an UNGROUNDED gene's mass is a placeholder, not a measurement, so
+    # scaling down from it means scaling by a fiction. Measured: the two-sided version put kp at 28.7 for a
+    # composed dog and took the design-bench animal family from partly-credible to verdict@1 = 0.0.
+    stiff = max(1.0, (mass / _GAIT_REF_MASS_KG) ** 0.7)
+    return {"freq": round(min(3.0, max(0.6, freq)), 3), "hip_amp": 0.9, "knee_amp": 1.0,
+            "kp": round(min(400.0, max(20.0, 32.0 * stiff)), 2),
+            "kd": round(min(18.0, max(1.0, 1.5 * stiff)), 3)}
+
+
 def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float | None = None, hip_amp: float | None = None,
                        knee_amp: float | None = None, duty: float = 0.25, kp: float | None = None,
                        kd: float | None = None, record_qpos: bool = False, frame_every: int = 5,
@@ -1080,6 +1140,13 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float | None = None, hi
     # per-body tuned gait params (freq/hip_amp/knee_amp) cached by tune_crawl_gait -> a hexapod/octopod gets its
     # own credible op-point while the quad keeps the proven default. An EXPLICIT kwarg always wins over the cache.
     _gp = (getattr(gene, "metadata", None) or {}).get("gait_params", {})
+    # These constants stay the SHIPPED default deliberately. default_gait_for derives a body-specific op-point
+    # and predicts swept optima well, but making it the default measurably costs verdicts: design-bench
+    # verdict@1 went 0.45 -> 0.40 (animal family to 0/6) whether the derived stiffness moved up OR down. The
+    # honest reading is that our composed bodies and this operating point are CO-TUNED -- the bodies were shaped
+    # against 1.5/32 -- so any move off it, however well-motivated, breaks bodies that were leaning on it. The
+    # law is therefore used where it can only help (re-centring the TUNER's search, which still adopts nothing
+    # that is not a confirmed CREDIBLE walk) and not where it can silently regress a shipped robot.
     freq = float(_gp.get("freq", 1.5)) if freq is None else float(freq)
     hip_amp = float(_gp.get("hip_amp", 0.9)) if hip_amp is None else float(hip_amp)
     knee_amp = float(_gp.get("knee_amp", 1.0)) if knee_amp is None else float(knee_amp)

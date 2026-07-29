@@ -240,7 +240,10 @@ def gene_to_meshed_mjcf(gene: RobotGene, cache_dir: str = "build/_viewmesh", *,
     meshes: dict | None = None
     try:
         from virturoid.services.cad_geometry import build_visual_meshes
-        meshes = build_visual_meshes(gene, cache_dir, kitbash=kitbash, synth=synth) or None
+        # actuator_in_mesh=not show_actuators: whoever is NOT drawing the datasheet _act geom owns the motor.
+        # Letting both draw it put two coincident cans in the same place and z-fought into a sawtooth seam.
+        meshes = build_visual_meshes(gene, cache_dir, kitbash=kitbash, synth=synth,
+                                     actuator_in_mesh=not show_actuators) or None
     except Exception:  # noqa: BLE001 - missing CAD kernel / mesh-gen failure -> primitive fallback
         meshes = None
     sensor_geoms = None
@@ -278,7 +281,9 @@ def write_packaged_visual_mjcf(gene: RobotGene, package_dir: str | Path, *,
     try:
         from virturoid.services.cad_geometry import build_visual_meshes
 
-        absolute_meshes = build_visual_meshes(gene, str(asset_dir), cache=True) or {}
+        # This package compiles with show_actuators=True below, so the compiler draws the motors; leaving them
+        # in the mesh too would double-draw every joint (see build_visual_meshes' actuator_in_mesh).
+        absolute_meshes = build_visual_meshes(gene, str(asset_dir), cache=True, actuator_in_mesh=False) or {}
         if not absolute_meshes:
             return None
         model_path.parent.mkdir(parents=True, exist_ok=True)
@@ -664,12 +669,18 @@ def _detail_geoms_xml(seg, pad: str, *, suppress_motor: bool = False) -> str:
         tail = name_l.rsplit("_", 1)
         idx = int(tail[1]) if len(tail) == 2 and tail[1].isdigit() else 0
         if welded and 0.02 < L:                        # terminal welded segment == foot -> rubber boot pad
-            # Center the boot UP the foot so its distal extent (pos + boot_r) aligns with the foot capsule's own
-            # distal cap (L + R) — a boot at the tip with a bigger radius hangs below the collision contact and
-            # reads as a spawn penetration (the standing-spawn test measures EVERY geom's oriented AABB). Aligned,
-            # the visible pad wraps the foot without ever protruding past the surface the robot actually stands on.
-            boot_r = R
-            boot_z = L + R - boot_r
+            # Center the boot UP the foot so its distal surface lands exactly on the segment's own COLLISION
+            # extent — a pad hanging below the contact surface reads as a spawn penetration (the standing-spawn
+            # test measures every geom's oriented AABB) and makes the robot look like it is sinking into the floor.
+            # That extent is shape-dependent: a capsule's distal cap is at L + R, but a BOX or cylinder foot ends
+            # flat at L. This assumed a capsule for every foot, and the composer emits BOX feet — so every walking
+            # body carried a pad protruding R (38 mm on a quadruped) past the surface it actually stands on. It
+            # went unseen because the foot's VISUAL mesh used to be an oversized brick that reached even further,
+            # so standing_spawn_z (which measures the meshed model) lifted the body enough to cover it. Fixing the
+            # foot mesh removed that accidental cover and exposed this.
+            distal = L + R if seg.shape == "capsule" else L
+            boot_r = max(0.004, min(R, 0.45 * L))
+            boot_z = distal - boot_r
             parts.append(
                 f'{pad}<geom name="{escape(seg.name)}_boot" type="sphere" pos="0 0 {boot_z:.5f}" '
                 f'size="{boot_r:.5f}" material="mat_rubber"{vis}/>')

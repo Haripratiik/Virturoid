@@ -548,7 +548,22 @@ def _honest_gait(gene, *, steps: int = 1200, render: bool = False, tag: str = "g
     # so the product's legged robots walk with learned control that compounds over builds — else the shipped default.
     gait_params: dict = {}
     gait_source = "default_crawl"
+    # THIS BODY'S OWN TUNED OP-POINT FIRST. tune_crawl_gait fits (freq, hip, knee, kp, kd) to this gene, confirms
+    # it on a second longer rollout, and caches it on metadata['gait_params'] -- but verify never read it, so a
+    # body we had just tuned was still judged under the shipped default. Measured: the horse tuned to a confirmed
+    # CREDIBLE WALK at 1.26 m and then verified as "LURCHES (pitch 31 / roll 44)", because the verdict came from
+    # a gait fitted to a different body. Params measured ON THIS BODY beat both the generic default and a mined
+    # cross-body hint region, and the deploy-select comparison below still guards it against the default.
     try:
+        _own = (getattr(gene, "metadata", None) or {}).get("gait_params") or {}
+        _own = {k: float(_own[k]) for k in ("freq", "hip_amp", "knee_amp", "duty", "kp", "kd") if k in _own}
+        if _own:
+            gait_params, gait_source = _own, "tuned_for_this_body"
+    except Exception:  # noqa: BLE001 - a malformed cache must never block the verdict
+        gait_params = {}
+    try:
+        if gait_params:
+            raise LookupError("this body has its own measured op-point; no cross-body hint needed")
         # FLYWHEEL = HINTS, NOT COPY-PASTE. Rather than deploy one banked body's exact params verbatim (a trap on a
         # slightly-different body), start from the mined HINT REGION — where credible walks CLUSTER across bodies,
         # auto-derived from data (gait_hints). A quick verify uses this data-driven prior; the ``adapt_gait`` tool
@@ -572,7 +587,8 @@ def _honest_gait(gene, *, steps: int = 1200, render: bool = False, tag: str = "g
                                if k in _p}
                 gait_source = "flywheel_hint"                    # a data-driven hint region, not a copied policy
     except Exception:  # noqa: BLE001 - the flywheel is an accelerant; a miss just uses the default gait
-        gait_params = {}
+        if gait_source != "tuned_for_this_body":                 # never discard THIS body's own measured op-point
+            gait_params = {}
     r = crawl_gait_rollout(gene, steps=steps, record_qpos=True, **gait_params)
     # DEPLOY-SELECT safety net: a recalled gait must never make THIS body walk worse than the shipped default
     # (gene-construction paths differ, so a banked gait may not fit every body). When a gait was recalled, ALSO

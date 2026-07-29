@@ -178,7 +178,33 @@ def critique_gene(gene, *, expected: str | None = None) -> dict:
             add("head_top", "med", "no clear head/upper mass at the top third", None)
 
     if kind in ("quadruped", "legged"):
-        ar = measures["aspect_w_h"]
+        # MEASURE THE LOAD-BEARING STRUCTURE, NOT THE PAYLOAD. The stance rule is about whether the body is
+        # stable on its legs -- a wide base under a low chassis. Taking W:H over EVERY geom means anything
+        # mounted ON TOP of a legged robot is scored as if it were part of the stance: a back-mounted
+        # manipulator dropped a Go2 from W:H 0.99 to 0.56 and auto-reverted the edit that added it. That is a
+        # real, shipping robot class (Spot+Arm, Unitree B1+Z1, Go2+Z1), so the rule was rejecting a capability
+        # rather than a defect. It is general, not arm-specific: a sensor mast or a tall cargo box on a rover
+        # would have tripped it the same way.
+        #
+        # A geom is load-bearing if it belongs to a chain that REACHES THE GROUND -- i.e. its body, or one of
+        # its descendants, comes near the floor. Everything else is carried, and carried mass has no business
+        # in a stance ratio (it is judged by the balance/payload checks instead).
+        _ground_z = lo[2] + 0.12 * max(height, 1e-6)
+        _reaches = set()
+        for _gi, _g in enumerate(keep):
+            if float(P[_gi][2] - rb[_gi]) <= _ground_z:
+                _b = int(m.geom_bodyid[_g])
+                while _b > 0:                                  # mark the whole chain up to the root
+                    _reaches.add(_b)
+                    _b = int(m.body_parentid[_b])
+        _idx = [i for i, g in enumerate(keep) if int(m.geom_bodyid[g]) in _reaches] or list(range(len(keep)))
+        _Pl, _rl = P[_idx], rb[_idx]
+        _lol, _hil = (_Pl - _rl[:, None]).min(0), (_Pl + _rl[:, None]).max(0)
+        _hs = float(_hil[2] - _lol[2]) or height
+        _ws = float(max(_hil[0] - _lol[0], _hil[1] - _lol[1]))
+        ar = round(_ws / _hs, 3) if _hs > 1e-6 else 0.0
+        measures["stance_aspect_w_h"] = ar
+        measures["carried_geoms"] = len(keep) - len(_idx)
         if ar < 0.8:
             add("stance", "high", f"too tall/narrow for a legged body (W:H={ar:.2f}; want wider-than-tall)", ar)
         # feet near the floor

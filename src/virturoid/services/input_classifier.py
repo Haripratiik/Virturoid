@@ -85,8 +85,40 @@ def _slug(value: str) -> str:
     return re.sub(r"[^a-zA-Z0-9]+", "_", value.lower()).strip("_") or "project"
 
 
-def _make_artifact(index: int, rel_path: str, size: int | None, checksum: str | None) -> InputArtifact:
+_XML_ROOTS = (("<mujoco", "robot_model"), ("<robot", "robot_model"), ("<sdf", "world_or_model"))
+
+
+def sniff_xml_model(path: str) -> str | None:
+    """Return the artifact type for a ``.xml`` whose ROOT ELEMENT says it is a robot description, else None.
+
+    ``.xml`` is genuinely ambiguous (configs, launch files, ROS manifests), so the extension map parks it at the
+    non-committal ``xml_model`` -- but ``project_graph_summary`` only accepts ``robot_model``/``world_or_model``
+    as a sim target, so a real MJCF was scanned, recognized, and then silently excluded. That mattered because
+    MuJoCo models are conventionally shipped as ``.xml``, not ``.mjcf`` -- the whole MuJoCo Menagerie is. Measured
+    on Menagerie's unitree_go2 folder: robot_models=[], "No robot description found", lane_used=none, and
+    ingest_project then synthesized a DEFAULT body and reported "Ready to edit/verify" -- a 67 kg humanoid
+    standing in for a 15 kg quadruped, with no warning that the customer's own robot had never been read.
+
+    Deciding by CONTENT keeps package.xml/launch files where they belong while letting real models through.
+    """
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(4096).decode("utf-8", errors="ignore").lower()
+    except OSError:
+        return None
+    for token, artifact_type in _XML_ROOTS:
+        if token in head:
+            return artifact_type
+    return None
+
+
+def _make_artifact(index: int, rel_path: str, size: int | None, checksum: str | None,
+                   full_path: str | None = None) -> InputArtifact:
     artifact_type, category, recognized = classify_name(rel_path)
+    if artifact_type == "xml_model" and full_path:
+        sniffed = sniff_xml_model(full_path)
+        if sniffed:
+            artifact_type, category, recognized = sniffed, "model", True
     return InputArtifact(
         id=f"art_{index:04d}",
         artifact_type=artifact_type,
@@ -119,7 +151,7 @@ def scan_folder(root: str, *, bundle_id: str | None = None, max_files: int = 200
                 size: int | None = os.path.getsize(full)
             except OSError:
                 size = None
-            artifacts.append(_make_artifact(index, rel, size, _sha256_file(full)))
+            artifacts.append(_make_artifact(index, rel, size, _sha256_file(full), full_path=full))
             index += 1
             if index >= max_files:
                 return InputBundle(id=bundle_id or f"bundle_{_slug(os.path.basename(root))}",

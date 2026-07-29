@@ -63,11 +63,19 @@ class GaitTunerTests(unittest.TestCase):
         return S.get_robot(create_robot({"prompt": prompt, "tune_gait": tune})["robot_id"])
 
     def test_quad_stays_credible_and_short_circuits(self):
-        from virturoid.services.morph_policy import tune_crawl_gait
+        """A quad that already walks must keep its DEFAULT op-point — the tuner must not churn a working gait.
+
+        That default is now derived from the body's own size rather than being the literal 1.5 Hz of one
+        reference robot (morph_policy.default_gait_for): stride frequency scales as sqrt(g/L), so a slightly
+        shorter-legged dog settles a little faster. Pinning the constant tested the reference body, not the
+        behaviour; pinning "it short-circuits to THIS body's default" tests what the short-circuit is for.
+        """
+        from virturoid.services.morph_policy import default_gait_for, tune_crawl_gait
         gene = self._build("a quadruped robot dog that walks")
         best = tune_crawl_gait(gene)
         self.assertTrue(best["verdict"].startswith("CREDIBLE"))
-        self.assertEqual((gene.metadata or {}).get("gait_params", {}).get("freq"), 1.5)   # the proven default
+        self.assertAlmostEqual((gene.metadata or {}).get("gait_params", {}).get("freq"),
+                               default_gait_for(gene)["freq"], places=3)
 
     def test_tuner_never_caches_a_noncredible_gait(self):
         # a hexapod has no robustly-CLEAN scripted crawl -> the tuner must cache NOTHING (never a gamed lurch)
