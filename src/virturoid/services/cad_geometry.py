@@ -60,6 +60,20 @@ def realize_shape(spec: dict):
                 return base
         except Exception:  # noqa: BLE001 - malformed compound -> capsule fallback below
             pass
+    # `anatomy_role` is the general anatomy compiler asking for the SAME detailed solids the hard-coded recipes
+    # get via family="role". It stamps the mapped role additively (its own `family` stays whatever the physics
+    # proxy needs), so honour it here -- the visual layer is the only consumer of this function, so preferring
+    # the rich solid cannot move a collider, a mass or a verdict. Falls through to the authored family below if
+    # the solid fails to build, so a bad role can never lose the part.
+    _arole = str(spec.get("anatomy_role") or "")
+    if _arole and fam != "role":
+        try:
+            _part = build_anatomy(_arole, float(spec.get("length", spec.get("height", 0.1)) or 0.1),
+                                  float(spec.get("radius", 0.03) or 0.03))
+            if _part is not None and _part.is_valid and _part.volume > 0:
+                return _part
+        except Exception:  # noqa: BLE001 - fall back to the authored shape program below
+            pass
     if fam == "role":                                # role-keyed multi-feature anatomy (build_anatomy)
         try:
             part = build_anatomy(spec.get("role", "actuator_segment"),
@@ -180,6 +194,47 @@ def realize_shape(spec: dict):
     with bd.BuildPart() as fb:
         bd.Cylinder(R, L)
     return fb.part
+
+
+def _visual_matches_link(geom: dict, seg) -> dict:
+    """Return ``geom`` with its DIMENSIONS reconciled to the link's real ``radius_m`` / ``length_m``.
+
+    A geometry spec is authored when the body is composed, but the link keeps changing afterwards: grounding
+    re-sizes it, the structural pass thickens under-margined links, the housing-fit pass grows a limb so it can
+    carry its motor, and an edit can rescale it. Nothing propagated any of that into the VISUAL spec, so the
+    render drew a stale silhouette -- measured on a quadruped, a leg whose real link radius is 27.3 mm was drawn
+    at 12.7 mm, i.e. **2.15x thinner than the robot being simulated**, while the datasheet motor can was drawn at
+    full size. That combination is precisely the "fat drums on pencil sticks" toy cue, and it is also a
+    truthfulness bug: the picture disagrees with the physics it claims to show.
+
+    Only ever GROWS the visual to meet the link (never shrinks an authored flourish below what the model asked
+    for), and only touches dimensional fields -- family, profile topology, detail and role are untouched."""
+    try:
+        r = float(getattr(seg, "radius_m", 0.0) or 0.0)
+        L = float(getattr(seg, "length_m", 0.0) or 0.0)
+        if r <= 0.0 or not isinstance(geom, dict):
+            return geom
+        out = dict(geom)
+        if out.get("anatomy_role") or str(out.get("family") or "").lower() == "role":
+            out["radius"] = max(float(out.get("radius") or 0.0), r)      # parametric solids: just re-size
+            if L > 0:
+                out["length"] = L
+            return out
+        prof = out.get("profile")
+        if isinstance(prof, (list, tuple)) and prof:                     # extrude: scale the section to the link
+            try:
+                cur = max(max(abs(float(p[0])), abs(float(p[1]))) for p in prof if len(p) >= 2)
+            except (TypeError, ValueError, IndexError):
+                return out
+            if cur > 0 and r > cur:
+                k = r / cur
+                out["profile"] = [[float(p[0]) * k, float(p[1]) * k] for p in prof if len(p) >= 2]
+                for _f in ("fillet", "chamfer"):                         # keep edge treatments proportionate
+                    if out.get(_f):
+                        out[_f] = float(out[_f]) * k
+        return out
+    except Exception:  # noqa: BLE001 - reconciliation is a fidelity aid; never lose the part over it
+        return geom
 
 
 def build_link_solid(shape: str, length_m: float, radius_m: float, actuated: bool,
@@ -453,7 +508,7 @@ def build_visual_meshes(gene, out_dir: str, *, cache: bool = True, kitbash: bool
                 baked = synthesize_part(geom.get("desc") or f"a robot {s.name} part",
                                         s.length_m, s.radius_m, str(fp))
             if baked is None and geom:               # arbitrary/role shape -> realize, then drop floor to z=0
-                solid = realize_shape(geom)
+                solid = realize_shape(_visual_matches_link(geom, s))
                 try:
                     minz = float(solid.bounding_box().min.Z)
                 except Exception:  # noqa: BLE001 - degenerate bbox -> assume already floored

@@ -194,6 +194,47 @@ def _role_geometry(role: str, size: float, girth: float, aspect: str = "", *, au
     return _tapered(L, g, max(0.004, 0.65 * g)), L, g
 
 
+# A real quadruped/insect leg is a SHORT proximal abduction block plus long load-bearing links (a Go2
+# thigh and calf are 213 mm each). This is the proximal segment's share of one average link length.
+_HIP_LENGTH_SHARE = 0.45
+# A real foot is a CONTACT PAD, not a limb link (a Go2's is a ~22 mm sphere on a 426 mm leg).
+_FOOT_LENGTH_SHARE = 0.5
+
+
+def _anatomy_role_for(seg_role: str, index: int, n_segments: int) -> str | None:
+    """Map this compiler's SEMANTIC role onto ``cad_geometry.build_anatomy``'s detailed-solid vocabulary.
+
+    The two halves of the pipeline grew separate role words: we describe a part by what it IS ("leg", "foot",
+    "head"), while the mesh layer indexes multi-feature solids by what to BUILD ("quad_thigh", "foot_pad",
+    "sensor_head"). Nothing joined them, so every body from this compiler rendered as extruded rectangles.
+
+    A limb's segments are distinguished BY POSITION, which is how a real leg is built: the first segment carries
+    the abduction/hip block, the second is the thigh, and everything below it is calf. Returns None for roles
+    with no better solid than the generic one (the caller then leaves the authored geometry alone)."""
+    r = (seg_role or "").lower()
+    if r in ("foot", "paw", "hoof"):
+        return "foot_pad"
+    if r in ("hand", "gripper", "claw"):
+        return "hand_plate"
+    if r in ("head", "skull", "sensor_head", "snout", "muzzle"):
+        return "sensor_head"
+    if r in ("leg", "leg_upper", "leg_lower", "thigh", "shin", "limb"):
+        if r in ("thigh", "leg_upper"):
+            return "quad_thigh"
+        if r in ("shin", "leg_lower"):
+            return "quad_calf"
+        if n_segments <= 1:
+            return "quad_thigh"                      # a single-segment leg is a thigh, not a hip block
+        return "quad_hip" if index == 0 else ("quad_thigh" if index == 1 else "quad_calf")
+    if r in ("arm", "arm_upper", "arm_lower", "forearm", "upper_arm"):
+        if r in ("arm_lower", "forearm"):
+            return "forearm"
+        if r in ("arm_upper", "upper_arm"):
+            return "upper_arm"
+        return "upper_arm" if (n_segments <= 1 or index == 0) else "forearm"
+    return None
+
+
 def _physics_proxy_from_geometry(geometry: dict | None, fallback_shape: str, fallback_radius: float) -> tuple[str, tuple[float, float] | None]:
     """Select the primitive collider that actually represents a shape program.
 
@@ -536,10 +577,25 @@ def build_from_anatomy(graph: dict) -> RobotGene:
             # fallback). Applies to single-segment parts; the primitive COLLIDER (size/girth) is unchanged, so
             # physics is untouched and only the rendered shape changes (a dome sensor, a bracket, a nozzle).
             _cg = part.get("geometry")
-            if isinstance(_cg, dict) and n == 1:
+            _authored = isinstance(_cg, dict) and n == 1
+            if _authored:
                 geo = _cg
             if isinstance(geo, dict):
                 geo = {**geo, "semantic_role": seg_role}
+                # ANATOMY VOCABULARY FOR THE GENERAL PATH. cad_geometry.build_anatomy already ships multi-feature
+                # ORIGINAL solids -- a 5-section tapered limb spindle with a proximal shoulder that seats on the
+                # motor, a heel->toe sole, a jaw->cheeks->crown skull -- but they are only reachable through
+                # `family="role"`, which ONLY the hard-coded morphology_composer recipes emitted. Every body from
+                # THIS compiler (the general LLM anatomy-graph path: dogs, horses, geckos, novel creatures) fell
+                # through to a 4-point rectangle extruded into a bar, which is why the hexapod's legs read as real
+                # limbs while the dog's read as sticks. Stamp the mapped role so the mesh layer can use the rich
+                # solid. ADDITIVE ONLY: `family` is untouched, so _physics_proxy_from_geometry picks exactly the
+                # same collider and no mass, inertia or verdict can move. Never stamped over an AUTHORED shape
+                # program (a T4 dome/bracket the model designed on purpose still wins).
+                if not _authored:
+                    _ar = _anatomy_role_for(seg_role, i, n)
+                    if _ar:
+                        geo = {**geo, "anatomy_role": _ar}
             if is_wheel:
                 joint_type = "revolute"                            # a wheel is always a (continuous) hinge
             elif explicit_joint == "fixed" or (last and is_limb and n > 1):
