@@ -393,6 +393,36 @@ def _record_gait_lesson(gene, failure_code: str, operator: str, *, improvement: 
         pass
 
 
+def _record_gait_hint_outcome(gene, hint_rollout: dict, default_rollout: dict, *, selected_default: bool,
+                              source: str) -> None:
+    """Record every attempted hint deployment, including wins, losses and ties.
+
+    Lessons remain useful diagnosis for losses; this provenance event is the unbiased denominator needed to tell
+    whether reuse helps at all. The measured delta is like-for-like absolute forward travel at one horizon.
+    """
+    try:
+        from virturoid.services.gait_flywheel import structural_gait_key
+        from virturoid.services.gait_quality import classify
+        from virturoid.services.memory_db import DEFAULT_DB_PATH, MemoryDB
+        from virturoid.services.robotics_vector_memory import RoboticsVectorMemory
+        DEFAULT_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+        hint_forward = abs(float(hint_rollout.get("forward", 0.0)))
+        default_forward = abs(float(default_rollout.get("forward", 0.0)))
+        structure_key = structural_gait_key(gene)
+        with MemoryDB(DEFAULT_DB_PATH) as db:
+            RoboticsVectorMemory(db).record_provenance(
+                "gene", getattr(gene, "id", "") or structure_key,
+                parent_type="gait_hint_region", parent_id=structure_key, kind="gait_hint_deploy",
+                delta=round(hint_forward - default_forward, 6),
+                meta={"source": source, "selected": "default" if selected_default else "hint",
+                      "hint_forward_m": hint_forward, "default_forward_m": default_forward,
+                      "hint_credible": classify(hint_rollout).startswith("CREDIBLE"),
+                      "default_credible": classify(default_rollout).startswith("CREDIBLE")},
+            )
+    except Exception:  # noqa: BLE001 - measurement must never break a deploy verdict
+        pass
+
+
 def _honest_serpentine(gene, *, steps: int = 2000, render: bool = False, tag: str = "serpentine") -> dict:
     """The honest LAND-SERPENTINE verdict for a LIMBLESS serial spine (a snake): a lateral travelling wave down
     the spine crawls it forward against ground friction (morph_policy.serpentine_rollout). A snake has no legs,
@@ -554,6 +584,7 @@ def _honest_gait(gene, *, steps: int = 1200, render: bool = False, tag: str = "g
         cred_def = classify(r_def).startswith("CREDIBLE")
         better_def = (cred_def and not cred_r) or (
             cred_def == cred_r and abs(float(r_def.get("forward", 0))) > abs(float(r.get("forward", 0))))
+        _record_gait_hint_outcome(gene, r, r_def, selected_default=better_def, source=gait_source)
         if better_def:
             # the banked hint underperformed the default ON THIS BODY -> a verified failure->fix lesson (the
             # locomotion path's only lesson source; feeds mine_gait_hints for the next similar body)
@@ -840,9 +871,22 @@ def create_robot(args: dict) -> dict:
     # ~0.65 m with auto-tune vs ~0.09 m un-fanned). ensure_walkable_quad is a no-op for non-quad morphologies,
     # so manipulators/rovers/etc. are byte-identical.
     gene = compose_robot(prompt, ensure_walkable=bool(args.get("ensure_walkable", True)))
-    # Walk-tune the gait per body: the crawl defaults are quad-tuned, so a hexapod/octopod only creeps (~0.2 m)
-    # out of the box. tune_crawl_gait finds this body's credible op-point and caches it on the gene (the quad
-    # short-circuits on its first, already-credible rollout, so it stays cheap + byte-identical).
+    # GROUND THE HELD BODY (Stage 2.1). The mass/torque grounding used to run only at export/build time, so the
+    # robot the product VERIFIED and TRAINED was not the robot it exported and told the customer to build:
+    # measured, a "robot dog" was held at 3.57 kg (-76% vs a Go2's 15 kg) while its own export shipped 13.50 kg
+    # -- a 3.8x split-brain, with every CREDIBLE WALK verdict earned on the styrofoam twin. Grounding here makes
+    # the held body THE buildable body, so verify/train/evaluate/render and the export all describe one robot.
+    # Measured across archetypes: dog 3.57->13.50 kg (Go2 15), arm 2.96->19.00 (FR3 18.3), rover 4.20->110
+    # (MiR250 94), hexapod 7.53->14.42 -- and no verdict regressed (the dog walks FURTHER grounded: 1.70 vs
+    # 0.64 m). ground_and_repair is idempotent, so export_held's own grounding becomes a no-op for these bodies
+    # and still covers imported/amended ones. Fail-open: a grounding error must never block a build.
+    try:
+        from virturoid.services.gene_build import ground_and_repair
+        ground_and_repair(gene)
+    except Exception:  # noqa: BLE001 - grounding is the fidelity layer, never a build blocker
+        pass
+    # Walk-tune the gait per body AFTER grounding, so the cached op-point is tuned for the REAL mass the body
+    # ships with (tuning the styrofoam twin would hand the shipped robot a gait fitted to the wrong inertia).
     if robot_kind(gene) == "legged" and args.get("tune_gait", True):
         # NB (flywheel_breakthrough_plan §3.M / §5d): in-place stance_repair was TRIED here and REVERTED — measured
         # 0/5 product-path walk-rate lift (composer already fans offline; the dominant failure is fore-aft LURCH,
@@ -905,6 +949,18 @@ def edit_robot(args: dict) -> dict:
         new_gene, diffs = EO.apply_ops(gene, ops)
     except EO.EditError as exc:
         return {"ok": False, "error": str(exc)}                # teaching error (how to fix), not a crash
+    if bool(args.get("gate_non_regression", True)):
+        before = _design_non_regression_signature(gene)
+        after = _design_non_regression_signature(new_gene)
+        if after > before:
+            return {
+                "ok": False,
+                "error": "edit auto-reverted because deterministic design findings regressed",
+                "reverted": True,
+                "before": {"high_or_fatal": before[0], "weighted_findings": before[1]},
+                "after": {"high_or_fatal": after[0], "weighted_findings": after[1]},
+                "proposed_diffs": diffs,
+            }
     label = ",".join(d.get("op", "edit") for d in diffs)
     S.commit_robot(rid, new_gene, label=label)
     out = {"ok": True, "diffs": diffs, "summary": _summary(new_gene, rid),
@@ -913,6 +969,33 @@ def edit_robot(args: dict) -> dict:
     if img:
         out["artifacts"] = [img]
     return out
+
+
+def _design_non_regression_signature(gene) -> tuple[int, int]:
+    """Deterministic ordering used to accept/revert a critique-driven edit.
+
+    High/fatal findings dominate, then a weighted total. If a verifier is unavailable, it contributes no
+    finding rather than inventing evidence; the normal schema gate in ``apply_ops`` still applies.
+    """
+    severities: list[str] = []
+    try:
+        from virturoid.services.gene_validation import validate_gene_design
+        severities += [f["severity"] for f in validate_gene_design(gene)["risk_flags"]]
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from virturoid.services.anatomy_critic import critique_gene
+        severities += [f["severity"] for f in critique_gene(gene)["issues"]]
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from virturoid.services.visual_physics_gate import audit_gene
+        severities += ["high" for _ in audit_gene(gene).issues]
+    except Exception:  # noqa: BLE001
+        pass
+    weight = {"fatal": 8, "high": 5, "med": 2, "low": 1}
+    hard = sum(severity in ("fatal", "high") for severity in severities)
+    return hard, sum(weight.get(severity, 0) for severity in severities)
 
 
 def undo_robot(args: dict) -> dict:
