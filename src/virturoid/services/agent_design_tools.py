@@ -355,10 +355,30 @@ def submit_design(args: dict) -> dict:
     if len(roots) != 1:
         return {"ok": False, "error": f"a design needs EXACTLY ONE root part with role 'body' and no parent "
                 f"(found {len(roots)}); see get_design_schema examples"}
-    bad_roles = sorted({str(p.get("role") or "").lower() for p in graph["parts"]} - _ROLESET - {""})
-    if bad_roles:                                              # T3: teach, never silently mis-compile an unknown role
-        return {"ok": False, "error": f"unknown part role(s) {bad_roles}; use only {sorted(_ROLESET)} "
-                f"(an unknown role is NOT silently turned into a limb)"}
+    # OPEN ROLE VOCABULARY, still nothing guessed. The 23 roles are an ANIMAL vocabulary, so a gantry, SCARA,
+    # turret, boom, rail carriage, track or rotor was not merely awkward to express -- it was rejected outright,
+    # and no amount of geometry authoring helped because the rejection happens before geometry is read. But the
+    # original guard is right that an unknown role must not be silently turned into a limb, so the rule becomes:
+    # any role NAME is allowed, and an unfamiliar one must say which known role it behaves like structurally.
+    # The agent states the semantics; the compiler still never guesses.
+    unknown = {}
+    for p in graph["parts"]:
+        r = str(p.get("role") or "").lower()
+        if not r or r in _ROLESET:
+            continue
+        like = str(p.get("like") or "").lower()
+        if like in _ROLESET:
+            p["role"] = like                                   # compile AS the declared structure...
+            p.setdefault("role_label", r)                      # ...while keeping what the designer called it
+        else:
+            unknown[r] = p.get("name")
+    if unknown:
+        return {"ok": False, "error": (
+            f"part role(s) {sorted(unknown)} are outside the built-in vocabulary. That is allowed, but you must "
+            f"say what each one IS structurally: add \"like\": one of {sorted(_ROLESET)}. For example a gantry "
+            f"column or an excavator boom is like an 'arm' (a serial chain), a track is like a 'wheel' (ground "
+            f"drive), a turret is like a 'neck' (a rotating mount). An unknown role is never silently turned "
+            f"into a limb, which is why this asks instead of assuming.")}
     scale_err = _check_scale(graph)                            # M16: reject absurd proportions with a teaching error
     if scale_err:
         return {"ok": False, "error": scale_err}

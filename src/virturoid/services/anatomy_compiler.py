@@ -469,7 +469,15 @@ def build_from_anatomy(graph: dict) -> RobotGene:
     a root part (parent null / role 'body') is required. ``symmetry: left_right`` mirrors a part to ±y."""
     parts = list(graph.get("parts") or [])
     robot_class = str(graph.get("robot_class") or "quadruped")
-    base_mount = str(graph.get("base_mount") or "free").lower()
+    # A FIXED-BASE MACHINE MUST NOT FLOAT. The default was "free" for every class, so an arm -- and now a gantry,
+    # SCARA, rail carriage or turret, which are all bolted down -- got a 6-DOF floating base and simply fell over,
+    # making any verdict on it meaningless. Default by class instead, the same rule robot_import already applies
+    # when it decides an imported body's base (free for things that locomote, table for things that are mounted).
+    # An explicit graph value still wins, so a caller can bolt a quadruped to a rig or float an arm on purpose.
+    _mobile_classes = {"mobile_base", "quadruped", "hexapod", "humanoid", "biped", "legged", "aerial", "aquatic",
+                       "mobile_manipulator"}
+    _declared = str(graph.get("base_mount") or "").lower()
+    base_mount = _declared or ("free" if str(robot_class or "").lower() in _mobile_classes else "table")
     if base_mount not in {"table", "floor", "free"}:
         base_mount = "free"
     by_name = {p.get("name"): p for p in parts if p.get("name")}
@@ -628,6 +636,12 @@ def build_from_anatomy(graph: dict) -> RobotGene:
                 joint_type = "revolute"                            # a wheel is always a (continuous) hinge
             elif explicit_joint == "fixed" or (last and is_limb and n > 1):
                 joint_type = None                                  # welded paw / explicitly-fixed part
+            elif explicit_joint == "prismatic":
+                # A SLIDING joint. `GeneSegment` and `gene_compiler` have always supported prismatic; the anatomy
+                # path just never offered it, so a whole family of real machines was inexpressible -- a gantry
+                # axis, a telescoping mast, a linear rail carriage, an excavator's stick. Nothing about animals
+                # needs it, which is exactly why it was missing.
+                joint_type = "prismatic"
             elif explicit_joint == "revolute" or role in _ARTICULATED or is_limb:
                 joint_type = "revolute"
             else:
@@ -714,6 +728,23 @@ def build_from_anatomy(graph: dict) -> RobotGene:
                 proxy_shape, proxy_cs = _physics_proxy_from_geometry(
                     geo, "cylinder" if is_wheel else "capsule", radius_m,
                 )
+            # SPECIFIED joints beat inferred ones. Everything above derives axis and limits from the ANIMAL role
+            # (abduction-vs-stride for a walking leg, unlimited spin for a wheel, else a +-2.6 catch-all), which is
+            # right for creatures and useless for machines: a gantry axis, a SCARA elbow, a turret yaw and an
+            # excavator boom are each defined BY their axis and travel. GeneSegment and gene_compiler have always
+            # carried joint_axis/lower/upper -- only this path never let the caller say them. A declared value wins;
+            # anything omitted keeps the role-derived default, so every existing graph compiles unchanged.
+            if joint_type:
+                _uax = part.get("axis")
+                if isinstance(_uax, (list, tuple)) and len(_uax) == 3:
+                    _n = (sum(float(v) ** 2 for v in _uax)) ** 0.5 or 1.0
+                    _ja = tuple(float(v) / _n for v in _uax)       # normalised: a direction, not a magnitude
+                if part.get("lower") is not None:
+                    _jlo = float(part["lower"])
+                if part.get("upper") is not None:
+                    _jhi = float(part["upper"])
+                if _jlo is not None and _jhi is not None and _jlo > _jhi:
+                    _jlo, _jhi = _jhi, _jlo                        # tolerate a swapped range rather than emit one
             segs.append(GeneSegment(
                 name=seg_name, parent=prev, shape=proxy_shape,
                 length_m=length_m, radius_m=max(0.006, radius_m),
