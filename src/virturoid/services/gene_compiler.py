@@ -196,16 +196,45 @@ def _self_collision_excludes_xml(gene: RobotGene) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _euler_xyz_to_quat(a: float, b: float, c: float) -> tuple[float, float, float, float]:
+    """MuJoCo ``euler="a b c"`` (default ``eulerseq="xyz"``, i.e. R = Rx(a) @ Ry(b) @ Rz(c)) as (w, x, y, z).
+
+    Needed because a free base's ``qpos`` quaternion has to AGREE with the orientation baked into the root
+    ``<body euler=...>`` tag; MuJoCo derives ``qpos0`` from that tag, so writing a different quaternion in a
+    keyframe silently reorients the whole robot."""
+    import math
+
+    def mul(p, q):
+        w1, x1, y1, z1 = p
+        w2, x2, y2, z2 = q
+        return (w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
+                w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+                w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
+                w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2)
+
+    qx = (math.cos(a / 2.0), math.sin(a / 2.0), 0.0, 0.0)
+    qy = (math.cos(b / 2.0), 0.0, math.sin(b / 2.0), 0.0)
+    qz = (math.cos(c / 2.0), 0.0, 0.0, math.sin(c / 2.0))
+    return mul(mul(qx, qy), qz)
+
+
 def _pose_keyframe(gene: RobotGene, base_z: float) -> str:
     """Emit a MuJoCo ``<keyframe>`` from ``gene.metadata['rest_pose']`` (joint_name -> angle) so the body
     renders/spawns in a recognizable baked stance instead of a default straight-out star. The qpos vector
-    follows MuJoCo's joint order EXACTLY: a free base contributes 7 (xyz + identity quat) then each actuated
-    joint contributes 1, in the same pre-order DFS as ``_body_xml``. Every actuated/free body gets a named
-    ``home`` key; ``rest`` is retained as a compatibility alias for existing rollout and render paths."""
+    follows MuJoCo's joint order EXACTLY: a free base contributes 7 (xyz + the ROOT'S OWN quat) then each
+    actuated joint contributes 1, in the same pre-order DFS as ``_body_xml``. Every actuated/free body gets a
+    named ``home`` key; ``rest`` is retained as a compatibility alias for existing rollout/render paths.
+
+    The base quaternion must mirror the root's ``mount_euler``, not be hardcoded to identity. Composed bodies
+    have an unrotated root so identity was right by accident; an IMPORTED root carries the rotation that aligns
+    its reconstructed link frame (``robot_import._rot_z_to``), and overwriting that with identity threw the whole
+    robot into a ~19 deg pitch — an imported Go2 measured 0.803 m tall against a real 0.394 m, legs splayed."""
     pose = (getattr(gene, "metadata", None) or {}).get("rest_pose") or {}
     qpos: list[float] = []
     if gene.base_mount == "free":
-        qpos += [0.0, 0.0, float(base_z), 1.0, 0.0, 0.0, 0.0]
+        root_euler = getattr(gene.root(), "mount_euler", None) or (0.0, 0.0, 0.0)
+        qw, qx, qy, qz = _euler_xyz_to_quat(*(float(v) for v in root_euler))
+        qpos += [0.0, 0.0, float(base_z), qw, qx, qy, qz]
     base_len = len(qpos)
 
     def walk(seg) -> None:

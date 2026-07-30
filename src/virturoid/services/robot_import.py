@@ -171,6 +171,43 @@ def _bake_source_mesh(mj, body_id: int, S, out_path) -> bool:
     return True
 
 
+_REST_KEY_PREFERENCE = ("home", "stand", "standing", "default", "retract", "init")
+
+
+def _source_rest_pose(mj, name_of, BODY) -> tuple[dict, str | None]:
+    """The source model's intended stance as ``{our_joint_name: angle}``, plus which keyframe it came from.
+
+    Prefers a conventionally-named key (`home`, `stand`, ...) and otherwise takes the first one. Only hinge and
+    slide joints are carried -- a free/ball base is not representable in a RobotGene chain and its height is
+    re-derived by ``standing_spawn_z`` anyway. Our joint name is ``{segment}_joint`` and a segment IS the source
+    body, so the source joint's own body gives the mapping.
+    """
+    import mujoco
+
+    if int(getattr(mj, "nkey", 0)) <= 0:
+        return {}, None
+    names = [(name_of(mujoco.mjtObj.mjOBJ_KEY, k) or "").lower() for k in range(mj.nkey)]
+    kid = next((i for pref in _REST_KEY_PREFERENCE for i, n in enumerate(names) if n == pref), None)
+    if kid is None:
+        kid = next((i for pref in _REST_KEY_PREFERENCE for i, n in enumerate(names) if pref in n), 0)
+    qpos = mj.key_qpos[kid]
+    pose: dict[str, float] = {}
+    for j in range(mj.njnt):
+        if int(mj.jnt_type[j]) not in (2, 3):                    # 2 = slide, 3 = hinge
+            continue
+        adr = int(mj.jnt_qposadr[j])
+        if not (0 <= adr < len(qpos)):
+            continue
+        bid = int(mj.jnt_bodyid[j])
+        # Match the segment builder's own naming, including its fallback for an unnamed body, or the pose keys
+        # silently miss those joints.
+        body = name_of(BODY, bid) or f"body{bid}"
+        val = float(qpos[adr])
+        if abs(val) > 1e-6:                                      # a zero angle is already the compiler's default
+            pose[f"{body}_joint"] = round(val, 5)
+    return pose, (names[kid] or f"key{kid}")
+
+
 def import_robot(source: str, *, robot_id: str | None = None, species: str | None = None) -> dict:
     """Import a URDF/MJCF (file path or XML string) into a RobotGene.
 
@@ -366,6 +403,24 @@ def import_robot(source: str, *, robot_id: str | None = None, species: str | Non
         end_effector_type="gripper" if any("grip" in (s.name.lower()) for s in segments) else "none",
         metadata={"imported_from": "mjcf_or_urdf", "n_bodies": mj.nbody, "n_joints": mj.njnt},
     )
+    # CARRY THE SOURCE'S OWN STANDING POSE. A robot description ships the stance its designers intended as a
+    # named keyframe -- 45 of the 74 MuJoCo Menagerie models do (`home`, `stand`, `standing`, `retract`) -- and
+    # for a legged robot that pose is the whole point: a Go2's home key is base z=0.27 with every leg at
+    # (0, 0.9, -1.8), i.e. HIP FORWARD AND KNEE FOLDED BACK. We ignored it and spawned every imported robot at
+    # qpos 0, which for a quadruped means STRAIGHT LEGS: measured, that read 0.601 m tall against a real 0.394,
+    # and it is why an imported Go2 verified CROUCH/FELL. Our own composer has always baked a bent-knee rest
+    # pose (morphology_composer: thigh -0.55, calf +1.10) and gene_compiler emits it as a keyframe -- only the
+    # IMPORT path never populated it, so customer robots were held to a stance no real robot uses.
+    #
+    # Angles transfer 1:1 despite the link-frame rotation: S is a rotation, and the joint axis was carried into
+    # the segment frame by S^T, so a rotation of theta about (S^T a) equals a rotation of theta about a.
+    try:
+        _pose, _key = _source_rest_pose(mj, name_of, BODY)
+        if _pose:
+            gene.metadata = {**(gene.metadata or {}), "rest_pose": _pose,
+                             "rest_pose_source": f"source keyframe {_key!r}"}
+    except Exception:  # noqa: BLE001 - a pose is a fidelity aid, never an import blocker
+        pass
     gene_issues = gene.validate()
     warnings.extend(f"gene validation: {iss}" for iss in gene_issues)
 
