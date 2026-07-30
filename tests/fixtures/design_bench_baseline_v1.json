@@ -4,21 +4,19 @@
   "model": "offline_heuristic_v1",
   "schema_valid@1": 1.0,
   "compile@1": 1.0,
-  "verdict@1": 0.5,
+  "verdict@1": 0.55,
   "diversity_unique_ratio": 0.5,
   "spec_faithfulness": 0.5,
   "by_family": {
-    "animal": 0.0,
+    "animal": 0.1667,
     "vehicle": 1.0,
     "arm": 0.75,
     "hybrid": 1.0,
     "novel": 0.25
   },
-  "per_case_note": "PER-CASE floor, added 2026-07-30. The aggregate above cannot do the job it was given: the battery is 20 prompts, so verdict@1 moves in steps of 0.05 -- the same size as the gate's own tolerance -- and the cassette is deterministic, so this is lost information rather than sampling noise. A change that fixes one body and breaks another reads as no change at all. That is not hypothetical: measured on this date, hybrid (mobile manipulator) had gone 1.0 -> 0.0, BOTH cases lost, while animal gained one, for a net -0.05 that the tolerance absorbed exactly. See task #246. The map below therefore records what is credible TODAY as a floor that may not shrink; the `known_regressions` list names cases the aggregate baseline says SHOULD pass and which do not, so they are debt rather than blessed.",
-  "known_regressions": [
-    "mobile_manip__appearance",
-    "mobile_manip__construction"
-  ],
+  "raised_note": "verdict@1 0.50 -> 0.55 and hybrid 0.0 -> 1.0 on 2026-07-30, closing #246. The hybrid family (mobile manipulator) had been at 0.0 with BOTH cases lost; the aggregate hid it because the loss was exactly one tolerance. Two real defects: the composer gave the arm no stowed driving pose (it chained 0.952 m straight up off a 0.32x0.38 m wheelbase, so the body tipped at ~1 g and full wheel traction IS ~1 g), and _honest_drive reset to qpos 0 so a body's own rest keyframe was discarded even when it had one. animal is recorded at its measured 0.1667 rather than the stale 0.0 it had drifted up from.",
+  "per_case_note": "PER-CASE floor. The aggregate cannot do the job it was given: the battery is 20 prompts, so verdict@1 moves in steps of 0.05 -- the same size as the gate's tolerance -- and the cassette is deterministic, so this is lost information rather than sampling noise. A change that fixes one body and breaks another reads as no change at all. Measured 2026-07-30, that had already happened: hybrid (mobile manipulator) sat at 0.0 with BOTH cases lost while animal gained one, netting exactly -0.05. Root-caused and fixed (#246), so known_regressions is now EMPTY -- keep it that way by fixing, not by re-recording a lower number. This map is a floor: any body credible here must stay credible.",
+  "known_regressions": [],
   "per_case": {
     "cart__appearance": true,
     "cart__construction": true,
@@ -30,8 +28,8 @@
     "inchworm__construction": true,
     "lynx__appearance": false,
     "lynx__construction": false,
-    "mobile_manip__appearance": false,
-    "mobile_manip__construction": false,
+    "mobile_manip__appearance": true,
+    "mobile_manip__construction": true,
     "palletizer__appearance": true,
     "palletizer__construction": true,
     "rover__appearance": true,

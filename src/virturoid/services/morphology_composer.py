@@ -391,8 +391,22 @@ def morphology_from_requirements(reach_m: float, payload_kg: float, *, prompt: s
         # so the robot can drive to a box, pick it, and carry it — the request the e2e test showed we dropped.
         reach_c = max(0.4, float(reach_m or 0.55))
         t_c = round(max(10.0, (0.5 + 0.35 * 4) * 9.81 * reach_c * 1.6), 1)
+        # STOWED DRIVING POSE. Without one the arm chains straight up from the deck -- measured, a 0.952 m mast on
+        # a 0.32 x 0.38 m wheelbase -- and the body TIPPED while driving, which is what took the design-bench
+        # hybrid family from 1.0 to 0.0 (#246). The static margin was never the problem (COM centred, 44.3 deg of
+        # tilt available); the mast's rotational inertia about the contact patch is, so wheel acceleration pitches
+        # the whole robot. Real mobile manipulators drive with the arm folded for exactly this reason -- it is why
+        # `retract` is a conventional keyframe name alongside `home`.
+        # Chosen by sweeping (j1, j2) over their full ranges and ranking by the tilt angle needed to tip
+        # (margin-to-support-edge / COM height), NOT by COM height alone: a stow that lowers the arm while
+        # cantilevering it off one side moves the COM toward the tipping edge and is worse.
+        #   arm up : COM z 0.164, tilt-to-tip 44.3 deg, top 0.952 m
+        #   stowed : COM z 0.116, tilt-to-tip 52.9 deg, top 0.222 m
+        # Same mechanism as the baked bent-knee crouch above: spawn/render pose only, and training resets to its
+        # own init, so this changes what the robot DRIVES as, not what it can learn.
+        arm_stow = {"j1_joint": -2.09, "j2_joint": -2.62}
         return {"robot_class": "mobile_manipulator", "base_mount": "free",
-                "species": "mobile_manipulator.composed",
+                "species": "mobile_manipulator.composed", "rest_pose": arm_stow,
                 "base": {"name": "chassis", "shape": "box", "length": 0.10, "radius": 0.22, "mass": 8.0},
                 "links": _grasp_arm_links(reach_c, t_c),
                 "wheels": [{"name": f"wheel_{i}", "parent": "chassis", "radius": 0.07, "thickness": 0.05,

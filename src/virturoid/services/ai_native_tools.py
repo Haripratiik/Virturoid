@@ -727,13 +727,37 @@ def _honest_drive(gene, *, steps: int = 800, world_xml: str | None = None) -> di
     from virturoid.services.morph_policy import compiled_model, robot_mjcf
     model = compiled_model(world_xml or robot_mjcf(gene))
     data = mujoco.MjData(model)
-    mujoco.mj_resetData(model, data); mujoco.mj_forward(model, data)
+    mujoco.mj_resetData(model, data)
+    # DRIVE THE BODY IN THE POSE IT SHIPS. Resetting to qpos 0 discards the model's own rest keyframe, and for a
+    # mobile MANIPULATOR that pose is the whole difference between a robot and a wheelie: measured on the bench's
+    # own frozen gene, the arm chains 0.952 m straight up from a 0.32 x 0.38 m wheelbase, putting the COM at
+    # 0.164 m against a 0.160 m half-wheelbase -- so it tips at about 1 g, and full wheel traction IS about 1 g.
+    # Same body, arm stowed: up_min -0.131 (flipped past horizontal) -> +0.988 (upright), and it drives FURTHER,
+    # 0.833 -> 1.010 m. This is why the design-bench hybrid family read 1.0 -> 0.0 (#246): the verdict was
+    # judging every mobile manipulator with its arm held vertically, which no real one drives with.
+    # Same principle as the imported rest pose: evaluate the robot in the stance its design specifies.
+    if model.nkey:
+        mujoco.mj_resetDataKeyframe(model, data, 0)
+    mujoco.mj_forward(model, data)
     bid, _free = _base_body_id(model)
     if model.nu == 0:
         return {"kind": "mobile", "verdict": "NO ACTUATORS (cannot drive)", "survived": True, "forward_m": 0.0,
                 "note": "task capability (navigation/goal-reach) via evaluate_held"}
     # identify wheel geoms (the cylinders), the floor plane, and each actuator's driven joint dof
-    wheel_geoms = {g for g in range(model.ngeom) if model.geom_type[g] == mujoco.mjtGeom.mjGEOM_CYLINDER}
+    # WHEELS ARE NAMED, NOT GUESSED FROM SHAPE. "Every cylinder is a wheel" is wrong on any wheeled robot that
+    # also has cylindrical structure: measured on the bench's mobile manipulator, shoulder/j1/j2/wrist all count
+    # as wheels because `_mech_beam` renders arm links as cylinders. That corrupts three things at once -- the
+    # mean wheel RADIUS (arm links 0.03 m averaged in with real 0.07 m wheels), the wheel-CONTACT count (an arm
+    # link brushing the floor reads as a wheel on the ground), and the SPIN check. Prefer the gene's own wheel
+    # names, which the composer and the importer both set; fall back to shape only when nothing is named.
+    _wheel_names = {s.name for s in getattr(gene, "segments", []) or []
+                    if "wheel" in (s.name or "").lower() or "caster" in (s.name or "").lower()
+                    or (getattr(s, "role", "") or "").lower() == "wheel"}
+    wheel_geoms = {g for g in range(model.ngeom)
+                   if (mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, int(model.geom_bodyid[g])) or "")
+                   in _wheel_names} if _wheel_names else set()
+    if not wheel_geoms:                                             # unnamed (e.g. a raw import): shape is all we have
+        wheel_geoms = {g for g in range(model.ngeom) if model.geom_type[g] == mujoco.mjtGeom.mjGEOM_CYLINDER}
     floor_geoms = {g for g in range(model.ngeom) if model.geom_type[g] == mujoco.mjtGeom.mjGEOM_PLANE}
     wheel_r = float(np.mean([model.geom_size[g][0] for g in wheel_geoms])) if wheel_geoms else 0.05
     dofs = [int(model.jnt_dofadr[int(model.actuator_trnid[u, 0])]) for u in range(model.nu)]
