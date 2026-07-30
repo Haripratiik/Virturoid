@@ -104,6 +104,38 @@ def test_swept_collision_catches_what_the_rest_pose_cannot():
     assert frozenset(("boom", "mast")) in pairs, (
         f"the swept check found {rep['swept']['pairs']}, but a 0.40 m boom swinging +-3.1 rad MUST pass through a "
         "0.30 m mast on the same torso — if this ever goes quiet the check has become vacuous")
+    # exact, so it can say WHERE and HOW DEEP -- an unactionable list is barely better than no list
+    det = rep["swept"]["detail"]["boom|mast"]
+    assert det["joint"] == "boom_joint" and 0.0 <= det["at_travel"] <= 1.0, det
+    assert det["penetration_m"] < 0, f"a reported contact must actually penetrate: {det}"
+
+
+def test_hitting_the_FLOOR_is_reported_apart_from_hitting_yourself():
+    """Both are real defects and they are different ones: a mounted arm fouling its own bench is not the same
+    problem as two links passing through each other, and conflating them buries one inside the other."""
+    from virturoid.services.anatomy_compiler import build_from_anatomy
+    from virturoid.services.robot_probe import probe
+    g = build_from_anatomy({"robot_class": "manipulator", "name": "sweeper", "parts": [
+        {"name": "torso", "role": "body", "size": 0.30, "girth": 0.16},
+        {"name": "boom", "role": "arm", "parent": "torso", "attach": "front_top", "aim": "forward",
+         "size": 0.40, "girth": 0.035, "joint": "revolute", "axis": [0, 1, 0],
+         "lower": -3.1, "upper": 3.1}]})
+    sw = probe(g, {"fields": ["swept"]})["swept"]
+    assert "boom" in sw["ground_strikes"], f"a 0.40 m boom swinging down MUST reach the floor: {sw}"
+    assert not any("world" in p for p in sw["pairs"]), "the floor must not appear as a self-collision pair"
+
+
+def test_the_swept_check_is_exact_not_a_box_estimate():
+    """It reads MuJoCo's own contacts, so a reported pair IS touching. The AABB version returned 43 pairs on a
+    quadruped, most of them two capsules passing near each other diagonally -- and a list you cannot act on is
+    barely better than no list."""
+    from virturoid.services.morphology_composer import compose_robot
+    from virturoid.services.robot_probe import probe
+    sw = probe(compose_robot("a four legged robot dog", llm=None), {"fields": ["swept"]})["swept"]
+    assert len(sw["pairs"]) < 43, f"still box-like: {len(sw['pairs'])} pairs"
+    for k, v in sw["detail"].items():
+        assert v["penetration_m"] < 0, f"{k} reported without real penetration: {v}"
+        assert 0.0 <= v["at_travel"] <= 1.0 and v["joint"], v
 
 
 def test_probing_never_mutates_the_robot(dog):

@@ -194,35 +194,81 @@ def probe(gene, query: dict | None = None) -> dict:
         if wanted("swept"):
             # THE CHECK A STATIC ONE CANNOT MAKE. A design can be clean at rest and drive one link straight
             # through another partway through a joint's travel; Articraft names this as a top LLM failure mode.
-            # Sample each limited joint across its range (others held at rest) and report pairs that only ever
-            # touch away from the rest pose, so the report says something the `overlaps` field did not.
-            rest = {pair for pair in map(tuple, rep.get("overlaps", intersecting(ext)))}
-            found: set[tuple] = set()
+            #
+            # EXACT, via MuJoCo's own narrow phase rather than AABBs. Comparing boxes reported 43 pairs on a
+            # 20-part quadruped -- mostly artefacts of two capsules passing near each other diagonally -- and an
+            # unactionable list is barely better than no list. Reading data.contact after mj_forward uses the real
+            # capsule/box geometry, so a reported pair IS touching.
+            #
+            # Ancestor pairs are excluded because they touch BY CONSTRUCTION (a child is seated in its parent),
+            # which is the same exclusion gene_compiler writes into the model's own <contact> block. And the angle
+            # each pair first meets at is reported: real robots self-collide at joint EXTREMES and carry avoidance
+            # software for it, so "touches at 0.95 of travel" and "touches at 0.30" are different problems -- the
+            # second is a design defect, the first is a limit to set.
             import copy
+
+            anc = set()
+            _par = {s.name: s.parent for s in getattr(gene, "segments", []) or []}
+            for nm in _par:
+                p = _par.get(nm)
+                while p:
+                    anc.add(frozenset((nm, p)))
+                    p = _par.get(p)
+
+            def _touching(d2):
+                out = {}
+                for ci in range(int(d2.ncon)):
+                    c = d2.contact[ci]
+                    b1 = int(model.geom_bodyid[int(c.geom1)]); b2 = int(model.geom_bodyid[int(c.geom2)])
+                    if b1 == b2:
+                        continue
+                    n1 = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, b1) or ""
+                    n2 = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, b2) or ""
+                    if not n1 or not n2 or frozenset((n1, n2)) in anc:
+                        continue
+                    if b1 == 0 or b2 == 0:            # the FLOOR is not self-collision; split out below
+                        key = ("world", n2 if b1 == 0 else n1)
+                    else:
+                        key = tuple(sorted((n1, n2)))
+                    out[key] = min(out.get(key, 0.0), float(c.dist))     # most-penetrating contact for the pair
+                return out
+
+            rest_pairs = set(_touching(data))
+            found: dict[tuple, dict] = {}
+            swept_joints = 0
             for j in range(model.njnt):
                 if int(model.jnt_type[j]) not in (2, 3) or not int(model.jnt_limited[j]):
                     continue
+                swept_joints += 1
                 lo, hi = float(model.jnt_range[j][0]), float(model.jnt_range[j][1])
                 adr = int(model.jnt_qposadr[j])
-                for t in (0.0, 0.25, 0.5, 0.75, 1.0):
+                jname = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, j) or f"j{j}"
+                for t in (0.0, 0.2, 0.4, 0.6, 0.8, 1.0):
                     d2 = copy.deepcopy(data)
                     d2.qpos[adr] = lo + t * (hi - lo)
                     mujoco.mj_forward(model, d2)
-                    for pair in map(tuple, intersecting(_body_extents(model, d2))):
-                        if pair not in rest:
-                            found.add(pair)
+                    for key, dist in _touching(d2).items():
+                        if key in rest_pairs:
+                            continue
+                        prev = found.get(key)
+                        # keep the EARLIEST point in travel where it happens; that is the actionable number
+                        if prev is None or abs(t - 0.5) > abs(prev["at_travel"] - 0.5):
+                            found[key] = {"joint": jname, "at_travel": t, "penetration_m": round(dist, 5)}
+            # A part sweeping into the FLOOR is a real defect -- an arm's boom fouling its own bench -- but it is
+            # not self-collision, and conflating them buries one kind of problem inside the other.
+            ground = {k[1]: v for k, v in found.items() if k[0] == "world"}
+            found = {k: v for k, v in found.items() if k[0] != "world"}
             rep["swept"] = {
-                "pairs": [list(p) for p in sorted(found)],
-                "note": ("pairs whose AABBs intersect somewhere inside a joint's declared range while being clear "
-                         "at the rest pose"),
-                "precision": ("CONSERVATIVE UPPER BOUND, not a list of confirmed collisions. These are "
-                              "axis-aligned BOXES around each part, so two capsules that merely pass near each "
-                              "other diagonally will be reported; a 20-part quadruped driven to every joint limit "
-                              "yields tens of pairs this way, most of them box artefacts. Read it as 'these pairs "
-                              "are worth looking at', and note that real robots DO self-collide at joint extremes "
-                              "-- which is why they carry self-collision avoidance. Narrowing this to MuJoCo's own "
-                              "contact detection at each sampled pose would make it exact; see task #248."),
-                "n_joints_swept": sum(1 for j in range(model.njnt)
-                                      if int(model.jnt_type[j]) in (2, 3) and int(model.jnt_limited[j])),
+                "pairs": [list(k) for k in sorted(found)],
+                "detail": {f"{k[0]}|{k[1]}": v for k, v in sorted(found.items())},
+                "ground_strikes": ground,
+                "ground_note": ("parts that sweep INTO the floor within a joint's range — a defect for a mounted "
+                                "machine (its own bench), expected for a leg mid-stride"),
+                "note": ("parts that ACTUALLY touch somewhere inside a joint's declared range while being clear at "
+                         "the rest pose, from MuJoCo's own contact detection -- not an AABB estimate. "
+                         "`at_travel` is where in the range it happens (0 = lower limit, 1 = upper): near the ends "
+                         "is a limit worth tightening, mid-range is a geometry defect."),
+                "excludes": "parent/ancestor pairs, which are seated in each other by construction",
+                "n_joints_swept": swept_joints,
             }
     return rep
