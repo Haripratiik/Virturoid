@@ -163,11 +163,49 @@ def compile_gene_to_mjcf(gene: RobotGene, *, include_floor: bool = True, spawn_z
         f'{body_xml}'
         '  </worldbody>\n'
         f'{self_collision_excludes}'
+        f'{_equality_xml(gene)}'
         f'{actuators}'
         f'{sensors}'
         f'{keyframe}'
         '</mujoco>\n'
     )
+
+
+def _equality_xml(gene: RobotGene) -> str:
+    """Emit `<equality><connect>` for each declared closed kinematic loop.
+
+    A gantry's bridge is supported at BOTH columns; a delta's three arms meet at ONE platform. `segments` is a
+    strict tree, so those were inexpressible — and the failure was quiet rather than loud: the gantry compiled
+    with the right 3 prismatic DOF, rendered convincingly, and its second column carried no load at all. Driving
+    the bridge along its rail walked it off that column into mid-air.
+
+    `connect` does not touch the body tree; it is a top-level constraint naming two bodies MuJoCo already has,
+    which is exactly why the gene can model loops without `segments` ceasing to be a tree.
+
+    NOTE this is a SOFT constraint solved with the rest of the system, not a rigid weld. A bridge held by
+    `connect` is compliant under load unless solref/solimp are stiffened — expressiveness and stiffness are
+    different questions, and this buys the first.
+    """
+    lcs = getattr(gene, "loop_closures", None) or []
+    if not lcs:
+        return ""
+    names = {s.name for s in gene.segments}
+    lines = ["  <equality>"]
+    for lc in lcs:
+        a, b = (lc or {}).get("a"), (lc or {}).get("b")
+        if a not in names or b not in names or a == b:
+            continue                                  # validate() reports these; never emit a broken model
+        seg = next((s for s in gene.segments if s.name == a), None)
+        anchor = (lc or {}).get("anchor")
+        if not (isinstance(anchor, (list, tuple)) and len(anchor) == 3):
+            anchor = (0.0, 0.0, float(getattr(seg, "length_m", 0.0) or 0.0))   # a's tip, in a's own frame
+        ax, ay, az = (float(v) for v in anchor)
+        lines.append(f'    <connect body1="{escape(a)}" body2="{escape(b)}" '
+                     f'anchor="{ax:.5f} {ay:.5f} {az:.5f}"/>')
+    if len(lines) == 1:
+        return ""
+    lines.append("  </equality>")
+    return "\n".join(lines) + "\n"
 
 
 def _self_collision_excludes_xml(gene: RobotGene) -> str:
@@ -185,6 +223,14 @@ def _self_collision_excludes_xml(gene: RobotGene) -> str:
         while ancestor is not None:
             pairs.append((ancestor, seg.name))
             ancestor = parents.get(ancestor)
+    # A LOOP-JOINED pair meets by design, exactly as a parent and child do — but they are not ancestor and
+    # descendant, so the walk above never reaches them. Left colliding, the contact solver pushes the two apart
+    # while the equality constraint pulls them together, and the model fights itself at the one joint the design
+    # cares most about.
+    for lc in (getattr(gene, "loop_closures", None) or []):
+        a, b = (lc or {}).get("a"), (lc or {}).get("b")
+        if a and b and a != b:
+            pairs.append((a, b))
     if not pairs:
         return ""
     lines = ["  <contact>"]
@@ -457,6 +503,7 @@ def compile_gene_with_scene(gene: RobotGene, scene_objects, *, table: bool = Tru
         # compile path already does this (line ~162), but the scene path omitted it, so a body in a scene solved
         # spurious impulses against its own structure. Robot↔scene-object + floor contacts stay enabled.
         _self_collision_excludes_xml(gene).rstrip("\n"),
+        _equality_xml(gene).rstrip("\n"),          # closed loops, in the scene path too — see _equality_xml
         _actuator_xml(gene).rstrip("\n") or "  <actuator></actuator>",
         *( [] if physics_only else [_sensor_xml(gene).rstrip("\n")] ),
         _pose_keyframe(gene, base_z).rstrip("\n"),

@@ -71,6 +71,21 @@ class RobotGene:
     # are indistinguishable after the build ends.
     design_source: str = "unknown"
     composition_notes: list[str] = field(default_factory=list)
+    # CLOSED KINEMATIC LOOPS, as a separate list so `segments` stays a strict TREE.
+    #
+    # A gantry's bridge rests on BOTH columns; a delta's three arms meet at ONE platform. With one parent per
+    # segment neither is expressible, and the failure is quiet: our gantry rendered with a second column that
+    # carried no load, and driving the bridge along its rail walked it off that column into mid-air.
+    #
+    # Deliberately NOT a second `parent` on GeneSegment. MuJoCo models a loop as `<equality><connect>`, which
+    # does not touch the body tree either — it is a top-level constraint naming two existing bodies. Keeping the
+    # tree a tree means the ~40 places that walk parent->child keep working; making `parent` multi-valued would
+    # instead HANG several of them, which have no visited-set guard (gait_flywheel._leg_count,
+    # morphology_composer, heldout_set, grounded_physics, robot_probe, structural_validation).
+    #
+    # Each entry: {"a": segment, "b": segment, "anchor": [x, y, z] | None}. The anchor is the meeting point in
+    # `a`'s local frame; omitted, it is a's tip.
+    loop_closures: list[dict] = field(default_factory=list)
     metadata: dict = field(default_factory=dict)
 
     # ---- tree helpers -------------------------------------------------------
@@ -127,6 +142,19 @@ class RobotGene:
                     seen.add(node.name)
                     node = self.segment(node.parent)
 
+        # Loop closures name real segments, and never restate an edge the TREE already has (a parent-child pair
+        # is already rigidly connected; asking the solver to also constrain it is a contradiction, not a loop).
+        _names = set(names)
+        _tree_edges = {frozenset((s.name, s.parent)) for s in self.segments if s.parent}
+        for i, lc in enumerate(self.loop_closures or []):
+            a, b = (lc or {}).get("a"), (lc or {}).get("b")
+            if a not in _names or b not in _names:
+                issues.append(f"loop_closure {i} joins {a!r} and {b!r}; both must be existing segments")
+            elif a == b:
+                issues.append(f"loop_closure {i} joins {a!r} to itself")
+            elif frozenset((a, b)) in _tree_edges:
+                issues.append(f"loop_closure {i} joins {a!r} and {b!r}, which are already parent and child")
+
         ees = [s for s in self.segments if s.is_end_effector]
         if len(ees) != 1:
             issues.append(f"exactly one segment must be the end effector, found {len(ees)}")
@@ -145,6 +173,9 @@ class RobotGene:
             "end_effector_type": self.end_effector_type,
             "design_source": self.design_source,
             "composition_notes": list(self.composition_notes),
+            # Round-trips, because the species tree persists genes through here — a field that vanishes on
+            # to_dict is a field the flywheel silently loses.
+            "loop_closures": [dict(lc) for lc in (self.loop_closures or [])],
             "metadata": dict(self.metadata),
             "segments": [
                 {"name": s.name, "parent": s.parent, "shape": s.shape, "length_m": s.length_m,
@@ -167,6 +198,7 @@ class RobotGene:
             end_effector_type=d.get("end_effector_type", "gripper"),
             design_source=str(d.get("design_source", "unknown")),
             composition_notes=list(d.get("composition_notes", [])),
+            loop_closures=[dict(lc) for lc in (d.get("loop_closures") or [])],
             metadata=dict(d.get("metadata", {})),
             segments=[
                 GeneSegment(
