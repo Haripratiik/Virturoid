@@ -85,3 +85,43 @@ def test_verdict_at_1_does_not_regress():
     assert out["compile@1"] >= _BASELINE["compile@1"] - 1e-9
     assert out["verdict@1"] >= _BASELINE["verdict@1"] - tol, \
         f"verdict@1 regressed: {out['verdict@1']} < {_BASELINE['verdict@1']} - {tol}"
+
+
+@pytest.mark.slow
+def test_no_individual_body_silently_stops_walking():
+    """PER-CASE gate, because the aggregate above cannot resolve what it is asked to resolve.
+
+    The battery is 20 prompts, so verdict@1 moves in steps of exactly 0.05 -- the same size as that test's
+    tolerance -- and the cassette is deterministic and hermetic, so the ambiguity is lost information, not
+    sampling noise. A change that fixes one body and breaks another reads as NO CHANGE, and the aggregate gate
+    passes. That already happened here: measured 2026-07-30, the hybrid family (mobile manipulator) had gone
+    1.0 -> 0.0 with BOTH cases lost while animal gained one, a net -0.05 the tolerance absorbed exactly.
+
+    So gate on the bodies themselves. Any case credible in the recorded floor must stay credible, and the
+    failure message names the body -- which is the whole point, since 'verdict@1 fell by 0.05' never did.
+    """
+    out = DB.bench_from_cassette(verify=True)
+    got = out["per_case"]
+    floor = _BASELINE.get("per_case") or {}
+    assert floor, "baseline carries no per_case floor; re-record with scripts/design_bench.py --record"
+    missing = sorted(set(floor) - set(got))
+    assert not missing, f"battery no longer covers {missing}; re-record the baseline if that is intended"
+    broke = sorted(k for k, was in floor.items() if was and not got.get(k))
+    assert not broke, (
+        "these bodies were credible and are not any more: " + ", ".join(broke)
+        + f"  (verdict@1 {out['verdict@1']} vs baseline {_BASELINE['verdict@1']} — note the aggregate can "
+          "absorb one flip entirely, which is why this per-case check exists)")
+
+
+@pytest.mark.slow
+def test_the_known_regressions_are_still_the_only_ones():
+    """The cases the aggregate baseline says should pass, and which do not, are tracked debt -- not blessed.
+
+    `known_regressions` exists so a real capability loss cannot be normalised by re-recording a lower number.
+    If one of them starts passing, this fails and the list must shrink; if a NEW one appears, the per-case gate
+    above catches it first. Either way the list stays honest. See task #246 for the hybrid investigation."""
+    out = DB.bench_from_cassette(verify=True)
+    known = set(_BASELINE.get("known_regressions") or [])
+    fixed = sorted(k for k in known if out["per_case"].get(k))
+    assert not fixed, (f"good news: {fixed} now pass. Remove them from known_regressions in "
+                       "tests/fixtures/design_bench_baseline_v1.json so the list keeps meaning something.")

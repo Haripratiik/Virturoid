@@ -1,5 +1,5 @@
 {
-  "note": "Design-Bench v1 baseline (offline heuristic cassette). Re-recorded 2026-07-22 from 0.65: the novel family (starfish/inchworm) dropped 1.0 -> 0.25 because the 2026-07 ANATOMICAL joint ranges replaced the +-3.14 catch-all \u2014 the old credible verdicts rode on hyperextension the honest ranges forbid. The gate is now HERMETIC (gait-hint recall disabled during the bench), so this number no longer floats with session DB state. Re-record via scripts/design_bench.py --record when the battery/composer changes.",
+  "note": "Design-Bench v1 baseline (offline heuristic cassette). Re-recorded 2026-07-22 from 0.65: the novel family (starfish/inchworm) dropped 1.0 -> 0.25 because the 2026-07 ANATOMICAL joint ranges replaced the ±3.14 catch-all — the old credible verdicts rode on hyperextension the honest ranges forbid. The gate is now HERMETIC (gait-hint recall disabled during the bench), so this number no longer floats with session DB state. Re-record via scripts/design_bench.py --record when the battery/composer changes.",
   "battery_version": "v1",
   "model": "offline_heuristic_v1",
   "schema_valid@1": 1.0,
@@ -13,5 +13,32 @@
     "arm": 0.75,
     "hybrid": 1.0,
     "novel": 0.25
+  },
+  "per_case_note": "PER-CASE floor, added 2026-07-30. The aggregate above cannot do the job it was given: the battery is 20 prompts, so verdict@1 moves in steps of 0.05 -- the same size as the gate's own tolerance -- and the cassette is deterministic, so this is lost information rather than sampling noise. A change that fixes one body and breaks another reads as no change at all. That is not hypothetical: measured on this date, hybrid (mobile manipulator) had gone 1.0 -> 0.0, BOTH cases lost, while animal gained one, for a net -0.05 that the tolerance absorbed exactly. See task #246. The map below therefore records what is credible TODAY as a floor that may not shrink; the `known_regressions` list names cases the aggregate baseline says SHOULD pass and which do not, so they are debt rather than blessed.",
+  "known_regressions": [
+    "mobile_manip__appearance",
+    "mobile_manip__construction"
+  ],
+  "per_case": {
+    "cart__appearance": true,
+    "cart__construction": true,
+    "elephant__appearance": true,
+    "elephant__construction": false,
+    "gecko__appearance": false,
+    "gecko__construction": false,
+    "inchworm__appearance": false,
+    "inchworm__construction": true,
+    "lynx__appearance": false,
+    "lynx__construction": false,
+    "mobile_manip__appearance": false,
+    "mobile_manip__construction": false,
+    "palletizer__appearance": true,
+    "palletizer__construction": true,
+    "rover__appearance": true,
+    "rover__construction": true,
+    "starfish__appearance": false,
+    "starfish__construction": false,
+    "welder__appearance": false,
+    "welder__construction": true
   }
 }

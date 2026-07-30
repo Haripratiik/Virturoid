@@ -271,6 +271,13 @@ def run_bench(designs: list[dict], *, model: str = "cassette", verify: bool = Tr
         "schema_valid@1": _rate(n_schema, len(rows)),
         "compile@1": _rate(n_compile, len(rows)),
         "verdict@1": _rate(n_credible, len(rows)),                       # THE headline
+        # PER-CASE outcomes, because the headline rate cannot resolve what it is asked to resolve. The battery is
+        # 20 prompts, so verdict@1 moves in steps of exactly 0.05 -- the same size as the gate's own tolerance.
+        # A change that fixes one body and breaks another therefore reads as NO CHANGE AT ALL, and a single flip
+        # reads as a full-tolerance regression. That ambiguity is not statistical (the cassette is deterministic
+        # and hermetic, so this is an exact function of the code) -- it is purely lost information, recovered here.
+        # Gate on this map, not the rate, and a regression can name the body it broke.
+        "per_case": {str(r.get("prompt_id")): bool(r["credible"]) for r in rows},
         # conditional (labelled, for diagnosis only — never the headline)
         "conditional": {"compile|schema": _rate(n_compile, n_schema),
                         "verdict|compile": _rate(n_credible, n_compile)},
