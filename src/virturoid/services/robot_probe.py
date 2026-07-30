@@ -207,13 +207,14 @@ def probe(gene, query: dict | None = None) -> dict:
             # second is a design defect, the first is a limit to set.
             import copy
 
-            anc = set()
-            _par = {s.name: s.parent for s in getattr(gene, "segments", []) or []}
-            for nm in _par:
-                p = _par.get(nm)
-                while p:
-                    anc.add(frozenset((nm, p)))
-                    p = _par.get(p)
+            # DIRECT parent only. Excluding the whole ancestor CLOSURE is a much stronger claim than the
+            # justification supports: a child is seated in ITS PARENT by construction, but it is not seated in
+            # its grandparent, and on a serial chain the closure is every pair there is. Measured on the
+            # product's own "6-axis robot arm on a bench": 35 of 36 pairs became structurally ineligible, so the
+            # only thing the check could ever report about an arm was whether the two gripper fingers touched --
+            # while j1 really drove 35 mm into `base` at its own lower limit and was reported as nothing.
+            anc = {frozenset((s.name, s.parent))
+                   for s in getattr(gene, "segments", []) or [] if s.parent}
 
             def _touching(d2):
                 out = {}
@@ -243,7 +244,10 @@ def probe(gene, query: dict | None = None) -> dict:
                 lo, hi = float(model.jnt_range[j][0]), float(model.jnt_range[j][1])
                 adr = int(model.jnt_qposadr[j])
                 jname = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, j) or f"j{j}"
-                for t in (0.0, 0.2, 0.4, 0.6, 0.8, 1.0):
+                # A grid that skips the MIDDLE of the range cannot see the defect it most wants to report. The
+                # previous 0.2 spacing never visited t=0.5 at all, so a pair penetrating across 14.8% of travel
+                # centred on mid-range came back clean. Odd count, so 0.5 is always sampled.
+                for t in (0.0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1.0):
                     d2 = copy.deepcopy(data)
                     d2.qpos[adr] = lo + t * (hi - lo)
                     mujoco.mj_forward(model, d2)
@@ -251,9 +255,17 @@ def probe(gene, query: dict | None = None) -> dict:
                         if key in rest_pairs:
                             continue
                         prev = found.get(key)
-                        # keep the EARLIEST point in travel where it happens; that is the actionable number
-                        if prev is None or abs(t - 0.5) > abs(prev["at_travel"] - 0.5):
-                            found[key] = {"joint": jname, "at_travel": t, "penetration_m": round(dist, 5)}
+                        # Report the DEEPEST intrusion and the travel point where it actually happens. The old
+                        # rule kept whichever sample sat furthest from mid-range, which is a tie-break dressed up
+                        # as a measurement: on the composed quadruped 6 of 14 pairs also touched at t=0.2/0.8 and
+                        # every one was displayed at an extreme, so the report handed back "a limit worth
+                        # tightening" for what was really a mid-range geometry defect — and printed a penetration
+                        # up to 5x shallower than the worst it had seen.
+                        if prev is None or dist < prev["penetration_m"]:
+                            found[key] = {"joint": jname, "at_travel": t, "penetration_m": round(dist, 5),
+                                          "where": ("at a joint EXTREME — tighten the limit or add avoidance"
+                                                    if t in (0.0, 1.0) else
+                                                    "MID-RANGE — the parts are shaped or placed wrong")}
             # A part sweeping into the FLOOR is a real defect -- an arm's boom fouling its own bench -- but it is
             # not self-collision, and conflating them buries one kind of problem inside the other.
             ground = {k[1]: v for k, v in found.items() if k[0] == "world"}

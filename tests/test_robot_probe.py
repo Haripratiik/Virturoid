@@ -138,6 +138,42 @@ def test_the_swept_check_is_exact_not_a_box_estimate():
         assert 0.0 <= v["at_travel"] <= 1.0 and v["joint"], v
 
 
+def test_only_the_DIRECT_parent_is_excluded_not_every_ancestor():
+    """"A child is seated in its parent by construction" justifies excluding a direct parent. It does not
+    justify excluding the whole ancestor closure — and on a SERIAL chain that closure is every pair there is.
+
+    Measured on the product's own 6-axis arm (base -> shoulder -> j1 -> ... -> fingers): the closure made 35 of
+    36 pairs structurally ineligible, so the only thing the check could ever say about an arm was whether the two
+    gripper fingers touched."""
+    from virturoid.services.morphology_composer import compose_robot
+    from virturoid.services.robot_probe import probe
+    arm = compose_robot("a 6-axis robot arm on a bench", llm=None)
+    names = [s.name for s in arm.segments]
+    par = {s.name: s.parent for s in arm.segments}
+    direct = {frozenset((n, par[n])) for n in names if par.get(n)}
+    eligible = sum(1 for i, a in enumerate(names) for b in names[i + 1:] if frozenset((a, b)) not in direct)
+    # a serial chain of N has N-1 direct-parent pairs; everything else must remain checkable
+    assert eligible >= len(names) * (len(names) - 1) // 2 - len(names), (
+        f"only {eligible} of {len(names)}*{len(names) - 1}//2 pairs are eligible — the exclusion is too broad")
+    probe(arm, {"fields": ["swept"]})          # and it must still run cleanly on that body
+
+
+def test_the_sweep_visits_MID_RANGE():
+    """A grid that skips the middle cannot find the defect it most wants to report. The 0.2-spaced grid never
+    visited t=0.5 — the exact point the report calls the more serious kind — so a pair penetrating across
+    mid-range came back clean. The report also has to say WHICH kind it found."""
+    from virturoid.services.morphology_composer import compose_robot
+    from virturoid.services.robot_probe import probe
+    sw = probe(compose_robot("a four legged robot dog", llm=None), {"fields": ["swept"]})["swept"]
+    assert sw["detail"], "the quadruped self-collides; an empty report means the check went vacuous"
+    mid = [v for v in sw["detail"].values() if v["at_travel"] not in (0.0, 1.0)]
+    assert mid, ("every pair is reported at a joint EXTREME, which is what the old furthest-from-centre "
+                 "tie-break produced regardless of where the deepest intrusion actually was")
+    for v in sw["detail"].values():
+        assert "where" in v and v["where"], f"a hit must say whether it is a limit problem or a shape one: {v}"
+        assert ("EXTREME" in v["where"]) == (v["at_travel"] in (0.0, 1.0)), v
+
+
 def test_probing_never_mutates_the_robot(dog):
     """Read-only means read-only: the held gene must be byte-identical afterwards, or an agent that measures its
     design would be silently editing it."""

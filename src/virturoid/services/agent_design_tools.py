@@ -74,10 +74,16 @@ _EXAMPLE_SCARA = {
         # the floor. Structure a machine needs to look like itself is the designer's job, not the compiler's.
         {"name": "column", "role": "column", "like": "neck", "parent": "base", "attach": "front_top",
          "aim": "up", "size": 0.45, "girth": 0.06},
+        # AXIS IS IN THE SEGMENT'S OWN FRAME, and a segment's local +z runs ALONG the part. So for a link aimed
+        # "forward", [0,0,1] is a ROLL joint about the arm's own length -- not a SCARA elbow, which turns about
+        # the vertical. Measured: with [0,0,1] both elbows came out horizontal (world axis 1,0,0) and driving
+        # link2 through 1.2 rad moved the tip 0.0000 m. The arm could not fold at all, while still compiling,
+        # passing every gate, and rendering as a plausible SCARA. Here [-1,0,0] is the local direction that maps
+        # to world +z for a forward-aimed link, and the tip travels 0.0837 m.
         {"name": "link1", "role": "arm", "parent": "column", "aim": "forward",
-         "size": 0.35, "girth": 0.045, "joint": "revolute", "axis": [0, 0, 1], "lower": -2.6, "upper": 2.6},
+         "size": 0.35, "girth": 0.045, "joint": "revolute", "axis": [-1, 0, 0], "lower": -2.6, "upper": 2.6},
         {"name": "link2", "role": "arm", "parent": "link1", "aim": "forward",
-         "size": 0.28, "girth": 0.038, "joint": "revolute", "axis": [0, 0, 1], "lower": -2.6, "upper": 2.6,
+         "size": 0.28, "girth": 0.038, "joint": "revolute", "axis": [-1, 0, 0], "lower": -2.6, "upper": 2.6,
          "rest": 0.9},
         {"name": "quill", "role": "quill", "like": "arm", "parent": "link2", "aim": "down",
          "size": 0.18, "girth": 0.022, "joint": "prismatic", "axis": [0, 0, 1], "lower": -0.15, "upper": 0.0},
@@ -160,9 +166,14 @@ def get_design_schema(args: dict) -> dict:
                 "symmetry": "'left_right' mirrors the part to a +y/-y PAIR (so one leg entry = two legs)",
                 "joint": "'revolute' to actuate it, 'prismatic' for a SLIDING axis (a gantry ram, a rail "
                          "carriage, a SCARA quill); omit for a welded/fixed part",
-                "axis": "[x,y,z] the joint's own axis, e.g. [0,0,1] for a turret yaw or a SCARA elbow. Omitted, "
-                        "the axis is derived from the ANIMAL role, which is right for a limb and wrong for a "
-                        "machine",
+                "axis": "[x,y,z] the joint's axis IN THE PART'S OWN FRAME, where local +z runs ALONG the part "
+                        "and the part is oriented by its `aim`. This is the easiest thing here to get wrong: for "
+                        "a link aimed 'forward', [0,0,1] is a ROLL about the arm's own length, NOT a vertical "
+                        "yaw — a SCARA built that way compiles, passes every check, renders correctly, and "
+                        "cannot fold (measured: tip travel 0.0000 m). For a forward-aimed link the vertical is "
+                        "[-1,0,0]; for an up-aimed one it is [0,0,1]. Check it with probe_robot rather than "
+                        "reasoning about frames. Omitted, the axis is derived from the ANIMAL role, which is "
+                        "right for a limb and wrong for a machine",
                 "lower": "float; joint travel limit (radians for revolute, metres for prismatic)",
                 "upper": "float; the other limit. Declare both for anything with a real stroke or range",
                 "rest": "float; the angle/extension this joint RESTS at, within [lower, upper]. Machines have no "
