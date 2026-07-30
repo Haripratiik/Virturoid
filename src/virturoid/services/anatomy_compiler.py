@@ -361,15 +361,32 @@ def _aim_dir(aim: str, role: str) -> tuple:
 
     This is the same rule the ROLE vocabulary already follows: an unknown role is never guessed at, it has to
     declare what it is `like`. Silence about a word we do not know is the one thing a design tool must not do."""
+    # An explicit DIRECTION VECTOR, for anything the 18 tokens cannot say. Every token has y >= 0, because they
+    # were written for animals whose limbs come in mirrored pairs and are placed by `symmetry: left_right` -- so
+    # there is no way to point a single part at -y at all, and a radial layout (three delta arms at 120 degrees,
+    # a radial urchin) is unauthorable however the tokens are combined. Same move as the parametric `attach`:
+    # the vocabulary stays as convenient shorthand and stops being a ceiling.
+    if isinstance(aim, (list, tuple)) and len(aim) == 3:
+        try:
+            v = [float(c) for c in aim]
+        except (TypeError, ValueError):
+            raise ValueError(f"aim {aim!r} must be three numbers [x, y, z], or one of: "
+                             f"{', '.join(sorted(_AIM_VEC))}") from None
+        n = (v[0] ** 2 + v[1] ** 2 + v[2] ** 2) ** 0.5
+        if n < 1e-9:
+            raise ValueError(f"aim {aim!r} has no direction (zero length); a part must point somewhere")
+        return (v[0] / n, v[1] / n, v[2] / n)
     a = (aim or "").strip().lower()
     if a in _AIM_VEC:
         return _AIM_VEC[a]
     if a:
         raise ValueError(
             f"aim {aim!r} is not a direction this compiler knows (part role {role!r}). It would have been "
-            f"silently treated as 'forward'. Use one of: {', '.join(sorted(_AIM_VEC))}. Note there is no "
-            "'left'/'right' — lateral placement is a job for `attach` (its `lateral` runs -1..+1) or for "
-            "`symmetry: 'left_right'`, which mirrors a part into a +y/-y pair.")
+            f"silently treated as 'forward'. Use one of: {', '.join(sorted(_AIM_VEC))} — or give an explicit "
+            "[x, y, z] vector, which is the only way to reach a direction the tokens cannot name (every token "
+            "has y >= 0, so a single part pointing at -y, or a radial fan at 120 degrees, needs the vector). "
+            "Note 'left'/'right' are not tokens: lateral placement is a job for `attach` (its `lateral` runs "
+            "-1..+1) or for `symmetry: 'left_right'`, which mirrors a part into a +y/-y pair.")
     if role in _DOWN_ROLES:                               # nothing declared: the role's own default is intended
         return (0.0, 0.0, -1.0)
     return (1.0, 0.0, 0.0)

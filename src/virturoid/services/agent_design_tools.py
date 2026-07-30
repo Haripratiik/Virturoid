@@ -157,7 +157,11 @@ def get_design_schema(args: dict) -> dict:
                 "name": "unique str (required)", "role": f"one of {_ROLES} (required)",
                 "parent": "another part's name; omit for the root body",
                 "attach": f"where on the parent it mounts: {_ATTACH}",
-                "aim": f"the direction it points: {_AIM}",
+                "aim": (f"the direction it points: {_AIM} — or an explicit [x, y, z] vector for anything those "
+                        "cannot say. Every token has y >= 0, because they were written for ANIMALS whose limbs "
+                        "come in mirrored pairs (see `symmetry`), so a single part pointing at -y, or a RADIAL "
+                        "fan like three delta arms at 120 degrees, needs the vector. An unrecognised token is "
+                        "refused, never silently treated as 'forward'"),
                 "size": "length in metres (the segment's long axis)", "girth": "radius in metres",
                 "aspect": "BODY shape (root part only): 'deck'/'chassis' = a flat rectangular slab for a "
                           "rover/AGV (wheels mount at its corners); 'wide' = a broad low pod; 'round' = a "
