@@ -126,76 +126,6 @@ def _link_vector(mj, body_id: int, children: dict):
     return far
 
 
-def _hub_span(mj, body_id: int, children: dict):
-    """A HUB's own axis, length and origin offset — for a body with several children, where `_link_vector` fails.
-
-    `_link_vector` returns the vector to the farthest child. For a serial link that is exactly right: the Go2's
-    thigh measures 0.2130 m against a real 0.213. For a TORSO with four legs on it, it picks one hip and calls
-    the distance to it the trunk's length. Measured across the cached Menagerie corpus, 33 models have a
-    multi-child root and 20 import understated by >=1.5x (median 1.76x) — the Go2's trunk at 0.199 m against a
-    real 0.387, Berkeley Humanoid's at 0.070 m for a 0.25 m torso.
-
-    Three measurements shaped the rule, and each one moved the answer:
-
-      * the AXIS is the principal axis of the child spread, not the direction to any one child;
-      * VISUAL geometry overstates the length — the Go2's base carries five non-colliding shrouds, and
-        measuring them with the collision box returns 0.530 m for a 0.376 m structure, so collision wins;
-      * so does an outlying FEATURE — the Go2's head is a cylinder and a sphere at x ~ +0.29, pushing the
-        collision union to 0.528, and ANYmal C's nose pushes its 0.600 m base to 1.049.
-
-    Hence: the MAIN structural geom, unioned with the points where children actually mount. A trunk spans its own
-    body and at least far enough to reach everything hanging off it. That keeps Spot's chassis (0.893 m, genuinely
-    longer than its hip spread) and a gripper palm (wider than the spread of its finger mounts) while excluding
-    the nose.
-
-    Returns (axis, length, offset) in the BODY frame, or None when this is not a hub. `offset` is where the
-    geometry begins relative to the body origin and is NOT a flag: across the corpus off/len has median -0.504
-    but sd 0.297, and only 12 of 31 sit within 0.1 of centred — TIAGo++ starts nearly a full length behind its
-    origin, LEAP Hand slightly ahead of it.
-    """
-    import numpy as np
-
-    kids = children.get(body_id, [])
-    if len(kids) < 2:
-        return None
-    P = np.asarray([mj.body_pos[c] for c in kids], dtype=float)
-    C = P - P.mean(axis=0)
-    if float(np.linalg.norm(C)) < 1e-9:      # co-located children carry no direction; leave it to _link_vector
-        return None
-    axis = np.asarray(np.linalg.svd(C, full_matrices=False)[2][0], dtype=float)
-
-    ids = [g for g in range(mj.ngeom)
-           if int(mj.geom_bodyid[g]) == body_id and int(mj.geom_type[g]) != 0]
-    hard = [g for g in ids if int(mj.geom_contype[g]) or int(mj.geom_conaffinity[g])] or ids
-
-    def _half(g):
-        t, s = int(mj.geom_type[g]), np.asarray(mj.geom_size[g], dtype=float)
-        if t == 2:                                     # sphere
-            return np.array([s[0]] * 3)
-        if t in (3, 5):                                # capsule / cylinder: (radius, half-length)
-            return np.array([s[0], s[0], s[1] + (s[0] if t == 3 else 0.0)])
-        return np.abs(s[:3])                           # ellipsoid / box / mesh bbox
-
-    def _span(g):
-        h, c = _half(g), np.asarray(mj.geom_pos[g], dtype=float)
-        R = _quat_mat(mj.geom_quat[g])
-        ts = [float(np.dot(c + R @ (h * np.array([sx, sy, sz])), axis))
-              for sx in (-1, 1) for sy in (-1, 1) for sz in (-1, 1)]
-        return min(ts), max(ts)
-
-    lo = hi = None
-    if hard:
-        main = max(hard, key=lambda g: float(np.prod(_half(g)) + 1e-12))   # the body's main structure
-        lo, hi = _span(main)
-    kt = [float(np.dot(p, axis)) for p in P]
-    lo = min(kt) if lo is None else min(lo, min(kt))
-    hi = max(kt) if hi is None else max(hi, max(kt))
-    length = float(hi - lo)
-    if length < 0.02:
-        return None
-    return axis, length, float(lo)
-
-
 def _bake_source_mesh(mj, body_id: int, S, out_path) -> bool:
     """Write THIS body's own mesh geoms, transformed into our LINK frame, as one binary STL (millimetres).
 
@@ -362,7 +292,6 @@ def import_robot(source: str, *, robot_id: str | None = None, species: str | Non
     segments: list[GeneSegment] = []
     seg_len_by_name: dict[str, float] = {}      # a child's mount z is measured from its parent's TIP
     _rot_by_id: dict[int, object] = {}          # body id -> S_i, the body-frame -> LINK-frame rotation
-    _origin_shift: dict[int, float] = {}        # body id -> where a HUB's geometry starts along its own axis
     try:                                        # per-link STLs of the customer's own meshes (visual only)
         from pathlib import Path as _P
         _mesh_dir = _P("build/_importmesh") / _slug_name(robot_id or os.path.basename(str(source)) or "import")
@@ -389,15 +318,8 @@ def import_robot(source: str, *, robot_id: str | None = None, species: str | Non
         # 39.9 kg for a 15.2 kg robot. The old condition (`span > length_m * 1.8`) meant the exact span was
         # DISCARDED exactly when the mesh was big, i.e. on every real mesh-based robot.
         import numpy as _np
-        # A HUB (several children) measures its OWN span; a serial link measures the reach to its next joint.
-        # See _hub_span: the vector-to-one-child proxy is right for a thigh and close to meaningless for a torso.
-        _hub = _hub_span(mj, i, children)
-        if _hub is not None:
-            _hub_ax, _span, _origin_shift[i] = _hub
-            _v = _hub_ax * _span
-        else:
-            _v = _link_vector(mj, i, children)
-            _span = float(_np.linalg.norm(_v))
+        _v = _link_vector(mj, i, children)
+        _span = float(_np.linalg.norm(_v))
         if _span >= 0.02:
             length_m = float(min(1.5, _span))
             shape = "capsule" if shape != "box" or length_m > 2.5 * radius_m else shape
@@ -432,12 +354,7 @@ def import_robot(source: str, *, robot_id: str | None = None, species: str | Non
             _Sp = _rot_by_id.get(int(mj.body_parentid[i]), _np.eye(3))
             _p_len = float(seg_len_by_name.get(parent, 0.0))
             _local = _Sp.T @ _np.asarray(mj.body_pos[i], dtype=float)      # parent body frame -> parent link frame
-            # A hub's segment is drawn from ITS OWN START, not from its body origin — a real trunk straddles that
-            # origin (the Go2's runs -0.193..+0.194). So the parent's frame effectively begins `_shift` along its
-            # axis, and every child measured from the old origin has to be re-measured from the new one. Without
-            # this the Go2's rear hips land at -0.193, BEHIND the trunk's own start, and the legs walk off the body.
-            _shift = float(_origin_shift.get(int(mj.body_parentid[i]), 0.0))
-            mount_offset = (float(_local[0]), float(_local[1]), float(_local[2]) - _shift - _p_len)
+            mount_offset = (float(_local[0]), float(_local[1]), float(_local[2]) - _p_len)
             mount_euler = _mat_to_euler_xyz(_Sp.T @ _quat_mat(mj.body_quat[i]) @ _S)
         else:
             mount_offset, mount_euler = (0.0, 0.0, 0.0), _mat_to_euler_xyz(_S)
