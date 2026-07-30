@@ -300,6 +300,16 @@ def _anchor_on_body(attach: str, half_len: float, half_w: float, height: float, 
     ~0.6*half_len (the loft tapers toward its ends, so 0.9 would stick out past the surface -> a visible gap),
     and limbs root well inside the body (legs into the lower body and extend out the bottom; neck/tail into the
     upper body) — the overlap hides the joint and guarantees a connected silhouette. front=+x, rear=-x."""
+    # PARAMETRIC ANCHOR. The eight named sites are an animal's vocabulary -- shoulder, hip, withers, tail root --
+    # and they cannot say "60% along the deck": a turret mid-chassis, a carriage partway down its rail, a sensor
+    # mast at 70% of the body. A dict form is a strict GENERALISATION, not a second code path: along=1.0/0.5/0.0
+    # reproduces front/mid/rear exactly, lateral=+-1 reproduces left/right, and height=0.40/0.50/0.70 reproduces
+    # bottom/mid/top, so every named site is a point in this space and the equivalence is asserted in the tests.
+    if isinstance(attach, dict):
+        along = min(1.0, max(0.0, float(attach.get("along", 0.5))))
+        lateral = min(1.0, max(-1.0, float(attach.get("lateral", 0.0))))
+        frac_h = min(1.0, max(0.0, float(attach.get("height", 0.5))))
+        return ((along - 0.5) * 2.0 * edge * half_len, lateral * 0.82 * half_w, frac_h * height)
     a = (attach or "mid").lower()
     # Five longitudinal anchors front->rear so a many-legged creature (spider/crab/insect = 4 pairs) can
     # spread its limb pairs along the body instead of colliding at one spot. ``front_mid``/``rear_mid`` sit

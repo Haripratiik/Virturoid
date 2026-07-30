@@ -110,6 +110,50 @@ def test_a_bolted_down_machine_does_not_get_a_floating_base():
     assert forced.base_mount == "free"
 
 
+@pytest.mark.parametrize("named,param", [
+    ("front_top", {"along": 1.0, "height": 0.70}),
+    ("rear_bottom", {"along": 0.0, "height": 0.40}),
+    ("mid_bottom", {"along": 0.5, "height": 0.40}),
+    ("front_bottom", {"along": 1.0, "height": 0.40}),
+    ("rear_top", {"along": 0.0, "height": 0.70}),
+    ("front_mid_bottom", {"along": 0.75, "height": 0.40}),
+    ("rear_mid_bottom", {"along": 0.25, "height": 0.40}),
+])
+def test_a_parametric_attach_point_generalises_the_named_sites_exactly(named, param):
+    """The 8 named sites are an animal's anchors (shoulder, hip, withers, tail root) and cannot say "60% along the
+    deck" -- a turret mid-chassis, a carriage partway down its rail, a mast at 70% of the body.
+
+    The dict form must be a strict GENERALISATION, not a parallel code path: if every named site is a point in
+    this space then there is one anchor rule, and the named tokens are shorthand. Asserting the equivalence is
+    what makes that claim checkable rather than hopeful."""
+    from virturoid.services.anatomy_compiler import _anchor_on_body
+    HL, HW, H, E = 0.30, 0.10, 0.12, 0.6
+    a = _anchor_on_body(named, HL, HW, H, edge=E)
+    b = _anchor_on_body(param, HL, HW, H, edge=E)
+    assert a == pytest.approx(b, abs=1e-9), f"{named} -> {a} but {param} -> {b}"
+
+
+def test_a_part_can_mount_somewhere_no_named_site_reaches():
+    """The point of the exercise: an anchor the token vocabulary simply cannot express, measured on the compiled
+    body rather than asserted from the graph."""
+    import mujoco
+
+    from virturoid.services.anatomy_compiler import build_from_anatomy
+    from virturoid.services.gene_compiler import compile_gene_to_mjcf
+    xs = {}
+    for along in (0.30, 0.60):
+        gene = build_from_anatomy({"robot_class": "mobile_base", "name": f"deck_{along}", "parts": [
+            {"name": "deck", "role": "body", "aspect": "deck", "size": 0.5, "girth": 0.16},
+            {"name": "mast", "role": "sensor_mast", "like": "neck", "parent": "deck",
+             "attach": {"along": along, "height": 0.7}, "aim": "up", "size": 0.2, "girth": 0.03}]})
+        m = mujoco.MjModel.from_xml_string(compile_gene_to_mjcf(gene, include_floor=True))
+        b = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, "mast")
+        assert b > 0, "the mast did not survive compilation"
+        xs[along] = float(m.body_pos[b][0])
+    assert xs[0.30] < xs[0.60], f"a larger `along` must sit further forward: {xs}"
+    assert abs(xs[0.60] - xs[0.30]) > 1e-3, f"`along` had no effect on placement: {xs}"
+
+
 def test_every_existing_animal_role_still_compiles_unchanged():
     """The 23 roles are the regression surface: opening the vocabulary must not perturb any of them."""
     from virturoid.services.agent_design_tools import _ROLES
