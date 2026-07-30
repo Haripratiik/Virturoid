@@ -352,10 +352,25 @@ _AIM_VEC = {
 
 
 def _aim_dir(aim: str, role: str) -> tuple:
-    a = (aim or "").lower()
+    """Which way this part points. An OMITTED aim takes the role's default; an UNRECOGNISED one is an error.
+
+    Those two cases used to be the same line, and any token we did not know silently became `forward`. Measured:
+    a gantry authored with `aim: "right"` -- not a token, though it reads like one -- built its bridge pointing
+    down the machine instead of across it, and nothing said so. The design compiled, passed its DOF check, and
+    was wrong in the only place a customer looks.
+
+    This is the same rule the ROLE vocabulary already follows: an unknown role is never guessed at, it has to
+    declare what it is `like`. Silence about a word we do not know is the one thing a design tool must not do."""
+    a = (aim or "").strip().lower()
     if a in _AIM_VEC:
         return _AIM_VEC[a]
-    if role in _DOWN_ROLES:
+    if a:
+        raise ValueError(
+            f"aim {aim!r} is not a direction this compiler knows (part role {role!r}). It would have been "
+            f"silently treated as 'forward'. Use one of: {', '.join(sorted(_AIM_VEC))}. Note there is no "
+            "'left'/'right' — lateral placement is a job for `attach` (its `lateral` runs -1..+1) or for "
+            "`symmetry: 'left_right'`, which mirrors a part into a +y/-y pair.")
+    if role in _DOWN_ROLES:                               # nothing declared: the role's own default is intended
         return (0.0, 0.0, -1.0)
     return (1.0, 0.0, 0.0)
 
@@ -642,10 +657,16 @@ def build_from_anatomy(graph: dict) -> RobotGene:
                     _ar = _anatomy_role_for(seg_role, i, n)
                     if _ar:
                         geo = {**geo, "anatomy_role": _ar}
-            if is_wheel:
-                joint_type = "revolute"                            # a wheel is always a (continuous) hinge
-            elif explicit_joint == "fixed" or (last and is_limb and n > 1):
+            # An explicit `joint` beats the role's inference — including for a wheel. The wheel branch used to run
+            # FIRST, so `joint: "fixed"` on a wheel-role part was silently overridden into a revolute and the
+            # design quietly gained an actuator it never asked for. That matters because the compiler's own
+            # teaching error tells an agent that a TRACK is "like a wheel": a tracked loader would declare two
+            # fixed track units and be handed two motors. This module already states the rule further down —
+            # "SPECIFIED joints beat inferred ones" — and the wheel case simply predated it.
+            if explicit_joint == "fixed" or (last and is_limb and n > 1):
                 joint_type = None                                  # welded paw / explicitly-fixed part
+            elif is_wheel and not explicit_joint:
+                joint_type = "revolute"                            # a wheel with nothing declared is a free hinge
             elif explicit_joint == "prismatic":
                 # A SLIDING joint. `GeneSegment` and `gene_compiler` have always supported prismatic; the anatomy
                 # path just never offered it, so a whole family of real machines was inexpressible -- a gantry
