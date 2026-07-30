@@ -989,6 +989,44 @@ def probe_robot(args: dict) -> dict:
         return {"ok": False, "error": f"could not measure '{args['robot_id']}' ({type(exc).__name__}: {exc})"}
 
 
+def assert_design(args: dict) -> dict:
+    """State what the design MEANT, and be checked against it.
+
+    ``probe_robot`` answers questions, but only the ones you think to ask. This is the other half: declare intent
+    as claims the harness verifies -- "the foot should touch the ground", "the gripper stays within 40 cm of its
+    mount", "these two are SUPPOSED to overlap, that is a joint housing not a defect".
+
+    It targets one failure mode specifically: a design where every part passes its local checks and the assembly
+    still means nothing. An assertion is the only artefact that records what the assembly was FOR, so it is the
+    only thing that makes that kind of wrongness detectable.
+
+    ``assertions`` is a list of ``{kind, a, b?, max_m?, min_m?, reason?}``; call with ``{"kind": "list"}`` for the
+    vocabulary. Passing ``persist: true`` stores them on the robot so a later ``edit_robot`` re-checks the
+    ORIGINAL intent -- an amend that quietly breaks what the design was for is caught by the design's own words.
+    ``allow_*`` forms dismiss one false positive in writing, with the reason kept, instead of loosening a
+    threshold for every design that follows."""
+    from virturoid.services import session_state as S
+    from virturoid.services.design_assertions import check, describe, validate
+    if str(args.get("kind") or "") == "list" or args.get("list"):
+        return {"ok": True, "assertions": describe()}
+    gene = S.get_robot(args.get("robot_id"))
+    if gene is None:
+        return {"ok": False, "error": f"no robot '{args.get('robot_id')}'; call create_robot first"}
+    spec = args.get("assertions")
+    if spec is not None:
+        bad = validate(spec)
+        if bad:
+            return {"ok": False, "error": "; ".join(bad), "assertions": describe()}
+    try:
+        out = check(gene, spec)
+    except Exception as exc:  # noqa: BLE001 - a check failing must not take the session down
+        return {"ok": False, "error": f"could not check '{args['robot_id']}' ({type(exc).__name__}: {exc})"}
+    if args.get("persist") and spec:
+        gene.metadata = {**(getattr(gene, "metadata", None) or {}), "assertions": list(spec)}
+        S.put_robot(gene, robot_id=args["robot_id"], label="assertions")
+    return {"ok": True, "robot_id": args["robot_id"], **out}
+
+
 def edit_robot(args: dict) -> dict:
     """Apply typed LOCALIZED edit ops to a held robot (e.g. taller = scale_group legs length 1.2). Lands as ONE
     undo step; returns the DIFF + new summary. ``ops`` is a list of ``{op, args}`` (discover them with the
