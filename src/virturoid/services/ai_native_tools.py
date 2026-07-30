@@ -139,8 +139,22 @@ def _render_gene(gene, tag: str, *, azimuth: float = 50.0, elevation: float = -1
         except Exception:  # noqa: BLE001
             xml = compile_gene_to_mjcf(gene, include_floor=True, spawn_z=spawn_z)
         m = mujoco.MjModel.from_xml_string(xml)
-        d = mujoco.MjData(m); mujoco.mj_resetData(m, d)
-        _pose_manipulator_for_render(m, d, gene)               # bend an arm into a natural pose (no-op for others)
+        d = mujoco.MjData(m)
+        # SHOW THE POSE THE BODY SHIPS IN. mj_resetData goes to qpos0 — every joint at zero — so a design that
+        # DECLARED where it rests was rendered in a stance it never holds. Measured: a SCARA and a rail rendered
+        # byte-identically with and without their rest angles, and an excavator that stands 1.248 m tall in
+        # simulation was drawn lying flat on the ground. The sim paths (standing_spawn_z, _honest_drive) already
+        # reset to the keyframe for exactly this reason; the render was the one place left behind, which is the
+        # one place a customer actually looks.
+        _declared = bool((getattr(gene, "metadata", None) or {}).get("rest_pose"))
+        if m.nkey:
+            mujoco.mj_resetDataKeyframe(m, d, 0)
+        else:
+            mujoco.mj_resetData(m, d)
+        if not _declared:
+            # The canned arm bend is a fallback for bodies that never said how they rest. A declared stance is
+            # the designer's own answer and must not be overwritten by our guess at one.
+            _pose_manipulator_for_render(m, d, gene)
         mujoco.mj_forward(m, d)
         rr = mujoco.Renderer(m, height=420, width=560); cam = mujoco.MjvCamera()
         # FRAME THE ACTUAL BODY. A fixed lookat z=0.15 / distance=1.9 is sized for a quadruped, so a tall body

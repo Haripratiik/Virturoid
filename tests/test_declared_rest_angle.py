@@ -123,6 +123,38 @@ def test_a_prismatic_stroke_can_declare_its_parked_position():
     assert float(d.qpos[m.jnt_qposadr[j]]) == pytest.approx(-0.5, abs=1e-6)
 
 
+def test_the_declared_stance_is_what_gets_RENDERED():
+    """The picture is the whole point, and it was the one place the stance did not reach.
+
+    `_render_gene` — the artifact submit_design and render_view hand back — called mj_resetData, which goes to
+    qpos0 with every joint at zero, and then overwrote an arm's hinges with canned bends. So a SCARA and a rail
+    rendered byte-identically with and without their rest angles, and an excavator that stands 1.248 m tall in
+    simulation was drawn lying flat. The sim paths already reset to the keyframe for exactly this reason."""
+    import copy
+    import hashlib
+    import os
+
+    from virturoid.services.agent_design_tools import _EXAMPLE_EXCAVATOR
+    from virturoid.services.anatomy_compiler import build_from_anatomy
+    from virturoid.services.ai_native_tools import _render_gene
+
+    flat_graph = copy.deepcopy(_EXAMPLE_EXCAVATOR)
+    for p in flat_graph["parts"]:
+        p.pop("rest", None)                                   # same body, stance removed
+
+    posed = _render_gene(build_from_anatomy(_EXAMPLE_EXCAVATOR), "t_rest_posed")
+    flat = _render_gene(build_from_anatomy(flat_graph), "t_rest_flat")
+    if not posed or not flat or not (os.path.exists(posed) and os.path.exists(flat)):
+        pytest.skip("rendering is unavailable in this environment")
+
+    def _h(p):
+        with open(p, "rb") as fh:
+            return hashlib.sha256(fh.read()).hexdigest()
+    assert _h(posed) != _h(flat), (
+        "the render is byte-identical with and without a declared rest pose — the stance reaches simulation but "
+        "not the picture, which is the only place a customer looks")
+
+
 def test_a_leg_keeps_its_derived_knee_bend_when_nothing_is_declared():
     """The derived poses are STRUCTURAL — a body has to stand — so they must survive the new opt-in. Only a part
     that says `rest` gets to override, and the regression surface here is every animal ever composed."""
