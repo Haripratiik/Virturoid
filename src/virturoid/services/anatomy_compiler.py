@@ -771,7 +771,21 @@ def build_from_anatomy(graph: dict) -> RobotGene:
                 # rest pose: a slight knee bend on legs (so the body stands TALL, not squatting); a CURL spread
                 # across the internal joints of a multi-segment part (scorpion tail arching over, a curved neck/
                 # trunk) when the graph asks for it; otherwise straight at rest.
-                if is_limb and i == 1:
+                #
+                # A DECLARED rest angle wins over all of it. The derived cases above are animal defaults, and a
+                # machine has none: every joint sat at 0, so a chain of forward-aimed links came out as a straight
+                # horizontal line. Measured by rendering the eight non-animal benchmark families -- the excavator
+                # passed its DOF check 4/4 and lay flat on the ground, and declaring a stance on the same body
+                # stood it up 0.025 -> 1.248 m. Which stance is right belongs to the DESIGNER, not to a per-class
+                # table here: a parked excavator and one loading a truck are the same machine.
+                if part.get("rest") is not None:
+                    _r = float(part["rest"])
+                    if _jlo is not None:                  # a stance MuJoCo cannot hold is worse than none -- the
+                        _r = max(_r, float(_jlo))         # solver would snap it on step 1 and the body a customer
+                    if _jhi is not None:                  # was shown would not be the body that simulates
+                        _r = min(_r, float(_jhi))
+                    pose[f"{seg_name}_joint"] = _r
+                elif is_limb and i == 1:
                     pose[f"{seg_name}_joint"] = 0.12
                 elif curl and n > 1 and i >= 1:
                     pose[f"{seg_name}_joint"] = curl / (n - 1)

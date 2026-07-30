@@ -55,6 +55,53 @@ _EXAMPLE_ROVER = {
          "attach": ["front_bottom", "rear_bottom"][i],
          "size": 0.2, "girth": 0.08, "symmetry": "left_right"} for i in range(2)]}   # 2 pairs = 4 wheels at corners
 
+# NON-ANIMAL worked examples. The three above are all creatures, and every example an agent had was a creature,
+# so the machine half of the vocabulary (prismatic joints, declared axes, open roles, parametric attach, a rest
+# stance) had no precedent showing how the pieces go together. These two are the load-bearing shapes: a SCARA is
+# the "declared axis + prismatic" case, an excavator the "articulated boom that must REST somewhere" case.
+#
+# `rest` is the part that is easy to skip and impossible to un-see once rendered: with every joint at 0 a chain
+# of forward-aimed links is a straight horizontal line, so the excavator below WITHOUT its rest angles lies flat
+# on the ground (measured: 0.025 m tall) and WITH them stands 1.248 m.
+_EXAMPLE_SCARA = {
+    "robot_class": "manipulator", "name": "agent_scara",
+    # 2R in a horizontal plane about Z, then a prismatic quill. `axis` matters: the role-derived default is a
+    # limb's (0,1,0) pitch, which would make this an elbow that bends the wrong way.
+    "parts": [
+        {"name": "base", "role": "body", "size": 0.22, "girth": 0.11},
+        # The COLUMN is the part that is easy to leave out and obvious once rendered: a SCARA's links work in a
+        # horizontal plane, so without a vertical standoff the whole arm sits at z~0 and reads as a pipe lying on
+        # the floor. Structure a machine needs to look like itself is the designer's job, not the compiler's.
+        {"name": "column", "role": "column", "like": "neck", "parent": "base", "attach": "front_top",
+         "aim": "up", "size": 0.45, "girth": 0.06},
+        {"name": "link1", "role": "arm", "parent": "column", "aim": "forward",
+         "size": 0.35, "girth": 0.045, "joint": "revolute", "axis": [0, 0, 1], "lower": -2.6, "upper": 2.6},
+        {"name": "link2", "role": "arm", "parent": "link1", "aim": "forward",
+         "size": 0.28, "girth": 0.038, "joint": "revolute", "axis": [0, 0, 1], "lower": -2.6, "upper": 2.6,
+         "rest": 0.9},
+        {"name": "quill", "role": "quill", "like": "arm", "parent": "link2", "aim": "down",
+         "size": 0.18, "girth": 0.022, "joint": "prismatic", "axis": [0, 0, 1], "lower": -0.15, "upper": 0.0},
+    ]}
+_EXAMPLE_EXCAVATOR = {
+    "robot_class": "manipulator", "name": "agent_excavator",
+    # open roles (slew_ring / boom / stick / bucket) each declaring what they ARE via `like`, plus the rest
+    # stance that puts the machine in a working posture instead of flat on the floor.
+    "parts": [
+        {"name": "house", "role": "body", "size": 0.9, "girth": 0.30},
+        {"name": "slew", "role": "slew_ring", "like": "neck", "parent": "house", "attach": "front_top",
+         "aim": "up", "size": 0.16, "girth": 0.20, "joint": "revolute", "axis": [0, 0, 1],
+         "lower": -3.1, "upper": 3.1},
+        {"name": "boom", "role": "boom", "like": "arm", "parent": "slew", "aim": "forward",
+         "size": 0.95, "girth": 0.07, "joint": "revolute", "axis": [0, 1, 0],
+         "lower": -0.2, "upper": 1.2, "rest": -0.15},
+        {"name": "stick", "role": "stick", "like": "arm", "parent": "boom", "aim": "forward",
+         "size": 0.70, "girth": 0.05, "joint": "revolute", "axis": [0, 1, 0],
+         "lower": -2.2, "upper": 0.2, "rest": -1.6},
+        {"name": "bucket", "role": "bucket", "like": "hand", "parent": "stick", "aim": "forward",
+         "size": 0.32, "girth": 0.15, "joint": "revolute", "axis": [0, 1, 0],
+         "lower": -2.6, "upper": 0.4, "rest": -1.2},
+    ]}
+
 
 def _corpus_grounding(args: dict) -> dict:
     """Thesis A — RETRIEVAL = RUNTIME GROUNDING. Return the best PHYSICS-VERIFIED shape programs the
@@ -111,7 +158,18 @@ def get_design_schema(args: dict) -> dict:
                           "bulbous sac; omit for the default sleek barrel torso",
                 "segments": "int; a leg with 4 = 3 actuated joints + a welded foot (Go2-class)",
                 "symmetry": "'left_right' mirrors the part to a +y/-y PAIR (so one leg entry = two legs)",
-                "joint": "'revolute' to actuate it; omit for a welded/fixed part",
+                "joint": "'revolute' to actuate it, 'prismatic' for a SLIDING axis (a gantry ram, a rail "
+                         "carriage, a SCARA quill); omit for a welded/fixed part",
+                "axis": "[x,y,z] the joint's own axis, e.g. [0,0,1] for a turret yaw or a SCARA elbow. Omitted, "
+                        "the axis is derived from the ANIMAL role, which is right for a limb and wrong for a "
+                        "machine",
+                "lower": "float; joint travel limit (radians for revolute, metres for prismatic)",
+                "upper": "float; the other limit. Declare both for anything with a real stroke or range",
+                "rest": "float; the angle/extension this joint RESTS at, within [lower, upper]. Machines have no "
+                        "animal default, so every joint sits at 0 and a chain of forward-aimed links comes out as "
+                        "a straight horizontal line lying on the ground — declaring the working stance is what "
+                        "stands it up (a measured excavator went 0.025 -> 1.248 m tall). Legs keep their derived "
+                        "knee bend when this is omitted",
                 "curl": "float; a resting curl spread across a multi-segment part (a curved tail/neck)",
                 "geometry": "OPTIONAL shape program to AUTHOR a single-segment part; its build/export approximation "
                             "is kept with the segment and the high-fidelity mesh path realizes the full shape. See geometry_families."},
@@ -156,7 +214,9 @@ def get_design_schema(args: dict) -> dict:
                       "roles MUST come from the roles list above; an unknown role is rejected with a teaching "
                       "error (it is NOT silently compiled into a limb)",
                       "the compiler + validity gates run on submit; a broken graph returns a teaching error"],
-            "examples": {"quadruped": _EXAMPLE_QUAD, "hexapod": _EXAMPLE_HEX, "rover": _EXAMPLE_ROVER},
+            # Every example here used to be a CREATURE, so the machine half of the vocabulary had no precedent.
+            "examples": {"quadruped": _EXAMPLE_QUAD, "hexapod": _EXAMPLE_HEX, "rover": _EXAMPLE_ROVER,
+                         "scara_arm": _EXAMPLE_SCARA, "excavator": _EXAMPLE_EXCAVATOR},
             # HONEST out-of-box capability of each example (measured, not assumed): so the agent knows what
             # walks/drives immediately vs what needs training. The scripted wave gait is a strong PRIOR for a
             # 4-leg body but marginal for 6+ legs (a known frontier — the learned residual/train_held closes it).
