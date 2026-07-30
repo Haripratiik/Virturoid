@@ -99,6 +99,24 @@ def test_casters_are_not_legs():
     assert _klass("pal_tiago/tiago.xml") == "mobile_base"
 
 
+def test_an_include_fragment_says_so_instead_of_raising():
+    """A model directory ships files meant to be pulled INTO a parent -- keyframes, assets, shared defaults -- and
+    a customer dropping a folder will hand us one.
+
+    shadow_hand/keyframes.xml is the single import failure in the whole 63-model Menagerie corpus, and it failed
+    as a raw `ValueError: keyframe 'scissors': invalid qpos size, expected 0, got 24`, which tells the customer
+    nothing actionable. A <mujoco> root declaring no <body> is the signature of a fragment."""
+    src = _MEN / "shadow_hand/keyframes.xml"
+    if not src.is_file():
+        pytest.skip("shadow_hand is not cached locally")
+    from virturoid.services.robot_import import import_robot
+    out = import_robot(str(src), robot_id="frag")
+    assert out["gene"] is None and not out["valid"]
+    w = " ".join(out.get("warnings") or []).lower()
+    assert "fragment" in w, w
+    assert "left_hand.xml" in w, f"the report must name the real model beside it: {w}"
+
+
 def test_a_classification_failure_never_breaks_the_import():
     """The class is a guess layered on top of a faithful import; it must degrade, not raise."""
     from virturoid.schemas.gene import GeneSegment, RobotGene

@@ -234,6 +234,31 @@ def import_robot(source: str, *, robot_id: str | None = None, species: str | Non
                          "`rosrun xacro xacro`), then import the generated .urdf."],
         }
 
+    # AN INCLUDE FRAGMENT IS NOT A MODEL. Real model directories ship files meant to be pulled INTO a parent --
+    # keyframes.xml, assets.xml, a shared defaults block -- and a customer dropping a folder will hand us one.
+    # Measured on MuJoCo Menagerie: shadow_hand/keyframes.xml is the single import failure in the whole 63-model
+    # corpus, and it fails as a raw `ValueError: keyframe 'scissors': invalid qpos size, expected 0, got 24`,
+    # which tells the customer nothing. A <mujoco> root carrying no BODY is the signature: it declares things for
+    # someone else's worldbody. Say so, and name the model file sitting next to it.
+    if "<mujoco" in _text and "<body" not in _text:
+        _sibling = ""
+        try:
+            _p = Path(source)
+            if len(source) < 512 and _p.is_file():
+                _peers = sorted(q.name for q in _p.parent.glob("*.xml")
+                                if q != _p and "<body" in q.read_text(encoding="utf-8", errors="replace"))
+                if _peers:
+                    _sibling = f" The model in this directory is {_peers[0]!r}" + (
+                        f" (also: {', '.join(_peers[1:4])})." if len(_peers) > 1 else ".")
+        except OSError:
+            pass
+        return {
+            "gene": None, "backend_support": {}, "species": None, "robot_class": None, "valid": False,
+            "warnings": ["this is an MJCF INCLUDE FRAGMENT, not a standalone model: it has a <mujoco> root but "
+                         "declares no <body>, so it only contributes keyframes/assets/defaults to a parent model "
+                         "that <include>s it. Import the model file instead." + _sibling],
+        }
+
     mj = _load_model(source, mujoco, warnings)
 
     name_of = lambda obj, i: (mujoco.mj_id2name(mj, obj, i) or "")  # noqa: E731

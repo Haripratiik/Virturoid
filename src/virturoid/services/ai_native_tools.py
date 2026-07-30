@@ -961,6 +961,34 @@ def get_robot(args: dict) -> dict:
     return {"ok": True, **_summary(gene, args["robot_id"]), **S.robot_meta(args["robot_id"])}
 
 
+def probe_robot(args: dict) -> dict:
+    """MEASURE the held robot: a read-only query surface, not a fixed summary.
+
+    ``get_robot`` returns one canned summary and ``describe_robot``/``diagnose_body`` compose a NEW body from a
+    prompt rather than inspecting the held one, so the questions a designer actually asks had no answer -- how far
+    is the gripper from its mount, do these two links pass through each other anywhere in a joint's range, what is
+    the torque margin here, how much ground clearance is there.
+
+    ``fields`` selects what to compute (omit for everything):
+    ``parts`` ``reach`` ``clearance`` ``mass`` ``torque`` ``overlaps`` ``swept``.
+
+    ``swept`` is the one a static check cannot do: it samples each limited joint across its declared range and
+    reports pairs that collide only AWAY from the rest pose -- a design can be perfectly clean as it stands and
+    drive one link straight through another halfway through its travel.
+
+    Everything is derived from the compiled MuJoCo model, so an answer cannot disagree with the physics the
+    verdict will use, and no LLM is called -- these are measurements, so the zero-product-token rule holds."""
+    from virturoid.services import session_state as S
+    from virturoid.services.robot_probe import probe
+    gene = S.get_robot(args["robot_id"])
+    if gene is None:
+        return {"ok": False, "error": f"no robot '{args['robot_id']}'; call create_robot first"}
+    try:
+        return {"ok": True, "robot_id": args["robot_id"], **probe(gene, args)}
+    except Exception as exc:  # noqa: BLE001 - a measurement failing must not take the session down
+        return {"ok": False, "error": f"could not measure '{args['robot_id']}' ({type(exc).__name__}: {exc})"}
+
+
 def edit_robot(args: dict) -> dict:
     """Apply typed LOCALIZED edit ops to a held robot (e.g. taller = scale_group legs length 1.2). Lands as ONE
     undo step; returns the DIFF + new summary. ``ops`` is a list of ``{op, args}`` (discover them with the
