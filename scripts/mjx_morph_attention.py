@@ -140,6 +140,23 @@ def main(argv=None) -> int:
                     "randomization (canonical MuJoCo-Playground pattern: batch geom_friction/body_mass/dof_"
                     "armature/dof_frictionloss as vmapped mjx.Model leaves), targeting the MJX<->CPU CONTACT gap "
                     "for vigorous learned gaits. Off (default) -> in_axes=(None,0) = byte-identical single model.")
+    # MORPHOLOGY DR: the axis the co-design literature actually randomizes, and the one this repo was missing.
+    # Every existing DR knob varies DYNAMICS (friction, mass, gains, pushes); none varies GEOMETRY, so a policy
+    # trained here is fitted to exactly one set of link lengths. That is the measured blocker behind three
+    # reverted geometry improvements: bodies and the scripted gait's operating point are co-tuned, so changing
+    # limb proportions -- however anatomically right -- moved every body off the point its controller assumed.
+    # Randomizing LEG LENGTH per env (asymmetric fore/hind included) then finetuning per body is the published
+    # remedy (arxiv 2407.06770, quadruped parkour). Off by default -> byte-identical to the single-model path.
+    ap.add_argument("--morph-dr", action="store_true", help="per-env LIMB-LENGTH randomization: scale each limb's "
+                    "link lengths (geom half-length, child offsets, ipos, mass, inertia) per env, keeping the "
+                    "attachment points -- and therefore stance width -- fixed, so LENGTH is isolated from WIDTH. "
+                    "Also feeds the per-env lengths into the policy's own morphology tokens, so this CONDITIONS "
+                    "the policy rather than just making it robust. Off -> single shared model, byte-identical.")
+    ap.add_argument("--morph-dr-lo", type=float, default=0.75, help="lower limb-length scale for --morph-dr")
+    ap.add_argument("--morph-dr-hi", type=float, default=1.30, help="upper limb-length scale for --morph-dr")
+    ap.add_argument("--morph-dr-asym", action="store_true", help="sample each limb's scale INDEPENDENTLY so fore "
+                    "and hind legs differ (the paper's asymmetric case). Off -> one scale for all limbs per env, "
+                    "which varies size without varying proportion between limbs.")
     ap.add_argument("--dr-scale", type=float, default=1.0, help="P3 (plan v4): scale the contact-DR range WIDTH "
                     "(deviation from 1.0). 1.0=canonical Go1/Barkour ranges (default, byte-identical); <1 = milder "
                     "(e.g. 0.4) so a warm-started nominal policy adds robustness WITHOUT toppling under too-wide DR.")
@@ -401,14 +418,19 @@ def main(argv=None) -> int:
     opt = optax.chain(optax.clip_by_global_norm(1.0), optax.scale_by_adam())   # B0.3: LR applied manually below (KL-adaptive)
     opt_state = opt.init(params)
 
-    def obs_tokens(d):
-        """(NT, F) per env — same feature layout as morph_graph.observe (so params transfer to CPU)."""
+    def obs_tokens(d, st=static):
+        """(NT, F) per env — same feature layout as morph_graph.observe (so params transfer to CPU).
+
+        ``st`` is the per-token STATIC block. It defaults to the shared nominal one, and is passed per env only
+        under --morph-dr, where each env has different link lengths and the policy has to be told which body it
+        is driving. Without that the features would be identical across envs while the dynamics differed, which
+        trains robustness (implicit system identification) rather than morphology conditioning."""
         qpos = d.qpos[qadr]; qvel = d.qvel[vadr]
         dyn = jp.stack([qpos, qvel, jp.sin(qpos), jp.cos(qpos)], axis=1)
         q = d.qpos[base_qadr:base_qadr + 7]; qd = d.qvel[base_vadr:base_vadr + 6]
         upright = 1.0 - 2.0 * (q[4] ** 2 + q[5] ** 2)
         g = jp.array([1.0, q[2], upright, qd[0], qd[1], qd[2], qd[3], qd[4], qd[5]])
-        return jp.nan_to_num(jp.concatenate([static, dyn, jp.tile(g, (NT, 1))], axis=1))
+        return jp.nan_to_num(jp.concatenate([st, dyn, jp.tile(g, (NT, 1))], axis=1))
 
     from virturoid.services.morph_forward import attention_forward
 
@@ -436,6 +458,98 @@ def main(argv=None) -> int:
         vals = vmlp(P["vf"], pools)[:, 0]                                              # (N,)
         return means, vals
 
+    # MORPHOLOGY DR: per-env LIMB LENGTHS as batched mjx.Model leaves, plus the matching per-env morphology tokens.
+    #
+    # A "limb" is a branch hanging off the root body. Within a branch every body's OWN length scales, but the
+    # branch root's `body_pos` -- where the limb attaches to the trunk -- does NOT, which is what separates leg
+    # LENGTH from stance WIDTH. Deeper `body_pos` values do scale, so each link starts at its stretched parent's
+    # tip and the chain stays connected. Mass scales linearly (a longer rod of the same radius) and inertia
+    # cubically (rod about a transverse axis, m*L^2).
+    #
+    # The second half is what makes this CO-DESIGN and not just robustness: `graph.static` is computed once from
+    # the nominal model, so without patching it every env would show the policy IDENTICAL morphology features
+    # while behaving differently -- implicit system identification, not conditioning. Columns 5 (link_off) and 7
+    # (mass) of morph_graph's static layout are exactly the two the scale changes, so they are patched per env.
+    # Joint LIMIT columns are unaffected for hinges (morph_graph normalizes those by pi, not by link length).
+    MORPH_DR = bool(args.morph_dr)
+    static_v, _ST_AX, morph_scale = static, None, None
+    if MORPH_DR:
+        _par = np.asarray(mj.body_parentid, dtype=int)
+        _root = next((b for b in range(1, mj.nbody) if _par[b] == 0), 1)   # the robot's own root body
+        branch_of = np.full(mj.nbody, -1, dtype=int)          # which limb each body belongs to (-1 = trunk)
+        is_branch_root = np.zeros(mj.nbody, dtype=bool)
+        _limbs = [b for b in range(1, mj.nbody) if _par[b] == _root]
+        for _i, _b in enumerate(_limbs):
+            is_branch_root[_b] = True
+            _stack = [_b]
+            while _stack:
+                _x = _stack.pop()
+                branch_of[_x] = _i
+                _stack += [c for c in range(1, mj.nbody) if _par[c] == _x]
+        n_limbs = len(_limbs)
+        if n_limbs == 0:
+            print("morph-DR requested but the root has no limbs; falling back to the single model", flush=True)
+            MORPH_DR = False
+    if MORPH_DR:
+        # Which geom_size column carries LENGTH, per geom type. A sphere or a mesh has no length axis to stretch,
+        # and a foot pad should not become a stilt, so those are left alone.
+        _GT = np.asarray(mj.geom_type, dtype=int)
+        _GS = np.asarray(mj.geom_size, dtype=float)
+        len_col = np.full(mj.ngeom, -1, dtype=int)
+        for _g in range(mj.ngeom):
+            if _GT[_g] in (3, 5):                            # capsule, cylinder -> size = (radius, half-length, _)
+                len_col[_g] = 1
+            elif _GT[_g] in (4, 6):                          # ellipsoid, box -> stretch the axis that is longest
+                len_col[_g] = int(np.argmax(_GS[_g][:3]))
+        size_hot = np.zeros((mj.ngeom, _GS.shape[1]), dtype=float)
+        for _g in range(mj.ngeom):
+            if len_col[_g] >= 0:
+                size_hot[_g, len_col[_g]] = 1.0
+        gbody = np.asarray(mj.geom_bodyid, dtype=int)
+        in_limb = (branch_of >= 0).astype(float)                      # trunk stays nominal
+        pos_scales = in_limb * (~is_branch_root).astype(float)        # attachment points fixed -> width preserved
+        b_idx = np.maximum(branch_of, 0)
+
+        _J_BODY = np.asarray([int(mj.jnt_bodyid[int(mj.actuator_trnid[u, 0])]) for u in np.asarray(graph.act_u)])
+
+        def _limb_scales(rng):
+            if args.morph_dr_asym:
+                return jax.random.uniform(rng, (n_limbs,), minval=args.morph_dr_lo, maxval=args.morph_dr_hi)
+            one = jax.random.uniform(rng, (), minval=args.morph_dr_lo, maxval=args.morph_dr_hi)
+            return jp.full((n_limbs,), one)
+
+        _keys = jax.random.split(jax.random.PRNGKey(11), N)
+        _s_limb = jax.vmap(_limb_scales)(_keys)                        # (N, n_limbs)
+        _bi = jp.asarray(b_idx)
+        s_body = jp.where(jp.asarray(in_limb) > 0, _s_limb[:, _bi], 1.0)          # (N, nbody)
+        s_pos = jp.where(jp.asarray(pos_scales) > 0, _s_limb[:, _bi], 1.0)        # (N, nbody)
+        s_geom = s_body[:, jp.asarray(gbody)]                                     # (N, ngeom)
+
+        _size_mult = 1.0 + jp.asarray(size_hot)[None] * (s_geom[..., None] - 1.0)
+        mx_v = mx.replace(
+            geom_size=mx.geom_size[None] * _size_mult,
+            geom_pos=mx.geom_pos[None] * s_geom[..., None],
+            body_pos=mx.body_pos[None] * s_pos[..., None],
+            body_ipos=mx.body_ipos[None] * s_body[..., None],
+            body_mass=mx.body_mass[None] * s_body,
+            body_inertia=mx.body_inertia[None] * (s_body ** 3)[..., None],
+        )
+        mx_axes = jax.tree_util.tree_map(lambda _x: None, mx).replace(
+            geom_size=0, geom_pos=0, body_pos=0, body_ipos=0, body_mass=0, body_inertia=0)
+        # Tell the POLICY what body it is driving: patch link_off (col 5) and mass (col 7) per env.
+        s_tok = s_body[:, jp.asarray(_J_BODY)]                                    # (N, NT)
+        static_v = jp.broadcast_to(static, (N,) + static.shape)
+        static_v = static_v.at[:, :, 5].multiply(s_tok).at[:, :, 7].multiply(s_tok)
+        _ST_AX, morph_scale = 0, _s_limb
+        print(f"morph-DR ON: {n_limbs} limbs x {N} envs, length scale "
+              f"[{args.morph_dr_lo:.2f}, {args.morph_dr_hi:.2f}]"
+              f"{' asymmetric per limb' if args.morph_dr_asym else ' shared per env'}; "
+              f"stance width fixed; policy tokens carry the per-env lengths", flush=True)
+        if CONTACT_DR:
+            print("NOTE: --contact-dr with --morph-dr would overwrite body_mass; morph-DR owns mass here.",
+                  flush=True)
+            CONTACT_DR = False
+
     # CONTACT-PARAM DR (T1.5): batch per-env mjx.Model leaves (friction/mass/armature/frictionloss) + a matching
     # in_axes Model; vmap step/forward over (model, data). The canonical MuJoCo-Playground pattern, targeting the
     # MJX<->CPU CONTACT gap for vigorous learned gaits. OFF -> mx_v=mx, mx_axes=None -> in_axes=(None,0) = the
@@ -460,16 +574,38 @@ def main(argv=None) -> int:
         mx_axes = jax.tree_util.tree_map(lambda _x: None, mx).replace(
             geom_friction=0, body_mass=0, dof_armature=0, dof_frictionloss=0)
         print(f"contact-DR ON: per-env friction/mass/armature/frictionloss over {N} envs", flush=True)
-    else:
+    elif not MORPH_DR:                                    # morph-DR already batched the model; don't undo it
         mx_v, mx_axes = mx, None
     step_v = jax.vmap(mjx.step, in_axes=(mx_axes, 0))
 
     _spawn = jp.asarray(spawn_qpos) if spawn_qpos is not None else None  # imported robot's home pose
 
+    # PER-ENV SPAWN HEIGHT. With per-env leg lengths a single shared base z is wrong for every env but one: a
+    # longer-legged body starts with its feet through the floor (ejected on the first step) and a shorter one
+    # starts falling. Measure it instead of deriving it -- forward-kinematic each env at its default pose, find
+    # its lowest geom, and lift the base so that point rests just above the floor. This is exactly what
+    # gene_compiler.standing_spawn_z does on CPU, done once per env at startup rather than analytically.
+    _spawn_z = None
+    if MORPH_DR:
+        _d_probe = jax.vmap(lambda _: mjx.make_data(mx, naconmax=NACON, njmax=NJMAX))(jp.arange(N))
+        if _spawn is not None:
+            _d_probe = _d_probe.replace(qpos=jp.broadcast_to(_spawn, (N, _spawn.shape[0])))
+        _d_probe = jax.vmap(mjx.forward, in_axes=(mx_axes, 0))(mx_v, _d_probe)
+        _not_plane = jp.asarray(np.asarray(mj.geom_type) != 0)
+        _rb = jp.asarray(np.asarray(mj.geom_rbound, dtype=float))          # per-geom bounding radius
+        _z = _d_probe.geom_xpos[:, :, 2] - _rb[None, :]                    # (N, ngeom) lowest point of each geom
+        _BIG = 1.0e6                                          # not jp.inf: casting inf to f32 warns "overflow in cast"
+        _zmin = jp.min(jp.where(_not_plane[None, :], _z, _BIG), axis=1)    # (N,)
+        _spawn_z = 0.02 - _zmin                                           # lift so the lowest point sits at 2 cm
+        print(f"morph-DR spawn heights: base z shifted by {float(jp.min(_spawn_z)):+.3f}..."
+              f"{float(jp.max(_spawn_z)):+.3f} m across envs so every body starts standing", flush=True)
+
     def reset(key):
         data = jax.vmap(lambda _: mjx.make_data(mx, naconmax=NACON, njmax=NJMAX))(jp.arange(N))
         if _spawn is not None:                            # spawn every env at the robot's standing home pose
             data = data.replace(qpos=jp.broadcast_to(_spawn, (N, _spawn.shape[0])))
+        if _spawn_z is not None:                          # per-env: each morphology stands on its own feet
+            data = data.replace(qpos=data.qpos.at[:, 2].add(_spawn_z))
         return jax.vmap(mjx.forward, in_axes=(mx_axes, 0))(mx_v, data)
 
     def legacy_reward_of(d):
@@ -494,7 +630,7 @@ def main(argv=None) -> int:
             # alive (N,): 1.0 until this env first falls; air_time/last_contact (N, n_feet): feet_air_time state;
             # stance_time (N, n_feet): per-foot GROUNDED duration (P1 periodic reward; symmetric to air_time).
             data, alive, a_prev, air_time, last_contact, stance_time = carry
-            obs = jax.vmap(obs_tokens)(data)              # (N, NT, F)
+            obs = jax.vmap(obs_tokens, in_axes=(0, _ST_AX))(data, static_v)   # (N, NT, F)
             pkey = key
             if DR_ON:                                     # sim2real: noisy obs + (below) randomized dynamics + pushes
                 key, okey, pkey = jax.random.split(key, 3)
@@ -657,7 +793,8 @@ def main(argv=None) -> int:
             last_pcpt = jax.vmap(_phase_percept_1)(data_last.time)   # bootstrap value uses the clock at data_last too
         else:
             obs, act, logp, rew, val, fwd, alive = traj; pcpt = last_pcpt = None
-        _, last_val = act_and_value(params, jax.vmap(obs_tokens)(data_last), last_pcpt)
+        _, last_val = act_and_value(
+            params, jax.vmap(obs_tokens, in_axes=(0, _ST_AX))(data_last, static_v), last_pcpt)
 
         def gae(carry, x):
             nextval, next_alive, adv = carry
