@@ -157,6 +157,15 @@ def main(argv=None) -> int:
     ap.add_argument("--morph-dr-asym", action="store_true", help="sample each limb's scale INDEPENDENTLY so fore "
                     "and hind legs differ (the paper's asymmetric case). Off -> one scale for all limbs per env, "
                     "which varies size without varying proportion between limbs.")
+    ap.add_argument("--morph-dr-groups", type=int, default=0, help="how many DISTINCT bodies to spread over the "
+                    "envs (0 = one per env). This decouples morphology count from env count, which matters "
+                    "because batching the model is what stops large env counts compiling: measured, 1024 envs "
+                    "never reached iteration 0 in 30+ min, so the affordable env count is small -- and with one "
+                    "body per env, each morphology is then sampled exactly ONCE per iteration. Measured "
+                    "consequence at 64 envs / 64 bodies: reward peaked at iteration 10 (fwd_vel +0.123) then "
+                    "decayed to +0.038 while the KL-adaptive LR collapsed to its 1e-05 floor -- between-body "
+                    "variance swamped the gradient and the controller read it as instability. G=8 over 64 envs "
+                    "gives 8 samples per body instead of 1, at identical compile cost.")
     ap.add_argument("--dr-scale", type=float, default=1.0, help="P3 (plan v4): scale the contact-DR range WIDTH "
                     "(deviation from 1.0). 1.0=canonical Go1/Barkour ranges (default, byte-identical); <1 = milder "
                     "(e.g. 0.4) so a warm-started nominal policy adds robustness WITHOUT toppling under too-wide DR.")
@@ -518,8 +527,15 @@ def main(argv=None) -> int:
             one = jax.random.uniform(rng, (), minval=args.morph_dr_lo, maxval=args.morph_dr_hi)
             return jp.full((n_limbs,), one)
 
-        _keys = jax.random.split(jax.random.PRNGKey(11), N)
-        _s_limb = jax.vmap(_limb_scales)(_keys)                        # (N, n_limbs)
+        # G distinct bodies tiled over N envs (G=0 -> one body per env). See --morph-dr-groups for why: the env
+        # count is capped by compile cost, so one-body-per-env leaves each morphology with a single sample per
+        # iteration and the gradient becomes between-body noise.
+        _G = int(args.morph_dr_groups) or N
+        _G = max(1, min(_G, N))
+        _keys = jax.random.split(jax.random.PRNGKey(11), _G)
+        _s_g = jax.vmap(_limb_scales)(_keys)                            # (G, n_limbs)
+        _reps = int(np.ceil(N / _G))
+        _s_limb = jp.tile(_s_g, (_reps, 1))[:N]                         # (N, n_limbs), G distinct rows
         _bi = jp.asarray(b_idx)
         s_body = jp.where(jp.asarray(in_limb) > 0, _s_limb[:, _bi], 1.0)          # (N, nbody)
         s_pos = jp.where(jp.asarray(pos_scales) > 0, _s_limb[:, _bi], 1.0)        # (N, nbody)
@@ -541,9 +557,9 @@ def main(argv=None) -> int:
         static_v = jp.broadcast_to(static, (N,) + static.shape)
         static_v = static_v.at[:, :, 5].multiply(s_tok).at[:, :, 7].multiply(s_tok)
         _ST_AX, morph_scale = 0, _s_limb
-        print(f"morph-DR ON: {n_limbs} limbs x {N} envs, length scale "
-              f"[{args.morph_dr_lo:.2f}, {args.morph_dr_hi:.2f}]"
-              f"{' asymmetric per limb' if args.morph_dr_asym else ' shared per env'}; "
+        print(f"morph-DR ON: {n_limbs} limbs, {_G} distinct bodies over {N} envs ({N // _G} envs/body), "
+              f"length scale [{args.morph_dr_lo:.2f}, {args.morph_dr_hi:.2f}]"
+              f"{' asymmetric per limb' if args.morph_dr_asym else ' shared per body'}; "
               f"stance width fixed; policy tokens carry the per-env lengths", flush=True)
         if CONTACT_DR:
             print("NOTE: --contact-dr with --morph-dr would overwrite body_mass; morph-DR owns mass here.",
@@ -599,6 +615,17 @@ def main(argv=None) -> int:
         _spawn_z = 0.02 - _zmin                                           # lift so the lowest point sits at 2 cm
         print(f"morph-DR spawn heights: base z shifted by {float(jp.min(_spawn_z)):+.3f}..."
               f"{float(jp.max(_spawn_z)):+.3f} m across envs so every body starts standing", flush=True)
+        # PER-ENV STANDING HEIGHT. z_stand was one scalar taken from the NOMINAL body, and it does not merely
+        # scale a reward -- `fell = z < 0.5*z_stand` TERMINATES the episode, and `height`/`up` are both ratios of
+        # it. With per-env leg lengths the standing heights differ by ~9 cm here, so a short-legged env was being
+        # killed as "fallen" while standing perfectly while a tall one never tripped the fall line even collapsed.
+        # That is contradictory supervision no learning-rate schedule can rescue, and it is what the first two
+        # runs actually died of (peak fwd_vel at iteration 10, then decay to NEGATIVE by 50).
+        # Same shape of defect as _pose_keyframe's hardcoded identity quaternion: a constant that was only ever
+        # right because there was exactly one body.
+        z_stand = z_stand + _spawn_z                                      # (N,) -- broadcasts everywhere z_stand did
+        print(f"morph-DR standing heights: {float(jp.min(z_stand)):.3f}..{float(jp.max(z_stand)):.3f} m "
+              f"(fall line and height ratio are now PER BODY, not the nominal body's)", flush=True)
 
     def reset(key):
         data = jax.vmap(lambda _: mjx.make_data(mx, naconmax=NACON, njmax=NJMAX))(jp.arange(N))
