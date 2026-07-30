@@ -578,6 +578,24 @@ def is_real_cad(step_path) -> bool:
     return len(re.findall(r"#\d+\s*=", text)) >= 20
 
 
+def _R_to_deg_xyz(R) -> tuple:
+    """Rotation matrix -> intrinsic XYZ euler in DEGREES, which is what build123d's Location wants.
+
+    Same convention MuJoCo uses by default (eulerseq "xyz", R = Rx @ Ry @ Rz), so a part lands in the CAD
+    assembly exactly where the compiled MJCF puts it -- otherwise the two artefacts describe different robots."""
+    import numpy as np
+    sy = float(-R[2, 0])
+    sy = max(-1.0, min(1.0, sy))
+    b = np.arcsin(sy)
+    if abs(sy) < 0.999999:
+        a = np.arctan2(float(R[2, 1]), float(R[2, 2]))
+        c = np.arctan2(float(R[1, 0]), float(R[0, 0]))
+    else:                                                    # gimbal lock: fold the rotation into a alone
+        a = np.arctan2(float(-R[1, 2]), float(R[1, 1]))
+        c = 0.0
+    return (float(np.degrees(a)), float(np.degrees(b)), float(np.degrees(c)))
+
+
 def export_gene_cad(gene, out_dir: str, *, material: str = "aluminum") -> dict:
     """Export real CAD for every link of ``gene``: per-link STEP + STL + assembly STEP, with mass and
     moment of inertia computed from the solids. Returns a manifest dict (the manufacturable artifact)."""
@@ -620,13 +638,42 @@ def export_gene_cad(gene, out_dir: str, *, material: str = "aluminum") -> dict:
                       "mass_basis": "grounded" if grounded > 0 else "solid_volume",
                       "step": f"step/{s.name}.step", "stl": f"stl/{s.name}.stl"})
         solids.append(solid)
-    try:                                             # one manufacturable assembly STEP
-        asm = solids[0]
-        for sld in solids[1:]:
-            asm = asm + sld
+    # A POSITIONED ASSEMBLY, not a pile of parts at the origin. Every link solid is AUTHORED at (0,0,0) along its
+    # own +z, so boolean-unioning them fused the whole robot into one blob at one point: the file was named
+    # robot_assembly.step and was not an assembly. That is why "make it taller" could not be shown as a geometric
+    # delta -- there was no geometry to diff, and anyone opening the STEP saw a knot.
+    # Each solid is now placed at its FORWARD-KINEMATIC pose, walking the gene chain exactly as the MJCF does:
+    # a child sits at its parent's tip plus mount_offset, rotated by mount_euler (MuJoCo's default eulerseq
+    # "xyz", so R = Rx @ Ry @ Rz -- the same convention gene_compiler emits and robot_import reads).
+    asm_ok = False
+    try:
+        import numpy as _np
+
+        placed, world = [], {}
+        for s, sld in zip(gene.segments, solids):
+            me = tuple(getattr(s, "mount_euler", None) or (0.0, 0.0, 0.0))
+            mo = tuple(getattr(s, "mount_offset", None) or (0.0, 0.0, 0.0))
+            ca, cb, cc = (_np.cos(v) for v in me)
+            sa, sb, sc = (_np.sin(v) for v in me)
+            Rx = _np.array([[1, 0, 0], [0, ca, -sa], [0, sa, ca]])
+            Ry = _np.array([[cb, 0, sb], [0, 1, 0], [-sb, 0, cb]])
+            Rz = _np.array([[cc, -sc, 0], [sc, cc, 0], [0, 0, 1]])
+            R_local = Rx @ Ry @ Rz
+            if s.parent and s.parent in world:
+                pR, pT, pLen = world[s.parent]
+                R = pR @ R_local
+                T = pT + pR @ (_np.asarray(mo, dtype=float) + _np.array([0.0, 0.0, float(pLen)]))
+            else:
+                R, T = R_local, _np.asarray(mo, dtype=float)
+            world[s.name] = (R, T, float(s.length_m))
+            # build123d works in MILLIMETRES; the gene is metres.
+            loc = bd.Location((float(T[0]) * 1000.0, float(T[1]) * 1000.0, float(T[2]) * 1000.0),
+                              _R_to_deg_xyz(R))
+            placed.append(loc * sld)
+        asm = bd.Compound(children=placed)           # a real assembly: parts KEEP their identity and their pose
         bd.export_step(asm, str(out / "robot_assembly.step"))
         asm_ok = True
-    except Exception:  # noqa: BLE001 - boolean union can be finicky; per-part STEP is the fallback
+    except Exception:  # noqa: BLE001 - placement/compound can be finicky; per-part STEP is the fallback
         asm_ok = False
     return {"material": material, "parts": parts, "part_count": len(parts),
             "total_mass_kg": round(total_mass, 3), "assembly_step": asm_ok, "dir": str(out)}

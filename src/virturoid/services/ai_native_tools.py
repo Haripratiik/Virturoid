@@ -989,6 +989,29 @@ def probe_robot(args: dict) -> dict:
         return {"ok": False, "error": f"could not measure '{args['robot_id']}' ({type(exc).__name__}: {exc})"}
 
 
+def scope_amend(args: dict) -> dict:
+    """What would this amend touch, and what stops being true once it lands — WITHOUT editing anything.
+
+    An edit otherwise just happens: ask for a taller robot, get a new robot back, with no statement of what was
+    meant to change, what was meant to stay, or which established facts the change invalidates. This returns
+    ``{editable, preserved, invalidates}`` first, so the change can be shown or refused before it commits.
+
+    ``editable`` includes everything BELOW a named part, because a descendant's placement is defined relative to
+    its parent and moves whether or not it was named. ``preserved`` is a CLAIM, not a finding -- after the edit,
+    ``edit_robot`` reports what actually moved, which is the check that turns the promise into a fact. An
+    unclassified operator is assumed to touch everything: a missed recheck is a silent wrong answer, an extra one
+    costs seconds of simulation."""
+    from virturoid.services import session_state as S
+    from virturoid.services.change_impact import scope
+    gene = S.get_robot(args.get("robot_id"))
+    if gene is None:
+        return {"ok": False, "error": f"no robot '{args.get('robot_id')}'; call create_robot first"}
+    ops = args.get("ops") or ([{"op": args["op"], "args": args.get("args") or {}}] if args.get("op") else [])
+    if not ops:
+        return {"ok": False, "error": "pass ops:[{op,args}] (or op/args) — the edit you are considering"}
+    return {"ok": True, "robot_id": args["robot_id"], **scope(gene, ops)}
+
+
 def assert_design(args: dict) -> dict:
     """State what the design MEANT, and be checked against it.
 
