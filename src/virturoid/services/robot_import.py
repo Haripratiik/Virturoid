@@ -126,6 +126,37 @@ def _link_vector(mj, body_id: int, children: dict):
     return far
 
 
+def _root_own_span(mj, body_id: int):
+    """The root body's own longest COLLISION extent — how long the trunk actually is.
+
+    Not from its children: a torso's children are a symmetric pair of shoulders or four hips, and reading a shape
+    off where things are attached to it is what rebuilt a humanoid chest sideways. Not from visual geometry
+    either: the Go2's base carries five non-colliding shrouds, and measuring those with the collision box returns
+    0.530 m for a 0.376 m structure. The MAIN structural geom, unioned with the other collision geoms only where
+    they extend it along the same axis, keeps a nose or an antenna from becoming length.
+    """
+    import numpy as np
+
+    ids = [g for g in range(mj.ngeom)
+           if int(mj.geom_bodyid[g]) == body_id and int(mj.geom_type[g]) != 0]
+    hard = [g for g in ids if int(mj.geom_contype[g]) or int(mj.geom_conaffinity[g])] or ids
+    if not hard:
+        return None
+
+    def _half(g):
+        t, s = int(mj.geom_type[g]), np.asarray(mj.geom_size[g], dtype=float)
+        if t == 2:
+            return np.array([s[0]] * 3)
+        if t in (3, 5):                                    # capsule / cylinder: (radius, half-length)
+            return np.array([s[0], s[0], s[1] + (s[0] if t == 3 else 0.0)])
+        return np.abs(s[:3])
+
+    main = max(hard, key=lambda g: float(np.prod(_half(g)) + 1e-12))
+    h = _half(main)
+    span = float(2.0 * np.max(h))
+    return span if span >= 0.02 else None
+
+
 def _bake_source_mesh(mj, body_id: int, S, out_path) -> bool:
     """Write THIS body's own mesh geoms, transformed into our LINK frame, as one binary STL (millimetres).
 
@@ -320,6 +351,30 @@ def import_robot(source: str, *, robot_id: str | None = None, species: str | Non
         import numpy as _np
         _v = _link_vector(mj, i, children)
         _span = float(_np.linalg.norm(_v))
+        # THE ROOT measures its own body, not the reach to one child. `_link_vector` picks the farthest child,
+        # which is right for a serial link (the Go2's thigh comes out at 0.2130 m against a real 0.213) and close
+        # to meaningless for a torso: it imported the Go2's trunk at 0.199 m against a real ~0.387.
+        #
+        # Deliberately ROOT-ONLY, and deliberately from the body's OWN geometry. The first attempt at this
+        # (reverted, 3279c57) deformed 14 of 27 Menagerie models by up to 0.45 m, in three ways this avoids:
+        #   * it read the axis off the PRINCIPAL AXIS OF THE CHILD SPREAD, and a humanoid torso carries a
+        #     symmetric PAIR of shoulders — so that axis runs side to side and H1's chest was rebuilt 90 degrees
+        #     wrong. Here the axis comes from the body's own longest collision extent, which a symmetric pair
+        #     cannot mislead;
+        #   * it shifted a hub's frame origin without correcting the hub's own mount to ITS parent, so every
+        #     subtree below a NESTED hub slid. The root HAS no parent, so root-only removes that case entirely;
+        #   * it changed the datum under `_bake_source_mesh`, which rotates but does not translate. No datum
+        #     moves here — only the drawn LENGTH — so the customer's meshes stay where they were.
+        #
+        # Children are unaffected either way: a child's mount is computed as `local.z - parent_len`, so it
+        # self-compensates for whatever length the parent has. The length only decides how the segment is DRAWN.
+        # Gate: tests/test_imported_kinematics_are_preserved.py, which fails on the reverted version.
+        if parent is None:
+            _own = _root_own_span(mj, i)
+            if _own is not None and _own > _span:
+                _span = _own
+                _v = _v * (_own / max(float(_np.linalg.norm(_v)), 1e-9)) if float(_np.linalg.norm(_v)) > 1e-9 \
+                    else _np.array([_own, 0.0, 0.0])
         if _span >= 0.02:
             length_m = float(min(1.5, _span))
             shape = "capsule" if shape != "box" or length_m > 2.5 * radius_m else shape
