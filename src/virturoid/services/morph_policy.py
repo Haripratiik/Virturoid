@@ -512,6 +512,13 @@ def recipe_gains(model, graph=None, *, ascale: float = _ASCALE):
 # oscillation on each leg's thigh+calf joints, diagonal limbs anti-phase, gives the body a STEPPING rhythm so
 # ES learns only a propulsion/stabilization RESIDUAL instead of discovering a gait from a stand-still (which
 # CPU-ES cannot do — it slides or collapses). residual_scale < 1 keeps the policy from cancelling the CPG.
+# ``leg_flip`` IS NOT A DIRECTION CONTROL, despite reading like one. Both branches below (lines ~546 and ~583)
+# select between [pi,0,0,pi] and [0,pi,pi,0] -- the same pattern with +pi on EVERY leg, i.e. swapping which
+# diagonal pair leads. On a fore-aft-symmetric leg layout that is a body SYMMETRY, not a reversal, so open-loop
+# travel is identical to 3 decimal places at every ``calf_phase`` on both the composed quad and the canonical
+# template (measured, task #254). It only appears to do something when a random residual rides on top. The knob
+# that actually sets direction is ``calf_phase`` -- the hip-to-knee relative phase, which decides whether the foot
+# pushes back or forward through stance. Kept in the dict because banked policies carry it at ``cpg_arr[5]``.
 CPG_DEFAULT = {"freq": 1.5, "thigh_amp": 0.6, "calf_amp": 0.8, "calf_phase": 1.5708,
                "residual_scale": 0.3, "leg_flip": True}
 
@@ -721,7 +728,15 @@ def recipe_rollout_morph(gene, policy: MorphPolicy | None = None, *, steps: int 
     obs normalization (``normalizer=(mean,std)``), terminate-on-fall, clipped-non-negative velocity-tracking
     reward. Returns ``gait`` (recipe reward meaned over the horizon — the training fitness), ``forward`` travel,
     ``height_ratio``, ``alive`` step count, ``survived``, and ``frames`` (for rendering). CPU MuJoCo; the SAME
-    policy object drives any morphology (this is what actually produces an UPRIGHT WALK)."""
+    policy object drives any morphology (this is what actually produces an UPRIGHT WALK).
+
+    ``policy=None`` is NOT an open-loop / zero-residual baseline -- it constructs a RANDOM ``MorphPolicy``
+    (``rng.normal(0, 0.3)`` weights, below), whose residual reaches ~0.06 rad, i.e. ~10% of ``thigh_amp``. On a
+    body the CPG drives well that is a small perturbation, but on a composed quad -- where the prior yields almost
+    no thrust -- the random residual DOMINATES the result: measured over 10 seeds, travel is -0.012 +/- 0.221 m
+    (6/10 negative) versus +0.455 +/- 0.100 m (0/10 negative) on the canonical fanned template. So a single
+    ``policy=None`` rollout of a composed body measures the SEED, not the body. For a true open-loop CPG, pass a
+    ``MorphPolicy`` with zeroed ``_arrs`` (verified byte-identical to ``cpg["residual_scale"] = 0.0``)."""
     import mujoco
     import numpy as np
 
