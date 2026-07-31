@@ -157,3 +157,30 @@ def test_the_URDF_export_says_it_cannot_carry_the_loop():
     assert "bridge" in urdf and "column_r" in urdf, "the warning does not name which join was lost"
     clean = gene_to_urdf(_gantry(False))
     assert "closed kinematic loop" not in clean.lower(), "a body with no loops must not carry the warning"
+
+
+def test_a_braced_gantry_and_a_cantilever_do_not_share_a_memory_KEY():
+    """The moat depends on this. Our memory is keyed by MORPHOLOGY, so two robots that index to the same
+    fingerprint get each other's banked control hints — and a gantry braced at both columns and one cantilevering
+    off a single column are genuinely different machines with different load paths.
+
+    They hashed IDENTICALLY, because the fingerprint's neighbour graph was built from parent edges alone. A loop
+    closure is a neighbour relation, which is exactly what a Weisfeiler-Lehman fingerprint exists to capture."""
+    from virturoid.services.morph_wl_fingerprint import wl_fingerprint
+    free = wl_fingerprint(_gantry(False))
+    tied = wl_fingerprint(_gantry(True))
+    assert free != tied, "a braced gantry and a cantilever still index to the same morphology key"
+    cos = sum(x * y for x, y in zip(free, tied))
+    assert cos < 0.95, f"the two are still near-identical in the embedding (cosine {cos:.4f})"
+
+
+def test_a_body_with_no_loops_fingerprints_exactly_as_before():
+    """The regression surface is every robot already banked: adding a loop channel must not re-key them, or the
+    entire existing corpus silently stops matching."""
+    from virturoid.services.morph_wl_fingerprint import wl_fingerprint
+    from virturoid.services.morphology_composer import compose_robot
+    dog = compose_robot("a four legged robot dog", llm=None)
+    assert dog.loop_closures == []
+    assert wl_fingerprint(dog) == wl_fingerprint(dog)
+    plain = _gantry(False)
+    assert wl_fingerprint(plain) == wl_fingerprint(plain)

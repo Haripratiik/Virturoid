@@ -76,6 +76,16 @@ def wl_fingerprint(gene: RobotGene, *, iterations: int = 2, dim: int = _DIM) -> 
         if s.parent is not None and s.parent in by_name:
             neighbours[s.name].append(s.parent)
             neighbours[s.parent].append(s.name)
+    # A CLOSED LOOP is a neighbour relation too, and WL exists to capture exactly that. Without it a gantry whose
+    # bridge is braced at both columns and one that cantilevers off a single column produced IDENTICAL
+    # fingerprints — two robots with genuinely different load paths and different control problems, indexed to
+    # the same key. That undermines the whole point of a morphology-keyed memory: the flywheel would hand a
+    # braced machine the hints it learned from a cantilever.
+    for lc in (getattr(gene, "loop_closures", None) or []):
+        a, b = (lc or {}).get("a"), (lc or {}).get("b")
+        if a in by_name and b in by_name and a != b:
+            neighbours[a].append(b)
+            neighbours[b].append(a)
 
     scale = _body_scale(segs)
     labels = {s.name: _initial_label(s, not children.get(s.name), len(children.get(s.name, [])), scale)
