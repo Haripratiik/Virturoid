@@ -97,6 +97,17 @@ _THREE_LIGHTS = (
 )
 
 
+def _base_z_for(gene: RobotGene) -> float:
+    """The fixed base's height: an explicit `base_height_m` when the design gave one, else the named mount.
+
+    `base_mount` says what the robot is bolted TO; it cannot say how high that is. A delta hangs from an overhead
+    plate, and table/floor/torso give 0.025/0/0, so its whole mechanism compiled BELOW the floor."""
+    h = getattr(gene, "base_height_m", None)
+    if h is not None:
+        return float(h)
+    return _MOUNT_Z.get(gene.base_mount, TABLE_TOP_Z)
+
+
 def compile_gene_to_mjcf(gene: RobotGene, *, include_floor: bool = True, spawn_z: float | None = None,
                          meshes: dict | None = None, show_actuators: bool = False,
                          sensor_geoms: dict | None = None, physics_only: bool = False) -> str:
@@ -122,7 +133,7 @@ def compile_gene_to_mjcf(gene: RobotGene, *, include_floor: bool = True, spawn_z
         raise ValueError(f"cannot compile invalid gene {gene.id}: {'; '.join(issues)}")
 
     root = gene.root()
-    base_z = _MOUNT_Z.get(gene.base_mount, TABLE_TOP_Z)
+    base_z = _base_z_for(gene)
     if spawn_z is not None and gene.base_mount == "free":
         base_z = float(spawn_z)
     body_xml = _body_xml(gene, root, pos=(0.0, 0.0, base_z), indent=4, meshes=meshes,
@@ -428,7 +439,7 @@ def standing_spawn_z(gene: RobotGene, *, clearance: float | None = None, meshed:
         # The visual-physics CI gate now rejects those mismatches, so every free body starts at its real contact.
         clearance = 0.002
     if gene.base_mount != "free":
-        return _MOUNT_Z.get(gene.base_mount, TABLE_TOP_Z)
+        return _base_z_for(gene)
     ref = _MOUNT_Z["free"]                                       # measure the body's downward reach at 0.1
     for build_xml in ((lambda: gene_to_meshed_mjcf(gene, include_floor=False, spawn_z=ref)) if meshed else None,
                       lambda: compile_gene_to_mjcf(gene, include_floor=False, spawn_z=ref)):
@@ -466,7 +477,7 @@ def compile_gene_with_scene(gene: RobotGene, scene_objects, *, table: bool = Tru
     if issues:
         raise ValueError(f"cannot compile invalid gene {gene.id}: {'; '.join(issues)}")
     root = gene.root()
-    base_z = _MOUNT_Z.get(gene.base_mount, TABLE_TOP_Z)
+    base_z = _base_z_for(gene)
     scene_objects = list(scene_objects)
     # A scene that brings its own ground/walls (navigation, maze) is a FLOOR scene: drop the tabletop so the
     # robot drives on the scene's own floor instead of a 0.7x0.45 m table.

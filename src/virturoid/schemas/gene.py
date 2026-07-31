@@ -64,6 +64,12 @@ class RobotGene:
     segments: list[GeneSegment] = field(default_factory=list)
     parent_species: str | None = None  # the tree node this gene was amended from
     base_mount: str = "table"          # floor | table | torso
+    # How HIGH the fixed base sits, when the three named heights are not one of the answers. `base_mount` says
+    # what the robot is mounted TO; this says where that mount is. Measured need: a DELTA hangs from an overhead
+    # plate, and with table/floor/torso giving 0.025/0/0 its whole mechanism was built below the floor — the
+    # platform came out at z = -0.069 m. Overhead gantries, ceiling rails and bench-mounted arms have the same
+    # shape of problem. None sets it -> the named height, so every existing body is unchanged.
+    base_height_m: float | None = None
     end_effector_type: str = "gripper"
     # How the body was obtained is product evidence, not an ephemeral Python
     # attribute.  A fallback must survive serialization and be visible in every
@@ -170,7 +176,7 @@ class RobotGene:
         return {
             "id": self.id, "species": self.species, "robot_class": self.robot_class,
             "parent_species": self.parent_species, "base_mount": self.base_mount,
-            "end_effector_type": self.end_effector_type,
+            "end_effector_type": self.end_effector_type, "base_height_m": self.base_height_m,
             "design_source": self.design_source,
             "composition_notes": list(self.composition_notes),
             # Round-trips, because the species tree persists genes through here — a field that vanishes on
@@ -196,6 +202,7 @@ class RobotGene:
             id=d["id"], species=d["species"], robot_class=d["robot_class"],
             parent_species=d.get("parent_species"), base_mount=d.get("base_mount", "table"),
             end_effector_type=d.get("end_effector_type", "gripper"),
+            base_height_m=(None if d.get("base_height_m") is None else float(d["base_height_m"])),
             design_source=str(d.get("design_source", "unknown")),
             composition_notes=list(d.get("composition_notes", [])),
             loop_closures=[dict(lc) for lc in (d.get("loop_closures") or [])],

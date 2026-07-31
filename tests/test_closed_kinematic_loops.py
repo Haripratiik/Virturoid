@@ -184,3 +184,41 @@ def test_a_body_with_no_loops_fingerprints_exactly_as_before():
     assert wl_fingerprint(dog) == wl_fingerprint(dog)
     plain = _gantry(False)
     assert wl_fingerprint(plain) == wl_fingerprint(plain)
+
+
+def test_a_fixed_base_can_be_ELEVATED():
+    """`base_mount` says what the robot is bolted TO; it could not say how high that is. The three named heights
+    are 0.025 / 0 / 0, so an overhead-mounted machine compiled BELOW THE FLOOR — a delta's platform measured
+    z = -0.069 m, its whole mechanism underground. Overhead gantries, ceiling rails and bench arms share the
+    shape of the problem."""
+    import mujoco
+    from virturoid.services.morph_policy import compiled_model, robot_mjcf
+
+    def _lowest(gene):
+        m = compiled_model(robot_mjcf(gene))
+        d = mujoco.MjData(m)
+        if m.nkey:
+            mujoco.mj_resetDataKeyframe(m, d, 0)
+        mujoco.mj_forward(m, d)
+        return min(float(d.xpos[b][2]) for b in range(1, m.nbody)), max(
+            float(d.xpos[b][2]) for b in range(1, m.nbody))
+
+    ground = _gantry(True)
+    lo0, hi0 = _lowest(ground)
+    raised = _gantry(True)
+    raised.base_height_m = 1.40
+    lo1, hi1 = _lowest(raised)
+    assert hi1 > hi0 + 1.0, f"declaring base_height_m 1.40 did not raise the body ({hi0:.3f} -> {hi1:.3f} m)"
+    assert (hi1 - lo1) == pytest.approx(hi0 - lo0, abs=1e-6), "raising the base changed the body's own shape"
+
+
+def test_base_height_round_trips_and_defaults_to_the_named_mount():
+    """None must mean the named height, or every body ever banked silently moves."""
+    import json
+    from virturoid.schemas.gene import RobotGene
+    plain = _gantry(False)
+    assert plain.base_height_m is None
+    raised = _gantry(False)
+    raised.base_height_m = 0.85
+    assert RobotGene.from_dict(json.loads(json.dumps(raised.to_dict()))).base_height_m == 0.85
+    assert RobotGene.from_dict(json.loads(json.dumps(plain.to_dict()))).base_height_m is None
