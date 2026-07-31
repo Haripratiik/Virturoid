@@ -222,3 +222,31 @@ def test_base_height_round_trips_and_defaults_to_the_named_mount():
     raised.base_height_m = 0.85
     assert RobotGene.from_dict(json.loads(json.dumps(raised.to_dict()))).base_height_m == 0.85
     assert RobotGene.from_dict(json.loads(json.dumps(plain.to_dict()))).base_height_m is None
+
+
+def test_a_loop_between_parts_that_are_NOT_touching_is_flagged():
+    """A `connect` locks in whatever offset the two parts have AT BUILD TIME. Declaring one between parts that
+    are apart does not pull them together — it WELDS THE GAP, permanently, and says nothing.
+
+    Measured on a delta: its arm tips sat 0.5045 m from the platform before stepping and 0.5045 m after 2000
+    steps, held exactly that far apart by the constraint meant to join them. Every count was right (nu=3, neq=2)
+    while the machine was not joined at all — so the count cannot be the check."""
+    from virturoid.services.gene_validation import validate_gene_design as validate_gene
+    apart = _gantry(True)
+    seg = next(s for s in apart.segments if s.name == "bridge")
+    seg.length_m = 0.30                                # far too short to reach column_r
+    rep = validate_gene(apart)
+    txt = str(rep)
+    assert "loop_closures_meet" in txt, f"nothing reported that the loop spans a gap: {txt[:400]}"
+
+
+def test_a_loop_between_parts_that_DO_touch_passes():
+    """The gantry as built: its bridge is sized so the far end already lands on the far column, which is why it
+    worked. That has to keep passing, or the check is just noise."""
+    from virturoid.services.gene_validation import validate_gene_design as validate_gene
+    rep = validate_gene(_gantry(True))
+    checks = rep.get("checks", rep) if isinstance(rep, dict) else {}
+    if isinstance(checks, dict) and "loop_closures_meet" in checks:
+        assert checks["loop_closures_meet"] is True, rep
+    if isinstance(checks, dict) and "loop_closures_compiled" in checks:
+        assert checks["loop_closures_compiled"] is True, rep

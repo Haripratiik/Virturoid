@@ -165,6 +165,54 @@ def _mujoco_checks(gene, cls, checks, flag) -> None:
         if not checks["mjcf_roundtrip"]:
             flag("mjcf_roundtrip", "high",
                  f"compiled model exposes {m.nu} actuators but the gene has {len(gene.actuated_joints())}", m.nu)
+        # Every declared loop must survive compilation — an actuator count alone cannot see one, which is how a
+        # gantry with a decorative second column passed every gate it had.
+        _want_eq = len(getattr(gene, "loop_closures", None) or [])
+        checks["loop_closures_compiled"] = (int(m.neq) >= _want_eq)
+        if not checks["loop_closures_compiled"]:
+            flag("loop_closures_compiled", "high",
+                 f"the design declares {_want_eq} closed loop(s) but the compiled model carries {int(m.neq)}",
+                 int(m.neq))
+        # A `connect` locks in whatever offset the two parts have AT BUILD TIME. So declaring a loop between
+        # parts that are not already touching does not pull them together — it WELDS THE GAP, permanently, and
+        # says nothing. Measured on a delta: its arm tips sat 0.5045 m from the platform before stepping and
+        # 0.5045 m after 2000 steps, held exactly that far apart by the constraint meant to join them. The
+        # gantry worked only because its bridge was sized so the far end already landed on the column.
+        if _want_eq:
+            import numpy as _np
+            mujoco.mj_forward(m, d)
+            _far = []
+            for _lc in gene.loop_closures:
+                _a, _b = (_lc or {}).get("a"), (_lc or {}).get("b")
+                _ia = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, str(_a))
+                _ib = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, str(_b))
+                if _ia < 0 or _ib < 0:
+                    continue
+                _sa = next((s for s in gene.segments if s.name == _a), None)
+                _anc = (_lc or {}).get("anchor")
+                if not (isinstance(_anc, (list, tuple)) and len(_anc) == 3):
+                    _anc = (0.0, 0.0, float(getattr(_sa, "length_m", 0.0) or 0.0))
+                _pa = _np.asarray(d.xpos[_ia], dtype=float) + d.xmat[_ia].reshape(3, 3) @ _np.asarray(_anc,
+                                                                                                      dtype=float)
+                # Distance to b's SURFACE, not to its origin. A body's origin is wherever its frame happens to
+                # sit — for a column it is the base, so measuring there reports the column's own LENGTH as a gap
+                # and calls a perfect join broken. (The gantry's bridge tip is 0.0000 m from column_r's top and
+                # 0.9000 m from its origin.)
+                _gs = [_g for _g in range(m.ngeom) if int(m.geom_bodyid[_g]) == _ib]
+                if _gs:
+                    _gap = min(float(_np.linalg.norm(_pa - _np.asarray(d.geom_xpos[_g], dtype=float)))
+                               - float(m.geom_rbound[_g]) for _g in _gs)
+                    _gap = max(0.0, _gap)
+                else:
+                    _gap = float(_np.linalg.norm(_pa - _np.asarray(d.xpos[_ib], dtype=float)))
+                if _gap > 0.05:
+                    _far.append((f"{_a}<->{_b}", round(_gap, 4)))
+            checks["loop_closures_meet"] = not _far
+            if _far:
+                flag("loop_closures_meet", "high",
+                     "declared loop(s) join parts that are not touching, so the constraint holds the GAP instead "
+                     f"of closing it: {_far}. Place the two parts coincident in the design — a connect preserves "
+                     "the offset it is built with", _far[0][1])
     except Exception as exc:  # noqa: BLE001 - a body that won't compile/load is the worst failure
         flag("mjcf_roundtrip", "fatal", f"gene does not compile/load into MuJoCo: {exc}", None)
         return
