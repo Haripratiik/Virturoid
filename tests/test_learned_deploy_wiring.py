@@ -52,6 +52,95 @@ def test_deploy_rollout_records_qpos_by_default(monkeypatch):
     assert seen["record_qpos"] is False                      # explicit override still possible (training inner loops)
 
 
+# ------------------------------------------------------------- #257: the artifact DECLARES its controller
+# scripts/mjx_morph_attention.py::_save's meta layout, mirrored here so the routing contract is pinned against the
+# EXACT array the GPU trainer writes: [F, H, NT, fwd, adaptive@4, cpg@5, decimation@6, action_lpf@7, sphere_feet@8,
+# phase_obs@9, command@10, recipe@11]. That trainer's ONLY control law is the recipe one, but a run WITHOUT --cpg
+# banks no obs_mean and no cpg_arr -- and gpu_trainer.default_training_recipe sets cpg only for >=3 legs, so every
+# biped / humanoid / non-legged run lands here.
+def _gpu_artifact(path, feature_dim, *, cpg=0.0, decimation=1.0, sphere_feet=0.0, marked=True):
+    pol = MP.MorphPolicy(feature_dim, seed=0)                 # hidden=32 == meta[1] below
+    meta = [float(feature_dim), 32.0, 12.0, 0.4, 0.0, cpg, decimation, 0.0, sphere_feet, 0.0]
+    if marked:                                                # a post-fix artifact: command spacer + the marker
+        meta += [0.0, 1.0]
+    np.savez(str(path), **{k: pol._arrs[k] for k in ("We", "be", "Wq", "Wk", "Wv", "Wo", "Wh", "bh")},
+             meta=np.asarray(meta))
+    return str(path)
+
+
+def _route(monkeypatch, policy):
+    """Route ``policy`` with BOTH rollouts stubbed, so only the controller CHOICE is under test."""
+    seen = {}
+    monkeypatch.setattr(MP, "recipe_rollout_morph",
+                        lambda g, p, **kw: seen.update(via="recipe") or _credible_rollout())
+    monkeypatch.setattr(MP, "rollout_morph", lambda g, p, **kw: seen.update(via="residual") or _failed_rollout())
+    r = MP.rollout_deployed_morph_policy(object(), policy)
+    assert seen["via"] == ("recipe" if r["deployment_controller"] == "recipe_cpg" else "residual")
+    return r["deployment_controller"]
+
+
+def test_non_cpg_recipe_artifact_deploys_under_the_recipe_controller(monkeypatch, tmp_path):
+    """The measured bug: a recipe-trained artifact with NEITHER obs_mean NOR cpg was deployed under the legacy
+    torque-residual controller it was never trained with (which also never terminates on a fall). The explicit
+    meta[11] marker -- not the incidental presence of a normalizer -- decides."""
+    npz = _gpu_artifact(tmp_path / "gpu_biped.npz", 27)
+    pol = MP.MorphPolicy.from_npz(npz)
+    assert pol.obs_mean is None and pol.cpg is None           # exactly what the old inference looked at: nothing
+    assert pol.recipe_control is True                          # ...but the artifact SAYS what it was trained with
+    assert _route(monkeypatch, pol) == "recipe_cpg"
+
+
+def test_unmarked_artifact_routes_exactly_as_it_does_today(monkeypatch, tmp_path):
+    """BACKWARD COMPAT: checkpoints already on disk carry no meta[11] and can never be retro-marked, so an
+    UNMARKED artifact must keep the legacy obs_mean/cpg inference verbatim -- in both directions."""
+    old = MP.MorphPolicy.from_npz(_gpu_artifact(tmp_path / "old.npz", 27, marked=False))
+    assert old.recipe_control is None                          # unknown, NOT False: absence of evidence
+    assert _route(monkeypatch, old) == "residual"              # ...so it routes precisely as it did before
+    old_cpg = MP.MorphPolicy.from_npz(_gpu_artifact(tmp_path / "old_cpg.npz", 27, cpg=1.0, marked=False))
+    assert old_cpg.recipe_control is None and old_cpg.cpg is not None
+    assert _route(monkeypatch, old_cpg) == "recipe_cpg"        # the inference still carries the CPG artifacts
+    plain = MP.MorphPolicy(27, seed=0)                         # a fresh in-memory policy is unmarked too
+    assert plain.recipe_control is None and _route(monkeypatch, plain) == "residual"
+
+
+def test_recipe_marker_survives_banking_and_an_unmarked_bank_stays_unmarked(monkeypatch, tmp_path):
+    """to_npz is the flywheel's banking path: a marked artifact must stay marked through it, and a policy of
+    UNKNOWN provenance must bank a 0.0 that still means "unmarked" (never an explicit residual claim)."""
+    marked = MP.MorphPolicy.from_npz(_gpu_artifact(tmp_path / "gpu.npz", 27))
+    reloaded = MP.MorphPolicy.from_npz(marked.to_npz(str(tmp_path / "banked.npz"), 0.5))
+    assert reloaded.recipe_control is True and _route(monkeypatch, reloaded) == "recipe_cpg"
+    plain = MP.MorphPolicy(27, seed=0)
+    unmarked = MP.MorphPolicy.from_npz(plain.to_npz(str(tmp_path / "plain.npz"), 0.1))
+    assert float(np.load(tmp_path / "plain.npz")["meta"][11]) == 0.0
+    assert unmarked.recipe_control is None and _route(monkeypatch, unmarked) == "residual"
+    # a normalizer is proof of recipe training on its own -> banking one MARKS the file (same criterion as meta[2])
+    norm = (np.zeros(27), np.ones(27))
+    rec = MP.MorphPolicy.from_npz(plain.to_npz(str(tmp_path / "norm.npz"), 0.1, normalizer=norm))
+    assert rec.recipe_control is True and _route(monkeypatch, rec) == "recipe_cpg"
+
+
+def test_newly_routed_artifact_honours_its_own_decimation_and_sphere_feet(monkeypatch, quad, tmp_path):
+    """The deploy==train knobs the legacy residual path silently DROPPED. The recipe rollout adopts the
+    artifact's own meta[6]/meta[8], so the newly-routed policy runs the contact model and control rate it was
+    trained at -- assert on the real rollout, not on the routing tag alone."""
+    import mujoco
+
+    from virturoid.services import sphere_feet as SF
+    from virturoid.services.morph_graph import encode_robot
+    fd = encode_robot(mujoco.MjModel.from_xml_string(MP.robot_mjcf(quad))).feature_dim
+    pol = MP.MorphPolicy.from_npz(_gpu_artifact(tmp_path / "gpu.npz", fd, decimation=6.0, sphere_feet=1.0))
+    assert pol.decimation == 6 and pol.sphere_feet is True
+    seen = {"sphere": 0, "act": 0}
+    real_sf, real_act = SF.apply_sphere_feet, MP.MorphPolicy.act
+    monkeypatch.setattr(SF, "apply_sphere_feet", lambda m: seen.update(sphere=seen["sphere"] + 1) or real_sf(m))
+    monkeypatch.setattr(MP.MorphPolicy, "act",
+                        lambda self, *a, **k: (seen.update(act=seen["act"] + 1), real_act(self, *a, **k))[1])
+    r = MP.rollout_deployed_morph_policy(quad, pol, steps=12)
+    assert r["deployment_controller"] == "recipe_cpg"
+    assert seen["sphere"] == 1                                # meta[8]: the trained contact model is rebuilt
+    assert seen["act"] == 2                                   # meta[6]: 12 steps at D=6 -> 2 control updates, not 12
+
+
 # ---------------------------------------------------------------------------- F1: recall seam + product verdict
 def test_recall_with_rollout_returns_the_screen_rollout(monkeypatch, quad):
     """The credibility screen already runs a full deployed rollout — the verdict path reuses that exact evidence."""

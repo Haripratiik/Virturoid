@@ -925,11 +925,19 @@ def main(argv=None) -> int:
                  # meta layout MUST match MorphPolicy.from_npz: [F,H,NT,fwd, adaptive@4, cpg@5, decimation@6,
                  # action_lpf@7, sphere_feet@8] so CPU replay reads the right flags (adaptive gains + trot-CPG prior +
                  # control rate + action filter + foot contact model) and reproduces the gait it was trained with.
+                 # meta[11] states the CONTROLLER EXPLICITLY, and is always 1.0: the ONLY control law in this trainer
+                 # is the recipe one (tgt = q_default + CPG + ascale*tanh(a); tau = KP*err - KD*qd; terminate-on-fall).
+                 # Deploy used to INFER "recipe" from obs_mean/cpg — and a run WITHOUT --cpg banks neither, so it fell
+                 # through to the legacy torque-residual rollout it was never trained with, which also never terminates
+                 # on a fall and ignores the meta[6]/meta[8] written right here (task #257). meta[10] is a 0.0 spacer:
+                 # this trainer has no velocity-command conditioning, which is exactly what from_npz already infers.
                  meta=np.asarray([F, H, NT, float(fwd),
                                   1.0 if args.adaptive else 0.0, 1.0 if CPG_ON else 0.0, float(DECIM),
                                   float(ACTION_LPF),           # meta[7]: action LPF (T1.2) so deploy matches train
                                   1.0 if args.sphere_feet else 0.0,      # meta[8]: sphere feet (T1.4); deploy==train
-                                  1.0 if PHASE_OBS else 0.0]))           # meta[9]: P1 phase-clock obs; deploy==train
+                                  1.0 if PHASE_OBS else 0.0,             # meta[9]: P1 phase-clock obs; deploy==train
+                                  0.0,                                   # meta[10]: WS8/P6 velocity-command (never here)
+                                  1.0]))                                 # meta[11]: RECIPE controller; deploy==train
 
     if args.eval_npz:                                   # EVAL: deterministic single-env MJX rollout (recipe control)
         dd = np.load(args.eval_npz)

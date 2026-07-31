@@ -58,6 +58,12 @@ class MorphPolicy:
         #   [sin,cos] via the percept token (slots 8-9) so a clocked policy TIMES its steps; off = perception-blind
         self.command_conditioned = False                      # WS8/P6 (meta[10]): deploy feeds a [vx,wz] velocity
         #   command via the percept token (slots 8-9) so the policy TRACKS a commanded speed (L6); off = unconditioned
+        # RECIPE-CONTROLLER marker (meta[11]): an EXPLICIT "this policy was trained under the recipe controller"
+        # claim, so the deploy router stops INFERRING it from the incidental presence of obs_mean/cpg. Tri-state:
+        # True = marked recipe; None = UNMARKED (a fresh in-memory policy, or an artifact saved before the slot
+        # existed) -> rollout_deployed_morph_policy falls back to the legacy obs_mean/cpg inference. There is
+        # deliberately no False: a 0.0 in the file means "unmarked", never "explicitly residual" (see from_npz).
+        self.recipe_control = None
         rng = np.random.default_rng(seed)
         s = 0.3
         # NOTE: Wrange/brange are appended LAST so the rng draw order for We/Wq/Wk/Wv/Wo/Wh is unchanged
@@ -224,6 +230,16 @@ class MorphPolicy:
         p.sphere_feet = bool(float(meta[8]) > 0.5) if len(meta) > 8 else False  # meta[8]: sphere feet (T1.4); deploy==train
         p.phase_obs = bool(float(meta[9]) > 0.5) if len(meta) > 9 else False  # meta[9]: P1 phase-clock obs; deploy==train
         p.command_conditioned = bool(float(meta[10]) > 0.5) if len(meta) > 10 else False  # meta[10]: WS8/P6 vel-command
+        # RECIPE-CONTROLLER marker rides in meta[11]. The GPU trainer's ONLY control law is the recipe (PD-to-default
+        # + terminate-on-fall), but a run WITHOUT --cpg banks neither obs_mean nor cpg, so the deploy router used to
+        # infer "not a recipe policy" and drove it under the LEGACY torque-residual rollout it was never trained with
+        # — which also never terminates on a fall and drops the artifact's own meta[6]/meta[8]. Every biped, humanoid
+        # and non-legged GPU run hit it, because gpu_trainer.default_training_recipe only sets cpg for >=3 legs.
+        # UNMARKED (<=11-element meta, or a 0.0) stays None, NOT False: checkpoints already on disk cannot be
+        # retro-marked, and to_npz stamps 0.0 for a policy of unknown provenance — so a 0.0 is an ABSENCE of evidence,
+        # never a positive "residual" claim. rollout_deployed_morph_policy turns None back into the exact obs_mean/cpg
+        # inference it used before, so every pre-marker artifact routes EXACTLY as it does today.
+        p.recipe_control = True if (len(meta) > 11 and float(meta[11]) > 0.5) else None
         return p
 
     def to_npz(self, path, score: float = 0.0, *, normalizer=None):
@@ -240,6 +256,12 @@ class MorphPolicy:
         if norm is not None:
             extra = {"obs_mean": np.asarray(norm[0], dtype=float), "obs_std": np.asarray(norm[1], dtype=float)}
             recipe_flag = 1.0
+        # meta[11]: the EXPLICIT recipe-controller marker. 1.0 when this policy is KNOWN to be a recipe policy —
+        # it was loaded from a marked artifact (``recipe_control``), or it banks an obs normalizer, which only a
+        # recipe-trained policy has. 0.0 means UNMARKED, never "residual": an in-memory policy of unknown
+        # provenance must keep falling back to the legacy inference in rollout_deployed_morph_policy, which is
+        # what preserves today's behaviour for everything that isn't positively marked.
+        recipe_marker = 1.0 if (recipe_flag or getattr(self, "recipe_control", None)) else 0.0
         np.savez(path, **{k: self._arrs[k] for k in self._order}, **extra,
                  meta=np.asarray([float(self.feature_dim), float(self.hidden), recipe_flag, float(score),
                                   1.0 if getattr(self, "adaptive_gains", False) else 0.0,
@@ -248,7 +270,8 @@ class MorphPolicy:
                                   float(getattr(self, "action_lpf", 0.0) or 0.0),     # meta[7]: action LPF
                                   1.0 if getattr(self, "sphere_feet", False) else 0.0,   # meta[8]: sphere feet (T1.4)
                                   1.0 if getattr(self, "phase_obs", False) else 0.0,    # meta[9]: P1 phase-clock obs
-                                  1.0 if getattr(self, "command_conditioned", False) else 0.0]))  # meta[10]: WS8/P6 cmd
+                                  1.0 if getattr(self, "command_conditioned", False) else 0.0,  # meta[10]: WS8/P6 cmd
+                                  recipe_marker]))               # meta[11]: recipe controller (0.0 = UNMARKED)
         return str(path)
 
 
@@ -998,8 +1021,21 @@ def rollout_deployed_morph_policy(gene, policy: MorphPolicy, *, steps: int = 900
     ``record_qpos`` defaults ON (v7-F2): without the qpos trace, ``gait_quality.classify()`` silently SKIPS its
     ROLL/PITCH gate — so a learned policy that rolled over could read CREDIBLE while the scripted gaits (which
     always record) get the full bar. Deploy/banking/recall screens must judge learned == scripted; the tiny
-    per-5-step qpos copy is the price of an un-gameable verdict."""
-    if getattr(policy, "obs_mean", None) is not None or getattr(policy, "cpg", None) is not None:
+    per-5-step qpos copy is the price of an un-gameable verdict.
+
+    Routing honours the artifact's EXPLICIT recipe marker (``recipe_control``, meta[11]) FIRST. Deriving "is this
+    a recipe policy?" from obs_mean/cpg alone misrouted every GPU run trained WITHOUT ``--cpg``: the trainer banks
+    no obs normalizer, and ``default_training_recipe`` only turns cpg on for >=3 legs, so bipeds, humanoids and
+    non-legged bodies were scored under the legacy residual controller they were never trained with (task #257).
+    The recipe path also restores the deploy==train knobs the residual rollout drops — ``recipe_rollout_morph``
+    adopts the artifact's own ``decimation`` (meta[6]) and ``sphere_feet`` (meta[8])."""
+    recipe = getattr(policy, "recipe_control", None)
+    if recipe is None:
+        # UNMARKED: an artifact saved before meta[11] existed, or an in-memory policy. A checkpoint already on disk
+        # can never be retro-marked, so instead of guessing a controller for it we keep the OLD heuristic verbatim
+        # — backward compatibility is the point, pre-marker artifacts must route EXACTLY as they did before.
+        recipe = getattr(policy, "obs_mean", None) is not None or getattr(policy, "cpg", None) is not None
+    if recipe:
         result = dict(recipe_rollout_morph(gene, policy, steps=steps, record_qpos=record_qpos))
         result["deployment_controller"] = "recipe_cpg"
         return result
