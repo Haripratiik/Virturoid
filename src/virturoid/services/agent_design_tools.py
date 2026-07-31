@@ -109,6 +109,53 @@ _EXAMPLE_EXCAVATOR = {
     ]}
 
 
+_EXAMPLE_DELTA = {
+    # A PARALLEL mechanism — the one shape a tree genuinely cannot express on its own, and the reason
+    # `loop_closures` exists. Three arms drive ONE shared platform, so two of the three joins are loops.
+    #
+    # The trap that cost two attempts: MuJoCo's `connect` locks in whatever offset the two parts have AT BUILD
+    # TIME. Declaring a loop between parts that are apart does not pull them together — it welds the gap. The
+    # first version's arm tips sat 0.5045 m from the platform before stepping and 0.5045 m after 2000 steps,
+    # with nu=3 / neq=2 and a clean validate the whole time. So every forearm's `aim` and `size` here are
+    # computed to land EXACTLY on the platform rim; `validate_gene_design` reports `loop_closures_meet` and
+    # will say so if an edit breaks that.
+    "robot_class": "delta", "name": "agent_delta", "base_height_m": 1.05,
+    "loop_closures": [{"a": "fore1", "b": "platform"}, {"a": "fore2", "b": "platform"}],
+    "parts": [
+        {"name": "plate", "role": "frame", "like": "body", "size": 0.40, "girth": 0.24},
+        # The STEM is structure we add, not a delta part: a tree needs ONE parent for the platform, and the
+        # platform has to be built where the arms will meet it. Drawn thin so it reads as a mast.
+        {"name": "stem", "role": "stem", "like": "neck", "parent": "plate", "joint": "fixed",
+         "attach": {"along": 0.5, "lateral": 0.0, "height": 0.0}, "aim": [0, 0, -1],
+         "size": 0.55, "girth": 0.018},
+        # SHORT disc at the stem's tip. Using a long `length` to position it instead draws a fat column down
+        # the middle — length both places a part and draws it.
+        {"name": "platform", "role": "platform", "like": "hand", "parent": "stem", "joint": "fixed",
+         "aim": [0, 0, -1], "size": 0.045, "girth": 0.105},
+        # Three actuated upper arms at 120 degrees. Only an explicit aim VECTOR can do this: every aim token
+        # has y >= 0, so a radial fan is unreachable through the named directions.
+        {"name": "up0", "role": "delta_upper", "like": "arm", "parent": "plate",
+         "attach": {"along": 0.5, "lateral": 0.0, "height": 0.0}, "aim": [0.800, 0.000, -0.600],
+         "size": 0.30, "girth": 0.026, "joint": "revolute", "axis": [0, 1, 0],
+         "lower": -0.9, "upper": 0.9, "rest": 0.0},
+        {"name": "up1", "role": "delta_upper", "like": "arm", "parent": "plate",
+         "attach": {"along": 0.5, "lateral": 0.0, "height": 0.0}, "aim": [-0.400, 0.693, -0.600],
+         "size": 0.30, "girth": 0.026, "joint": "revolute", "axis": [0, 1, 0],
+         "lower": -0.9, "upper": 0.9, "rest": 0.0},
+        {"name": "up2", "role": "delta_upper", "like": "arm", "parent": "plate",
+         "attach": {"along": 0.5, "lateral": 0.0, "height": 0.0}, "aim": [-0.400, -0.693, -0.600],
+         "size": 0.30, "girth": 0.026, "joint": "revolute", "axis": [0, 1, 0],
+         "lower": -0.9, "upper": 0.9, "rest": 0.0},
+        # Forearms converge INWARD and down; aim = (platform rim - upper arm's tip), size = that distance.
+        {"name": "fore0", "role": "delta_fore", "like": "arm", "parent": "up0",
+         "aim": [-0.636, 0.000, -0.772], "size": 0.4795, "girth": 0.018},
+        {"name": "fore1", "role": "delta_fore", "like": "arm", "parent": "up1",
+         "aim": [0.318, -0.551, -0.772], "size": 0.4795, "girth": 0.018},
+        {"name": "fore2", "role": "delta_fore", "like": "arm", "parent": "up2",
+         "aim": [0.318, 0.551, -0.772], "size": 0.4795, "girth": 0.018},
+    ]}
+
+
 def _corpus_grounding(args: dict) -> dict:
     """Thesis A — RETRIEVAL = RUNTIME GROUNDING. Return the best PHYSICS-VERIFIED shape programs the
     self-manufactured corpus holds for the roles this design will use, so the agent ADAPTS a proven precedent
@@ -231,7 +278,8 @@ def get_design_schema(args: dict) -> dict:
                       "the compiler + validity gates run on submit; a broken graph returns a teaching error"],
             # Every example here used to be a CREATURE, so the machine half of the vocabulary had no precedent.
             "examples": {"quadruped": _EXAMPLE_QUAD, "hexapod": _EXAMPLE_HEX, "rover": _EXAMPLE_ROVER,
-                         "scara_arm": _EXAMPLE_SCARA, "excavator": _EXAMPLE_EXCAVATOR},
+                         "scara_arm": _EXAMPLE_SCARA, "excavator": _EXAMPLE_EXCAVATOR,
+                         "delta_parallel": _EXAMPLE_DELTA},
             # HONEST out-of-box capability of each example (measured, not assumed): so the agent knows what
             # walks/drives immediately vs what needs training. The scripted wave gait is a strong PRIOR for a
             # 4-leg body but marginal for 6+ legs (a known frontier — the learned residual/train_held closes it).

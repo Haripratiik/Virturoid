@@ -917,6 +917,13 @@ def build_from_anatomy(graph: dict) -> RobotGene:
                      robot_class=robot_class, segments=segs, base_mount=base_mount,
                      end_effector_type=end_effector_type, design_source="anatomy_graph",
                      composition_notes=["Compiled directly from the supplied anatomy graph."],
+                     # A parallel mechanism is declared at the GRAPH level, not per part: a loop joins two parts
+                     # and belongs to neither, and how high the whole thing is mounted is a fact about the body.
+                     # Without these two the graph could describe a delta and never build one.
+                     loop_closures=[dict(lc) for lc in (graph.get("loop_closures") or [])
+                                    if isinstance(lc, dict)],
+                     base_height_m=(None if graph.get("base_height_m") is None
+                                    else float(graph["base_height_m"])),
                      metadata=metadata)
 
 

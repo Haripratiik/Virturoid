@@ -134,3 +134,40 @@ def test_every_shipped_example_compiles_and_every_actuator_does_something(name):
         if moved < 1e-4:
             dead.append((jn, round(moved, 6)))
     assert not dead, f"{name} has joints that move nothing when driven: {dead}"
+
+
+def test_the_shipped_delta_is_a_real_PARALLEL_mechanism():
+    """The one shape a tree cannot express alone, so it is the example that proves loop_closures reach an agent.
+
+    Three arms drive ONE shared platform. The trap it exists to teach: MuJoCo's `connect` locks in whatever
+    offset the two parts have AT BUILD TIME, so declaring a loop between parts that are apart WELDS THE GAP. An
+    earlier version had arm tips 0.5045 m from the platform before stepping and 0.5045 m after 2000 steps — with
+    nu=3, neq=2 and a clean validate the whole time."""
+    import numpy as np
+    from virturoid.services.agent_design_tools import _EXAMPLE_DELTA
+    from virturoid.services.anatomy_compiler import build_from_anatomy
+    from virturoid.services.gene_validation import validate_gene_design
+
+    gene = build_from_anatomy(_EXAMPLE_DELTA)
+    assert len(gene.loop_closures) == 2, (
+        f"the graph declares 2 loops and the gene carries {len(gene.loop_closures)} — the anatomy compiler is "
+        "dropping them, so this example builds a tree with two dangling arms")
+    assert gene.base_height_m == 1.05, "the overhead plate height did not reach the gene"
+
+    _, m, d = _model(_EXAMPLE_DELTA)
+    assert m.neq >= 2, f"the compiled model carries {m.neq} equality constraints, not the 2 declared"
+    assert m.nu == 3, f"a delta has 3 actuated arms; this one has {m.nu}"
+
+    # the platform must sit ON the machine's axis — an off-centre one is three arms dangling, not a delta
+    import mujoco
+    pl = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, "platform")
+    assert pl >= 0
+    assert float(np.linalg.norm(np.asarray(d.xpos[pl], dtype=float)[:2])) < 0.02, (
+        f"the platform sits {np.round(d.xpos[pl][:2], 4)} off the axis")
+
+    # and every declared loop must actually MEET, not hold a gap
+    checks = (validate_gene_design(gene) or {}).get("checks", {})
+    assert checks.get("loop_closures_compiled") is not False, checks
+    assert checks.get("loop_closures_meet") is not False, (
+        "the shipped delta declares loops between parts that are not touching — it would teach an agent to weld "
+        "gaps")
