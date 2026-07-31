@@ -50,9 +50,24 @@ def skill_of(name: str):
 def deploy_quality(gene, policy, *, steps: int = 2400) -> float:
     """The deployment-aligned skill quality on THIS body: the dense gait reward over a full episode (the
     track_smooth metric — forward speed while upright, smooth). Higher = a better, more usable skill. A RECIPE
-    policy (it carries a banked obs normalizer) is rolled out under the SAME PD-to-default control + normalization
-    it learned — scoring it on the legacy torque-residual path would understate a gait it never trained for."""
-    if getattr(policy, "obs_mean", None) is not None:
+    policy is rolled out under the SAME PD-to-default control it learned — scoring it on the legacy torque-
+    residual path would understate a gait it never trained for.
+
+    "Is this a RECIPE policy?" comes from the artifact's EXPLICIT marker (``recipe_control``, meta[11]), NOT from
+    the incidental presence of a banked obs normalizer. This scores BANKED SKILLS: it is the number ``acquire_skill``
+    compares against ``target`` to decide REUSE-vs-retrain, and the ``success_rate`` persisted by ``db.record_skill``
+    — i.e. what the cross-user flywheel RANKS and RECALLS for every later body. The GPU trainer banks no normalizer
+    at all, so inferring from ``obs_mean`` scored EVERY marked artifact under a controller it never trained with and
+    then wrote that wrong score into the bank (task #257, 4th and last site). UNMARKED policies (pre-meta[11]
+    artifacts, in-memory policies) keep this site's own legacy inference VERBATIM — obs_mean only, never cpg.
+
+    NORMALIZATION stays a separate question from the control law, and needs no flag here: ``recipe_rollout_morph``
+    already picks the normalizer up from the policy itself and feeds RAW observations when there is none, so a
+    marked artifact with ``obs_mean is None`` routes to the recipe branch without dividing by an absent normalizer."""
+    recipe = getattr(policy, "recipe_control", None)
+    if recipe is None:
+        recipe = getattr(policy, "obs_mean", None) is not None
+    if recipe:
         from virturoid.services.morph_policy import recipe_rollout_morph
         r = recipe_rollout_morph(gene, policy, steps=steps)
     else:

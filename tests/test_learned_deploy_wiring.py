@@ -248,6 +248,162 @@ def test_the_build_headline_scores_the_banked_marked_policy_not_a_random_one(mon
     assert headline() and headline()[0] is None
 
 
+def test_deploy_quality_scores_a_marked_artifact_under_the_recipe_controller(monkeypatch, tmp_path):
+    """SITE 4 (skill_library.py:55) scores BANKED SKILLS — the number ``acquire_skill`` compares against
+    ``target`` to decide REUSE-vs-retrain, the ``success_rate`` stamped into ``db.record_skill``, and therefore
+    what the cross-user flywheel RANKS and RECALLS for every later body. Its legacy inference is the narrow one
+    (obs_mean only, never cpg), so a marked GPU artifact — which banks no normalizer — was scored under the
+    legacy torque-residual controller it never trained with, and that wrong score was PERSISTED into the bank."""
+    from virturoid.services import skill_library as SL
+
+    pol = _marked(tmp_path, 27)
+    assert pol.obs_mean is None and pol.cpg is None             # what the old inference looked at: nothing
+    assert pol.recipe_control is True                            # ...while the artifact states its controller
+    seen = {}
+    monkeypatch.setattr(MP, "recipe_rollout_morph",
+                        lambda g, p, **kw: seen.update(via="recipe") or {"finite": True, "gait": 0.71})
+    monkeypatch.setattr(MP, "rollout_morph",
+                        lambda g, p, **kw: seen.update(via="residual") or {"finite": True, "gait": 0.12})
+    assert SL.deploy_quality(object(), pol) == pytest.approx(0.71)
+    assert seen["via"] == "recipe"                               # the controller it was TRAINED with
+    # BACKWARD COMPAT: an unmarked policy keeps the legacy obs_mean-only inference VERBATIM, in both directions.
+    seen.clear()
+    old = _marked(tmp_path, 27, "old.npz", marked=False)
+    assert old.recipe_control is None                            # unknown, NOT False: absence of evidence
+    assert SL.deploy_quality(object(), old) == pytest.approx(0.12) and seen["via"] == "residual"
+    seen.clear()
+    old.obs_mean, old.obs_std = np.zeros(27), np.ones(27)        # a normalizer still means "recipe", as today
+    assert SL.deploy_quality(object(), old) == pytest.approx(0.71) and seen["via"] == "recipe"
+    seen.clear()
+    old.obs_mean = None
+    old.cpg = MP.CPG_DEFAULT                                     # ...and cpg alone still does NOT, as today
+    assert SL.deploy_quality(object(), old) == pytest.approx(0.12) and seen["via"] == "residual"
+
+
+def test_deploy_quality_of_a_marked_artifact_needs_no_normalizer(quad, tmp_path):
+    """The COUPLING that the site-2 fix forced out, asserted here UNSTUBBED: a marked GPU artifact legitimately
+    has obs_mean None, so routing it to the recipe branch must feed RAW observations instead of dividing by a
+    normalizer that isn't there. ``recipe_rollout_morph`` already decouples control law from normalization
+    (``normalizer`` stays None -> no division), so this site needs no separate flag — prove it, don't assume it."""
+    import mujoco
+
+    from virturoid.services import skill_library as SL
+    from virturoid.services.morph_graph import encode_robot
+
+    fd = encode_robot(mujoco.MjModel.from_xml_string(MP.robot_mjcf(quad))).feature_dim
+    pol = _marked(tmp_path, fd)
+    assert pol.obs_mean is None and pol.recipe_control is True
+    q = SL.deploy_quality(quad, pol, steps=12)                  # must NOT raise TypeError on the absent normalizer
+    assert isinstance(q, float) and q > -1.0                    # a real recipe score, not the not-finite sentinel
+
+
+# ------------------------------------ #258: the GPU trainer's EXPLORATION SIGMA is bounded, and recorded
+# scripts/mjx_morph_attention.py has essentially no coverage, and `mjx` cannot be imported on a CPU box, so its
+# `main()` is untestable here. These pin the parts of the fix that are pure numerics (the sigma bound), pure
+# argparse (the flag) and pure I/O (the meta layout). The rollout/print plumbing that carries the mean-episode-
+# length readout is NOT covered: it lives inside jitted MJX rollouts and needs a real GPU run.
+def _trainer():
+    import scripts.mjx_morph_attention as T                # a repo-root namespace package; import per test so a
+    return T                                               # failure here can never silently skip this whole file
+
+
+def test_exploration_sigma_is_bounded_at_every_read():
+    """The measured bug (#258): ``ent = (logstd + const).sum()`` is LINEAR in logstd, so the PPO loss carries a
+    CONSTANT -ENT = -5e-3 gradient pushing sigma UP forever, unscheduled, with nothing opposing it. From the -0.5
+    init (sigma 0.6065) that truncated episodes to ~150 of 500 control steps, so the objective never observed the
+    fall — and the measured sweep showed sigma >~0.3 INVERTS the objective's ranking of two checkpoints."""
+    T = _trainer()
+    exp, bs = np.exp, T.bounded_sigma
+    assert exp(-0.5) == pytest.approx(0.6065, abs=1e-4)          # the trainer's logstd INIT, unbounded
+    assert bs(np.array([-0.5]))[0] == pytest.approx(exp(-0.7))   # ...capped from the very first iteration
+    for raw in (-0.5, 0.0, 2.0, 50.0):                           # the RUNAWAY: wherever the constant entropy
+        assert bs(np.array([raw]))[0] == pytest.approx(exp(T.LOGSTD_MAX))   # gradient drives it, sigma is bounded
+    assert bs(np.array([-9.0]))[0] == pytest.approx(exp(T.LOGSTD_MIN))      # and it can't collapse to 0 either
+    assert 0.100 == pytest.approx(exp(T.LOGSTD_MIN), abs=5e-4)   # the documented [0.10, 0.50] band
+    assert 0.497 == pytest.approx(exp(T.LOGSTD_MAX), abs=5e-4)
+    for raw in (-2.0, -1.5, -0.9):                               # INSIDE the band it is the EXACT identity, so a
+        assert bs(np.array([raw]))[0] == float(exp(raw))         # run that never hits the cap is unperturbed
+    # the sweep's GOOD region (sigma <= 0.15, where the objective ranked the good checkpoint first) is reachable
+    assert bs(np.array([0.0]), hi=-1.9)[0] == pytest.approx(0.1496, abs=1e-4)
+
+
+def test_the_sigma_bound_is_a_cli_flag_with_the_old_behaviour_reachable():
+    """A hard-coded guess is not falsifiable; a flag is. The parser also has to RENDER — an unescaped '%' in any
+    help string makes ``--help`` raise, which is how a CLI silently stops being usable."""
+    T = _trainer()
+    ap = T.build_parser()
+    d = ap.parse_args([])
+    assert (d.logstd_min, d.logstd_max) == (T.LOGSTD_MIN, T.LOGSTD_MAX)
+    assert d.ep_len == 200                                       # horizon stays a RUN-TIME choice; default untouched
+    wide = ap.parse_args(["--logstd-min", "-20", "--logstd-max", "20"])
+    for raw in (-0.5, 0.0, 2.0):                                 # a wide range == the exact PRE-BOUND behaviour
+        assert T.bounded_sigma(np.array([raw]), wide.logstd_min, wide.logstd_max)[0] == float(np.exp(raw))
+    tight = ap.parse_args(["--logstd-max", "-1.9"])
+    assert T.bounded_sigma(np.array([0.0]), tight.logstd_min, tight.logstd_max)[0] < 0.15
+    assert "--logstd-max" in ap.format_help()                    # renders at all (the unescaped-'%' trap)
+
+
+def _npz_with_meta(path, meta):
+    pol = MP.MorphPolicy(27, seed=0)
+    np.savez(str(path), **{k: pol._arrs[k] for k in ("We", "be", "Wq", "Wk", "Wv", "Wo", "Wh", "bh")},
+             meta=np.asarray(meta))
+    return MP.MorphPolicy.from_npz(str(path))
+
+
+def test_the_banked_artifact_records_the_sigma_it_was_trained_under(tmp_path):
+    """meta[12] follows the meta[11] convention EXACTLY: APPENDED (never reordered) so every existing reader is
+    untouched, and ABSENT rather than 0.0 when unknown — a 0.0 would be a positive claim of sigma 1.0. Without it
+    nothing on disk says which of two checkpoints was explored at a sigma that inverts the objective's ranking."""
+    T = _trainer()
+    m = T.trainer_meta(27, 32, 12, 0.4, decimation=6, sphere_feet=True, logstd=-0.7)
+    assert len(m) == 13 and m[11] == 1.0                         # the #257 recipe marker is untouched
+    assert float(np.exp(m[12])) == pytest.approx(0.4966, abs=1e-4)     # exp(meta[12]) = the training sigma
+    assert T.trainer_meta(27, 32, 12, 0.4, decimation=6, sphere_feet=True) == m[:12]   # unknown -> NO slot at all
+    # a 13-slot artifact must load EXACTLY as the 12-slot one: a tail entry is invisible to every existing reader
+    a, b = _npz_with_meta(tmp_path / "m13.npz", m), _npz_with_meta(tmp_path / "m12.npz", m[:12])
+    for attr in ("feature_dim", "hidden", "adaptive_gains", "decimation", "action_lpf", "sphere_feet",
+                 "phase_obs", "command_conditioned", "recipe_control"):
+        assert getattr(a, attr) == getattr(b, attr), attr
+    assert a.recipe_control is True and a.decimation == 6 and a.sphere_feet is True
+
+
+def test_the_entropy_bonus_pushes_sigma_up_forever_and_the_bound_stops_it():
+    """The MECHANISM, not just the clamp. ``loss = pg + VF*vf - ENT*ent`` with ``ent = (logstd + const).sum()`` is
+    LINEAR in logstd, so its gradient is the CONSTANT -ENT — an unscheduled upward push on sigma every minibatch,
+    for the whole run. Reading the CLIPPED logstd in the entropy term makes that gradient ZERO past the cap, so
+    the push stops AT the bound instead of accumulating forever in a parameter the rollout no longer obeys."""
+    jax = pytest.importorskip("jax")                             # the GPU-box dep; skip on a box without it
+    jp = jax.numpy
+    T = _trainer()
+    ENT = 5e-3                                                   # the trainer's entropy coefficient
+
+    def loss_unbounded(ls):
+        return -ENT * (ls + 0.5 * jp.log(2 * jp.pi * jp.e)).sum()
+
+    def loss_bounded(ls):
+        return -ENT * (T.bounded_logstd(ls, T.LOGSTD_MIN, T.LOGSTD_MAX, xp=jp)
+                       + 0.5 * jp.log(2 * jp.pi * jp.e)).sum()
+    for raw in (-0.5, 0.0, 2.0):                                 # unbounded: the SAME constant push, everywhere
+        assert float(jax.grad(loss_unbounded)(jp.array([raw]))[0]) == pytest.approx(-ENT)
+    assert float(jax.grad(loss_bounded)(jp.array([-1.5]))[0]) == pytest.approx(-ENT)   # inside: unchanged
+    for raw in (-0.5, 0.0, 2.0):                                 # at/past the cap: the push is switched OFF
+        assert float(jax.grad(loss_bounded)(jp.array([raw]))[0]) == pytest.approx(0.0, abs=1e-12)
+    assert float(jax.grad(loss_bounded)(jp.array([-9.0]))[0]) == pytest.approx(0.0, abs=1e-12)   # and below it
+    # and the SAME expression is what the rollout samples with, under jit (this is how the trainer reads it)
+    assert float(jax.jit(lambda p: T.bounded_sigma(p, T.LOGSTD_MIN, T.LOGSTD_MAX, xp=jp)[0])(jp.array([-0.5]))) \
+        == pytest.approx(float(np.exp(T.LOGSTD_MAX)), abs=1e-6)
+
+
+def test_this_files_gpu_artifact_mirror_still_matches_the_real_writer(tmp_path):
+    """``_gpu_artifact`` above hand-mirrors the trainer's meta array. A mirror that DRIFTS from the writer turns
+    every routing test in this file into a test of the mirror instead of the contract, so pin them together."""
+    T = _trainer()
+    mirrored = list(np.load(_gpu_artifact(tmp_path / "mirror.npz", 27, cpg=1.0, decimation=6.0,
+                                          sphere_feet=1.0))["meta"])
+    real = T.trainer_meta(27, 32, 12, 0.4, cpg=True, decimation=6, sphere_feet=True)
+    assert [float(x) for x in mirrored] == [float(x) for x in real]
+
+
 # ---------------------------------------------------------------------------- F1: recall seam + product verdict
 def test_recall_with_rollout_returns_the_screen_rollout(monkeypatch, quad):
     """The credibility screen already runs a full deployed rollout — the verdict path reuses that exact evidence."""

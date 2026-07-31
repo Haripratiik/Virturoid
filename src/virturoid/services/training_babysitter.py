@@ -24,7 +24,11 @@ from __future__ import annotations
 import math
 import re
 
-# The trainer's per-iter line: "  iter  120  ep_reward=   12.34  fwd_vel=+0.412  lr=3.0e-04 kl=0.0123  (48s)"
+# The trainer's per-iter line, as of task #258's instrumentation:
+#   "  iter  120  ep_reward=   12.34  fwd_vel=+0.412  ep_len=125.0/125  sigma=0.497*  lr=3.0e-04 kl=0.0123  (48s)"
+# ep_len/sigma sit BETWEEN fwd_vel and kl, which the `.*?kl=` hop already tolerates — the three fields this
+# regex captures are unchanged. (ep_len and sigma are diagnostics for a human reading the log; if the babysitter
+# should ever act on a truncated-episode signal, capture ep_len here rather than re-deriving it.)
 _ITER_RE = re.compile(
     r"iter\s+(\d+)\s+ep_reward=\s*([-+]?[\d.]+|[-+]?nan|[-+]?inf)\s+fwd_vel=\s*([-+]?[\d.]+|[-+]?nan|[-+]?inf)"
     r"(?:.*?kl=\s*([-+]?[\d.]+|[-+]?nan|[-+]?inf))?", re.I)

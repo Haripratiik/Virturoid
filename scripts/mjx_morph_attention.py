@@ -22,7 +22,86 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 
-def main(argv=None) -> int:
+# ------------------------------------------------------------------ EXPLORATION-SIGMA BOUND (task #258)
+# WHY THIS EXISTS. The Gaussian exploration std is a LEARNED, UNBOUNDED, UNSCHEDULED parameter here. The PPO
+# objective is ``loss = pg + VF * vf - ENT * ent`` with ``ent = (logstd + const).sum()``, so d(loss)/d(logstd)
+# carries a CONSTANT ``-ENT`` = -5e-3 that pushes sigma UP on every minibatch, for the whole run, with nothing
+# pulling it back but the policy-gradient term. From the ``-0.5`` init (sigma 0.6065) that is enough to TRUNCATE
+# the episodes the objective is scored on: measured, arm L trained at ``--ep-len 500`` still collapsed because
+# every episode died at ~150 of 500 control steps (~1.25 s) — so a LONGER HORIZON ALONE does not fix the bug
+# that the objective never observes the fall (checkpoints fall at 1.33-1.51 s).
+#
+# MEASURED (task #258) — sweep sigma, score the SAME two checkpoints under the SAME objective (good vs bad):
+#     sigma 0.0000 ->  300.7 vs 220.3   ranks the GOOD checkpoint first
+#     sigma 0.1500 ->  244.7 vs 214.0   ranks the GOOD checkpoint first
+#     sigma 0.3000 ->  197.7 vs 206.9   FLIPS — now prefers the BAD checkpoint
+#     sigma 0.6065 ->  169.1 vs 183.1   flipped; and 0.6065 is exactly the DEFAULT init
+# i.e. above ~0.15-0.30 the exploration noise INVERTS the ranking the objective is meant to express. Bounding
+# sigma is therefore a correctness fix on the objective, not a tuning preference.
+#
+# It is a FLAG, not a hard-coded guess: ``--logstd-min/--logstd-max`` move the bound, and a wide range makes the
+# clip the identity, recovering the exact pre-bound behaviour (logstd never travels anywhere near +-20).
+LOGSTD_MIN, LOGSTD_MAX = -2.3, -0.7                    # sigma in [exp(-2.3), exp(-0.7)] = [0.100, 0.497]
+
+
+def bounded_logstd(logstd, lo: float = LOGSTD_MIN, hi: float = LOGSTD_MAX, xp=None):
+    """``clip(logstd, lo, hi)`` — the log-sigma the policy ACTUALLY samples with.
+
+    Applied at EVERY read of ``params["logstd"]`` (sampling, the PPO log-prob, the entropy term, the KL probe) so
+    the sigma that generates actions, the sigma the ratio is computed against and the entropy the loss reports are
+    the same number. Clipping the ENTROPY read matters on its own: outside the range the clip has zero gradient,
+    so the constant ``-ENT`` push stops at the cap instead of accumulating forever in a parameter nobody reads.
+    ``xp`` is numpy or jax.numpy — the same expression is traceable under jit and testable on CPU."""
+    if xp is None:
+        import numpy
+        xp = numpy
+    return xp.clip(logstd, lo, hi)
+
+
+def bounded_sigma(logstd, lo: float = LOGSTD_MIN, hi: float = LOGSTD_MAX, xp=None):
+    """The exploration sigma actually used: ``exp(clip(logstd, lo, hi))`` (see ``bounded_logstd``)."""
+    if xp is None:
+        import numpy
+        xp = numpy
+    return xp.exp(bounded_logstd(logstd, lo, hi, xp=xp))
+
+
+def trainer_meta(F, H, NT, fwd, *, adaptive=False, cpg=False, decimation=1, action_lpf=0.0,
+                 sphere_feet=False, phase_obs=False, logstd=None) -> list:
+    """The ``meta`` array ``_save`` writes, as a plain list of floats — extracted so the LAYOUT is testable
+    without a GPU. It MUST match ``MorphPolicy.from_npz``: [F, H, NT, fwd, adaptive@4, cpg@5, decimation@6,
+    action_lpf@7, sphere_feet@8, phase_obs@9, command@10, recipe@11, logstd@12].
+
+    meta[11] is always 1.0: the ONLY control law in this trainer is the recipe one (tgt = q_default + CPG +
+    ascale*tanh(a); tau = KP*err - KD*qd; terminate-on-fall). Deploy used to INFER "recipe" from obs_mean/cpg —
+    and a run WITHOUT --cpg banks neither, so it fell through to the legacy torque-residual rollout it was never
+    trained with, which also never terminates on a fall and ignores the meta[6]/meta[8] written right here
+    (task #257). meta[10] is a 0.0 spacer: this trainer has no velocity-command conditioning, which is exactly
+    what from_npz already infers.
+
+    meta[12] is the EFFECTIVE (bounded) logstd — ``exp(meta[12])`` is the exploration sigma this artifact was
+    trained under, the quantity whose invisibility was the whole of task #258. It follows the meta[11] convention
+    exactly: it is APPENDED, never reordered, so every existing reader is untouched, and ``logstd=None`` OMITS the
+    slot rather than writing a 0.0 — a 0.0 would be a positive claim of sigma 1.0, whereas a MISSING slot is the
+    honest "this artifact predates the instrumentation and cannot be retro-marked"."""
+    meta = [float(F), float(H), float(NT), float(fwd),
+            1.0 if adaptive else 0.0,                     # meta[4]: adaptive per-joint PD gains
+            1.0 if cpg else 0.0,                          # meta[5]: trot-CPG prior
+            float(decimation),                            # meta[6]: control decimation (T1.1); deploy==train
+            float(action_lpf),                            # meta[7]: action LPF (T1.2) so deploy matches train
+            1.0 if sphere_feet else 0.0,                  # meta[8]: sphere feet (T1.4); deploy==train
+            1.0 if phase_obs else 0.0,                    # meta[9]: P1 phase-clock obs; deploy==train
+            0.0,                                          # meta[10]: WS8/P6 velocity-command (never set here)
+            1.0]                                          # meta[11]: RECIPE controller; deploy==train
+    if logstd is not None:
+        meta.append(float(logstd))                        # meta[12]: effective logstd (exp -> training sigma)
+    return meta
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """The full CLI, at MODULE level so every flag and its default is testable without importing jax/mjx —
+    which this box cannot do at all (mjx lives on the GPU box). Previously the parser was built inside
+    ``main()``, so no flag could be exercised on CPU. Body moved verbatim; only the indentation changed."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--robot", default="quadruped")
     ap.add_argument("--iters", type=int, default=200)
@@ -106,7 +185,7 @@ def main(argv=None) -> int:
     ap.add_argument("--upright-hi", type=float, default=0.7, help="upright-ramp SATURATION height (fraction of "
                     "standing z where the continuous upright reward hits 1.0). Default 0.7 (byte-identical; the "
                     "quad walks). RAISE toward ~0.9 for bodies that FARM the reward by CROUCHING: at 0.7 a "
-                    "0.67-height slide already earns ~85% upright, so PPO never stands tall enough to swing its "
+                    "0.67-height slide already earns ~85%% upright, so PPO never stands tall enough to swing its "
                     "legs (the hexapod crouch-slide, cadence 0). Higher saturation -> a crouch earns far less -> "
                     "the policy stands up and STEPS. Fall line stays at 0.5*z_stand.")
     ap.add_argument("--vz-w", type=float, default=0.4, help="lin_vel_z penalty (legged_gym): penalize vertical "
@@ -207,12 +286,26 @@ def main(argv=None) -> int:
     ap.add_argument("--keep-checkpoints", action="store_true", help="plan v2 T0.1: also save NUMBERED checkpoints "
                     "(runs/<name>_it{N}.npz every 10 iters) so DEPLOY-SIM checkpoint selection can pick best-by-CPU "
                     "(MJX reward can rise while CPU deploy flips sign -- never select on train-sim reward).")
+    ap.add_argument("--logstd-min", type=float, default=LOGSTD_MIN, help="LOWER bound on the learned exploration "
+                    "log-sigma (task #258). See the LOGSTD_MIN/LOGSTD_MAX block at the top of this file for the "
+                    "measured sweep; default -2.3 -> sigma >= 0.100.")
+    ap.add_argument("--logstd-max", type=float, default=LOGSTD_MAX, help="UPPER bound on the learned exploration "
+                    "log-sigma (task #258, the load-bearing one). The entropy bonus adds a CONSTANT upward "
+                    "gradient on logstd with nothing to stop it, and measured, sigma>~0.3 INVERTS the objective's "
+                    "ranking of two checkpoints while truncating episodes to ~30%% of the horizon — so the "
+                    "objective never observes the fall it is supposed to learn from. Default -0.7 -> sigma <= "
+                    "0.497. Pass a wide range (e.g. --logstd-min -20 --logstd-max 20) to make the clip the "
+                    "identity and recover the exact pre-bound behaviour.")
     ap.add_argument("--reward-expr", type=str, default="", help="R1 (agentic platform): an LLM-authored reward_dsl "
                     "EXPRESSION over the 10 whitelisted features (forward_vel, upright, height_ratio, contact_frac, "
                     "alive, slip, foot_clearance, energy, action_smooth, dist_to_goal). When set, it REPLACES the "
                     "shaped legged_gym reward — the same reward the CPU gait search screened now steers MJX PPO, "
                     "evaluated natively via reward_dsl.compile_reward_batched(xp=jax.numpy). Empty = shaped reward.")
-    args = ap.parse_args(argv)
+    return ap
+
+
+def main(argv=None) -> int:
+    args = build_parser().parse_args(argv)
     if args.smoke:
         args.envs, args.iters, args.ep_len, args.minibatches = 2, 2, 20, 1
 
@@ -401,6 +494,10 @@ def main(argv=None) -> int:
     H = args.hidden
     GAMMA, LAM, CLIP, ENT, VF, LR = 0.99, 0.95, 0.2, 5e-3, 0.5, 3e-4
     N, L = args.envs, max(5, args.ep_len // DECIM)       # L = CONTROL steps (physics time = L*DECIM ~ ep_len)
+    # task #258: the exploration sigma is bounded at EVERY read of params["logstd"] (see the module-level block).
+    LS_LO, LS_HI = float(args.logstd_min), float(args.logstd_max)
+    def _sigma(p):                                       # the sigma actually sampled with, as a traced scalar
+        return jp.exp(bounded_logstd(p["logstd"], LS_LO, LS_HI, xp=jp))[0]
 
     key = jax.random.PRNGKey(0)
     def W(k, shape, s=0.3):
@@ -646,11 +743,14 @@ def main(argv=None) -> int:
         return fwd * height * height + 0.3 * upright + 0.1 * height, fwd
 
     CHUNK = 5
+    # The rollout runs whole CHUNKs, so the horizon actually stepped is L rounded DOWN to a multiple of CHUNK.
+    # It is the honest denominator for the mean-episode-length readout below (L itself would flatter a run).
+    L_ROLL = max(CHUNK, (L // CHUNK) * CHUNK)
     LEGACY = bool(args.legacy_control)
 
     @functools.partial(jax.jit, static_argnums=())
     def roll_chunk(params, dr, carry, keys):
-        std = jp.exp(params["logstd"])[0]
+        std = _sigma(params)                             # task #258: BOUNDED exploration sigma (see LOGSTD_MIN/MAX)
         gain_s, kp_s, kd_s = dr                          # per-env sim2real scales (all ones when --dr off)
 
         def body(carry, key):
@@ -836,7 +936,13 @@ def main(argv=None) -> int:
             adv = (delta + GAMMA * LAM * next_alive * adv) * alive_t
             return (val_t, alive_t, adv), adv
         _, advs = jax.lax.scan(gae, (last_val, jp.ones(N), jp.zeros(N)), (rew, val, alive), reverse=True)
-        return obs, act, logp, advs, advs + val, rew.sum(0).mean(), fwd.mean(0).mean(), pcpt
+        # MEAN EPISODE LENGTH (task #258): `alive` is 1.0 per control step until this env first falls and 0.0
+        # after, so summing over time and meaning over envs IS the observed episode length in CONTROL steps.
+        # Nothing logged it, and its invisibility WAS the bug: at the default horizon both a good and a bad
+        # checkpoint survive every step, so alive_bonus is EXACTLY equal for both and the objective carries zero
+        # gradient about the fall; and when a longer horizon is used, exploration noise truncates episodes to a
+        # fraction of it. Printed against the horizon so a truncated run is visible on the FIRST iteration.
+        return obs, act, logp, advs, advs + val, rew.sum(0).mean(), fwd.mean(0).mean(), alive.sum(0).mean(), pcpt
 
     def rollout(params, key):
         rkey, key = jax.random.split(key)
@@ -855,7 +961,7 @@ def main(argv=None) -> int:
         carry = (data, jp.ones(N), jp.zeros((N, nu)), jp.zeros((N, n_feet)), jp.ones((N, n_feet)),
                  jp.zeros((N, n_feet)))                          # + stance_time (P1 periodic reward; feet start grounded)
         chunks = []
-        for _ in range(L // CHUNK):
+        for _ in range(L_ROLL // CHUNK):
             key, ck = jax.random.split(key)
             carry, out = roll_chunk(params, dr, carry, jax.random.split(ck, CHUNK))
             jax.block_until_ready(carry[0].qpos)
@@ -864,13 +970,19 @@ def main(argv=None) -> int:
         return finish(params, carry[0], traj)
 
     def loss_fn(params, obs, act, old_logp, adv, ret, percept=None):
-        std = jp.exp(params["logstd"])[0]
+        ls = bounded_logstd(params["logstd"], LS_LO, LS_HI, xp=jp)   # task #258: bound EVERY read, this one included
+        std = jp.exp(ls)[0]
         means, val = act_and_value(params, obs, percept)
         logp = (-0.5 * (((act - means) / std) ** 2 + 2 * jp.log(std) + jp.log(2 * jp.pi))).sum(-1)
         ratio = jp.exp(logp - old_logp)
         adv = (adv - adv.mean()) / (adv.std() + 1e-8)
         pg = jp.maximum(-adv * ratio, -adv * jp.clip(ratio, 1 - CLIP, 1 + CLIP)).mean()
-        ent = (params["logstd"] + 0.5 * jp.log(2 * jp.pi * jp.e)).sum()
+        # ENTROPY: bounded too, and that is load-bearing rather than cosmetic. ``ent`` is LINEAR in logstd, so
+        # d(loss)/d(logstd) picks up a CONSTANT -ENT = -5e-3 pushing sigma up every minibatch, unscheduled and
+        # with no opposing term. Reading the CLIPPED logstd makes that gradient ZERO outside the range, so the
+        # push stops AT the cap instead of accumulating forever in a parameter the rollout no longer obeys —
+        # and the entropy the loss reports is the entropy of the policy that actually acted.
+        ent = (ls + 0.5 * jp.log(2 * jp.pi * jp.e)).sum()
         return pg + VF * ((val - ret) ** 2).mean() - ENT * ent
 
     @jax.jit
@@ -894,7 +1006,7 @@ def main(argv=None) -> int:
             return (params, opt_state, key), None
         (params, opt_state, _), _ = jax.lax.scan(epoch, (params, opt_state, key), jp.arange(args.epochs))
         # B0.3 KL-adaptive-LR signal: k3 KL estimator (Schulman) on one minibatch, using only old_logp (>= 0).
-        std = jp.exp(params["logstd"])[0]
+        std = _sigma(params)                                 # task #258: the SAME bounded sigma the rollout used
         pc0 = percept[:mb] if percept is not None else None
         means_k, _ = act_and_value(params, obs[:mb], pc0)
         lp_k = (-0.5 * (((act[:mb] - means_k) / std) ** 2 + 2 * jp.log(std) + jp.log(2 * jp.pi))).sum(-1)
@@ -919,25 +1031,18 @@ def main(argv=None) -> int:
             extra["cpg_arr"] = np.asarray([CPG_PARAMS["freq"], CPG_PARAMS["thigh_amp"], CPG_PARAMS["calf_amp"],
                                            CPG_PARAMS["calf_phase"], CPG_PARAMS["residual_scale"],
                                            1.0 if CPG_PARAMS.get("leg_flip") else 0.0])
+        # The meta LAYOUT lives in the module-level ``trainer_meta`` (so it is testable without a GPU) — see its
+        # docstring for the full slot-by-slot contract, meta[11] (task #257) and meta[12] (task #258).
+        meta = trainer_meta(F, H, NT, float(fwd), adaptive=args.adaptive, cpg=CPG_ON, decimation=DECIM,
+                            action_lpf=ACTION_LPF, sphere_feet=args.sphere_feet, phase_obs=PHASE_OBS,
+                            # meta[12]: the EFFECTIVE (bounded) logstd, so a banked artifact RECORDS the
+                            # exploration noise it was trained under -- exp(meta[12]) is that sigma. Without it,
+                            # nothing on disk says which of two checkpoints was explored at a sigma that inverts
+                            # the objective's own ranking (task #258), and the run cannot be reconstructed.
+                            logstd=float(bounded_logstd(np.asarray(p["logstd"]), LS_LO, LS_HI)[0]))
         np.savez(dst, We=np.asarray(a["We"]), be=np.asarray(a["be"]), Wq=np.asarray(a["Wq"]),
                  Wk=np.asarray(a["Wk"]), Wv=np.asarray(a["Wv"]), Wo=np.asarray(a["Wo"]),
-                 Wh=np.asarray(a["Wh"]), bh=np.asarray(a["bh"]), **extra,
-                 # meta layout MUST match MorphPolicy.from_npz: [F,H,NT,fwd, adaptive@4, cpg@5, decimation@6,
-                 # action_lpf@7, sphere_feet@8] so CPU replay reads the right flags (adaptive gains + trot-CPG prior +
-                 # control rate + action filter + foot contact model) and reproduces the gait it was trained with.
-                 # meta[11] states the CONTROLLER EXPLICITLY, and is always 1.0: the ONLY control law in this trainer
-                 # is the recipe one (tgt = q_default + CPG + ascale*tanh(a); tau = KP*err - KD*qd; terminate-on-fall).
-                 # Deploy used to INFER "recipe" from obs_mean/cpg — and a run WITHOUT --cpg banks neither, so it fell
-                 # through to the legacy torque-residual rollout it was never trained with, which also never terminates
-                 # on a fall and ignores the meta[6]/meta[8] written right here (task #257). meta[10] is a 0.0 spacer:
-                 # this trainer has no velocity-command conditioning, which is exactly what from_npz already infers.
-                 meta=np.asarray([F, H, NT, float(fwd),
-                                  1.0 if args.adaptive else 0.0, 1.0 if CPG_ON else 0.0, float(DECIM),
-                                  float(ACTION_LPF),           # meta[7]: action LPF (T1.2) so deploy matches train
-                                  1.0 if args.sphere_feet else 0.0,      # meta[8]: sphere feet (T1.4); deploy==train
-                                  1.0 if PHASE_OBS else 0.0,             # meta[9]: P1 phase-clock obs; deploy==train
-                                  0.0,                                   # meta[10]: WS8/P6 velocity-command (never here)
-                                  1.0]))                                 # meta[11]: RECIPE controller; deploy==train
+                 Wh=np.asarray(a["Wh"]), bh=np.asarray(a["bh"]), **extra, meta=np.asarray(meta))
 
     if args.eval_npz:                                   # EVAL: deterministic single-env MJX rollout (recipe control)
         dd = np.load(args.eval_npz)
@@ -981,7 +1086,7 @@ def main(argv=None) -> int:
     lr = LR; DESIRED_KL = 0.01                            # B0.3: KL-adaptive learning rate (rsl_rl's most-copied trick)
     for it in range(args.iters):
         key, rk, uk = jax.random.split(key, 3)
-        obs, act, logp, adv, ret, ep_rew, ep_fwd, pcpt = rollout(params, rk)   # pcpt = gait clock (None w/o phase-obs)
+        obs, act, logp, adv, ret, ep_rew, ep_fwd, ep_len, pcpt = rollout(params, rk)   # pcpt = clock (None w/o phase-obs)
         flat = lambda a: a.reshape((-1,) + a.shape[2:])
         _lr = jp.asarray(lr, jp.float32)                     # pass as a TRACED scalar so a changing lr never re-jits
         if PHASE_OBS:                                        # P1: flatten + pass the clock so PPO minibatches carry it
@@ -995,7 +1100,14 @@ def main(argv=None) -> int:
         elif kl < 0.5 * DESIRED_KL:
             lr = min(lr * 1.5, 1e-2)
         if it % 10 == 0 or it == args.iters - 1:
+            # task #258 INSTRUMENTATION. ep_len: the two quantities the objective is actually made of were both
+            # invisible — if ep_len pins at the horizon, alive_bonus is identical for every checkpoint and the
+            # reward carries NO information about falling; if it sits far below, exploration is truncating the
+            # episodes the objective is scored on. sigma: the learned exploration std, trailed by '*' when the
+            # bound is clipping it (i.e. the entropy bonus has driven the raw parameter past the cap).
+            _sg = float(_sigma(params)); _raw = float(jp.exp(params["logstd"])[0])
             print(f"  iter {it:>4}  ep_reward={float(ep_rew):8.2f}  fwd_vel={float(ep_fwd):+.3f}  "
+                  f"ep_len={float(ep_len):5.1f}/{L_ROLL}  sigma={_sg:.3f}{'*' if abs(_raw - _sg) > 1e-6 else ''}  "
                   f"lr={lr:.1e} kl={kl:.4f}  ({(time.time()-t0):.0f}s)", flush=True)
         # CHECKPOINT often — the WSL2 GPU watchdog (TDR) kills long kernels mid-run (observed: a hang ~iter 20),
         # and every-30 lost everything before the first checkpoint. Every 10 keeps a fetchable policy (CPG-primed,
