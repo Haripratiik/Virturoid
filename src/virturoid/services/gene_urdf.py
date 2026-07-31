@@ -115,6 +115,19 @@ def gene_to_urdf(gene, *, name: str | None = None, mesh_dir: str | None = None) 
             joint_of[int(model.jnt_bodyid[j])] = j
 
     lines = [f'<robot name="{robot_name}">']
+    # URDF IS A TREE, so a declared closed loop CANNOT be represented here — a gantry's bridge can only hang off
+    # one column, a delta's arms cannot share a platform. Dropping that silently is the worst option available:
+    # the file would look complete and ship the exact cantilever the loop was added to fix, under a green export.
+    # So say it, in the file itself, where anyone opening the URDF will see it.
+    _loops = getattr(gene, "loop_closures", None) or []
+    if _loops:
+        lines.append(
+            f"  <!-- WARNING: {len(_loops)} closed kinematic loop(s) in this design are NOT represented below. "
+            "URDF is a strict tree (one parent per link) and cannot express them. Affected: "
+            + "; ".join(f"{escape(str((lc or {}).get('a')))}<->{escape(str((lc or {}).get('b')))}"
+                        for lc in _loops)
+            + ". The MJCF export carries them as <equality><connect>; this file describes the same robot with "
+            "those joins OPEN, so any load path through them is missing. -->")
     for b in range(1, model.nbody):
         nm = bname(b)
         mass = max(1e-4, float(model.body_mass[b]))

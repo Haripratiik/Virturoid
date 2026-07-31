@@ -145,3 +145,15 @@ def test_a_body_with_no_loops_is_unchanged():
     from virturoid.services.morph_policy import robot_mjcf
     xml = robot_mjcf(compose_robot("a four legged robot dog", llm=None))
     assert "<equality>" not in xml
+
+
+def test_the_URDF_export_says_it_cannot_carry_the_loop():
+    """URDF is a strict tree, so a closed loop genuinely cannot be represented. Dropping it SILENTLY is the
+    worst available option: the file looks complete and ships the exact cantilever the loop was declared to fix,
+    under a green export. Say it in the file, where whoever opens it will see it."""
+    from virturoid.services.gene_urdf import gene_to_urdf
+    urdf = gene_to_urdf(_gantry(True))
+    assert "closed kinematic loop" in urdf.lower(), "the URDF drops the loop without a word"
+    assert "bridge" in urdf and "column_r" in urdf, "the warning does not name which join was lost"
+    clean = gene_to_urdf(_gantry(False))
+    assert "closed kinematic loop" not in clean.lower(), "a body with no loops must not carry the warning"
