@@ -212,6 +212,44 @@ def export_usd(gene, path: str, *, kp: float = 32.0, kd: float = 1.5) -> dict:
         joints.append({"name": jname, "type": "revolute" if is_rev else "prismatic",
                        "lower": lo, "upper": hi, "child": bname(child), "rest": round(rest, 5)})
 
+    # --- closed kinematic loops -> UsdPhysics.FixedJoint --------------------------------------------------
+    #
+    # Unlike URDF, USD is NOT a tree: a UsdPhysics joint is a body0/body1 pair, an arbitrary graph, and PhysX
+    # solves loop joints. So a gantry's bridge braced at both columns and a delta's shared platform CAN be
+    # exported truthfully here — the previous writer just never looked, because it built joints by walking
+    # `model.njnt` and `body_parentid`, and an equality constraint is neither a joint nor a parent edge.
+    #
+    # Emitted as a FixedJoint rather than trying to mirror MuJoCo's `connect`: connect removes 3 translational
+    # DOF between two points, and USD's nearest honest equivalent for "these two parts are joined here" is a
+    # fixed joint at that anchor. It is STIFFER than the MuJoCo original, which is disclosed in the report
+    # rather than papered over — an Isaac scene that is rigid where the MuJoCo one is compliant will not match
+    # under load, and that is a real thing for a customer to know.
+    loops = []
+    for _lc in (getattr(gene, "loop_closures", None) or []):
+        _a, _b = (_lc or {}).get("a"), (_lc or {}).get("b")
+        _ia = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, str(_a))
+        _ib = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, str(_b))
+        if _ia < 0 or _ib < 0 or _ia == _ib:
+            continue
+        _seg = next((s for s in gene.segments if s.name == _a), None)
+        _anc = (_lc or {}).get("anchor")
+        if not (isinstance(_anc, (list, tuple)) and len(_anc) == 3):
+            _anc = (0.0, 0.0, float(getattr(_seg, "length_m", 0.0) or 0.0))
+        _anc = np.asarray([float(v) for v in _anc], dtype=float)
+        _Ra, _Rb = _quat2mat(data.xquat[_ia]), _quat2mat(data.xquat[_ib])
+        _world = np.array(data.xpos[_ia], float) + _Ra @ _anc
+        _loc_b = _Rb.T @ (_world - np.array(data.xpos[_ib], float))
+        _name = _safe(f"loop_{_a}_{_b}")
+        _fj = UsdPhysics.FixedJoint.Define(stage, f"/Robot/{_name}")
+        _fj.CreateBody0Rel().SetTargets([body_path[_ia]] if _ia in body_path else [])
+        _fj.CreateBody1Rel().SetTargets([body_path[_ib]] if _ib in body_path else [])
+        _fj.CreateLocalPos0Attr(Gf.Vec3f(*[float(v) for v in _anc]))
+        _fj.CreateLocalPos1Attr(Gf.Vec3f(*[float(v) for v in _loc_b]))
+        loops.append({"name": _name, "a": str(_a), "b": str(_b),
+                      "as_": "UsdPhysics.FixedJoint",
+                      "note": "MuJoCo models this as a COMPLIANT <equality><connect>; a USD fixed joint is "
+                              "rigid, so this export is stiffer than the simulated original"})
+
     # --- fixed base: weld the root body to the world -----------------------------------------------------
     if not floating:
         fj = UsdPhysics.FixedJoint.Define(stage, "/Robot/base_fixed")
@@ -223,6 +261,10 @@ def export_usd(gene, path: str, *, kp: float = 32.0, kd: float = 1.5) -> dict:
     manifest.update({"usd_path": path, "base": "floating" if floating else "fixed",
                      "root_link": bname(root_bid), "spawn_z": round(spawn_z, 4),
                      "total_mass_kg": round(total_mass, 4), "joints": joints,
+                     # Loops are EXPORTED here (USD is a graph, not a tree) but as rigid fixed joints, so the
+                     # difference from the compliant MuJoCo original is stated rather than left to be discovered
+                     # when an Isaac scene behaves differently under load.
+                     "loop_closures": loops,
                      "up_axis": "Z", "meters_per_unit": 1.0})
     return manifest
 

@@ -250,3 +250,26 @@ def test_a_loop_between_parts_that_DO_touch_passes():
         assert checks["loop_closures_meet"] is True, rep
     if isinstance(checks, dict) and "loop_closures_compiled" in checks:
         assert checks["loop_closures_compiled"] is True, rep
+
+
+def test_USD_exports_the_loop_because_USD_can():
+    """URDF is a tree and genuinely cannot carry a loop, so there it is disclosed. USD is NOT a tree — a
+    UsdPhysics joint is a body0/body1 pair, an arbitrary graph, and PhysX solves loop joints — so here the honest
+    answer is to EXPORT it. The old writer dropped it only because it built joints by walking njnt and
+    body_parentid, and an equality constraint is neither.
+
+    Exported as a FixedJoint, which is STIFFER than MuJoCo's compliant `connect`. That difference is reported,
+    because an Isaac scene that is rigid where the simulated one flexes will not match under load."""
+    pytest.importorskip("pxr", reason="USD export needs OpenUSD")
+    import os
+    import tempfile
+    from virturoid.services.usd_exporter import export_usd
+    with tempfile.TemporaryDirectory() as td:
+        rep = export_usd(_gantry(True), os.path.join(td, "gantry.usda")) or {}
+        loops = rep.get("loop_closures") or []
+        assert len(loops) == 1, f"the declared loop did not reach the USD manifest: {rep.get('loop_closures')!r}"
+        assert {loops[0]["a"], loops[0]["b"]} == {"bridge", "column_r"}, loops
+        assert "stiffer" in (loops[0].get("note") or "").lower(), (
+            "the fixed-joint approximation must be disclosed, not silent")
+        plain = export_usd(_gantry(False), os.path.join(td, "plain.usda")) or {}
+        assert not (plain.get("loop_closures") or []), "a body with no loops must export none"
