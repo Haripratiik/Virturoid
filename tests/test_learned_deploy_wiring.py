@@ -141,6 +141,113 @@ def test_newly_routed_artifact_honours_its_own_decimation_and_sphere_feet(monkey
     assert seen["act"] == 2                                   # meta[6]: 12 steps at D=6 -> 2 control updates, not 12
 
 
+# ------------------------------------------- #257 (cont.): the SAME question, asked in three more places
+# "Is this a recipe policy?" is also decided in learn_locomotion.locomotion_episode, learn_locomotion.rollout_view
+# and gene_build._build_legged_package. Each decides something DIFFERENT (which rollout scores the learned arm of
+# an episode / which control law the viewport replays / whether the banked policy is used at all), and each
+# predates the marker — so each mis-answers it for the artifacts the GPU trainer actually writes: no obs_mean
+# ever, and no cpg unless the body has >=3 legs.
+def _marked(tmp_path, feature_dim, name="gpu.npz", **kw):
+    return MP.MorphPolicy.from_npz(_gpu_artifact(tmp_path / name, feature_dim, **kw))
+
+
+def test_locomotion_episode_scores_a_marked_artifact_under_the_recipe_controller(monkeypatch, tmp_path, quad):
+    """SITE 1 (learn_locomotion.py:209) chooses the rollout that produces the LEARNED arm of the episode result —
+    the forward_m/upright the capability registry and the MCP locomotion tool report, and the number that decides
+    whether "learned" beats "scripted". A marked non-CPG artifact carries neither obs_mean nor cpg, so the legacy
+    inference sent it to rollout_morph: the legacy gravity-comp torque residual, which never terminates on a fall
+    and drops the artifact's own decimation/sphere_feet."""
+    from virturoid.services import learn_locomotion as LL
+    from virturoid.services import locomotion_controller as LC
+
+    pol = _marked(tmp_path, 27)
+    assert pol.obs_mean is None and pol.cpg is None            # what the old inference looked at: nothing
+    assert pol.recipe_control is True                          # ...while the artifact states its controller
+    seen = {}
+    monkeypatch.setattr(LC, "run_locomotion_episode",
+                        lambda model, **kw: {"distance_m": 0.0, "forward_m": 0.0, "upright": False, "status": "fell"})
+    monkeypatch.setattr(LL, "banked_policy_for", lambda gene, **kw: pol)
+    monkeypatch.setattr(MP, "recipe_rollout_morph",
+                        lambda g, p, **kw: seen.update(via="recipe") or _credible_rollout())
+    monkeypatch.setattr(MP, "rollout_morph", lambda g, p, **kw: seen.update(via="residual") or _failed_rollout())
+    ep = LL.locomotion_episode(quad, horizon=120)
+    assert seen["via"] == "recipe"                             # the controller it was TRAINED with
+    assert ep["source"] == "learned" and ep["upright"] is True  # ...and the episode reports that rollout's verdict
+    # BACKWARD COMPAT: an unmarked artifact keeps the legacy obs_mean/cpg inference verbatim, in both directions.
+    seen.clear()
+    monkeypatch.setattr(LL, "banked_policy_for", lambda gene, **kw: _marked(tmp_path, 27, "old.npz", marked=False))
+    LL.locomotion_episode(quad, horizon=120)
+    assert seen["via"] == "residual"
+    seen.clear()
+    monkeypatch.setattr(LL, "banked_policy_for",
+                        lambda gene, **kw: _marked(tmp_path, 27, "old_cpg.npz", cpg=1.0, marked=False))
+    LL.locomotion_episode(quad, horizon=120)
+    assert seen["via"] == "recipe"
+
+
+def test_rollout_view_replays_a_marked_artifact_under_the_recipe_control_law(monkeypatch, tmp_path, quad):
+    """SITE 2 (learn_locomotion.py:246) chooses the CONTROL LAW the desktop viewport replays with: the recipe
+    PD-to-default (+ the artifact's own CPG prior and gains) or the legacy gravity-comp torque residual, which is
+    the only path that calls MorphGraph.apply. Its legacy inference is NARROWER than the deploy router's — obs_mean
+    only, never cpg — so at HEAD EVERY GPU artifact, CPG or not, was replayed under a controller it never trained
+    with, and the user watched a motion that is not the gait that was banked."""
+    import mujoco
+
+    from virturoid.services import learn_locomotion as LL
+    from virturoid.services import morph_graph as MG
+    from virturoid.services.gene_compiler import compile_gene_to_mjcf, standing_spawn_z
+
+    xml = compile_gene_to_mjcf(quad, include_floor=True, spawn_z=standing_spawn_z(quad, meshed=False))
+    fd = MG.encode_robot(mujoco.MjModel.from_xml_string(xml)).feature_dim
+    pol = _marked(tmp_path, fd)
+    assert pol.obs_mean is None and pol.recipe_control is True
+    calls = {"apply": 0}
+    real_apply = MG.MorphGraph.apply
+    monkeypatch.setattr(MG.MorphGraph, "apply",
+                        lambda self, *a, **k: (calls.update(apply=calls["apply"] + 1), real_apply(self, *a, **k))[1])
+    view, _ = LL.rollout_view(quad, pol, steps=20, frame_every=10)   # must NOT raise: a recipe artifact has no
+    assert calls["apply"] == 0                                       #   normalizer to divide by (obs_mean is None)
+    assert len(view["frames"]) >= 2
+    # BACKWARD COMPAT: unmarked still replays exactly as before — normalizer -> recipe, bare policy -> residual.
+    plain = MP.MorphPolicy(fd, seed=0)
+    LL.rollout_view(quad, plain, steps=20, frame_every=10)
+    assert calls["apply"] == 20
+    plain.obs_mean, plain.obs_std = np.zeros(fd), np.ones(fd)
+    LL.rollout_view(quad, plain, steps=20, frame_every=10)
+    assert calls["apply"] == 20                                      # still 20: a normalizer still means "recipe"
+
+
+def test_the_build_headline_scores_the_banked_marked_policy_not_a_random_one(monkeypatch, tmp_path):
+    """SITE 3 (gene_build.py:802) is NOT a controller router — both branches already run recipe_rollout_morph. It
+    decides whether the banked policy is USED AT ALL, and ``policy=None`` there is not a zero-residual baseline:
+    recipe_rollout_morph CONSTRUCTS A RANDOM MorphPolicy (its own docstring). So a marked artifact was silently
+    discarded and the build's headline locomotion number — plus the qpos trace the viewer replays — described a
+    random policy instead of the species' banked one."""
+    from virturoid.fixtures.gene_library import quadruped_gene
+    from virturoid.services import gene_build as GB
+    from virturoid.services import learn_locomotion as LL
+
+    pol = _marked(tmp_path, 27)
+    calls = []
+
+    def fake_recipe(g, p, **kw):
+        calls.append((p, kw))
+        return _credible_rollout()
+
+    def headline():                                           # the exported-bare-gait check rolls out too, with its
+        return [p for p, kw in calls if kw.get("record_qpos")]  # own throwaway policy — the HEADLINE call is the one
+    monkeypatch.setattr(MP, "recipe_rollout_morph", fake_recipe)   # that records the qpos trace the viewer replays
+    monkeypatch.setattr(MP, "crawl_gait_rollout", lambda g, **kw: _failed_rollout())
+    monkeypatch.setattr(LL, "banked_policy_for", lambda gene, **kw: pol)
+    GB._build_legged_package(quadruped_gene(), "a quadruped that walks forward", tmp_path / "pkg", None)
+    assert headline() and headline()[0] is pol                # the banked artifact, not a random stand-in
+    # BACKWARD COMPAT: an UNMARKED policy with no normalizer is still discarded, exactly as today.
+    calls.clear()
+    monkeypatch.setattr(LL, "banked_policy_for", lambda gene, **kw: _marked(tmp_path, 27, "old.npz", marked=False))
+    GB._build_legged_package(quadruped_gene(), "a quadruped that walks forward", tmp_path / "pkg2", None)
+    assert headline() and headline()[0] is None
+
+
 # ---------------------------------------------------------------------------- F1: recall seam + product verdict
 def test_recall_with_rollout_returns_the_screen_rollout(monkeypatch, quad):
     """The credibility screen already runs a full deployed rollout — the verdict path reuses that exact evidence."""

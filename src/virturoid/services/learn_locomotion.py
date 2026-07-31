@@ -203,10 +203,16 @@ def locomotion_episode(gene, *, horizon: int = 2400, models_dir: str = "models",
     if policy is not None:
         steps_h = min(int(horizon), 2400)
         # A RECIPE/CPG policy must be driven under the SAME PD + CPG-prior rollout the bank/render/"Learn to move"
-        # use (recipe_rollout_morph) — else the learned RESIDUAL runs WITHOUT its gait prior and collapses. Gate on
-        # the CPG flag too: a GPU-trained policy carries cpg but no obs_mean (the GPU trainer banks no normalizer),
-        # and was being misrouted to the no-CPG rollout_morph -> the same walk that survives in the bank read as fallen.
-        if getattr(policy, "obs_mean", None) is not None or getattr(policy, "cpg", None) is not None:
+        # use (recipe_rollout_morph) — else the learned RESIDUAL runs WITHOUT its gait prior and collapses. The
+        # artifact's EXPLICIT marker (``recipe_control``, meta[11]) answers this; INFERRING it from obs_mean/cpg
+        # mis-answered it for every GPU run trained without --cpg (the trainer banks no normalizer, and
+        # gpu_trainer.default_training_recipe only sets cpg for >=3 legs) — so bipeds, humanoids and non-legged
+        # bodies were scored here on the legacy residual path, i.e. the walk that survives in the bank read as
+        # fallen. UNMARKED (pre-meta[11] artifacts, in-memory policies) keeps the legacy inference VERBATIM.
+        recipe = getattr(policy, "recipe_control", None)
+        if recipe is None:
+            recipe = getattr(policy, "obs_mean", None) is not None or getattr(policy, "cpg", None) is not None
+        if recipe:
             from virturoid.services.morph_policy import recipe_rollout_morph
             r = recipe_rollout_morph(gene, policy, steps=steps_h)
             upright = bool(r.get("survived", False)) or float(r.get("height_ratio", 0.0)) > 0.6
@@ -240,10 +246,19 @@ def rollout_view(robot, policy, *, steps: int = 360, frame_every: int = 4) -> tu
     data = mujoco.MjData(model); mujoco.mj_resetData(model, data); mujoco.mj_forward(model, data)
     graph = encode_robot(model)
     bq = graph.base_qadr
-    # A RECIPE policy (it carries a banked obs normalizer) was trained under position-PD-to-default control +
-    # obs normalization — replaying it with the legacy torque-residual would NOT reproduce its gait, so drive
-    # it the same way it learned. Legacy policies (obs_mean is None) replay on the residual path exactly as before.
-    recipe = getattr(policy, "obs_mean", None) is not None
+    # A RECIPE policy was trained under position-PD-to-default control (+ obs normalization when it banked one) —
+    # replaying it with the legacy torque-residual would NOT reproduce its gait, so drive it the same way it
+    # learned. The artifact's EXPLICIT marker (``recipe_control``, meta[11]) decides. Inferring it from obs_mean
+    # was NARROWER than even the deploy router's inference (which also reads cpg), so EVERY GPU artifact — CPG or
+    # not — was replayed here under a controller it never trained with, and the viewport showed a motion that is
+    # not the banked gait. UNMARKED policies keep the legacy obs_mean-only inference VERBATIM.
+    recipe = getattr(policy, "recipe_control", None)
+    if recipe is None:
+        recipe = getattr(policy, "obs_mean", None) is not None
+    # NORMALIZATION is a SEPARATE question from the control law: the GPU trainer banks no normalizer, so a marked
+    # recipe artifact legitimately has obs_mean=None and must be fed RAW observations (exactly what
+    # recipe_rollout_morph does when normalizer is None) rather than dividing by a normalizer that isn't there.
+    normalize = getattr(policy, "obs_mean", None) is not None
     if recipe:
         qadr = np.asarray(graph.qadr, dtype=int); vadr = np.asarray(graph.vadr, dtype=int)
         act_u = np.asarray(graph.act_u, dtype=int); clamps = np.asarray(graph.clamps, dtype=float)
@@ -281,7 +296,7 @@ def rollout_view(robot, policy, *, steps: int = 360, frame_every: int = 4) -> tu
     for t in range(steps):
         obs = policy.adapt_observation(graph.observe(model, data))
         if recipe:
-            a = policy.act((obs - policy.obs_mean) / policy.obs_std)
+            a = policy.act((obs - policy.obs_mean) / policy.obs_std if normalize else obs)
             cphase = _two_pi * cpg_freq * t * _dt if cpg_on else 0.0
             for k in range(graph.n_tokens):
                 cpg_off = float(cpg_amp[k] * np.sin(cphase + cpg_phase[k])) if cpg_on else 0.0

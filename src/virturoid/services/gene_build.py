@@ -799,7 +799,16 @@ def _build_legged_package(gene: RobotGene, prompt: str, output_dir: Path, contro
     # else the BARE trot-CPG (pol=None). The old code fell back to a no-CPG scripted eval when no policy was banked,
     # so every un-banked composed walker (six-legged, a fresh quad) read 'fell'/0.0 here while the viewport walked it
     # on the bare CPG -- the headline contradicted the 3D replay. A genuinely unstable anatomy body still reads 'fell'.
-    use_pol = pol if (pol is not None and getattr(pol, "obs_mean", None) is not None) else None
+    # "Is this a RECIPE policy?" comes from the artifact's EXPLICIT marker (``recipe_control``, meta[11]), falling
+    # back VERBATIM to the legacy obs_mean inference when unmarked (pre-marker artifacts must behave as before).
+    # This is not a controller choice -- both branches run recipe_rollout_morph -- it decides whether the BANKED
+    # policy is used AT ALL, and pol=None there is NOT a zero-residual baseline: recipe_rollout_morph constructs a
+    # RANDOM policy. So inferring from obs_mean discarded every GPU artifact (that trainer banks no normalizer) and
+    # scored the species' headline -- and the qpos trace the viewer replays -- on a random stand-in instead.
+    _pol_recipe = getattr(pol, "recipe_control", None) if pol is not None else None
+    if _pol_recipe is None:
+        _pol_recipe = getattr(pol, "obs_mean", None) is not None
+    use_pol = pol if (pol is not None and _pol_recipe) else None
     rr = recipe_rollout_morph(gene, use_pol, steps=900, record_qpos=True)   # qpos -> classify's ROLL/PITCH gate
     # M1/#212 (2026-07-24 audit): the build must not report EXPORT-BLOCKED for a body that verify_robot / create_robot
     # certify as a CREDIBLE WALK. Those use the tuned CRAWL gait; the trot recipe above drifts a fresh composed quad
