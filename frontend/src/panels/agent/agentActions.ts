@@ -8,8 +8,36 @@ import type { FeedEntry } from "@/state/assistant";
 // The agent action bus — pure functions over the stores, so the Command Deck,
 // mission cards, and the command palette all submit through ONE path.
 
-const BUILD_INTENT =
-  /\b(build|create|make|design|generate|assemble|spawn)\b.*\b(robot|arm|manipulator|gripper|mobile|base|rover|drone|bot|machine|quadruped|humanoid|hexapod|dog|walker)\b/i;
+// Build-intent detection, mirroring ui_server.py's `_fallback_build_action` so the composer and the
+// server agree on what a build request looks like. Three layers:
+//   1. ASKING wins: opens with an interrogative or a meta verb ("what is a quadruped?") -> not a build.
+//   2. IMPERATIVE: a build verb before a robot noun ("build a quadruped robot") -> build.
+//   3. NOUN PHRASE: names a robot and is not itself a question ("a quadruped robot that walks") -> build.
+// Layer 3 is the point: the composer placeholder invites exactly that phrasing, and requiring an
+// imperative verb made it a dead end.
+const ROBOT_NOUN =
+  "robots?|arms?|manipulators?|grippers?|end[ -]effectors?|mobile bases?|rovers?|drones?|" +
+  "quadcopters?|bots?|machines?|quadrupeds?|bipeds?|hexapods?|octopods?|humanoids?|" +
+  "walkers?|crawlers?|cobots?|exoskeletons?|gantr(?:y|ies)";
+// Creature words the product does build ("build a dog", "make a spider"). Deliberately IMPERATIVE-ONLY:
+// with an explicit build verb in front they are unambiguous, but as a bare noun phrase "a dog" is far
+// more likely to be conversation than a build order, so layer 3 never looks at them.
+const CREATURE_NOUN = "dogs?|cats?|horses?|cheetahs?|spiders?|snakes?|insects?|ants?|octopus(?:es)?";
+const ASKING =
+  /^\W*(?:what|why|how|when|where|which|who|whose|is|are|was|were|do|does|did|am|has|have|had|explain|tell|show|list|compare|describe|define|summari[sz]e|help|hi|hello|hey|thanks|thank)\b/i;
+const BUILD_IMPERATIVE = new RegExp(
+  `\\b(?:build|create|make|design|generate|assemble|spawn|construct|prototype)\\b[\\s\\S]*?\\b(?:${ROBOT_NOUN}|${CREATURE_NOUN})\\b`,
+  "i",
+);
+const ROBOT_MENTION = new RegExp(`\\b(?:${ROBOT_NOUN})\\b`, "i");
+
+function looksLikeBuildRequest(message: string): boolean {
+  const body = message.trim();
+  if (!body || ASKING.test(body)) return false;
+  if (BUILD_IMPERATIVE.test(body)) return true;
+  if (body.endsWith("?")) return false;
+  return ROBOT_MENTION.test(body);
+}
 
 let toolsCache: ToolSpec[] | null = null;
 export async function getToolSpecs(): Promise<ToolSpec[]> {
@@ -85,7 +113,7 @@ export async function submitAgentMessage(raw: string): Promise<void> {
   }
 
   // Build path: intent → cancellable job with a live feed. Never blocks.
-  if (store.mode === "build" && BUILD_INTENT.test(message)) {
+  if (store.mode === "build" && looksLikeBuildRequest(message)) {
     await dispatchBuild(message);
     return;
   }

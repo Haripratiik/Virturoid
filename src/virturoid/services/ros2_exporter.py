@@ -35,6 +35,58 @@ def _aerial_flight_config(genome: dict) -> dict | None:
             "note": "the joint-trajectory evaluation_node is INERT for this jointless airframe — deploy via MAVROS"}
 
 
+def _copy_urdf_meshes(package_dir: Path, root: Path, package_name: str, urdf: str) -> str:
+    """Carry the URDF's visual meshes into the ROS2 package and re-point the references at them.
+
+    ``robot/robot.urdf`` addresses its STLs RELATIVE to itself (``meshes/<name>.stl``, resolving to
+    ``robot/meshes/``). Copying only the .urdf into ``export/ros2/<pkg>/urdf/`` therefore produced a
+    file whose every mesh reference dangled -- 22 of them on a shipped quadruped -- so the one artifact
+    a customer actually opens in RViz/Gazebo/Isaac was the one that could not load.
+
+    The meshes are copied to ``<pkg>/meshes/`` and rewritten to ``package://<pkg>/meshes/<name>.stl``
+    rather than kept relative, because that is the only form that survives installation: after
+    ``colcon build`` the URDF is read from ``share/<pkg>/urdf/`` and resolved by ROS's package lookup,
+    and robot_state_publisher / RViz / Gazebo / Isaac's URDF importer all understand ``package://``
+    while none of them reliably resolve a path relative to the .urdf file. A reference that cannot be
+    resolved is left exactly as written and called out in a comment at the end of the file, so the
+    export never silently claims geometry it did not ship.
+    """
+    import re
+    import shutil
+
+    src_dir = package_dir / "robot"
+    out_dir = root / "meshes"
+    copied: set[str] = set()
+    missing: list[str] = []
+
+    def _rewrite(match: "re.Match[str]") -> str:
+        ref = match.group(1)
+        if ref.startswith(("package://", "file://", "http://", "https://", "/")):
+            return match.group(0)                       # already absolute/addressable: leave it alone
+        src = (src_dir / ref).resolve()
+        try:
+            src.relative_to(src_dir.resolve())          # never copy out of the package
+        except ValueError:
+            missing.append(ref)
+            return match.group(0)
+        if not src.is_file():
+            missing.append(ref)
+            return match.group(0)
+        if src.name not in copied:
+            out_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(src, out_dir / src.name)
+            copied.add(src.name)
+        return f'filename="package://{package_name}/meshes/{src.name}"'
+
+    urdf = re.sub(r'filename="([^"]+)"', _rewrite, urdf)
+    if missing:
+        note = ("  <!-- NOTE: {n} mesh reference(s) could not be resolved from robot/ and are left as written: "
+                "{refs}. Those links fall back to their primitive collision shapes. -->\n").format(
+            n=len(missing), refs="; ".join(sorted(set(missing))[:8]))
+        urdf = urdf.replace("</robot>", note + "</robot>")
+    return urdf
+
+
 def export_ros2_package(package_dir: Path, package_name: str = "virturoid_robot") -> Path:
     package_dir = Path(package_dir)
     genome = json.loads((package_dir / "robot" / "robot_genome.json").read_text(encoding="utf-8"))
@@ -54,7 +106,9 @@ def export_ros2_package(package_dir: Path, package_name: str = "virturoid_robot"
     _src_urdf = package_dir / "robot" / "robot.urdf"
     if _src_urdf.exists():
         (root / "urdf").mkdir(parents=True, exist_ok=True)
-        (root / "urdf" / "robot.urdf").write_text(_src_urdf.read_text(encoding="utf-8"), encoding="utf-8")
+        (root / "urdf" / "robot.urdf").write_text(
+            _copy_urdf_meshes(package_dir, root, package_name, _src_urdf.read_text(encoding="utf-8")),
+            encoding="utf-8")
 
     # Embed the exported controller (if the package has one) so the node runs the real policy.
     bundle_dir = package_dir / "software" / "controller"
@@ -274,6 +328,9 @@ setup(
         (os.path.join("share", package_name, "launch"), glob("launch/*.launch.py")),
         (os.path.join("share", package_name, "config"), glob("config/*.yaml") + glob("config/*.json")),
         (os.path.join("share", package_name, "urdf"), glob("urdf/*")),
+        # The URDF's visual meshes. Without this the installed robot_description resolves
+        # package://{name}/meshes/... to nothing and every mesh link renders empty.
+        (os.path.join("share", package_name, "meshes"), glob("meshes/*")),
     ],
     install_requires=["setuptools"],
     zip_safe=True,

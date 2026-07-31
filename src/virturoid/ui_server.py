@@ -102,8 +102,9 @@ def main() -> None:
         "--ui",
         choices=("legacy", "studio"),
         default=os.environ.get("VIRTUROID_UI", "legacy"),
-        help="Which frontend the native desktop window opens: the legacy console (/) "
-             "or Virturoid Studio (/studio). Default legacy until Studio reaches parity.",
+        help="Which frontend to open: the legacy console (/) or Virturoid Studio (/studio/). "
+             "Applies to BOTH the native desktop window and --web (which prints the matching URL). "
+             "Default legacy until Studio reaches parity.",
     )
     args = parser.parse_args()
     build_root = _resolve_build_root(Path(args.build_root))
@@ -115,20 +116,32 @@ def main() -> None:
         args.ui = "legacy"
 
     if args.web:
-        _run_web(args.host, args.port, build_root)
+        _run_web(args.host, args.port, build_root, ui=args.ui)
         return
 
     try:
         run_desktop(args.host, args.port, build_root, ui=args.ui)
-    except ImportError:
-        print("pywebview is not installed; falling back to browser mode.")
-        print("Install the desktop runtime with:  pip install pywebview")
-        _run_web(args.host, args.port, build_root)
+    except ImportError as exc:
+        # pywebview is an OPTIONAL extra (pyproject `[desktop]`); it is imported lazily so the web
+        # path never needs it. Name the extra, not a bare `pip install pywebview`, so the fix
+        # matches how the rest of the project is installed.
+        print(f"The native desktop window needs pywebview, which is not installed ({exc}).")
+        print('Install it with:  pip install -e ".[desktop]"     (or: pip install pywebview)')
+        print("Falling back to browser mode.")
+        _run_web(args.host, args.port, build_root, ui=args.ui)
 
 
-def _run_web(host: str, port: int, build_root: Path) -> None:
+def _run_web(host: str, port: int, build_root: Path, ui: str = "legacy") -> None:
+    """Serve in the browser. ``ui`` selects which URL is printed -- Studio lives at /studio/, and
+    printing only the root sent every reader of the README's headline command to the LEGACY console
+    (which also brands itself 'Virturoid Studio', so the mistake was invisible)."""
     server = create_server(host, port, build_root)
-    print(f"Virturoid console running at http://{host}:{port}")
+    if ui == "studio":
+        print(f"Virturoid Studio running at http://{host}:{port}/studio/")
+        print(f"Legacy build console at     http://{host}:{port}/")
+    else:
+        print(f"Virturoid build console running at http://{host}:{port}/")
+        print(f"Virturoid Studio (React app) at    http://{host}:{port}/studio/")
     print(f"Build output root: {build_root.resolve()}")
     server.serve_forever()
 
@@ -570,17 +583,56 @@ def _extract_build_action(text: str) -> dict | None:
     return None
 
 
-_BUILD_INTENT = re.compile(
-    r"\b(build|create|make|design|generate|assemble|spawn)\b.*\b(robot|arm|manipulator|gripper|"
-    r"mobile|base|rover|drone|bot|machine)\b",
+# --- Build-intent detection (no local model) ---------------------------------
+# THE MATCHING RULE, in three layers. The old rule required an IMPERATIVE VERB BEFORE THE NOUN
+# ("build a quadruped robot"), so the phrasing the input placeholder itself invites — a bare NOUN
+# PHRASE, "a quadruped robot that walks" — fell through to the offline hint and the primary
+# interaction dead-ended. A robot is a THING, so naming the thing is a legitimate request for it.
+#
+#   1. ASKING (wins over everything): the message opens with an interrogative or a meta verb
+#      ("what is a quadruped?", "explain the gripper", "is this arm valid?"). Never a build --
+#      these ask ABOUT robots rather than FOR one.
+#   2. IMPERATIVE: a build verb anywhere before a robot noun ("build a quadruped robot",
+#      "can you make me an arm?"). A build even when phrased as a polite question, because the
+#      verb states the intent.
+#   3. NOUN PHRASE: no verb needed -- the message NAMES a robot or a robot morphology
+#      ("a quadruped robot that walks", "six-legged walker, 3 kg") and is not itself a question.
+#      A trailing "?" disqualifies this layer, which is what keeps "a quadruped?" out.
+_ROBOT_NOUN = (
+    r"robots?|arms?|manipulators?|grippers?|end[ -]effectors?|mobile bases?|rovers?|drones?|"
+    r"quadcopters?|bots?|machines?|quadrupeds?|bipeds?|hexapods?|octopods?|humanoids?|"
+    r"walkers?|crawlers?|cobots?|exoskeletons?|gantr(?:y|ies)"
+)
+_BUILD_VERB = r"build|create|make|design|generate|assemble|spawn|construct|prototype"
+
+# Layer 1 -- opens by ASKING. Interrogatives + meta verbs + greetings, never a dispatchable build.
+_ASKING = re.compile(
+    r"^\W*(?:what|why|how|when|where|which|who|whose|is|are|was|were|do|does|did|am|has|have|had|"
+    r"explain|tell|show|list|compare|describe|define|summari[sz]e|help|hi|hello|hey|thanks|thank)\b",
     re.IGNORECASE,
 )
+# Layer 2 -- an imperative build verb standing before a robot noun.
+_BUILD_IMPERATIVE = re.compile(rf"\b(?:{_BUILD_VERB})\b.*?\b(?:{_ROBOT_NOUN})\b", re.IGNORECASE | re.DOTALL)
+# Layer 3 -- the message names a robot at all.
+_ROBOT_MENTION = re.compile(rf"\b(?:{_ROBOT_NOUN})\b", re.IGNORECASE)
+
+# Kept as the documented name for the imperative form (external callers/tests import it).
+_BUILD_INTENT = _BUILD_IMPERATIVE
 
 
 def _fallback_build_action(text: str) -> dict | None:
-    """Heuristic build detection used when no local model is available."""
-    if text and _BUILD_INTENT.search(text):
-        return {"action": "build", "prompt": text.strip(), "train": False}
+    """Heuristic build detection used when no local model is available. See the rule above."""
+    body = (text or "").strip()
+    if not body:
+        return None
+    if _ASKING.match(body):                                  # 1. asking ABOUT robots -> chat
+        return None
+    if _BUILD_IMPERATIVE.search(body):                       # 2. "build/make/design ... a robot"
+        return {"action": "build", "prompt": body, "train": False}
+    if body.endswith("?"):                                   # a question with no build verb -> chat
+        return None
+    if _ROBOT_MENTION.search(body):                          # 3. a bare noun phrase naming a robot
+        return {"action": "build", "prompt": body, "train": False}
     return None
 
 
@@ -666,10 +718,19 @@ def run_assistant_turn(payload: dict, build_root: Path) -> dict:
         return {"role": "assistant", "content": raw_reply.strip(), "action": "chat", "model_used": True}
 
     # No model and no build intent: a helpful, honest local reply.
+    # Name the variables that ACTUALLY control this chat assistant. VIRTUROID_LLM_BACKEND /
+    # OPENAI_API_KEY (the README's Configuration table) drive the DESIGN pipeline, not this layer --
+    # a user who set those exactly as documented was still told to install Ollama, with no way to
+    # discover why. Say which knob is which, and say that builds work without any of them.
     hint = (
-        "A local model isn't running. AI-first robot design is paused rather than substituting a template body. "
-        "To enable planning and build generation, start Ollama and pull a model "
-        f"(current target: {selected_model})."
+        f"No chat model is reachable, so I can only answer with the build pipeline itself "
+        f"(describe a robot and I will build it -- that path needs no model at all).\n\n"
+        f"This chat assistant is configured by VIRTUROID_ASSISTANT_PROVIDER "
+        f"(currently {ASSISTANT_PROVIDER!r}), VIRTUROID_ASSISTANT_MODEL (currently {selected_model!r}) "
+        f"and, for the ollama provider, OLLAMA_HOST (currently {OLLAMA_HOST}). Start that runtime and "
+        f"pull the model to enable free-form chat.\n\n"
+        f"Note these are SEPARATE from VIRTUROID_LLM_BACKEND / OPENAI_API_KEY, which choose the "
+        f"language model that authors robot anatomy in the build pipeline."
     )
     return {"role": "assistant", "content": hint, "action": "chat", "model_used": False}
 

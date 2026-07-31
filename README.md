@@ -181,16 +181,25 @@ the anatomy instead of the offline composer; the physics, verdicts, and exports 
 
 ### Virturoid Studio (the app)
 
-Studio is the real frontend — a React + Vite desktop/web app (source in [`frontend/`](frontend/), built to `site/`) served by the Python backend:
+Studio is the real frontend — a React + Vite desktop/web app (source in [`frontend/`](frontend/), built to
+[`frontend/dist/`](frontend/), which the Python backend serves at `/studio/`). Build it once, then run it:
 
 ```bash
-python scripts/run_ui.py --ui studio --web --port 8765   # Studio in the browser at http://127.0.0.1:8765/studio/
-python scripts/run_ui.py --ui studio                     # or as a native desktop window
+cd frontend && npm install && npm run build && cd ..      # one-time: build the Studio bundle
+python scripts/run_ui.py --ui studio --web --port 8765    # Studio in the browser at http://127.0.0.1:8765/studio/
+python scripts/run_ui.py --ui studio                      # or as a native desktop window (needs the desktop extra)
 ```
+
+`--ui studio` picks the URL the launcher opens and prints; without it you get the original lightweight build
+console at `/`. Both are served by the same process, so `/` and `/studio/` are always both reachable.
 
 Describe a robot to the build assistant and it builds it in the live 3D viewport. Switch the viewport to **Episode** to replay the trained motion, open **Memory** for the cross-robot species tree, and **Analysis** for evaluation detail. To develop the frontend with hot reload, run the backend as above and `cd frontend && npm install && npm run dev` (Vite serves `http://localhost:5173/studio/` and proxies the API to the backend).
 
-The original lightweight Build Console is still available with `python -m virturoid.ui_server [--web --port 8765]`.
+The original lightweight Build Console is also reachable directly with `python -m virturoid.ui_server [--web --port 8765]`.
+
+The native desktop window needs the `desktop` extra (`pip install -e ".[desktop]"`, which pulls in `pywebview`);
+without it the launcher says so and falls back to the browser. (`site/` is a separate Astro marketing site and is
+not part of the app.)
 
 ### Command line
 
@@ -258,6 +267,19 @@ cp .env.example .env
 | `VIRTUROID_CLAUDE_MODEL` | Model name for the Claude backend |
 | `VIRTUROID_LOCAL_LLM_URL` / `VIRTUROID_LOCAL_LLM_MODEL` | Endpoint + model when the backend is `local` (Ollama / vLLM / any OpenAI-compatible server) |
 | `VIRTUROID_GPU_SSH` | SSH target of a GPU box for training, for example `user@host` |
+
+**Studio's chat assistant is configured separately.** The variables above choose the model that authors robot
+*anatomy* in the build pipeline; the free-form chat box in Studio is its own swappable layer with its own knobs:
+
+| Variable | Purpose | Default |
+|---|---|---|
+| `VIRTUROID_ASSISTANT_PROVIDER` | Chat backend for the Studio assistant. Currently `ollama` is the only implemented provider | `ollama` |
+| `VIRTUROID_ASSISTANT_MODEL` | Model tag the assistant asks that provider for | `llama3.2` |
+| `OLLAMA_HOST` | Base URL of the Ollama runtime, when the provider is `ollama` | `http://127.0.0.1:11434` |
+
+You do **not** need any of these to build robots: describe a robot in the chat box and the request is dispatched
+to the deterministic build pipeline whether or not a chat model is running. They only enable free-form
+conversation. Setting `VIRTUROID_LLM_BACKEND=openai` does not configure this assistant, and vice versa.
 
 Bring your own subscription: set `VIRTUROID_LLM_BACKEND` to `openai`, `claude`, or `local` and supply the
 matching key/endpoint — the keys are yours and never leave your machine. Everything also runs fully offline
