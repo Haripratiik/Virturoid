@@ -94,6 +94,63 @@ class IngestProjectTests(unittest.TestCase):
         self.assertNotIn("wings", applied_groups)
         self.assertNotIn("head", applied_groups)
 
+    def test_description_only_is_not_reported_as_a_substitution(self):
+        # composing from words is exactly what a description-only ingest ASKED for -> no alarm, but the lane must
+        # still name what the held body actually is, never an import lane.
+        from virturoid.services.input_training_tools import _ingest_project
+        r = _ingest_project({"description": "a quadruped dog with an aluminum body"})
+        self.assertTrue(r["robot_id"])
+        self.assertTrue(r.get("ok"))
+        self.assertNotIn("substituted", r)
+        self.assertEqual(r["lane_used"], "composed_from_description")
+        self.assertNotIn("SUBSTITUTED", r["summary"])
+
+    def test_composed_fallback_on_a_real_project_is_a_hard_failure(self):
+        """The Spot symptom. A customer hands us FILES; nothing importable comes out of them; we compose a robot
+        from their sentence instead. That must be impossible to mistake for their robot:
+
+            before -> ok=True  "Ingested -> robot_5eecc737: lane=faithful, 0 material(s) applied,
+                                payload=None kg, 0 warning(s). Ready to edit/verify."
+                      with the only trace of the swap buried in notes[].
+        """
+        from virturoid.services.input_training_tools import _ingest_project
+        d = tempfile.mkdtemp(prefix="proj_")
+        # a URDF that names links no <link> declares -> no importer can build a body from it
+        Path(d, "robot.urdf").write_text(
+            '<?xml version="1.0"?><robot name="broken"><link name="a"/>'
+            '<joint name="j" type="revolute"><parent link="nope"/><child link="alsonope"/>'
+            '<axis xyz="0 0 1"/><limit lower="-1" upper="1" effort="1" velocity="1"/></joint></robot>',
+            encoding="utf-8")
+        r = _ingest_project({"project_path": d, "description": "a quadruped robot dog"})
+
+        self.assertTrue(r["robot_id"])                       # the composed body is still usable...
+        self.assertIs(r.get("ok"), False)                    # ...but the ingest did NOT succeed
+        self.assertTrue(r.get("substituted"))
+        self.assertNotEqual(r.get("lane_used"), "faithful")  # never "faithful" for a body we generated
+        self.assertTrue(r["warnings"], "a substitution can never report 0 warning(s)")
+        self.assertIn("SUBSTITUTED", r["warnings"][0])
+        self.assertIn("SUBSTITUTED", r["summary"])           # survives into the customer-facing line
+        self.assertIn("NOT YOUR ROBOT", r["summary"])
+        self.assertIn("how_to_fix", r["substitution"])
+        self.assertIn(r["substitution"]["reason"], r["summary"])
+
+    @unittest.skipUnless(_MUJOCO, "needs MuJoCo: the bug depended on the faithful lane compiling the scene")
+    def test_a_floor_only_scene_never_reports_a_faithful_lane(self):
+        """The exact mechanism behind `lane=faithful` on a generated Spot: boston_dynamics_spot/scene.xml is a
+        floor plus an <include>. import_model COMPILES it (a plane is a valid model) so the faithful lane went
+        green, while import_robot correctly refused it (no <body>) so the held robot was composed -- and the
+        summary reported the compiled scene's lane for the generated body."""
+        from virturoid.services.input_training_tools import _ingest_project
+        d = tempfile.mkdtemp(prefix="scene_")
+        Path(d, "scene.xml").write_text(
+            '<mujoco model="scene"><worldbody><geom name="floor" size="0 0 .05" type="plane"/>'
+            "</worldbody></mujoco>", encoding="utf-8")
+        r = _ingest_project({"project_path": d, "description": "a quadruped robot dog"})
+        self.assertNotEqual(r.get("lane_used"), "faithful")
+        self.assertIs(r.get("ok"), False)
+        self.assertTrue(r.get("substituted"))
+        self.assertNotIn("Ready to edit/verify", r["summary"])
+
     @unittest.skipUnless(_MUJOCO, "URDF import needs MuJoCo to compile the model")
     def test_folder_with_urdf_and_description(self):
         from virturoid.services import session_state as S

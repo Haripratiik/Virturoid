@@ -203,6 +203,30 @@ def _import_cad(args: dict) -> dict:
     return import_cad(path, material=args.get("material", "abs")).to_dict()
 
 
+def _model_compile_probe():
+    """A real-MuJoCo-compile probe for the model picker (input_classifier.rank_model_candidates).
+
+    Reuses ``model_import.import_model`` -- the SAME machinery ingest uses on the file it eventually picks -- so
+    the counts the picker scores on are the counts the customer will actually get. Results are memoised because
+    the picker probes a handful of near-tied candidates and ingest then imports the winner again. Returns None
+    when MuJoCo is unavailable, which simply drops the compiled evidence and leaves the static ranking."""
+    cache: dict[str, dict | None] = {}
+
+    def probe(abs_path: str) -> dict | None:
+        if abs_path not in cache:
+            try:
+                from virturoid.services.model_import import import_model
+                r = import_model(abs_path)
+                cache[abs_path] = ({"ok": True, "bodies": int(r.get("parts") or 0),
+                                    "actuators": int(r.get("actuated") or 0)} if r.get("ok")
+                                   else {"ok": False, "bodies": 0, "actuators": 0})
+            except Exception:  # noqa: BLE001 - no MuJoCo / unreadable file -> no compiled evidence, not a crash
+                cache[abs_path] = None
+        return cache[abs_path]
+
+    return probe
+
+
 def _ingest_project(args: dict) -> dict:
     """INGESTION AGENT (Part B): a robotics team drops a project FOLDER/ZIP of their existing robot (URDF/MJCF +
     optional BOM/CAD) plus an NLP description ("aluminum body, carbon-fiber legs, 5 kg payload, 6-DOF arm"), and
@@ -239,7 +263,9 @@ def _ingest_project(args: dict) -> dict:
             else:
                 scan_root = os.path.abspath(path)
             bundle = scan_folder(scan_root)
-            result["project_graph"] = project_graph_summary(bundle)
+            # PICK THE MODEL BY EVIDENCE. ingest already compiles models, so it contributes the compiled
+            # body/actuator counts the metadata-only inspect_project_bundle cannot.
+            result["project_graph"] = project_graph_summary(bundle, compile_probe=_model_compile_probe())
             # Auto-read a NOTES / README the customer dropped in the folder into the NLP payload, so specs
             # written in notes.md ("aluminum body, carbon-fiber legs, 5 kg payload") are parsed the same as a
             # typed description -- a drop-a-folder customer shouldn't have to re-type what's already in the box
@@ -364,14 +390,17 @@ def _ingest_project(args: dict) -> dict:
     result["notes"].extend(props.notes)
 
     # fallback: no importable model but a description -> compose an editable robot from the words (still ingest-able)
+    composed_from_description = False
     if gene is None and description:
         try:
             from virturoid.services.morphology_composer import compose_robot
             gene = compose_robot(description)
+            composed_from_description = True
             result["notes"].append("no importable robot model found -> composed an editable robot from the description")
         except Exception as exc:  # noqa: BLE001
             result["warnings"].append(f"could not compose a robot from the description: {exc}")
     if gene is None:
+        result["ok"] = False
         result["warnings"].append("no robot could be produced (no importable model and no usable description)")
         if workdir:
             shutil.rmtree(workdir, ignore_errors=True)
@@ -444,6 +473,44 @@ def _ingest_project(args: dict) -> dict:
             except Exception as exc:  # noqa: BLE001
                 result["warnings"].append(f"CAD import failed ({cad_ref}): {exc}")
 
+    # 6b) SUBSTITUTION GATE. A GENERATED body must never be presentable as the customer's own robot.
+    #
+    # Measured before this gate: dropping boston_dynamics_spot/ returned
+    #     ok=True  "Ingested -> robot_5eecc737: lane=faithful, 0 material(s) applied, ... 0 warning(s)."
+    # while the held robot was a composed quadruped and Spot had never been read. `lane=faithful` was true of the
+    # scene wrapper we happened to compile, not of the body we held -- the summary conflated the two -- and the
+    # only trace of the swap was a line in `notes`, which the customer-facing summary counts nothing from.
+    #
+    # We do NOT return an error, because composing from words is a documented, legitimate mode (description-only
+    # ingest asks for exactly that). What must be impossible is MISTAKING one for the other, so:
+    #   * `lane_used` describes the HELD ROBOT, and can never read "faithful" for a body we generated;
+    #   * a compose that happened *after the customer handed us files* is a SUBSTITUTION -- it sets ok=False, a
+    #     top-level `substituted` block, and a warning (so the "N warning(s)" count can never be 0);
+    #   * `summary` -- the one line an agent relays -- leads with it.
+    _design_source = str(getattr(gene, "design_source", "") or "").lower()
+    if composed_from_description or (result.get("lane_used") == "faithful"
+                                     and _design_source.startswith("anatomy")):
+        result["lane_used"] = "composed_from_description"
+    result["held_robot_design_source"] = _design_source or "unknown"
+    result["ok"] = True
+    if composed_from_description and path:
+        seen = list((result.get("project_graph") or {}).get("robot_models") or [])
+        why = (f"none of the {len(seen)} model file(s) in the project could be imported"
+               if seen else "the project contained no robot description file (URDF/MJCF/SDF/USD)")
+        result["ok"] = False
+        result["substituted"] = True
+        result["substitution"] = {
+            "held_robot_is": "a robot GENERATED from the text description — NOT the robot in your project",
+            "reason": why,
+            "project_path": str(path),
+            "model_files_seen": seen[:8],
+            "import_errors": [w for w in result["warnings"] if "import failed" in w][:4],
+            "how_to_fix": "point ingest_project directly at the model file, or fix the import errors above; "
+                          "inspect_project_bundle shows every candidate and why each was ranked where it was",
+        }
+        result["warnings"].insert(0, f"SUBSTITUTED ROBOT: {why}, so the held robot {result['robot_id']} was "
+                                     f"GENERATED from your description and is NOT your robot.")
+
     # 7) INGESTION REPORT (P0, plan §P0.7): the honest three-ledger account of what the folder yielded —
     # what we UNDERSTOOD, what we GUESSED, what we DROPPED — the same honesty contract as composition_notes.
     report = _ingestion_report(result)
@@ -453,9 +520,16 @@ def _ingest_project(args: dict) -> dict:
     if workdir:
         shutil.rmtree(workdir, ignore_errors=True)
     lane = result.get("lane_used") or "none"
-    result["summary"] = (f"Ingested -> {result['robot_id']}: lane={lane}, "
-                         f"{len(result['materials_applied'])} material(s) applied, "
-                         f"payload={result['payload_kg']} kg, {len(result['warnings'])} warning(s). Ready to edit/verify.")
+    if result.get("substituted"):
+        result["summary"] = (
+            f"SUBSTITUTED - {result['robot_id']} IS NOT YOUR ROBOT: {result['substitution']['reason']}, so this "
+            f"body was GENERATED from your description (lane={lane}). Your model was not ingested. "
+            f"{len(result['warnings'])} warning(s); see result['substitution'] for how to fix it.")
+    else:
+        result["summary"] = (f"Ingested -> {result['robot_id']}: lane={lane}, "
+                             f"{len(result['materials_applied'])} material(s) applied, "
+                             f"payload={result['payload_kg']} kg, {len(result['warnings'])} warning(s). "
+                             f"Ready to edit/verify.")
     return result
 
 
