@@ -201,6 +201,23 @@ def undo_robot(robot_id: str):
         return rec["gene"]
 
 
+def forget_robot(robot_id: str) -> bool:
+    """Drop a robot from the session (memory + its json). For SCRATCH holds -- e.g. ``export_held`` parks the
+    body it is about to ship under a temporary id so it can verify THAT body rather than the session one, and
+    must not leave the scratch entry sitting in the customer's session afterwards. Never raises."""
+    rid = _safe_id(robot_id)
+    with _LOCK:
+        existed = _ROBOTS.pop(rid, None) is not None
+    try:
+        p = _robot_path(rid)
+        if p.exists():
+            p.unlink()
+            existed = True
+    except OSError:  # noqa: PERF203 - housekeeping; a locked/absent file must never fail a build
+        pass
+    return existed
+
+
 def robot_meta(robot_id: str) -> dict:
     with _LOCK:
         rec = _fresh_robot(robot_id)

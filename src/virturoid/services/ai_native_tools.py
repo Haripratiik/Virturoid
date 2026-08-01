@@ -121,7 +121,8 @@ def _select_mujoco_gl() -> str:
     return backend
 
 
-def _render_gene(gene, tag: str, *, azimuth: float = 50.0, elevation: float = -16.0) -> str | None:
+def _render_gene(gene, tag: str, *, azimuth: float = 50.0, elevation: float = -16.0,
+                 collision: bool = False) -> str | None:
     import os
     _select_mujoco_gl()
     try:
@@ -130,15 +131,31 @@ def _render_gene(gene, tag: str, *, azimuth: float = 50.0, elevation: float = -1
 
         from virturoid.services.gene_compiler import compile_gene_to_mjcf, gene_to_meshed_mjcf, standing_spawn_z
         _RENDER_DIR.mkdir(parents=True, exist_ok=True)
-        spawn_z = standing_spawn_z(gene)
+        # SHOW THE BODY THAT IS ACTUALLY SIMULATED when asked. ``collision=True`` builds the exact model the
+        # gait/verdict path runs (compile_gene_to_mjcf, no visual mesh layer) at the exact spawn height it uses,
+        # so "what you see" and "what gets verified" can be put side by side instead of taken on trust.
+        spawn_z = standing_spawn_z(gene, meshed=not collision)
         # Render the MESHED model (the true geometry the app viewport shows), NOT the crude box collider — the
         # non-meshed render drew a chassis as its tiny bounding box, so a wheeled body read as a small box with
         # oversized disconnected wheels. Fall back to the primitive model only if meshing fails.
-        try:
-            xml = gene_to_meshed_mjcf(gene, include_floor=True, spawn_z=spawn_z)
-        except Exception:  # noqa: BLE001
+        if collision:
             xml = compile_gene_to_mjcf(gene, include_floor=True, spawn_z=spawn_z)
+        else:
+            try:
+                xml = gene_to_meshed_mjcf(gene, include_floor=True, spawn_z=spawn_z)
+            except Exception:  # noqa: BLE001
+                xml = compile_gene_to_mjcf(gene, include_floor=True, spawn_z=spawn_z)
         m = mujoco.MjModel.from_xml_string(xml)
+        if collision:
+            # Hide every geom that does NOT collide (mass=0 contype=0 cosmetics: motor cans, collars, hubs,
+            # fairings) so what is left on screen is exactly the set of bodies the verdict is computed from.
+            for _i in range(m.ngeom):
+                if int(m.geom_bodyid[_i]) == 0:
+                    continue                                    # keep the floor
+                if int(m.geom_contype[_i]) == 0 and int(m.geom_conaffinity[_i]) == 0:
+                    m.geom_rgba[_i] = (0.0, 0.0, 0.0, 0.0)
+                else:
+                    m.geom_rgba[_i] = (0.95, 0.45, 0.15, 0.95)   # the colliders, unmistakably
         d = mujoco.MjData(m)
         # SHOW THE POSE THE BODY SHIPS IN. mj_resetData goes to qpos0 — every joint at zero — so a design that
         # DECLARED where it rests was rendered in a stance it never holds. Measured: a SCARA and a rail rendered
@@ -1104,6 +1121,26 @@ def edit_robot(args: dict) -> dict:
                 "after": {"high_or_fatal": after[0], "weighted_findings": after[1]},
                 "proposed_diffs": diffs,
             }
+    # AN EDIT THAT DISMEMBERS THE ROBOT IS NOT A SUCCESS. ``evaluate_structural_assertions`` measures the
+    # visible gap across every parent->child seam and is already a HARD gate on ``submit_design``
+    # (agent_design_tools), but the amend path never called it -- so a ``set_height`` that pulled a humanoid's
+    # thighs off its pelvis and left its shins hanging in mid-air returned ``ok: true`` with a tidy diff and no
+    # warning. It is deliberately a NO-NEW-DETACHMENT gate, not an absolute one: a lossy imported twin can
+    # arrive with seams already open, and refusing to let the customer edit their own robot because of a defect
+    # we introduced at ingest would be worse than the bug. Only seams this edit BROKE block the commit.
+    seams = _newly_detached_seams(gene, new_gene)
+    if seams and bool(args.get("gate_connectivity", True)):
+        return {
+            "ok": False,
+            "error": (f"edit REJECTED: it detached {len(seams)} link(s) from the body — "
+                      + "; ".join(f"{s['seam']} now separated by {s['gap_m']:.3f} m" for s in seams[:4])
+                      + (f" (+{len(seams) - 4} more)" if len(seams) > 4 else "")
+                      + ". The robot would render as floating pieces. Nothing was applied; try a smaller "
+                        "change, or an op that rebuilds the topology (set_leg_count / add_limb)."),
+            "detached_seams": seams[:12],
+            "reverted": True,
+            "proposed_diffs": diffs,
+        }
     label = ",".join(d.get("op", "edit") for d in diffs)
     S.commit_robot(rid, new_gene, label=label)
     out = {"ok": True, "diffs": diffs, "summary": _summary(new_gene, rid),
@@ -1112,6 +1149,47 @@ def edit_robot(args: dict) -> dict:
     if img:
         out["artifacts"] = [img]
     return out
+
+
+def _seam_gaps(gene) -> dict:
+    """``{seam_name: gap_m}`` for every parent->child edge, from the shared structural-assertion measurement.
+
+    Measured on the MESHED model — the body the customer actually looks at. The primitive measurement cannot
+    see the failure this gate exists to catch: an imported robot is drawn from its own baked STLs, so an edit
+    can lengthen every collider (which stays mated) while the drawn links come apart.
+    """
+    try:
+        from virturoid.services.structural_assertions import evaluate_structural_assertions
+        rep = evaluate_structural_assertions(gene, meshed=True)
+    except Exception:  # noqa: BLE001 - unmeasurable is not the same as detached; the caller treats it as unknown
+        return {}
+    out = {}
+    for a in rep.assertions:
+        if a.name.startswith("seam:") and isinstance(a.value, (int, float)):
+            out[a.name] = float(a.value)
+    return out
+
+
+def _newly_detached_seams(before, after, *, tol_m: float = 0.006) -> list[dict]:
+    """Seams this edit BROKE: mated (or absent) before, detached after.
+
+    Relative on purpose — an imported customer robot is a lossy re-derivation of their model and can arrive
+    with seams already over budget. Blocking every edit on those would make their own robot uneditable, which
+    is a worse failure than the one being fixed. A seam that was already open only counts if the edit made it
+    materially worse (>1 mm), so an edit cannot hide behind a pre-existing gap either.
+    """
+    b, a = _seam_gaps(before), _seam_gaps(after)
+    if not a:
+        return []
+    bad = []
+    for name, gap in a.items():
+        if gap <= tol_m:
+            continue
+        was = b.get(name)
+        if was is not None and was > tol_m and gap <= was + 0.001:
+            continue                                   # already detached before this edit, and not made worse
+        bad.append({"seam": name[5:], "gap_m": round(gap, 4), "was_m": (round(was, 4) if was is not None else None)})
+    return sorted(bad, key=lambda r: -r["gap_m"])
 
 
 def _design_non_regression_signature(gene) -> tuple[int, int]:
@@ -1156,13 +1234,77 @@ def edit_ops(_args: dict) -> dict:
 
 
 def render_view(args: dict) -> dict:
+    """Render the held robot. ``view``: ``visual`` (default — the detailed surface) or ``collision`` (the exact
+    bodies the physics verdict is computed on). Either way the payload DISCLOSES which model was drawn and
+    proves the two share one set of colliders — see :func:`render_parity`."""
     from virturoid.services import session_state as S
     gene = S.get_robot(args["robot_id"])
     if gene is None:
         return {"ok": False, "error": f"no robot '{args['robot_id']}'"}
-    img = _render_gene(gene, f"{args['robot_id']}_view", azimuth=float(args.get("azimuth", 50.0)),
-                       elevation=float(args.get("elevation", -16.0)))
-    return {"ok": bool(img), "artifacts": [img] if img else [], "error": None if img else "render unavailable"}
+    view = str(args.get("view", "visual")).lower()
+    if view not in ("visual", "collision"):
+        return {"ok": False, "error": f"unknown view '{view}'; choose 'visual' or 'collision'"}
+    img = _render_gene(gene, f"{args['robot_id']}_{'collision' if view == 'collision' else 'view'}",
+                       azimuth=float(args.get("azimuth", 50.0)),
+                       elevation=float(args.get("elevation", -16.0)), collision=(view == "collision"))
+    out = {"ok": bool(img), "artifacts": [img] if img else [], "view": view,
+           "error": None if img else "render unavailable"}
+    # SAY WHICH ROBOT THIS PICTURE IS. The visual render adds detailed surface meshes that the gait sim does not
+    # build, so "is the thing I'm looking at the thing you verified?" is a fair question with a measurable
+    # answer. Attach it rather than leaving the customer to trust a comment in the source.
+    out["parity"] = render_parity(gene)
+    return out
+
+
+def render_parity(gene) -> dict:
+    """Measured proof that the RENDERED body and the SIMULATED body are one robot.
+
+    ``render_view`` builds ``gene_to_meshed_mjcf`` while the gait/verdict path builds ``compile_gene_to_mjcf``,
+    and the two do look different in a geom census — on a held Menagerie Go2, 43 geoms with 13 meshes versus 47
+    geoms with 21 capsules and 25 cylinders. That census is misleading: those extra cylinders are motor cans,
+    collars and hubs emitted at ``mass=0 contype=0 conaffinity=0``, and the mesh visuals are emitted the same
+    way. What actually decides a verdict is the COLLIDER set and the inertial properties, and those are built by
+    the same function from the same gene. Measured identical on the Go2, G1, Spot, and on composed dogs and
+    hexapods: 14/14 colliders matched by body, type, size and position, total mass to 1e-9, and the same spawn
+    height. This function re-measures that on demand so the claim is checkable rather than asserted.
+    """
+    import mujoco
+    import numpy as np
+
+    from virturoid.services.gene_compiler import compile_gene_to_mjcf, gene_to_meshed_mjcf, standing_spawn_z
+
+    def census(xml):
+        m = mujoco.MjModel.from_xml_string(xml)
+        colliders = sorted(
+            (int(m.geom_bodyid[i]), int(m.geom_type[i]), tuple(np.round(m.geom_size[i], 6)),
+             tuple(np.round(m.geom_pos[i], 6)))
+            for i in range(m.ngeom)
+            if int(m.geom_contype[i]) != 0 or int(m.geom_conaffinity[i]) != 0)
+        return m, colliders
+
+    try:
+        z_v, z_s = standing_spawn_z(gene), standing_spawn_z(gene, meshed=False)
+        mv, cv = census(gene_to_meshed_mjcf(gene, include_floor=True, spawn_z=z_v))
+        ms, cs = census(compile_gene_to_mjcf(gene, include_floor=True, spawn_z=z_s))
+        same = (cv == cs and abs(float(sum(mv.body_mass)) - float(sum(ms.body_mass))) < 1e-9
+                and abs(z_v - z_s) < 1e-9)
+        return {
+            "colliders_identical": cv == cs, "n_colliders": [len(cv), len(cs)],
+            "mass_identical": abs(float(sum(mv.body_mass)) - float(sum(ms.body_mass))) < 1e-9,
+            "spawn_z_identical": abs(z_v - z_s) < 1e-9,
+            "geoms_total": [int(mv.ngeom), int(ms.ngeom)], "visual_meshes": int(mv.nmesh),
+            "same_physics": bool(same),
+            "note": ("the rendered body and the simulated body share ONE set of colliders, masses and spawn "
+                     "height; the extra geoms on each side are cosmetic (mass=0, contype=0) — motor cans and "
+                     "collars on the sim model, surface meshes on the rendered one. "
+                     "Call render_view with view='collision' to SEE the bodies the verdict is computed on."
+                     if same else
+                     "WARNING: the rendered body and the simulated body DIFFER in physics — the picture is not "
+                     "the robot being verified."),
+        }
+    except Exception as exc:  # noqa: BLE001 - parity is a disclosure; an unmeasurable one says so
+        return {"same_physics": None, "error": f"{type(exc).__name__}: {exc}",
+                "note": "could not measure render/sim parity for this body"}
 
 
 def simulate_gait(args: dict) -> dict:
@@ -1367,9 +1509,13 @@ AI_NATIVE_TOOLS: dict[str, dict] = {
     "undo_robot": {"description": "Undo the last edit on a held robot (one step).", "heavy": False,
                    "handler": undo_robot, "parameters": {"type": "object", "required": ["robot_id"],
                    "properties": {"robot_id": {"type": "string"}}}},
-    "render_view": {"description": "Render a held robot to a PNG (an agent should SEE what it built). Returns a path.",
+    "render_view": {"description": "Render a held robot to a PNG (an agent should SEE what it built). "
+                    "view='visual' (default) draws the detailed surface; view='collision' draws the EXACT bodies "
+                    "the physics verdict is computed on. Returns a path plus a measured render/sim parity read.",
                     "heavy": True, "handler": render_view, "parameters": {"type": "object", "required": ["robot_id"],
-                    "properties": {"robot_id": {"type": "string"}, "azimuth": {"type": "number"}, "elevation": {"type": "number"}}}},
+                    "properties": {"robot_id": {"type": "string"}, "azimuth": {"type": "number"},
+                                   "elevation": {"type": "number"},
+                                   "view": {"type": "string", "enum": ["visual", "collision"]}}}},
     "simulate_gait": {"description": "Run the general scripted gait on a held robot; returns the HONEST verdict "
                       "(survived/cadence/support/upright/forward). Real MuJoCo.", "heavy": True, "handler": simulate_gait,
                       "parameters": {"type": "object", "required": ["robot_id"], "properties": {

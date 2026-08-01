@@ -143,8 +143,21 @@ def compile_gene_to_mjcf(gene: RobotGene, *, include_floor: bool = True, spawn_z
     keyframe = _pose_keyframe(gene, base_z)   # render the body in its baked rest stance (if any)
     sensors = "" if physics_only else _sensor_xml(gene)
 
+    # An imported link is drawn from the CUSTOMER'S baked STL, which has no length field an amend can scale --
+    # so ``scale_group``/``set_height`` used to move the child body to the link's new tip while the drawn mesh
+    # kept its original size, and the render came apart into floating chunks. ``geometry['scale']`` carries the
+    # per-axis factor those edits accumulate; fold it into the asset's own scale (base 0.001 = mm -> m).
+    _mesh_scale = {}
+    for _s in gene.segments:
+        _g = getattr(_s, "geometry", None)
+        _sc = (_g or {}).get("scale") if isinstance(_g, dict) else None
+        if isinstance(_sc, (list, tuple)) and len(_sc) == 3:
+            _mesh_scale[_s.name] = tuple(float(v) for v in _sc)
     mesh_assets = "".join(
-        f'    <mesh name="{escape(n)}_vis" file="{p}" scale="0.001 0.001 0.001"/>\n'
+        '    <mesh name="{n}_vis" file="{p}" scale="{sx:.9g} {sy:.9g} {sz:.9g}"/>\n'.format(
+            n=escape(n), p=p, sx=0.001 * _mesh_scale.get(n, (1.0, 1.0, 1.0))[0],
+            sy=0.001 * _mesh_scale.get(n, (1.0, 1.0, 1.0))[1],
+            sz=0.001 * _mesh_scale.get(n, (1.0, 1.0, 1.0))[2])
         for n, p in (meshes or {}).items()
     )
     floor = (

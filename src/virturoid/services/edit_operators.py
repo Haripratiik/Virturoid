@@ -43,8 +43,17 @@ _DIMS = ("length", "girth", "both")
 
 
 def _clone(gene):
+    """A genuinely INDEPENDENT copy. ``RobotGene.to_dict`` passes ``geometry`` through by REFERENCE
+    (``"geometry": s.geometry``), so a plain to_dict/from_dict round-trip hands the clone the original's own
+    geometry dicts -- and ``scale_group`` mutates geometry in place (``_scale_geo``/``_scale_geo_length``). The
+    edit therefore leaked back into the caller's gene. Latent while every operator was called once and
+    committed; it surfaced the moment ``set_height`` began probing several factors to solve for a target, where
+    each probe compounded on the last (measured: factor 1.70 -> 1.39 m, then an identical 1.75 -> 2.44 m, then
+    4.04, diverging instead of converging). Deep-copy the dict before rebuilding."""
+    import copy
+
     from virturoid.schemas.gene import RobotGene
-    return RobotGene.from_dict(gene.to_dict())
+    return RobotGene.from_dict(copy.deepcopy(gene.to_dict()))
 
 
 def _dominant_material(gene) -> str:
@@ -113,9 +122,13 @@ def _reground_and_gate(gene, *, material: str):
                         "try a smaller factor or a different group")
 
 
-def scale_group(gene, *, group: str = "legs", dims: str = "length", factor: float = 1.2):
+def scale_group(gene, *, group: str = "legs", dims: str = "length", factor: float = 1.2, only=None):
     """LENGTHEN / THICKEN a group of segments by ``factor`` (dims: length | girth | both). The workhorse:
-    'make it taller' -> scale_group(legs, length, ~1.2). Only the matched segments change; mass/BOM re-derive."""
+    'make it taller' -> scale_group(legs, length, ~1.2). Only the matched segments change; mass/BOM re-derive.
+
+    ``only`` narrows the selection to an explicit set of segment names (used by :func:`set_height`, which picks
+    the height-bearing chain structurally rather than by word list). Internal — not exposed as an op argument.
+    """
     if dims not in _DIMS:
         raise EditError(f"dims must be one of {_DIMS}, got '{dims}'")
     f = _num(factor, "factor")
@@ -123,6 +136,10 @@ def scale_group(gene, *, group: str = "legs", dims: str = "length", factor: floa
         raise EditError(f"factor {factor} out of the safe range [0.2, 5.0]")
     g = _clone(gene)
     targets = segments_for_group(g, group)
+    if only is not None:
+        targets = [s for s in targets if s.name in only]
+        if not targets:
+            raise EditError(f"none of the {len(only)} requested segment(s) exist on this robot")
     if not targets:
         raise EditError(f"no '{group}' segments on this robot (it is a {g.robot_class}); "
                         f"available groups here: {[k for k in _GROUP_WORDS if segments_for_group(g, k)] + ['all']}")
@@ -167,18 +184,149 @@ def scale_group(gene, *, group: str = "legs", dims: str = "length", factor: floa
     return g, diff
 
 
+#: how close ``set_height`` must land before it will call itself a success. 2% of the target, floored at 5 mm.
+_HEIGHT_TOL_FRAC = 0.02
+_HEIGHT_TOL_FLOOR_M = 0.005
+
+
+def height_bearing_segments(gene) -> list[str]:
+    """The links that ACTUALLY carry standing height: every ancestor-or-self of a ground-contacting leaf.
+
+    Structural, not lexical, and that is the whole point. ``segments_for_group(gene, "legs")`` matches on a
+    word list (``leg|thigh|shank|femur|tibia|shin|calf|coxa|hip``) which knows nothing about ``knee``,
+    ``ankle`` or ``pelvis`` -- so on an imported Unitree G1, whose links are named ``left_hip_yaw_link`` /
+    ``left_knee_link`` / ``left_ankle_roll_link``, it selected the SIX hip bodies and nothing else. Scaling
+    those alone lengthened the hip blocks while the knee/ankle chain below them kept its own length and had
+    its mount offsets scaled anyway: measured, that left the thighs floating off the pelvis and the shins and
+    feet hanging below with a visible gap. Walking the tree instead reaches all twelve leg links on the G1,
+    every leg on a hexapod, and the whole support chain on any customer robot regardless of its naming.
+
+    Falls back to the ``legs`` word group, then to every segment, if the body cannot be compiled/measured.
+    """
+    try:
+        import mujoco
+        import numpy as np
+
+        from virturoid.services.gene_compiler import compile_gene_to_mjcf
+        mj = mujoco.MjModel.from_xml_string(compile_gene_to_mjcf(gene, include_floor=False, spawn_z=0.1))
+        d = mujoco.MjData(mj)
+        if mj.nkey > 0:
+            mujoco.mj_resetDataKeyframe(mj, d, 0)
+        mujoco.mj_forward(mj, d)
+        # lowest world z reached by each BODY (its own geoms only), via each geom's tight local AABB
+        aabb = mj.geom_aabb.reshape(mj.ngeom, 6)
+        signs = np.array([[x, y, z] for x in (-1, 1) for y in (-1, 1) for z in (-1, 1)], float)
+        low: dict[int, float] = {}
+        for g in range(mj.ngeom):
+            b = int(mj.geom_bodyid[g])
+            if b == 0:
+                continue
+            corners = aabb[g, :3] + signs * aabb[g, 3:]
+            wz = float((d.geom_xpos[g] + corners @ d.geom_xmat[g].reshape(3, 3).T)[:, 2].min())
+            low[b] = min(low.get(b, wz), wz)
+        if not low:
+            raise ValueError("no body geoms")
+        floor = min(low.values())
+        span = max(max(low.values()) - floor, 1e-6)
+        # every body whose lowest point is within 15% of the body's own vertical span of the ground -- the feet,
+        # including a second/third pair a quadruped or hexapod stands on.
+        contacts = {b for b, z in low.items() if (z - floor) <= 0.15 * span}
+        by_name = {s.name: s for s in gene.segments}
+        chain: set[str] = set()
+        for b in contacts:
+            name = mujoco.mj_id2name(mj, mujoco.mjtObj.mjOBJ_BODY, b) or ""
+            seg = by_name.get(name)
+            guard = 0
+            while seg is not None and guard < 200:       # walk to the root; the root itself does not add height
+                guard += 1
+                if seg.parent is None:
+                    break
+                chain.add(seg.name)
+                seg = by_name.get(seg.parent)
+        if chain:
+            return sorted(chain)
+    except Exception:  # noqa: BLE001 - measurement aid; a compile failure falls back to the lexical group
+        pass
+    legs = segments_for_group(gene, "legs")
+    return sorted(s.name for s in legs) if legs else sorted(s.name for s in gene.segments)
+
+
 def set_height(gene, *, target_m: float):
-    """Make the robot stand at ~``target_m`` by scaling the LEGS (the height-bearing group). Solves the factor
-    from the current standing height, then defers to scale_group so the same gate/diff apply."""
+    """Make the robot stand at ~``target_m`` by scaling the height-bearing chain, and FAIL if it misses.
+
+    Two defects used to live here and they compounded. (1) The chain was chosen by name, so an imported
+    humanoid had only its hip blocks scaled -- see :func:`height_bearing_segments`. (2) The factor was solved
+    once, as ``target / current``, and whatever came out was reported as success. Standing height is AFFINE in
+    the scale factor, not proportional (there is a fixed mount reference and a ground clearance in it), so one
+    division cannot hit the target even when the right links are scaled. Measured on a Menagerie Unitree G1
+    asked for 1.5 m: 6 of 30 links scaled 1.70x, the body landed at 1.117 m -- a 0.383 m miss -- and the tool
+    returned ``ok: true`` with a tidy diff and no warning.
+
+    Now: solve on the real chain, refine against the measured height, and raise :class:`EditError` (which the
+    ``edit_robot`` tool turns into ``ok: false``) with the measured miss rather than shipping a body that is
+    neither the old height nor the requested one.
+    """
     tm = _num(target_m, "target_m")
     if not (0.05 <= tm <= 5.0):
         raise EditError(f"target height {target_m} m is implausible (expected 0.05-5.0 m)")
     cur = _standing_height(gene)
     if cur <= 1e-3:
         raise EditError("cannot measure the robot's current height to scale toward a target")
-    factor = tm / cur
-    legs = segments_for_group(gene, "legs")
-    return scale_group(gene, group=("legs" if legs else "all"), dims="length", factor=factor)
+    names = height_bearing_segments(gene)
+    tol = max(_HEIGHT_TOL_FRAC * tm, _HEIGHT_TOL_FLOOR_M)
+
+    # Refine the cumulative factor against the MEASURED height. h(f) is affine in f, so a secant step converges
+    # in one or two rounds; each attempt is applied to the ORIGINAL body so factors never compound silently.
+    best = None
+    probes: list[tuple[float, float]] = [(1.0, cur)]
+    f = tm / cur
+    for _ in range(6):
+        f = min(5.0, max(0.2, f))
+        if any(abs(f - pf) < 1e-6 for pf, _ in probes):
+            break
+        try:
+            g, diff = _scale_named(gene, names, f)
+        except EditError:
+            # This factor makes the body invalid (a link out of range, a failed re-ground). That is a real
+            # limit on how far this body can be scaled, not a reason to abandon the search -- fall back toward
+            # the best factor found so far and report the honest miss if nothing lands.
+            if best is None:
+                raise
+            f = (f + best[3]) / 2.0
+            continue
+        h = float(diff["standing_height_m"][1])
+        probes.append((f, h))
+        if best is None or abs(h - tm) < abs(best[2] - tm):
+            best = (g, diff, h, f)
+        if abs(h - tm) <= tol:
+            break
+        (f0, h0), (f1, h1) = probes[-2], probes[-1]
+        if abs(h1 - h0) < 1e-9 or abs(f1 - f0) < 1e-12:
+            break
+        slope = (h1 - h0) / (f1 - f0)
+        f = f1 + (tm - h1) / slope
+
+    if best is None:
+        raise EditError(f"could not scale this body toward {tm:g} m at all "
+                        f"(no height-bearing links found among {len(gene.segments)} segments)")
+    g, diff, got, used = best
+    diff.update({"op": "set_height", "target_m": round(tm, 4), "achieved_m": round(got, 4),
+                 "miss_m": round(got - tm, 4), "factor": round(used, 4),
+                 "height_bearing_links": len(names)})
+    if abs(got - tm) > tol:
+        raise EditError(
+            f"set_height MISSED: asked for {tm:g} m, the body reaches {got:.3f} m "
+            f"({got - tm:+.3f} m, {100 * abs(got - tm) / tm:.1f}% off) after scaling its "
+            f"{len(names)} height-bearing link(s) by {used:.3f}x. The edit was NOT applied — this body cannot "
+            f"reach that height by scaling alone (its {'reach' if got < tm else 'range'} is limited by joint "
+            "geometry or the safe scale range). Ask for a height nearer "
+            f"{got:.2f} m, or change the topology (set_leg_count / add_limb).")
+    return g, diff
+
+
+def _scale_named(gene, names, factor: float):
+    """``scale_group`` over an EXPLICIT segment-name set (the structural height chain), not a word group."""
+    return scale_group(gene, group="all", dims="length", factor=factor, only=set(names))
 
 
 def scale_robot(gene, *, factor: float = 1.2):

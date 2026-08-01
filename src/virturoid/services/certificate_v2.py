@@ -295,12 +295,13 @@ _NOT_MODELED = ["backlash", "cable routing", "thermal transients", "battery volt
 
 def build_certificate_v2(gene, verdict: dict, *, gait_params=None, task: str = "", robot_id: str | None = None,
                          memory_dir: str = "build/memory", run_dr: bool = True, dr_draws: int = 12,
-                         run_margins: bool = True) -> dict:
+                         run_margins: bool = True, body_parity: dict | None = None) -> dict:
     """Assemble the tiered NASA-STD-7009-mapped certificate. Always computes the cheap Tier-1 (model_sanity,
     actuator level); the DR sweep + margins (bounded rollouts) are on by default but can be disabled for a fast
     export. VOID (``valid: False``) unless model_sanity is green — every downstream claim depends on it."""
     from virturoid.services.verdict_certificate import build_certificate
-    base = build_certificate(gene, verdict, task=task, robot_id=robot_id, memory_dir=memory_dir)
+    base = build_certificate(gene, verdict, task=task, robot_id=robot_id, memory_dir=memory_dir,
+                             body_parity=body_parity)
     sanity = model_sanity(gene)
     act = actuator_fidelity_level(gene)
     cert = {
@@ -309,7 +310,8 @@ def build_certificate_v2(gene, verdict: dict, *, gait_params=None, task: str = "
         "identity": {"robot_id": robot_id, "species": getattr(gene, "species", None),
                      "robot_class": getattr(gene, "robot_class", None), "kind": base.get("kind"),
                      "n_segments": len(gene.segments), "dof": len(gene.actuated_joints())},
-        "verdict": {k: base.get(k) for k in ("verdict", "credible", "checks", "gait_source", "verified_with")},
+        "verdict": {k: base.get(k) for k in ("verdict", "credible", "checks", "gait_source", "verified_with",
+                                             "deploy_is_measure", "body_parity")},
         "model_sanity": sanity,
         "actuator_fidelity_level": act,
         "flywheel_provenance": base.get("flywheel_provenance"),

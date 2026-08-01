@@ -725,13 +725,24 @@ def export_held(args: dict) -> dict:
     # exported the ungrounded held gene for the URDF/sim while the BOM grounded separately -> the two exit doors
     # shipped physically different robots (3.57 kg URDF vs grounded ~8 kg BOM) for one prompt. Ground a COPY so
     # the held session gene is untouched; grounding is idempotent so a pre-grounded (amended) body is unaffected.
+    #
+    # ...and PROVE it is still the same robot. ``ground_and_repair`` now reproduces the body's own recorded
+    # grounding instead of hardcoding carbon fibre, and preserves an imported robot's manufacturer masses
+    # outright, so this is normally a genuine no-op. It is not guaranteed to be (the structural-repair and
+    # housing-fit passes can still thicken an under-margined link), and when it is not, the customer must be
+    # told rather than shipped a package whose certificate claims deploy==measure. Measured before the fix: a
+    # Go2 verified at 27.362 kg exported at 19.151 kg, silently, on all 13 links.
     import copy
+
+    from virturoid.services.grounded_physics import fingerprint_delta, physical_fingerprint
+    held_fp = physical_fingerprint(gene)
     gene = copy.deepcopy(gene)
     try:
         from virturoid.services.gene_build import ground_and_repair
         ground_and_repair(gene)
     except Exception:  # noqa: BLE001 - grounding is the consistency layer; a failure still exports the raw body
         pass
+    body_parity = fingerprint_delta(held_fp, physical_fingerprint(gene))
     fmts = args.get("formats") or list(_EXPORT_FORMATS)
     bad = [f for f in fmts if f not in _EXPORT_FORMATS]
     if bad:
@@ -809,21 +820,53 @@ def export_held(args: dict) -> dict:
         try:
             from virturoid.services.ai_native_tools import verify_robot
             from virturoid.services.certificate_v2 import build_certificate_v2
-            v = verify_robot({"robot_id": args["robot_id"], "mode": "quick"})
+            # MEASURE THE BODY THIS PACKAGE SHIPS. This used to verify the SESSION robot_id and then staple the
+            # result onto the exported gene, so cert["verdict"]["checks"] described one robot while
+            # cert["model_sanity"]/["margins"] described another. Verify the exported body itself, under a
+            # scratch id so the customer's session is untouched, and hand the certificate the held-vs-shipped
+            # comparison so it can only claim deploy==measure when that is actually true.
+            _vid = f"__export__{args['robot_id']}"
+            S.put_robot(gene, robot_id=_vid, prompt=task, label="export-verify")
+            try:
+                v = verify_robot({"robot_id": _vid, "mode": "quick"})
+            finally:
+                S.forget_robot(_vid)
             cert = build_certificate_v2(gene, v, task=task, robot_id=args["robot_id"],
+                                        body_parity=body_parity,
                                         run_margins=bool(args.get("certificate_margins", True)),
                                         run_dr=bool(args.get("dr_sweep", False)),
                                         dr_draws=int(args.get("dr_draws", 12)))
+            # Say WHERE these numbers came from. They are a fresh rollout taken at export time on the shipped
+            # body -- not a transcript of whatever `verify_robot` the customer ran earlier, which may have used
+            # a different budget (full = 1500 steps vs quick = 800) and would legitimately read differently.
+            cert["measured_on"] = {"body": "the body in this package", "when": "export",
+                                   "mode": "quick", "same_as_held_body": bool(body_parity.get("same")),
+                                   "note": "re-measured here so the verdict and the shipped model are one "
+                                           "robot; an earlier interactive verdict at a different rollout "
+                                           "budget can differ and is not what this certificate signs"}
             (out_dir / "verification_certificate.json").write_text(
                 json.dumps(cert, indent=2, default=str), encoding="utf-8")
             artifacts["certificate"] = str(out_dir / "verification_certificate.json")
         except Exception as exc:  # noqa: BLE001 - a certificate failure must never sink the buildable export
             artifacts["certificate_error"] = f"{type(exc).__name__}: {exc}"
     real = {k: v for k, v in artifacts.items() if not k.endswith("_error")}
-    return {"ok": bool(real), "artifacts": artifacts, "out_dir": str(out_dir),
-            "note": "MJCF runs in sim; URDF/ROS2 deploy; BOM is the real sized parts list; spec is the datasheet; "
-                    "usd/isaac_lab hand off to NVIDIA Isaac Sim/Lab; verification_certificate.json is the "
-                    "un-gameable physics verdict that travels with the design"}
+    out = {"ok": bool(real), "artifacts": artifacts, "out_dir": str(out_dir),
+           # The customer should not have to open a json to learn whether they were shipped the robot they
+           # verified. ``same_as_verified`` is the whole invariant in one boolean.
+           "body_parity": {"same_as_verified": bool(body_parity.get("same")),
+                           "total_mass_kg": body_parity.get("total_mass_kg"),
+                           "n_links_changed": body_parity.get("n_links_changed")},
+           "note": "MJCF runs in sim; URDF/ROS2 deploy; BOM is the real sized parts list; spec is the datasheet; "
+                   "usd/isaac_lab hand off to NVIDIA Isaac Sim/Lab; verification_certificate.json is the "
+                   "un-gameable physics verdict that travels with the design"}
+    if not body_parity.get("same"):
+        out["warnings"] = [
+            f"EXPORT CHANGED THE BODY: {body_parity.get('n_links_changed')} link(s) differ from the robot you "
+            f"verified (total mass {body_parity.get('total_mass_kg')} kg, delta "
+            f"{body_parity.get('delta_mass_kg')} kg). The certificate in this package was re-measured on the "
+            "SHIPPED body and does not claim deploy==measure against your earlier verdict."]
+        out["body_parity"]["changed"] = body_parity.get("changed")
+    return out
 
 
 def export_isaac(args: dict) -> dict:

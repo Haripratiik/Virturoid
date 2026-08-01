@@ -237,24 +237,65 @@ def _export_real_cad(gene: RobotGene, output_dir: Path) -> dict | None:
 _MAX_HOUSING_TO_LIMB = 1.5
 
 
+#: what ``ground_and_repair`` uses for a body that has NEVER been grounded (the validated-trainable B0 config).
+DEFAULT_GROUNDING = {"material": "carbon_fiber", "fill": 0.25}
+
+
+def grounding_config(gene: RobotGene) -> dict:
+    """How this body's masses were derived -- so re-grounding REPRODUCES it instead of re-deriving it.
+
+    ``metadata['mass_source'] == 'source_model'`` (an imported customer robot) means the per-link masses are
+    the manufacturer's own and must never be replaced by our primitive-volume estimate; ``preserve_mass`` is
+    then True and the material only sizes actuators. Otherwise the material/fill ``ground_gene`` last recorded
+    wins, falling back to :data:`DEFAULT_GROUNDING`.
+    """
+    meta = getattr(gene, "metadata", None) or {}
+    rec = meta.get("grounding") if isinstance(meta.get("grounding"), dict) else {}
+    try:
+        fill = float(rec.get("fill", DEFAULT_GROUNDING["fill"]))
+    except (TypeError, ValueError):
+        fill = float(DEFAULT_GROUNDING["fill"])
+    return {
+        "material": str(rec.get("material") or DEFAULT_GROUNDING["material"]),
+        "fill": fill if 0.0 < fill <= 1.0 else float(DEFAULT_GROUNDING["fill"]),
+        "preserve_mass": str(meta.get("mass_source") or "") == "source_model",
+        "source": ("imported" if str(meta.get("mass_source") or "") == "source_model"
+                   else ("recorded" if rec else "default")),
+    }
+
+
 def ground_and_repair(gene: RobotGene) -> dict:
     """GROUND a body to real actuators + material mass, then structurally repair under-margined links and
     re-ground so mass tracks the fix. This is the SINGLE grounding path both exit doors share -- the
     package builder (``build_gene_package``) and the agent's ``export_held`` -- so one prompt ships the SAME
     buildable robot (mass, actuators, safety factor) whichever door it leaves by. Before this was shared, the
     two doors diverged (export_held emitted the ungrounded 3.57 kg fantasy body while the builder grounded to
-    ~8 kg with real motors). ``ground_gene`` is idempotent, so re-running on an already-grounded (e.g. amended)
-    body is a no-op.
+    ~8 kg with real motors).
+
+    GROUND THE BODY WE WERE HANDED, NOT A DIFFERENT ONE. This used to hardcode ``carbon_fiber``/0.25, and
+    ``ground_gene`` re-derives every link mass from geometry x density x fill -- so a body grounded anywhere
+    else silently changed weight on its way out the door. Measured: a Go2 held and VERIFIED at 27.362 kg
+    (aluminium, 2700 kg/m3) exported at 19.151 kg (carbon fibre, 1600) -- 1600/2700 = 0.593 exactly, on all 13
+    links -- while the certificate travelling in the same package still claimed the verdict was signed by the
+    body that deploys. An IMPORTED robot was worse: its manufacturer's real per-link masses were replaced by
+    primitive-volume estimates (Menagerie Go2, 15.206 -> 13.235 kg, base 6.921 -> 6.107).
+
+    So: honour the gene's OWN recorded grounding (``metadata['grounding']``, stamped by ``ground_gene``), and
+    PRESERVE authoritative masses outright (``metadata['mass_source'] == 'source_model'`` -- an imported
+    customer robot). carbon_fiber/0.25 remains the default for a body that has never been grounded, which is
+    the case this function was written for and the validated-trainable config from the B0 GPU runs.
 
     Rationale (fidelity gap-closure §G3): ``ground_gene`` sizes real actuators on RATED torque and sets link
-    mass = structure + motor, so sim, eval, spec sheet and BOM all describe one robot. carbon_fiber/0.25 is the
-    validated-trainable config from the B0 GPU runs. §G3b: the added actuator mass can drop a link below the
-    SF>=2.0 structural target the readiness ledger fail-closes on, so thicken only the under-margined links
-    (SF ~ r^3, +5% headroom) and re-ground -- walking legs stay inside the slenderness band (length/diameter
-    >= 2.25) so the fix never re-creates stub legs. Fail-open: a grounding error is reported, never raised."""
+    mass = structure + motor, so sim, eval, spec sheet and BOM all describe one robot. §G3b: the added actuator
+    mass can drop a link below the SF>=2.0 structural target the readiness ledger fail-closes on, so thicken
+    only the under-margined links (SF ~ r^3, +5% headroom) and re-ground -- walking legs stay inside the
+    slenderness band (length/diameter >= 2.25) so the fix never re-creates stub legs. Fail-open: a grounding
+    error is reported, never raised."""
+    _g = grounding_config(gene)
+    _mat, _fill, _keep = _g["material"], _g["fill"], _g["preserve_mass"]
     try:
         from virturoid.services.grounded_physics import ground_gene
-        report = ground_gene(gene, material="carbon_fiber", fill=0.25)
+        report = ground_gene(gene, material=_mat, fill=_fill, preserve_mass=_keep)
         from virturoid.services.structural_validation import validate_structure
         for _ in range(3):
             _st = validate_structure(gene)
@@ -272,7 +313,7 @@ def ground_and_repair(gene: RobotGene) -> dict:
                         and float(_s.length_m) > 0):
                     _r = min(_r, float(_s.length_m) / 4.5)
                 _s.radius_m = round(max(float(_s.radius_m), _r), 5)
-            report = ground_gene(gene, material="carbon_fiber", fill=0.25)
+            report = ground_gene(gene, material=_mat, fill=_fill, preserve_mass=_keep)
         # A LINK MUST BE BIG ENOUGH TO HOUSE THE MOTOR THAT DRIVES IT (visual-fidelity defect T1). Actuator
         # housings are drawn at their true datasheet envelope, which is right -- but nothing forced the LIMB to
         # be able to carry that part, so the compiler emitted a 5.6 mm rod mounting a 98 mm-diameter T-Motor
@@ -299,7 +340,7 @@ def ground_and_repair(gene: RobotGene) -> dict:
                     _s.radius_m = round(_need, 5)
                     _grew = True
             if _grew:
-                report = ground_gene(gene, material="carbon_fiber", fill=0.25)
+                report = ground_gene(gene, material=_mat, fill=_fill, preserve_mass=_keep)
         except Exception:  # noqa: BLE001 - housing fit is a fidelity pass, never a build blocker
             pass
     except Exception as _ge:  # noqa: BLE001

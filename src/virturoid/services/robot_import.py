@@ -479,7 +479,13 @@ def import_robot(source: str, *, robot_id: str | None = None, species: str | Non
         # rolls out to 0 forward). A manipulator stays table-mounted.
         base_mount="free" if robot_class in ("mobile_base", "quadruped", "hexapod", "humanoid") else "table",
         end_effector_type="gripper" if any("grip" in (s.name.lower()) for s in segments) else "none",
-        metadata={"imported_from": "mjcf_or_urdf", "n_bodies": mj.nbody, "n_joints": mj.njnt},
+        # ``mass_source`` marks these per-link masses as AUTHORITATIVE: they are the manufacturer's own
+        # ``body_mass`` read straight off the customer's model, not our estimate. Grounding must size actuators
+        # around them, never replace them -- re-deriving from primitive volume x density turned a Menagerie
+        # Go2's 15.206 kg into 13.235 kg of carbon-fibre guesswork (base 6.921 -> 6.107) at export time, so the
+        # package shipped a robot the customer never verified and never owned.
+        metadata={"imported_from": "mjcf_or_urdf", "n_bodies": mj.nbody, "n_joints": mj.njnt,
+                  "mass_source": "source_model"},
     )
     # CARRY THE SOURCE'S OWN STANDING POSE. A robot description ships the stance its designers intended as a
     # named keyframe -- 45 of the 74 MuJoCo Menagerie models do (`home`, `stand`, `standing`, `retract`) -- and

@@ -162,13 +162,64 @@ def _pick_actuator(required_nm: float):
     return ACTUATORS[-1]
 
 
-def ground_gene(gene, *, material: str = "aluminum", fill: float = 0.3, margin: float = 1.3) -> dict:
+def physical_fingerprint(gene) -> dict:
+    """The physical identity of a body: what has to match for two genes to be the SAME robot.
+
+    Used to prove (or disprove) that the body a certificate was measured on is the body the package ships.
+    Deliberately narrow -- mass, size and joint capacity, i.e. everything a verdict actually depends on --
+    so cosmetic differences (materials, colours, visual meshes) never raise a false alarm.
+    """
+    return {
+        "n_segments": len(gene.segments),
+        "total_mass_kg": round(sum(float(s.mass_kg or 0.0) for s in gene.segments), 6),
+        "links": {str(s.name): (round(float(s.mass_kg or 0.0), 6), round(float(s.length_m or 0.0), 6),
+                                round(float(s.radius_m or 0.0), 6),
+                                round(float(s.actuator_torque_nm or 0.0), 6))
+                  for s in gene.segments},
+    }
+
+
+def fingerprint_delta(a: dict, b: dict, *, mass_tol_kg: float = 0.01, dim_tol_m: float = 1e-4) -> dict:
+    """Compare two :func:`physical_fingerprint` results. Returns ``{same, total_mass_kg, n_links_changed,
+    changed}`` -- ``same`` is the whole point: it is what lets a certificate claim deploy==measure honestly
+    instead of printing the claim unconditionally."""
+    la, lb = a.get("links") or {}, b.get("links") or {}
+    changed = []
+    for name in sorted(set(la) | set(lb)):
+        va, vb = la.get(name), lb.get(name)
+        if va is None or vb is None:
+            changed.append({"link": name, "was": va, "now": vb})
+            continue
+        if abs(va[0] - vb[0]) > mass_tol_kg or any(abs(va[i] - vb[i]) > dim_tol_m for i in (1, 2)):
+            changed.append({"link": name, "was": {"mass_kg": va[0], "length_m": va[1], "radius_m": va[2]},
+                            "now": {"mass_kg": vb[0], "length_m": vb[1], "radius_m": vb[2]}})
+    dm = round(float(b.get("total_mass_kg", 0.0)) - float(a.get("total_mass_kg", 0.0)), 6)
+    return {"same": not changed and abs(dm) <= mass_tol_kg,
+            "total_mass_kg": [a.get("total_mass_kg"), b.get("total_mass_kg")], "delta_mass_kg": dm,
+            "n_links_changed": len(changed), "changed": changed[:12]}
+
+
+def ground_gene(gene, *, material: str = "aluminum", fill: float = 0.3, margin: float = 1.3,
+                preserve_mass: bool = False) -> dict:
     """Mutate ``gene`` in place: set each link's mass from material+geometry (+ its actuator's mass) and each
     actuated joint's torque limit to a real actuator's PEAK. The actuator is sized so its CONTINUOUS (rated)
     torque covers the sustained requirement with ``margin`` -- real thermal practice; never size a joint at its
     stall, which cannot be held continuously (the failure the BOM certificate's G2 gate catches). Returns
     ``{material, bom, total_mass_kg, actuator_count}`` -- ``bom`` is the real parts list (now with rated torque and
-    no-load speed so the executable-on-BOM certificate can grade the exact shipped part)."""
+    no-load speed so the executable-on-BOM certificate can grade the exact shipped part).
+
+    ``preserve_mass`` sizes actuators and builds the BOM but leaves every ``mass_kg`` EXACTLY as it is. Use it
+    when the body's masses are AUTHORITATIVE rather than derived -- an imported customer robot carries its
+    manufacturer's real per-link masses, and re-deriving them from a primitive-volume estimate replaces the
+    customer's robot with our guess at it (measured on a Menagerie Go2: 15.206 kg of real link masses became
+    13.235 kg of carbon-fibre estimates, base 6.921 -> 6.107).
+
+    The material/fill actually used is RECORDED on the gene (``metadata['grounding']``) so a later re-ground
+    reproduces this body instead of silently re-deriving it at a different density. That silent switch is
+    exactly what made export ship a different robot than the one verified: ``ground_and_repair`` hardcoded
+    carbon fibre (1600 kg/m3) while the held body had been grounded at aluminium (2700), so every link lost
+    41% of its structural mass on the way out the door.
+    """
     from virturoid.services.component_catalog import select_actuator
     density = MATERIALS.get(material, MATERIALS["aluminum"])
     bom: list[dict] = []
@@ -207,7 +258,8 @@ def ground_gene(gene, *, material: str = "aluminum", fill: float = 0.3, margin: 
                             "peak_force_n": round(output_force, 2), "rated_force_n": round(act.rated_torque_nm / transmission_m, 2),
                             "required_force_n": round(float(required), 2), "transmission_m": transmission_m,
                             "max_speed_radps": act.max_speed_radps})
-                s.mass_kg = round(max(0.02, struct + act_mass), 3)
+                if not preserve_mass:
+                    s.mass_kg = round(max(0.02, struct + act_mass), 3)
                 total += s.mass_kg
                 continue
             # rated torque must cover the sustained requirement (with margin) -> thermal headroom; peak then has
@@ -218,10 +270,11 @@ def ground_gene(gene, *, material: str = "aluminum", fill: float = 0.3, margin: 
             bom.append({"role": s.name, "part": act.name, "mass_kg": act.mass_kg,
                         "stall_nm": act.peak_torque_nm, "rated_nm": act.rated_torque_nm,
                         "max_speed_radps": act.max_speed_radps, "required_nm": round(required, 2)})
-        s.mass_kg = round(max(0.02, struct + act_mass), 3)     # grounded mass = structure + actuator
+        if not preserve_mass:
+            s.mass_kg = round(max(0.02, struct + act_mass), 3)  # grounded mass = structure + actuator
         total += s.mass_kg
     balance_mass = 0.0
-    if prior and total < prior.mass_band_kg[0]:
+    if prior and total < prior.mass_band_kg[0] and not preserve_mass:
         target = sum(prior.mass_band_kg) / 2.0
         balance_mass = max(0.0, target - total)
         root = gene.root()
@@ -233,7 +286,15 @@ def ground_gene(gene, *, material: str = "aluminum", fill: float = 0.3, margin: 
                 "balance_of_system_mass_kg": round(balance_mass, 3),
                 "balance_of_system": ["battery", "compute", "wiring", "fasteners", "covers"],
             }
+    # RECORD WHAT THESE MASSES WERE DERIVED AT. Without this, a downstream re-ground has no way to reproduce
+    # the body it was handed and simply picks its own density -- which is how export shipped a robot 30% lighter
+    # than the one the customer watched walk. ``preserve_mass`` runs leave any existing record alone: the masses
+    # did not come from this call's material, so claiming they did would be the same lie one level down.
+    if not preserve_mass:
+        gene.metadata["grounding"] = {"material": material, "fill": round(float(fill), 6),
+                                      "margin": round(float(margin), 6)}
     return {"material": material, "bom": bom, "total_mass_kg": round(total, 3),
+            "mass_preserved": bool(preserve_mass),
             "actuator_count": len(bom), "physical_prior": (prior.id if prior else None),
             "mass_band_kg": (list(prior.mass_band_kg) if prior else None),
             "balance_of_system_mass_kg": round(balance_mass, 3)}

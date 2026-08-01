@@ -26,11 +26,18 @@ class StructuralAssertionReport:
         }
 
 
-def evaluate_structural_assertions(gene, *, max_visible_seam_gap_m: float = 0.006) -> StructuralAssertionReport:
+def evaluate_structural_assertions(gene, *, max_visible_seam_gap_m: float = 0.006,
+                                   meshed: bool = False) -> StructuralAssertionReport:
     """Author and execute gap/topology contracts from this design's graph and rendered geometry.
 
     Bounds include decorative brackets and hubs, so a mechanical mate may bridge deliberately separated
     colliders without contaminating simulation contact geometry.
+
+    ``meshed`` measures the model the CUSTOMER SEES (``gene_to_meshed_mjcf``) instead of the primitive one. It
+    matters for imported robots: their links are drawn from the customer's own baked STL, which no amend can
+    resize, so an edit could lengthen the colliders (staying mated, and therefore invisible to the primitive
+    measurement) while the drawn body came apart into floating chunks. Off by default so the existing
+    ``submit_design`` gate keeps measuring exactly what it always measured.
     """
     issues = gene.validate()
     edges = tuple((segment.parent, segment.name) for segment in gene.segments if segment.parent is not None)
@@ -44,10 +51,11 @@ def evaluate_structural_assertions(gene, *, max_visible_seam_gap_m: float = 0.00
     try:
         import mujoco
         import numpy as np
-        from virturoid.services.gene_compiler import compile_gene_to_mjcf, standing_spawn_z
+        from virturoid.services.gene_compiler import compile_gene_to_mjcf, gene_to_meshed_mjcf, standing_spawn_z
 
+        _build = gene_to_meshed_mjcf if meshed else compile_gene_to_mjcf
         model = mujoco.MjModel.from_xml_string(
-            compile_gene_to_mjcf(gene, include_floor=True, spawn_z=standing_spawn_z(gene, meshed=False))
+            _build(gene, include_floor=True, spawn_z=standing_spawn_z(gene, meshed=meshed))
         )
         data = mujoco.MjData(model)
         if model.nkey:

@@ -26,6 +26,9 @@ from virturoid.services.component_catalog import (
 )
 
 _DEFAULT_JOINT_TORQUE_NM = 6.0       # if the gene didn't size a joint, assume a modest mid-range demand
+#: must match ``grounded_physics.ground_gene``'s ``margin`` default, so the BOM re-selects the SAME motor
+#: grounding already fitted instead of a second, larger opinion of the same joint.
+_GROUNDING_MARGIN = 1.3
 
 
 @dataclass
@@ -101,6 +104,12 @@ def _scale_geo(geo, f: float) -> None:
     if not isinstance(geo, dict):
         return
     fam = geo.get("family")
+    if fam == "source_mesh":                               # the customer's own STL: scale its cross-section axes
+        sc = geo.get("scale")
+        sc = list(sc) if isinstance(sc, (list, tuple)) and len(sc) == 3 else [1.0, 1.0, 1.0]
+        sc[0] = round(float(sc[0]) * f, 6); sc[1] = round(float(sc[1]) * f, 6)
+        geo["scale"] = sc
+        return
     if fam == "extrude" and isinstance(geo.get("profile"), list):
         geo["profile"] = [[round(p[0] * f, 5), round(p[1] * f, 5)] for p in geo["profile"]]
     elif fam in ("tapered", "role"):
@@ -125,6 +134,17 @@ def _scale_geo_length(geo, f: float) -> None:
     if not isinstance(geo, dict):
         return
     fam = geo.get("family")
+    if fam == "source_mesh":
+        # AN IMPORTED LINK IS DRAWN FROM THE CUSTOMER'S OWN BAKED STL, which has no length field to scale — so a
+        # lengthened link kept its ORIGINAL drawn size while its child moved to the new, longer tip. Measured on
+        # a Menagerie Unitree G1 asked to stand at 1.5 m: the collider chain stayed mated (physics fine) while
+        # the RENDER came apart into a torso, a floating thigh, a floating shin and floating feet. Carry an
+        # explicit per-axis mesh scale instead; gene_compiler folds it into the <mesh> asset's scale.
+        sc = geo.get("scale")
+        sc = list(sc) if isinstance(sc, (list, tuple)) and len(sc) == 3 else [1.0, 1.0, 1.0]
+        sc[2] = round(float(sc[2]) * f, 6)                 # +z is the link's length axis
+        geo["scale"] = sc
+        return
     if fam == "extrude" and "height" in geo:
         geo["height"] = round(geo["height"] * f, 5)
     elif fam in ("tapered", "role") and "length" in geo:
@@ -443,11 +463,26 @@ def build_bom(gene: RobotGene, *, capabilities=None, task: str = "", pins: dict 
     lines: list[BomLine] = []
 
     # 1) ACTUATORS — one per actuated joint, smallest real motor that meets the joint's torque (with margin).
+    #
+    # SIZE FROM THE REQUIREMENT, NOT FROM THE MOTOR ALREADY CHOSEN. ``actuator_torque_nm`` is not a demand: on a
+    # grounded body ``ground_gene`` overwrote it with the SELECTED motor's PEAK. Feeding that back through
+    # ``select_actuator``'s default 1.3x margin re-read a capacity as a demand and bought one rung bigger every
+    # time, so ONE package shipped two contradictory motor lists -- bom.json said 8x AK80-64 + 4x XM540-W270-T
+    # while the certificate's margins.bom (which grades the SHIPPED clamp, margin=1.0) said 8x AK10-9 +
+    # 4x XM430-W350-T. A buyer procuring from that gets different part numbers depending on which file they open.
+    # ``torque_req_nm`` is the requirement grounding pinned for exactly this reason; reproducing its call here
+    # makes the two agree by construction. An UNGROUNDED body has no pin, and there ``actuator_torque_nm`` really
+    # is the authored requirement, so the original call stands.
     joints = gene.actuated_joints()
     actuator_map: dict[str, str] = {}
     chosen = []
     for s in joints:
-        a = select_actuator(s.actuator_torque_nm or _DEFAULT_JOINT_TORQUE_NM)
+        req = getattr(s, "torque_req_nm", None)
+        if req:
+            a = select_actuator(float(req), margin=_GROUNDING_MARGIN,
+                                continuous_torque_nm=float(req) * _GROUNDING_MARGIN)
+        else:
+            a = select_actuator(s.actuator_torque_nm or _DEFAULT_JOINT_TORQUE_NM)
         actuator_map[s.name] = a.name
         chosen.append(a)
     for a, qty in Counter(chosen).items():
