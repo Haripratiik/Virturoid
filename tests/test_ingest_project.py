@@ -66,6 +66,86 @@ class NlpPropertiesTests(unittest.TestCase):
         self.assertIn("set_payload", names)
 
 
+class PayloadIsNotTheRobotsOwnMassTests(unittest.TestCase):
+    """A stated MASS is not a payload.
+
+    The parser scored every mass figure as (has-a-cue-word-nearby, kilograms) and took the ``max``, with the
+    comment "among equals, the larger load (the binding requirement)". Both numbers in a sentence fall inside the
+    same +/-30 / 18-char cue window, so the EXPLICITLY LABELLED payload lost to the bigger bare number. Measured
+    at HEAD (2026-08-01):
+
+        "Our Unitree G1 humanoid, 1.3 m tall, 35 kg, 29 joints."  -> set_payload 35.0 kg
+        "A telescoping arm, 24 kg, 2 kg payload."                 -> set_payload 24.0 kg  (the 2 kg lost)
+        "Our Boston Dynamics Spot quadruped, 32 kg, 12 joints."   -> set_payload 32.0 kg
+
+    ``set_payload`` is not cosmetic -- it raises joint torques, re-grounds to bigger motors and adds mass -- so a
+    misparse silently RE-SPECS the customer's robot, and then emits its own fabricated "N joint(s) exceed the
+    strongest catalog motor for this payload" warning off the number it invented.
+
+    Three rules pinned here: a labelled payload always beats a bare mass; a bare mass is never silently adopted;
+    genuine ambiguity is SURFACED in ``notes`` rather than guessed. The sibling parser in ``input_evidence``
+    already works this way (a self-weight budget becomes a conflict + an intake question, not a silent value).
+    """
+
+    def setUp(self):
+        os.environ["VIRTUROID_SESSION_DIR"] = tempfile.mkdtemp(prefix="ingest_pay_")
+
+    def _x(self, text):
+        from virturoid.services.nlp_properties import extract_properties
+        return extract_properties(text)
+
+    def test_a_labelled_payload_beats_a_bare_mass(self):
+        p = self._x("A telescoping arm, 24 kg, 2 kg payload.")
+        self.assertEqual(p.payload_kg, 2.0, "the labelled 2 kg payload lost to the arm's own 24 kg mass")
+        self.assertIn("payload", (p.payload_evidence or ""))
+
+    def test_the_robots_own_mass_is_never_applied_as_a_payload(self):
+        for text in ("Our Unitree G1 humanoid, 1.3 m tall, 35 kg, 29 joints.",
+                     "Our Boston Dynamics Spot quadruped, 32 kg, 12 joints."):
+            with self.subTest(text=text):
+                p = self._x(text)
+                self.assertIsNone(p.payload_kg, f"read the robot's own mass as a payload: {p.payload_evidence!r}")
+                self.assertNotIn("set_payload", [o["op"] for o in p.ops],
+                                 "an unlabelled mass must not silently upsize the customer's actuators")
+
+    def test_an_unlabelled_mass_is_surfaced_not_guessed(self):
+        p = self._x("Our Unitree G1 humanoid, 1.3 m tall, 35 kg, 29 joints.")
+        blob = " ".join(p.notes).lower()
+        self.assertTrue(p.notes, "an ambiguous mass must be surfaced, not silently dropped either")
+        self.assertIn("35", blob)
+        self.assertIn("payload", blob)
+
+    def test_an_explicit_weight_word_marks_the_robots_own_mass(self):
+        for text in ("the robot weighs 12 kg", "total mass 35 kg", "dry weight of 18 kg"):
+            with self.subTest(text=text):
+                self.assertIsNone(self._x(text).payload_kg)
+
+    def test_a_carry_verb_binds_forward_to_the_number_it_governs(self):
+        # "carries" governs the 5 kg AFTER it, never the 40 kg base it is predicated of
+        p = self._x("a 40 kg base that carries 5 kg")
+        self.assertEqual(p.payload_kg, 5.0)
+
+    def test_among_genuine_payloads_the_larger_still_wins(self):
+        # the original intent, kept: when BOTH numbers are really payloads, the binding requirement is the bigger
+        self.assertEqual(self._x("carries 5 kg, rated for a 10 kg payload").payload_kg, 10.0)
+
+    def test_the_labelled_forms_that_already_worked_still_work(self):
+        self.assertEqual(self._x("carries a 5 kg payload").payload_kg, 5.0)
+        self.assertEqual(self._x("can lift 10 lbs").payload_kg, round(10 * 0.45359237, 2))
+        self.assertEqual(self._x("payload: 10 kg").payload_kg, 10.0)
+        self.assertEqual(self._x("a payload of 3 kg").payload_kg, 3.0)
+        self.assertEqual(self._x("aluminum body, carbon-fiber legs, 6 kg payload").payload_kg, 6.0)
+        self.assertEqual(self._x("lifts 2 kg, 2-DOF").payload_kg, 2.0)
+        self.assertEqual(self._x("10 kg load capacity").payload_kg, 10.0)
+
+    def test_an_ingest_does_not_apply_the_robots_own_mass(self):
+        from virturoid.services.input_training_tools import _ingest_project
+        r = _ingest_project({"description": "Our Spot-like quadruped, 32 kg, aluminum body, 12 joints."})
+        self.assertIsNone(r["payload_kg"], "the ingest applied the robot's own 32 kg as a payload")
+        self.assertTrue(any("payload" in n.lower() for n in r["notes"]),
+                        f"the unread mass must reach the customer-visible notes: {r['notes']}")
+
+
 class IngestProjectTests(unittest.TestCase):
     def setUp(self):
         os.environ["VIRTUROID_SESSION_DIR"] = tempfile.mkdtemp(prefix="ingest_sess_")

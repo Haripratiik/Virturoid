@@ -227,6 +227,55 @@ def _model_compile_probe():
     return probe
 
 
+# Classes that ALREADY carry legged meaning. ``robot_import._infer_class`` decides the family from the limbs
+# that actually hold the body up (#244) and is right across the Menagerie corpus, so the #214 reconciliation
+# below must never overwrite one of these.
+_LEGGED_CLASSES = frozenset({"quadruped", "hexapod", "octopod", "legged", "humanoid", "biped", "bipedal"})
+# The walkable reference template is a QUADRUPED fan/crawl recipe -- only these families can adopt it.
+_QUAD_TEMPLATE_CLASSES = frozenset({"quadruped", "hexapod", "octopod", "legged"})
+
+
+def _needs_legged_reconciliation(gene) -> bool:
+    """True only for the #214 case: a body whose STRUCTURE is legged while its class string says otherwise.
+
+    That happens when MuJoCo fuses a URDF quadruped's static torso into the world, leaving a fixed base that
+    the string classifier reads as an arm. It does NOT happen to an imported humanoid, whose class the
+    structural classifier already got right -- and treating it as if it did is what renamed every biped a
+    quadruped on the way in."""
+    try:
+        from virturoid.services.task_matched_eval import robot_kind
+        if robot_kind(gene) != "legged":
+            return False
+    except Exception:  # noqa: BLE001 - a classification guess must never break an ingest
+        return False
+    return (getattr(gene, "robot_class", "") or "").strip().lower() not in _LEGGED_CLASSES
+
+
+def _legged_family(gene) -> str:
+    """Which legged family a body belongs to, from the limbs that actually CARRY it -- the same ground-contact
+    signal ``robot_import._infer_class`` uses -- never a hard-coded guess.
+
+    An inconclusive count returns the honest generic ``"legged"`` rather than inventing a family, because the
+    family drives the BOM, the spec sheet, the verify rubric and the walkable-template offer."""
+    n = 0
+    try:
+        import mujoco
+
+        from virturoid.services.appendage_map import build_appendage_map
+        from virturoid.services.gene_compiler import compile_gene_to_mjcf, standing_spawn_z
+        n = int(build_appendage_map(mujoco.MjModel.from_xml_string(
+            compile_gene_to_mjcf(gene, include_floor=True, spawn_z=standing_spawn_z(gene)))).n_legs)
+    except Exception:  # noqa: BLE001 - no MuJoCo / an uncompilable twin -> fall through to the generic
+        n = 0
+    if n >= 6:
+        return "hexapod"
+    if n >= 3:
+        return "quadruped"
+    if n == 2:
+        return "humanoid"
+    return "legged"
+
+
 def _ingest_project(args: dict) -> dict:
     """INGESTION AGENT (Part B): a robotics team drops a project FOLDER/ZIP of their existing robot (URDF/MJCF +
     optional BOM/CAD) plus an NLP description ("aluminum body, carbon-fiber legs, 5 kg payload, 6-DOF arm"), and
@@ -351,11 +400,21 @@ def _ingest_project(args: dict) -> dict:
             from virturoid.services.task_matched_eval import evaluate_robot, robot_kind
             _kind = robot_kind(gene)
             # #214: reconcile a fixed-base legged import that the string classifier mislabelled an arm, so the
-            # BOM/fusion/verify pipeline all treat it consistently as the quadruped it structurally is.
-            if _kind == "legged" and getattr(gene, "robot_class", "") not in ("quadruped", "legged", "hexapod"):
-                result["notes"].append(f"reclassified the import from '{gene.robot_class}' to a legged body "
-                                       f"(it has multiple symmetric limbs off a common base)")
-                gene.robot_class = "quadruped"
+            # BOM/fusion/verify pipeline all treat it consistently as the legged body it structurally is.
+            #
+            # 2026-08-01: this fired for ANY class outside ("quadruped", "legged", "hexapod") and always wrote
+            # the literal "quadruped", so every imported HUMANOID -- a family robot_import._infer_class had
+            # already read correctly off the limbs holding it up (#244) -- was renamed a quadruped here. Measured
+            # on unitree_g1: bom.json and spec_sheet.json said `robot_class: quadruped`, the honesty ledger said
+            # "the imported QUADRUPED does not walk credibly", and the walkable-template offer quoted 0.681 m --
+            # the generic quad template, the same number offered for a Go2 -- i.e. it offered to turn a biped
+            # into a different animal. A class that already means legged is now left alone, and when the remap
+            # does fire the family comes from the body's own leg count instead of a constant.
+            if _needs_legged_reconciliation(gene):
+                _fam = _legged_family(gene)
+                result["notes"].append(f"reclassified the import from '{gene.robot_class}' to '{_fam}' (it "
+                                       f"stands on limbs off a common base, not on wheels or a bench mount)")
+                gene.robot_class = _fam
         except Exception:  # noqa: BLE001
             _kind = getattr(gene, "robot_class", "")
     if gene is not None and _kind == "legged":
@@ -364,22 +423,40 @@ def _ingest_project(args: dict) -> dict:
             result["imported_verdict"] = {"walks_as_imported": own >= 0.5, "distance_m": round(own, 3),
                                           "body": "the customer's own imported geometry (not a substitute)"}
             if own < 0.5:
-                # measure (do NOT adopt) what a walkable template would do, so the offer is honest + quantified
-                try:
-                    from virturoid.services.anatomy_compiler import ensure_walkable_quad
-                    tmpl = ensure_walkable_quad(gene, "imported quadruped", force=True)
-                    tval = float(evaluate_robot(tmpl).get("value", 0.0))
+                # measure (do NOT adopt) what a walkable template would do, so the offer is honest + quantified.
+                # The reference template is a QUADRUPED fan/crawl recipe, so it is only offered to quadruped-
+                # family bodies: proposing it for a biped is not a fixed version of the customer's robot, it is
+                # a different animal (and it quoted the generic quad's distance as if it were theirs).
+                _cls = (getattr(gene, "robot_class", "") or "").strip().lower()
+                if _cls in _QUAD_TEMPLATE_CLASSES:
+                    try:
+                        from virturoid.services.anatomy_compiler import ensure_walkable_quad
+                        tmpl = ensure_walkable_quad(gene, "imported quadruped", force=True)
+                        tval = float(evaluate_robot(tmpl).get("value", 0.0))
+                        result["walkable_template_offer"] = {
+                            "available": tval > own, "template_distance_m": round(tval, 3),
+                            "how_to_adopt": "call amend/edit with op 'adopt_walkable_template', or train the "
+                                            "imported body directly with train_reward — its geometry is "
+                                            "preserved either way"}
+                    except Exception:  # noqa: BLE001
+                        pass
+                else:
                     result["walkable_template_offer"] = {
-                        "available": tval > own, "template_distance_m": round(tval, 3),
-                        "how_to_adopt": "call amend/edit with op 'adopt_walkable_template', or train the imported "
-                                        "body directly with train_reward — its geometry is preserved either way"}
-                except Exception:  # noqa: BLE001
-                    pass
+                        "available": False,
+                        "why": f"the walkable reference template is a QUADRUPED fan/crawl recipe; this import is "
+                               f"a {_cls or 'legged'} body, so adopting it would hand back a different animal "
+                               f"rather than a walking version of yours",
+                        "how_to_proceed": "train the imported body directly with train_reward — for a biped, "
+                                          "dynamic walking is a learned-control problem, not a stance tweak"}
+                # ...and say so consistently: the ledger must not advertise a template the offer just declined
+                _offered = bool((result.get("walkable_template_offer") or {}).get("available"))
                 result["notes"].append(
                     f"the imported {getattr(gene, 'robot_class', 'legged')} does not walk credibly as imported "
-                    f"({round(own, 3)} m under the scripted gait) -- its ORIGINAL geometry is kept as-is; a walkable "
-                    f"reference template is available as an explicit opt-in (see walkable_template_offer), and "
-                    f"train_reward can learn a gait for the real body.")
+                    f"({round(own, 3)} m under the scripted gait) -- its ORIGINAL geometry is kept as-is; "
+                    + ("a walkable reference template is available as an explicit opt-in (see "
+                       "walkable_template_offer), and " if _offered else
+                       "no walkable reference template fits this body (see walkable_template_offer), so ")
+                    + "train_reward can learn a gait for the real body.")
         except Exception:  # noqa: BLE001 - the honest-verdict probe is best-effort; never block the ingest
             pass
 
