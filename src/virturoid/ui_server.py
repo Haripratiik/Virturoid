@@ -11,7 +11,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
-
+from virturoid.services.package_status import has_robot_package, package_status
 
 DEFAULT_PROMPT = "Build a tabletop robot arm that sorts red and blue blocks."
 
@@ -1048,9 +1048,7 @@ class _Handler(BaseHTTPRequestHandler):
             for child in sorted(root.iterdir(), key=lambda item: item.name.lower()):
                 if not child.is_dir():
                     continue
-                has_urdf = (child / "robot" / "robot.urdf").exists()
-                has_scenes = (child / "simulation" / "mujoco" / "compiled_scene_index.json").exists()
-                if not (has_urdf or has_scenes):  # list packages that can render (URDF) OR replay (scenes)
+                if not has_robot_package(child):  # list packages that can render (URDF) OR replay (scenes)
                     continue
                 scene_count = 0
                 index_path = child / "simulation" / "mujoco" / "compiled_scene_index.json"
@@ -1059,18 +1057,22 @@ class _Handler(BaseHTTPRequestHandler):
                         scene_count = len(json.loads(index_path.read_text(encoding="utf-8")).get("scenes", []))
                     except (json.JSONDecodeError, OSError):
                         scene_count = 0
-                valid: bool | None = None
+                # ONE status derivation for every surface (header chip, library card, inspector,
+                # status bar, Verify tab). `valid` stays on the wire as the raw contract fact for
+                # older clients, but no surface renders it as a generic verdict any more --
+                # see services/package_status.py for why they used to contradict each other.
+                status = package_status(child)
+                valid: bool | None = status["contract_ok"]
                 robot_class: str | None = None
                 species: str | None = None
                 contract_path = child / "reports" / "robot_package_contract.json"
                 if contract_path.exists():
                     try:
                         contract = json.loads(contract_path.read_text(encoding="utf-8"))
-                        valid = bool(contract.get("ok"))
                         robot_class = contract.get("robot_class")
                         species = contract.get("species")
                     except (json.JSONDecodeError, OSError):
-                        valid = None
+                        pass
                 # Real morphology facts from the actual model -- the accurate species + actuated DOF, so the
                 # memory shows what was really built (not a hardcoded placeholder species/DOF).
                 dof: int | None = None
@@ -1105,6 +1107,7 @@ class _Handler(BaseHTTPRequestHandler):
                         "id": child.name,
                         "scene_count": scene_count,
                         "has_meshes": (child / "cad" / "mesh" / "visual").exists(),
+                        "status": status,
                         "valid": valid,
                         "robot_class": robot_class,
                         "species": species,

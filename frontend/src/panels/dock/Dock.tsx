@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Terminal, ListTodo, FolderTree, Database, OctagonX } from "lucide-react";
 import { useAppStore } from "@/state/app";
-import { useJobsStore } from "@/state/jobs";
+import { useJobsStore, jobStatusLabel, jobStatusKind } from "@/state/jobs";
 import { cancelJob } from "@/api/jobs";
 import { useBuildSummary } from "@/api/queries";
 import { tryJSON, packageUrl, getJSON } from "@/api/client";
@@ -66,12 +66,7 @@ function JobsView() {
                 <td className="px-2 py-1.5 font-mono text-2xs text-secondary">{id.slice(0, 10)}</td>
                 <td className="px-2 py-1.5 text-2xs text-secondary">{rec.job.kind}</td>
                 <td className="px-2 py-1.5">
-                  <Pill
-                    kind={
-                      rec.job.status === "succeeded" ? "ok" : rec.job.status === "failed" ? "bad" : rec.job.status === "cancelled" ? "warn" : "skip"
-                    }
-                    label={rec.job.status}
-                  />
+                  <Pill kind={jobStatusKind(rec.job.status)} label={jobStatusLabel(rec.job.status)} />
                 </td>
                 <td className="max-w-96 truncate px-2 py-1.5 font-mono text-2xs text-muted">
                   {last ? `[${last.stage}] ${last.message}` : "—"}

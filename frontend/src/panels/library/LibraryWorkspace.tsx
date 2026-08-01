@@ -120,9 +120,10 @@ export function LibraryWorkspace() {
             >
               <div className="flex items-start justify-between gap-2">
                 <span className="truncate font-mono text-xs text-primary">{p.id}</span>
-                {p.valid === true && <Pill kind="ok" label="valid" />}
-                {p.valid === false && <Pill kind="bad" label="invalid" />}
-                {p.valid == null && <Pill kind="muted" label="unverified" />}
+                {/* Same verdict as the header chip and the Verify tab — one derivation, one wording. */}
+                <span title={p.status.detail}>
+                  <Pill kind={p.status.kind} label={p.status.label} />
+                </span>
               </div>
               <div className="text-2xs text-secondary">
                 {p.robot_class ?? "unknown class"}
@@ -134,9 +135,12 @@ export function LibraryWorkspace() {
                 {p.spec?.success != null && <span>success {pct(p.spec.success)}</span>}
                 {p.spec?.cost_usd != null && <span>${Math.round(p.spec.cost_usd).toLocaleString()}</span>}
               </div>
-              {p.honesty && (p.honesty.fidelity_flags ?? 0) > 0 && (
-                <Pill kind="warn" label={`${p.honesty.fidelity_flags} honesty flag(s)`} />
-              )}
+              <div className="flex flex-wrap gap-1">
+                {p.status.buildable === false && <Pill kind="warn" label="not buildable from real parts" />}
+                {p.honesty && (p.honesty.fidelity_flags ?? 0) > 0 && (
+                  <Pill kind="warn" label={`${p.honesty.fidelity_flags} honesty flag(s)`} />
+                )}
+              </div>
             </button>
           ))}
         </div>

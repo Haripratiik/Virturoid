@@ -16,10 +16,26 @@ export interface PackageHonesty {
   spec_constraints?: number;
 }
 
+/** The ONE robot-status verdict, derived server-side in services/package_status.py. Every surface
+ * renders this object; the individual facts below it (contract_ok / buildable) are reported under
+ * their own names, because they mean different things and must never all read "valid". */
+export interface PackageStatus {
+  label: string;                    // EXPORT-READY | EXPORT BLOCKED | PACKAGE INCOMPLETE | UNVERIFIED | NO ROBOT
+  kind: "ok" | "bad" | "warn" | "muted";
+  detail: string;
+  notes: string[];
+  contract_ok: boolean | null;      // declared artifacts exist + parse (file integrity)
+  safe_to_export: boolean | null;   // every REQUIRED readiness gate attained a real result
+  buildable: boolean | null;        // real actuators cover every joint + structure survives loads
+  highest_attained: string | null;
+}
+
 export interface PackageMeta {
   id: string;
   scene_count: number;
   has_meshes: boolean;
+  status: PackageStatus;
+  /** Raw package-contract fact, kept on the wire for older clients. Render `status`, not this. */
   valid: boolean | null;
   robot_class: string | null;
   species: string | null;
@@ -242,7 +258,9 @@ export interface SpecCompliance {
 
 // ---- Jobs (the additive /api/jobs surface) ----
 
-export type JobStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
+/** `no_output` = the job ran honestly to completion and produced nothing that was asked for (an
+ * impossible/ambiguous prompt, a rejected ungrounded design). NOT a success, NOT an error. */
+export type JobStatus = "queued" | "running" | "succeeded" | "no_output" | "failed" | "cancelled";
 
 export interface JobEvent {
   seq: number;

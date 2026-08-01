@@ -101,21 +101,16 @@ export function StatusBar() {
               {meta.robot_class ?? "robot"} · {meta.dof ?? "?"} DOF
             </span>
           </Tip>
-          <Tip
-            text={
-              gate.state === "done"
-                ? "Verification passed — this robot's claims are backed by real simulation evidence. See the Verify tab."
-                : `Verification: ${gate.hint}. Open the Verify tab for the honesty gates.`
-            }
-            side="top"
-          >
+          {/* Renders the SHARED verdict word (see state/status.ts) — the footer no longer invents
+              its own "verified/unverified" for the same fact the Verify tab calls EXPORT BLOCKED. */}
+          <Tip text={`${gate.label ?? "Verification"} — ${gate.hint}. Open the Verify tab for the honesty gates.`} side="top">
             <button
               type="button"
               onClick={() => useAppStore.getState().setWorkspace("verify")}
               className={`flex items-center gap-1 px-2 hover:bg-raised ${gate.state === "done" ? "text-ok" : "text-warn"}`}
             >
               {gate.state === "done" ? <ShieldCheck size={11} aria-hidden /> : <ShieldAlert size={11} aria-hidden />}
-              {gate.state === "done" ? "verified" : "unverified"}
+              {gate.label ?? (gate.state === "done" ? "verified" : "not verified")}
             </button>
           </Tip>
         </>

@@ -40,7 +40,7 @@ export function startPolling(id: string): void {
       for (const ev of resp.events) {
         log(resp.job.status === "failed" ? "error" : "agent", `[${ev.stage}] ${ev.message}`);
       }
-      const done = ["succeeded", "failed", "cancelled"].includes(resp.job.status);
+      const done = ["succeeded", "no_output", "failed", "cancelled"].includes(resp.job.status);
       if (done) {
         stopPolling(id);
         for (const cb of finishListeners) cb(resp.job);

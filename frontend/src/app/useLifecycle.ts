@@ -1,5 +1,6 @@
 import { useAppStore } from "@/state/app";
 import { usePackages, useLedger } from "@/api/queries";
+import { robotStatus } from "@/state/status";
 import type { WorkspaceId } from "@/state/app";
 
 // The Lifecycle Tracker's truth source: each station's state is computed from
@@ -11,6 +12,9 @@ export type StationState = "done" | "attention" | "pending" | "neutral";
 export interface StationStatus {
   state: StationState;
   hint: string;
+  /** Shared verdict wording, when the station has one (verify). Surfaces render this, never
+   * their own private word for the same fact. */
+  label?: string;
 }
 
 export function useLifecycle(): Record<WorkspaceId, StationStatus> {
@@ -40,12 +44,18 @@ export function useLifecycle(): Record<WorkspaceId, StationStatus> {
         ? { state: "neutral", hint: "No trained controller requested" }
         : { state: "attention", hint: "Not trained yet" };
 
+  // The verify station reports the SHARED robot status (services/package_status.py) — the same
+  // object the header chip, library card and Verify tab render — so the status bar can no longer
+  // say "unverified" while Verify says "EXPORT BLOCKED" and the header says "valid".
+  const status = robotStatus(meta, ledger.data);
   const verify: StationStatus = !activePackage
     ? { state: "pending", hint: "Needs a robot first" }
-    : ledger.data
-      ? ledger.data.safe_to_export
-        ? { state: "done", hint: "Export gates clear" }
-        : { state: "attention", hint: "Export blocked — open Verify" }
+    : status
+      ? {
+          state: status.kind === "ok" ? "done" : status.kind === "muted" ? "pending" : "attention",
+          hint: status.detail,
+          label: status.label,
+        }
       : { state: "pending", hint: "No readiness ledger" };
 
   const library: StationStatus = {

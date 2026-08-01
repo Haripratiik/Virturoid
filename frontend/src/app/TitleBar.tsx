@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Minus, Square, X, ChevronDown, Hexagon } from "lucide-react";
 import { useAppStore } from "@/state/app";
 import { usePackages } from "@/api/queries";
+import { robotStatus } from "@/state/status";
 import { Pill } from "@/components/ui";
 import { Tip } from "@/components/Explain";
 
@@ -20,15 +21,18 @@ function RobotSwitcher() {
   const setActivePackage = useAppStore((s) => s.setActivePackage);
   const packages = usePackages();
   const meta = packages.data?.packages.find((p) => p.id === activePackage);
+  // ONE verdict, computed server-side and rendered identically by the Verify tab and the status
+  // bar. It used to be the package contract's `ok` under a generic "valid" label, which could
+  // show green next to Verify's EXPORT BLOCKED.
+  const status = robotStatus(meta);
   return (
     <Tip text="The robot you are working on. Everything in the workbench — 3D view, properties, tests — follows this selection." block>
       <div className="relative flex items-center gap-2 rounded-ctl border border-hairline bg-panel px-2.5 py-1 hover:border-hairline-strong">
         <span className="font-mono text-xs text-primary">{activePackage ?? "no robot open"}</span>
-        {meta && (
-          <Pill
-            kind={meta.valid === true ? "ok" : meta.valid === false ? "bad" : "muted"}
-            label={meta.valid === true ? "valid" : meta.valid === false ? "invalid" : "unverified"}
-          />
+        {status && (
+          <Tip text={status.detail} side="bottom">
+            <Pill kind={status.kind} label={status.label} />
+          </Tip>
         )}
         <ChevronDown size={12} className="text-muted" aria-hidden />
         <select
