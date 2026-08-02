@@ -29,6 +29,7 @@ import re
 import numpy as np
 
 from virturoid.schemas.gene import GeneSegment, RobotGene
+from virturoid.services.body_kind import FLOATING_BASE_CLASSES
 from virturoid.services.novel_anatomy import _loft, _revolve, _tapered
 
 
@@ -106,16 +107,42 @@ def _role_geometry(role: str, size: float, girth: float, aspect: str = "", *, au
         # plain block). The compound is ONE segment (no kinematic cost) but reads as several parts.
         hw = min(max(0.02, g), 0.32 * L) / 2.0
         h = max(0.04, 2.3 * hw)
+        # THE TRUNK IS THE ONE PART WITH NO ANATOMY ROLE. Every limb/head/foot on this path reaches a
+        # multi-feature solid via `anatomy_role` (measured: a dog gets 17/20), but `_anatomy_role_for("body")`
+        # returns None on purpose -- build_anatomy's `quad_trunk` is authored for a trunk whose LONG axis is +z,
+        # and this compiler builds the body along +z = HEIGHT with the front-back extent in the profile. Routing
+        # to it would draw a 0.21 m blob where a 0.58 m trunk belongs. So the trunk's own shape program has to
+        # carry the detail, and a single filleted rectangular prism is exactly the "child's blocks" cue: it was
+        # the largest object in the render and the least machined thing in it.
+        # Now a STEPPED HULL, which is how a real quadruped chassis is actually built and is expressible with
+        # the shape-program vocabulary we already have (extrude + `at`, unioned by `compound`):
+        #   hull  - the full-width lower structure, plan corners cut so the nose/tail are chamfered, not
+        #           brick-flat end-on. This is parts[0], so it is the sub-part _apply_detail vents.
+        #   spine - a NARROWER upper hull rising out of it, giving the side view a real shoulder step
+        #           instead of one constant-section slab.
+        #   deck  - the raised top electronics module (kept, tapered forward so it reads as a sensor bay).
+        # Every sub-part starts at z=0 and stays inside the +-half_len x +-hw envelope, so the visual never
+        # reaches below or outside the collider it stands in (the mesh is floored to z=0 after realize, and a
+        # sub-part poking below would silently shift the whole trunk up off its own primitive).
+        # ALL of it is visual: `family` stays "compound", which _physics_proxy_from_geometry maps to
+        # (fallback_shape, None) exactly as before, so the collider stays the box built from (half_len, brad),
+        # and h/hw -- the numbers that become length_m/radius_m -- are untouched. Verified byte-identical
+        # collider hash + mass + spawn height on dog / cat / hexapod / humanoid.
         # a lighter fillet (was 0.45) so the machined CHAMFER that _apply_detail adds reads as crisp panel
         # edges, not a pillowy slab — matches the humanoid's chamfered chassis modules.
-        main = {"family": "extrude", "height": round(h, 4), "fillet": round(0.2 * hw, 4),
-                "profile": [[-hl, -hw], [hl, -hw], [hl, hw], [-hl, hw]]}
+        hull = {"family": "extrude", "height": round(0.66 * h, 4), "fillet": round(0.2 * hw, 4),
+                "profile": [[-hl, -0.70 * hw], [-0.88 * hl, -hw], [0.88 * hl, -hw], [hl, -0.70 * hw],
+                            [hl, 0.70 * hw], [0.88 * hl, hw], [-0.88 * hl, hw], [-hl, 0.70 * hw]]}
+        spine = {"family": "extrude", "height": round(h, 4), "fillet": round(0.18 * hw, 4),
+                 "chamfer": round(0.13 * hw, 5),
+                 "profile": [[-0.92 * hl, -0.76 * hw], [0.92 * hl, -0.76 * hw],
+                             [0.92 * hl, 0.76 * hw], [-0.92 * hl, 0.76 * hw]]}
         deck = {"family": "extrude", "height": round(0.42 * h, 4), "fillet": round(0.16 * hw, 4),
                 "chamfer": round(0.12 * hw, 5),
-                "profile": [[-0.55 * hl, -0.62 * hw], [0.55 * hl, -0.62 * hw],
-                            [0.55 * hl, 0.62 * hw], [-0.55 * hl, 0.62 * hw]],
+                "profile": [[-0.52 * hl, -0.56 * hw], [0.46 * hl, -0.68 * hw],
+                            [0.46 * hl, 0.68 * hw], [-0.52 * hl, 0.56 * hw]],
                 "at": (0.0, 0.0, round(0.8 * h, 4))}
-        return ({"family": "compound", "parts": [main, deck]}, h, hw)
+        return ({"family": "compound", "parts": [hull, spine, deck]}, h, hw)
     if role in ("head", "sensor_head"):
         # a mechanical SENSOR-HEAD module — a rounded box with a flat front face for cameras — NOT an organic
         # skull. This is a ROBOT (think Spot / a humanoid sensor head). Extruded along +z (aimed forward).
@@ -436,17 +463,25 @@ def _apply_detail(geo, detail: str, length_m: float, girth: float, chamfer: floa
         if prof:                                          # a beam/chassis: a ROW of side vents along its LONG
             hx = max((abs(p[0]) for p in prof), default=girth)   # in-plane axis, bored through the SHORT one
             hy = max((abs(p[1]) for p in prof), default=girth)
-            n = max(2, min(5, int(2 * max(hx, hy) / (1.7 * max(min(hx, hy), 1e-3)))))
+            # A MACHINED VENT ROW, not portholes. The vent radius used to be capped at 0.3 x the SHORT half-axis
+            # with a count capped at 5, which is fine on a beam but wrong on a chassis: a 580 x 180 x 207 mm
+            # quadruped trunk got THREE 54 mm holes bored clean through its flank, and that -- more than any
+            # other single feature -- is what made the render read as a wooden block rather than a robot. Size a
+            # vent against the panel it sits in (the part's own extruded HEIGHT as well as its short half-axis)
+            # and let the count rise, so a long chassis gets a row of small louvres and a short beam is
+            # unchanged in character. Visual only: cutouts never reach _physics_proxy_from_geometry.
+            lo, hi = min(hx, hy), max(hx, hy)
+            n = max(3, min(7, int(1.7 * hi / max(lo, 1e-3))))
+            r = max(0.003, min(0.14 * lo, 0.085 * max(length_m, 1e-3), 0.5 * (1.1 * hi) / n))
+            cz = round(0.40 * length_m, 4)                 # in the lower hull panel, clear of the shoulder step
             if hx >= hy:                                  # long along x -> vents stepped in x, bored along y
-                r = max(0.004, min(0.3 * hy, 0.5 * (1.4 * hx) / n))
                 for i in range(n):
-                    cuts.append([round(-0.68 * hx + 1.36 * hx * (i + 0.5) / n, 4), 0.0,
-                                 round(0.5 * length_m, 4), round(r, 4), round(2.4 * hy, 4), "y"])
+                    cuts.append([round(-0.66 * hx + 1.32 * hx * (i + 0.5) / n, 4), 0.0,
+                                 cz, round(r, 4), round(2.4 * hy, 4), "y"])
             else:                                         # long along y -> stepped in y, bored along x
-                r = max(0.004, min(0.3 * hx, 0.5 * (1.4 * hy) / n))
                 for i in range(n):
-                    cuts.append([0.0, round(-0.68 * hy + 1.36 * hy * (i + 0.5) / n, 4),
-                                 round(0.5 * length_m, 4), round(r, 4), round(2.4 * hx, 4), "x"])
+                    cuts.append([0.0, round(-0.66 * hy + 1.32 * hy * (i + 0.5) / n, 4),
+                                 cz, round(r, 4), round(2.4 * hx, 4), "x"])
         else:                                             # non-extrude part: vents along its length (z), thru y
             n = max(2, min(6, int(length_m / max(1e-3, 2.6 * girth))))
             r = max(0.004, 0.2 * girth)
@@ -516,10 +551,9 @@ def build_from_anatomy(graph: dict) -> RobotGene:
     # making any verdict on it meaningless. Default by class instead, the same rule robot_import already applies
     # when it decides an imported body's base (free for things that locomote, table for things that are mounted).
     # An explicit graph value still wins, so a caller can bolt a quadruped to a rig or float an arm on purpose.
-    _mobile_classes = {"mobile_base", "quadruped", "hexapod", "humanoid", "biped", "legged", "aerial", "aquatic",
-                       "mobile_manipulator"}
+    # The set is body_kind.FLOATING_BASE_CLASSES -- shared with robot_import, whose private copy had drifted.
     _declared = str(graph.get("base_mount") or "").lower()
-    base_mount = _declared or ("free" if str(robot_class or "").lower() in _mobile_classes else "table")
+    base_mount = _declared or ("free" if str(robot_class or "").lower() in FLOATING_BASE_CLASSES else "table")
     if base_mount not in {"table", "floor", "free"}:
         base_mount = "free"
     by_name = {p.get("name"): p for p in parts if p.get("name")}
@@ -1083,6 +1117,64 @@ def _leg_len(gene) -> float:
     return sum(float(getattr(s, "length_m", 0.0) or 0.0) for s in gene.segments) or 1.0
 
 
+_STANCE_GATE_GAIT = {"freq": 1.5, "hip_amp": 0.9, "knee_amp": 1.0, "duty": 0.25, "kp": 32.0, "kd": 1.5}
+
+
+def _splay_before_substituting(gene, base: float):
+    """Last resort BEFORE replacing a rolling quadruped: give it its own STANCE back. Returns ``(gene, base, fit)``.
+
+    ORDER IS THE ETHIC ([[make-it-learn-dont-teach-it]]). Control gets the first and fairest chance -- the body has
+    already had an operating point searched for it by the time this runs -- and only when that was not enough does
+    any geometry move. When it does move, the body moves AS ITSELF: ``widen_stance`` rotates each leg's proximal
+    MOUNT and preserves every authored segment, its geometry, its proportions and its part count. Nothing is
+    substituted, nothing is rebuilt from a template.
+
+    The angle is MEASURED per body, never assumed. ``stance_repair`` was shelved partly because its gate ran the
+    default crawl while deploy ran a different gait, so a "win" could degrade on delivery; here the screen uses
+    THIS BODY'S OWN cached op-point -- the controller that will actually deploy -- and the winner is then re-fitted
+    for its new stance and re-judged through ``evaluate_robot``, the same gate the substitution decision uses.
+    Adopted only on a strictly better verdict. 35 deg beat 25 on the horse and the cheetah, but the dog's crawl
+    verdict was measured DEGRADING at 46, so the angle is chosen from evidence and never hard-coded.
+    """
+    from virturoid.services.gait_flywheel import fit_gait_for_body
+    from virturoid.services.gait_search import evaluate_gait
+    from virturoid.services.stance_repair import SPLAY_ANGLES_DEG, _leg_sides, widen_stance
+    from virturoid.services.task_matched_eval import evaluate_robot
+
+    md0 = dict(getattr(gene, "metadata", None) or {})
+    fit0 = md0.get("gait_fit") or {}
+    sides = _leg_sides(gene)
+    if not sides:
+        return gene, base, fit0
+    params = {**_STANCE_GATE_GAIT, **{k: float(v) for k, v in (md0.get("gait_params") or {}).items()}}
+    best_deg, best_score = 0.0, None
+    for deg in SPLAY_ANGLES_DEG:
+        if not deg:
+            continue                                     # 0 deg is the incumbent, already measured as `base`
+        r = evaluate_gait(widen_stance(gene, deg, sides), params, steps=900)
+        score = (1 if r.get("credible") else 0, round(float(r.get("forward", 0.0)), 3))
+        if best_score is None or score > best_score:
+            best_score, best_deg = score, deg
+    if not best_deg:
+        return gene, base, fit0
+    cand = widen_stance(gene, best_deg, sides)
+    md = dict(getattr(cand, "metadata", None) or {})
+    md.pop("gait_params", None)                          # the old op-point was fitted to the OLD stance
+    md.pop("gait_fit", None)
+    cand.metadata = md
+    fit = fit_gait_for_body(cand) or {}
+    cval = float(evaluate_robot(cand).get("value", 0.0))
+    if cval <= base:                                     # the splay did not earn its place -> keep the body as authored
+        return gene, base, fit0
+    md = dict(getattr(cand, "metadata", None) or {})
+    md["stance_repair"] = {"applied": True, "roll_deg": best_deg, "from_value": round(base, 3),
+                           "to_value": round(cval, 3), "screened_with": "this body's own operating point",
+                           "note": (f"widened the stance {best_deg:.0f} deg per side after a per-body operating "
+                                    "point was not enough on its own; every authored part is kept")}
+    cand.metadata = md
+    return cand, cval, fit
+
+
 def ensure_walkable_quad(gene, prompt: str = "", *, force: bool = False):
     """DIAGNOSIS-DRIVEN, per-request walkability fallback for a QUADRUPED — a HINT the build reaches for, never a
     gait/body forced on every dog. If the body already walks under SOME gait (``evaluate_robot`` is gait-aware:
@@ -1107,21 +1199,54 @@ def ensure_walkable_quad(gene, prompt: str = "", *, force: bool = False):
         if len(legs) != 4 and getattr(gene, "robot_class", "") != "quadruped":
             return gene
         base = float(evaluate_robot(gene).get("value", 0.0))
-        if base < 0.5:
-            # TRIED AND REVERTED 2026-07-29: tune the authored body BEFORE deciding to substitute it, so we never
-            # throw away a customer's design to fix what is really an untuned controller. The instinct is right
-            # ([[make-it-learn-dont-teach-it]]) and the evidence was real -- a body scoring 0.000 under the
-            # default crawl reached CREDIBLE WALK at 1.220 once tune_crawl_gait picked its op-point.
-            #
-            # It cannot be done HERE, because this runs at COMPOSE time, before grounding embodies real actuator
-            # and structure mass: a horse is 4.2 kg at this point and 21 kg once grounded, so an op-point fitted
-            # now is fitted to a 5x lighter robot. Caching it shipped that wrong gait; NOT caching it made the
-            # gate incoherent -- it decided "this walks WITH tuning" and then shipped the body WITHOUT the
-            # tuning, which measured as design-bench verdict@1 0.45 -> 0.40 (the animal family to 0/6).
-            #
-            # The sound version tunes AFTER grounding, where the mass is real, and keeps the result. That means
-            # moving this decision out of the composer into the build path, which is its own change.
-            pass
+        # WHAT CONTROLLER WAS `base` MEASURED WITH? That is the whole question, and for years the answer was "one
+        # other robot's". `evaluate_robot` -> `crawl_gait_rollout` reads metadata['gait_params'] when the body has
+        # one, so a body that arrives here already fitted (ai_native_tools.create_robot runs
+        # gait_flywheel.fit_gait_for_body after grounding) is judged with a controller of its own, and a body that
+        # does not is judged at the shipped freq 1.5 / kp 32 -- which is the canonical fanned template's hand-tuned
+        # op-point and nothing else's. Measured on this checkout: the authored dog / cat / horse / cheetah all
+        # score 0.000 here at the shipped op-point and all reach a CREDIBLE WALK with one of their own (0.644 /
+        # 1.321 / 4.151 / 3.940 -- three of the four beating the template that is substituted for them).
+        #
+        # HISTORY, because the shape of the fix was found the hard way. TRIED AND REVERTED 2026-07-29: tune the
+        # body HERE, before deciding. The instinct was right ([[make-it-learn-dont-teach-it]]) and the evidence
+        # real, but it cannot be done at COMPOSE time -- grounding has not embodied actuator and structure mass
+        # yet, so a horse is 4.2 kg here and 21 kg once grounded and the op-point is fitted to a 5x lighter robot.
+        # Caching it shipped that wrong gait; not caching it made the gate incoherent (it decided "this walks WITH
+        # tuning" and shipped the body WITHOUT it -- design-bench verdict@1 0.45 -> 0.40). The sound version fits
+        # AFTER grounding and keeps the result, which meant moving the DECISION into the build path. It has now
+        # moved; this function is the decision, and it is called from there. See docs/breaking_the_cotuning_wall.md.
+        _fit = (getattr(gene, "metadata", None) or {}).get("gait_fit") or {}
+        if base < 0.5 and not _fit.get("searched") and (getattr(gene, "metadata", None) or {}).get("grounding"):
+            # NEVER DISCARD A BODY THAT WAS NEVER GIVEN A CONTROLLER OF ITS OWN. The caller normally fits one
+            # before calling (create_robot does), but the two use different questions -- the fit asks "is the
+            # default a credible crawl", this gate asks "does evaluate_robot clear 0.5" -- and a body can pass the
+            # first and fail the second, in which case it would be substituted having never been searched.
+            # Gated on metadata['grounding'] because that is the ONLY safe place to do it: at compose time the
+            # mass is a placeholder and the op-point would be fitted to a robot a fifth of the shipped weight,
+            # which is the version of this that was tried and reverted on 2026-07-29.
+            try:
+                from virturoid.services.gait_flywheel import fit_gait_for_body
+                _fit = fit_gait_for_body(gene) or {}
+                if _fit.get("adopted"):
+                    base = float(evaluate_robot(gene).get("value", 0.0))
+            except Exception:  # noqa: BLE001 - fitting is an accelerant; the honest verdict stands without it
+                _fit = (getattr(gene, "metadata", None) or {}).get("gait_fit") or {}
+        if base < 0.5 and _fit.get("searched") and (getattr(gene, "metadata", None) or {}).get("grounding"):
+            # Control had its fair chance and it was not enough. Before throwing the design away, try the ONE
+            # change that keeps every authored part -- widening the body's own stance. See _splay_before_substituting.
+            try:
+                gene, base, _fit = _splay_before_substituting(gene, base)
+            except Exception:  # noqa: BLE001 - stance repair is an accelerant; the honest verdict stands without it
+                pass
+        _own = (getattr(gene, "metadata", None) or {}).get("gait_params") or {}
+        if _fit.get("searched"):
+            _tried = (f"with an operating point searched for this body: {int(_fit.get('n_evals') or 0)} gaits "
+                      f"evaluated, best {_fit.get('forward_m')} m, plus the trot and the crawl")
+        elif _own:
+            _tried = "under this body's own cached operating point, plus the trot and the crawl"
+        else:
+            _tried = "under the shipped default operating point (freq 1.5 / kp 32), trot and crawl"
         if base >= 0.5 and not force:                        # already walks under some gait -> leave it sleek
             return gene                                      # (force skips this shortcut but STILL only adopts the
         #                                                      fanned stance below if it beats the original materially)
@@ -1133,6 +1258,7 @@ def ensure_walkable_quad(gene, prompt: str = "", *, force: bool = False):
             # self-protects a genuinely-walking design (it's adopted only when it beats the original materially).
             md = dict(getattr(gene, "metadata", None) or {})
             md["walkability"] = {"credible_walk": False, "distance_m": round(base, 3),
+                                 "measured": _tried,
                                  "hint": "widen the stance (fan the legs out) + use the crawl gait"}
             gene.metadata = md
             return gene
@@ -1175,6 +1301,17 @@ def ensure_walkable_quad(gene, prompt: str = "", *, force: bool = False):
         # longer rollout, and only caches a CREDIBLE result; it contains no
         # species branch or closed robot-class table.
         gait_tuning = None
+        # COMPARE LIKE WITH LIKE. `base` is now often measured on a GROUNDED body (this gate moved onto the build
+        # path, after ground_and_repair), while `cand` comes fresh out of the composer weighing a third of what it
+        # will ship at. Judging a 4 kg substitute against a 13.5 kg original flatters the substitute -- exactly the
+        # asymmetry that made an ungrounded gate throw good bodies away. If the incoming body was grounded, ground
+        # the candidate the same way before either tuning or scoring it.
+        if (getattr(gene, "metadata", None) or {}).get("grounding"):
+            try:
+                from virturoid.services.gene_build import ground_and_repair
+                ground_and_repair(cand)
+            except Exception:  # noqa: BLE001 - an ungrounded comparison is worse but must not crash the build
+                pass
         try:
             from virturoid.services.morph_policy import tune_crawl_gait
             gait_tuning = tune_crawl_gait(cand, steps=800, cache=True)
@@ -1184,7 +1321,8 @@ def ensure_walkable_quad(gene, prompt: str = "", *, force: bool = False):
         if cval > max(base, 0.4):                            # the fanned hint walks materially better -> adopt it
             md = dict(getattr(cand, "metadata", None) or {})
             md["walkability_fallback"] = {"applied": True, "from_distance_m": round(base, 3),
-                                          "to_distance_m": round(cval, 3), "hint": "fanned_stance+crawl_gait"}
+                                          "to_distance_m": round(cval, 3), "hint": "fanned_stance+crawl_gait",
+                                          "authored_gait": _tried, "authored_gait_fit": (_fit or None)}
             if gait_tuning is not None:
                 md["walkability_fallback"]["gait_tuning"] = gait_tuning
             cand.metadata = md
@@ -1193,10 +1331,16 @@ def ensure_walkable_quad(gene, prompt: str = "", *, force: bool = False):
             # generic builder's note "Compiled directly from the supplied anatomy graph." — which, for a body we
             # just REPLACED, is actively false, and create_robot surfaces composition_notes while the true trace
             # sat only in gene.metadata. Say what happened where the caller will actually see it.
+            #
+            # AND SAY IT ACCURATELY. This note used to read "could not walk (0.0 m under ANY gait)". That was
+            # false: it meant "under ONE gait" -- the shipped freq 1.5 / kp 32, which is one other robot's
+            # hand-tuned op-point. Three of the four authored animals that string was written about walk credibly
+            # with an op-point of their own. The claim the customer reads must be the claim we actually measured,
+            # so it now names WHICH controller the body failed under and how hard we looked.
             cand.composition_notes = [
-                "Walkability fallback applied: the authored body could not walk "
-                f"({round(base, 3)} m under any gait), so a fanned wide-stance quadruped was substituted "
-                f"({round(cval, 3)} m). Details in metadata.walkability_fallback.",
+                f"Walkability fallback applied: the authored body could not walk ({round(base, 3)} m {_tried}), "
+                f"so a fanned wide-stance quadruped was substituted ({round(cval, 3)} m). "
+                "Details in metadata.walkability_fallback.",
             ]
             return cand
         return gene

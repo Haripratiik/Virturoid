@@ -25,7 +25,7 @@ from __future__ import annotations
 import math
 from dataclasses import replace
 
-DEFAULT_GAIT = {"freq": 1.5, "hip_amp": 0.9, "knee_amp": 1.0, "duty": 0.25, "kp": 32.0, "kd": 1.5}
+DEFAULT_GAIT = {"freq": 1.5, "hip_amp": 0.9, "knee_amp": 1.0, "kp": 32.0, "kd": 1.5}   # `duty` dropped: task #265
 SPLAY_ANGLES_DEG = (0.0, 15.0, 25.0, 35.0)   # 0 = as-authored (the incumbent the repair must beat)
 
 

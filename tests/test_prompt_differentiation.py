@@ -113,22 +113,73 @@ def test_a_body_that_cannot_walk_is_normalised_but_SAYS_SO():
         assert "to_distance_m" in md["walkability_fallback"]      # the measured reason, not a bare flag
 
 
+def _length_axis_fields(geom, out=None) -> list[float]:
+    """Every field of a VISUAL geometry spec that measures along the link's length axis (+z), whatever family
+    the spec happens to be: ``extrude`` ``height``, ``tapered``/``role`` ``length``, ``loft`` section ``z``,
+    and — recursively — a ``compound``'s sub-parts together with their ``at`` z mounting offsets.
+
+    Family-agnostic ON PURPOSE. This link has already been a plain ``extrude`` and is now a ``compound`` (beam
+    + joint housing + two mounting flanges), so pinning the family name here would have been a proxy that
+    breaks the moment the visual is re-authored, while saying nothing about the property that matters. What
+    matters is that EVERY length-axis feature moves by the same factor: a compound whose beam grew while its
+    flanges kept their old height/offset would leave the union either short of, or hanging past, the collider.
+    """
+    out = [] if out is None else out
+    if not isinstance(geom, dict):
+        return out
+    for key in ("height", "length"):
+        if isinstance(geom.get(key), (int, float)):
+            out.append(float(geom[key]))
+    at = geom.get("at")
+    if isinstance(at, (list, tuple)) and len(at) == 3 and float(at[2]):
+        out.append(float(at[2]))                                  # a stacked sub-part's z mount
+    for sec in geom.get("sections") or []:
+        if isinstance(sec, (list, tuple)) and sec:
+            out.append(float(sec[0]))
+    for sub in geom.get("parts") or []:
+        _length_axis_fields(sub, out)
+    return out
+
+
+def _rendered_z_span_m(seg) -> float:
+    """The link's visual extent along +z, measured off the REALIZED SOLID through the renderer's own path
+    (``_visual_matches_link`` then ``realize_shape``, exactly what ``bake_link_meshes`` calls). A measured
+    scalar off the real solid, not a field read back out of the dict that produced it."""
+    from virturoid.services.cad_geometry import _visual_matches_link, realize_shape
+    bb = realize_shape(_visual_matches_link(seg.geometry, seg)).bounding_box()
+    return (float(bb.max.Z) - float(bb.min.Z)) / 1000.0           # build123d works in mm; the gene in metres
+
+
 def test_amending_a_link_length_keeps_the_visual_in_sync_with_the_collider():
     """#216: scale_group(length) used to lengthen length_m (which moves the child body to the parent's new
     distal tip) but leave the visual geometry short, so a lengthened arm link rendered short and its child
-    (the gripper) floated in a gap. The geometry's length-axis must scale with length_m."""
+    (the gripper) floated in a gap. The RENDERED link must stay exactly as long as its collider.
+
+    Asserted as the property, not as a family string: the guard is that the drawn solid's +z span equals
+    ``length_m`` before AND after the amend, and that every length-axis feature of the spec scales by the one
+    factor. That is strictly stronger than the old ``geometry["height"] == length_m`` field check — it is
+    measured off the realized solid, and it holds for a multi-part link where no single field is the length.
+    """
     from virturoid.services.edit_operators import scale_group
     from virturoid.services.morphology_composer import compose_robot
     g = compose_robot("a robotic arm that sorts objects", llm=None)
     j2 = next(s for s in g.segments if s.name == "j2")
-    assert (j2.geometry or {}).get("family") == "extrude"
-    h0, l0 = j2.geometry["height"], j2.length_m
+    l0, before = j2.length_m, _length_axis_fields(j2.geometry)
+    assert before, "the arm link must carry an authored visual, or there is nothing to keep in sync"
     g2, _ = scale_group(g, group="arms", dims="length", factor=1.3)
     j2b = next(s for s in g2.segments if s.name == "j2")
-    # both the collider length AND the visual height scaled by the same factor -> no gap opens at the tip
-    assert abs(j2b.length_m - l0 * 1.3) < 1e-3
-    assert abs(j2b.geometry["height"] - h0 * 1.3) < 1e-3
-    assert abs(j2b.length_m - j2b.geometry["height"]) < 1e-3      # visual length == collider length, in lockstep
+    assert abs(j2b.length_m - l0 * 1.3) < 1e-3                    # the collider lengthened
+    after = _length_axis_fields(j2b.geometry)
+    assert len(after) == len(before)                              # same features, none dropped or invented
+    for b, a in zip(before, after):                               # ...and they all moved TOGETHER
+        assert abs(a - b * 1.3) < 1e-4, f"visual length-axis feature {b} -> {a}, expected {b * 1.3}"
+    if importlib.util.find_spec("build123d") is None:
+        return                                                     # analytic check above still ran
+    for seg in (j2, j2b):                                          # the load-bearing one: measure the SOLID
+        span = _rendered_z_span_m(seg)
+        assert abs(span - seg.length_m) < 1e-3, (
+            f"the drawn link spans {span:.4f} m but its collider is {seg.length_m:.4f} m long: the render "
+            "would show a gap at the joint (or an overhang past it)")
 
 
 def test_scaling_a_parent_keeps_body_attached_limbs_anchored():

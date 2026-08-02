@@ -227,12 +227,15 @@ def _model_compile_probe():
     return probe
 
 
-# Classes that ALREADY carry legged meaning. ``robot_import._infer_class`` decides the family from the limbs
-# that actually hold the body up (#244) and is right across the Menagerie corpus, so the #214 reconciliation
-# below must never overwrite one of these.
-_LEGGED_CLASSES = frozenset({"quadruped", "hexapod", "octopod", "legged", "humanoid", "biped", "bipedal"})
-# The walkable reference template is a QUADRUPED fan/crawl recipe -- only these families can adopt it.
-_QUAD_TEMPLATE_CLASSES = frozenset({"quadruped", "hexapod", "octopod", "legged"})
+# Classes that ALREADY carry legged meaning, and the families that can adopt the QUADRUPED fan/crawl walkable
+# template. Both now come from ``body_kind`` -- the one place body classification lives -- rather than being
+# re-listed here, which is how the copies drifted apart in the first place.
+from virturoid.services.body_kind import (  # noqa: E402
+    LEGGED_CLASSES as _LEGGED_CLASSES,
+    QUAD_TEMPLATE_CLASSES as _QUAD_TEMPLATE_CLASSES,
+    family_from_legs,
+    measured_legs,
+)
 
 
 def _needs_legged_reconciliation(gene) -> bool:
@@ -256,24 +259,11 @@ def _legged_family(gene) -> str:
     signal ``robot_import._infer_class`` uses -- never a hard-coded guess.
 
     An inconclusive count returns the honest generic ``"legged"`` rather than inventing a family, because the
-    family drives the BOM, the spec sheet, the verify rubric and the walkable-template offer."""
-    n = 0
-    try:
-        import mujoco
+    family drives the BOM, the spec sheet, the verify rubric and the walkable-template offer.
 
-        from virturoid.services.appendage_map import build_appendage_map
-        from virturoid.services.gene_compiler import compile_gene_to_mjcf, standing_spawn_z
-        n = int(build_appendage_map(mujoco.MjModel.from_xml_string(
-            compile_gene_to_mjcf(gene, include_floor=True, spawn_z=standing_spawn_z(gene)))).n_legs)
-    except Exception:  # noqa: BLE001 - no MuJoCo / an uncompilable twin -> fall through to the generic
-        n = 0
-    if n >= 6:
-        return "hexapod"
-    if n >= 3:
-        return "quadruped"
-    if n == 2:
-        return "humanoid"
-    return "legged"
+    The count and the ladder are both ``body_kind``'s -- this function used to carry its own copy of each, and
+    the ladder disagreed with ``robot_import._infer_class``'s copy at 3 legs."""
+    return family_from_legs(measured_legs(gene)) or "legged"
 
 
 def _ingest_project(args: dict) -> dict:

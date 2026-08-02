@@ -1,0 +1,125 @@
+{
+  "id": "world_state_scene_938c34b8_variation_009",
+  "version": "0.1.0",
+  "scene_id": "scene_938c34b8_variation_009",
+  "scene_set_id": "scenes_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation",
+  "purpose": "variation",
+  "world_model_contract_uri": "simulation/world_model_contract.json",
+  "robot_spawn_xyz_rpy": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+  ],
+  "state_variables": [
+    "robot.joint_positions",
+    "robot.end_effector_pose",
+    "perception.wrist_rgbd_camera",
+    "world.object_poses",
+    "world.container_poses"
+  ],
+  "objects": [
+    {
+      "name": "red_block",
+      "object_type": "cube",
+      "pose_xyz_rpy": [
+        0.4101,
+        -0.085,
+        0.02,
+        0.0,
+        0.0,
+        2.5852
+      ],
+      "visible": true,
+      "material": "matte_red",
+      "physical_parameters": {
+        "mass_kg": 0.0433,
+        "friction": 1.108,
+        "scale": 0.973
+      }
+    },
+    {
+      "name": "blue_block",
+      "object_type": "cube",
+      "pose_xyz_rpy": [
+        0.4009,
+        0.085,
+        0.02,
+        0.0,
+        0.0,
+        -0.3353
+      ],
+      "visible": true,
+      "material": "matte_blue",
+      "physical_parameters": {
+        "mass_kg": 0.0475,
+        "friction": 1.203,
+        "scale": 0.949
+      }
+    },
+    {
+      "name": "red_bin",
+      "object_type": "container",
+      "pose_xyz_rpy": [
+        0.55,
+        -0.2418,
+        0.02,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "visible": true,
+      "material": null,
+      "physical_parameters": {}
+    },
+    {
+      "name": "blue_bin",
+      "object_type": "container",
+      "pose_xyz_rpy": [
+        0.55,
+        0.268,
+        0.02,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "visible": true,
+      "material": null,
+      "physical_parameters": {}
+    },
+    {
+      "name": "distractor_9_0",
+      "object_type": "cube",
+      "pose_xyz_rpy": [
+        0.3714,
+        -0.062,
+        0.02,
+        0.0,
+        0.0,
+        -1.7138
+      ],
+      "visible": true,
+      "material": "matte_gray",
+      "physical_parameters": {
+        "mass_kg": 0.0575,
+        "friction": 1.261,
+        "scale": 1.024
+      }
+    }
+  ],
+  "variation_parameters": {
+    "index": 9,
+    "purpose": "variation",
+    "clutter": true,
+    "seed": 1315080213,
+    "difficulty": 2,
+    "position_jitter_m": 0.07,
+    "lighting_level": 0.71,
+    "camera_noise_std": 0.0032,
+    "table_friction": 0.961,
+    "distractor_count": 1,
+    "background_texture": "plain"
+  }
+}

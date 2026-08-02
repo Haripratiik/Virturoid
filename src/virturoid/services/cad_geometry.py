@@ -69,7 +69,8 @@ def realize_shape(spec: dict):
     if _arole and fam != "role":
         try:
             _part = build_anatomy(_arole, float(spec.get("length", spec.get("height", 0.1)) or 0.1),
-                                  float(spec.get("radius", 0.03) or 0.03))
+                                  float(spec.get("radius", 0.03) or 0.03),
+                                  collider=str(spec.get("collider_shape") or ""))
             if _part is not None and _part.is_valid and _part.volume > 0:
                 return _part
         except Exception:  # noqa: BLE001 - fall back to the authored shape program below
@@ -77,7 +78,8 @@ def realize_shape(spec: dict):
     if fam == "role":                                # role-keyed multi-feature anatomy (build_anatomy)
         try:
             part = build_anatomy(spec.get("role", "actuator_segment"),
-                                 float(spec.get("length", 0.1)), float(spec.get("radius", 0.03)))
+                                 float(spec.get("length", 0.1)), float(spec.get("radius", 0.03)),
+                                 collider=str(spec.get("collider_shape") or ""))
             if part is not None and part.is_valid and part.volume > 0:
                 return part
         except Exception:  # noqa: BLE001 - unknown role / awkward topology -> capsule fallback below
@@ -219,6 +221,46 @@ def _visual_matches_link(geom: dict, seg) -> dict:
             out["radius"] = max(float(out.get("radius") or 0.0), r)      # parametric solids: just re-size
             if L > 0:
                 out["length"] = L
+            # Tell the solid WHICH COLLIDER it is standing in. A role solid is a picture of a link whose physics
+            # is a primitive, and for ground-contact parts the two must not describe different shapes: a
+            # quadruped foot is a CAPSULE (round section, the contact is a rolling ball) while a humanoid foot
+            # is a BOX (a flat plate, the contact is a sole). Drawing one shape over the other misrepresents the
+            # contact patch in the render, which is the single place a picture can most easily lie about the
+            # physics. `build_anatomy` uses this to pick the right foot; every other role ignores it.
+            out["collider_shape"] = str(getattr(seg, "shape", "") or "")
+            return out
+        if str(out.get("family") or "").lower() == "compound":
+            # A multi-feature part (a stepped chassis, a flanged arm link) is a UNION of positioned sub-shapes,
+            # and this function used to fall straight through it -- a compound has no top-level `profile`, so a
+            # trunk or an arm link whose link radius grew during grounding kept its stale silhouette. Scale the
+            # WHOLE assembly by ONE factor taken from the defining (first) sub-part, so the sub-shapes keep their
+            # relative proportions and their mounting positions instead of each snapping to the link radius.
+            parts = [p for p in (out.get("parts") or []) if isinstance(p, dict)]
+            if parts:
+                try:
+                    cur = max(max(abs(float(p[0])), abs(float(p[1])))
+                              for p in (parts[0].get("profile") or []) if len(p) >= 2)
+                except (TypeError, ValueError, IndexError):
+                    cur = 0.0
+                if cur > 0 and r > cur:
+                    k = r / cur
+                    scaled = []
+                    for sp in out["parts"]:
+                        if not isinstance(sp, dict):
+                            scaled.append(sp)
+                            continue
+                        sp = dict(sp)
+                        if isinstance(sp.get("profile"), (list, tuple)):
+                            sp["profile"] = [[float(p[0]) * k, float(p[1]) * k]
+                                             for p in sp["profile"] if len(p) >= 2]
+                        for _f in ("fillet", "chamfer"):
+                            if sp.get(_f):
+                                sp[_f] = float(sp[_f]) * k
+                        at = sp.get("at")
+                        if isinstance(at, (list, tuple)) and len(at) == 3:   # lateral mounts follow the section;
+                            sp["at"] = (float(at[0]) * k, float(at[1]) * k, float(at[2]))   # z stays in the frame
+                        scaled.append(sp)
+                    out["parts"] = scaled
             return out
         prof = out.get("profile")
         if isinstance(prof, (list, tuple)) and prof:                     # extrude: scale the section to the link
@@ -340,7 +382,7 @@ def _loft_solid(bd, sections, *, floor: bool = True):
     return part
 
 
-def build_anatomy(role: str, length_m: float, radius_m: float):
+def build_anatomy(role: str, length_m: float, radius_m: float, *, collider: str = ""):
     """A detailed, role-specific ORIGINAL link solid (build123d Part, mm), built in the link's [0, length]
     +z frame. Every role is now an ELLIPTICAL LOFT (or a simple analytic part) generated by us — NOT a copied
     real-robot mesh. Unknown roles fall back to a generic limb spindle. VISUAL ONLY (the compiler reads only
@@ -386,14 +428,38 @@ def build_anatomy(role: str, length_m: float, radius_m: float):
             (0.30 * L,  R * 0.92, R * 1.40),
             (0.65 * L,  R * 0.88, R * 1.36),
             (L,         R * 0.58, R * 1.05)])
-    if role == "sensor_head":                        # a tapered ovoid skull (jaw -> cheeks -> crown)
-        head = _loft_solid(bd, [
-            (0.00,     R * 0.66, R * 0.60),
-            (0.22 * L, R * 0.92, R * 0.82),
-            (0.50 * L, R * 1.00, R * 0.94),
-            (0.80 * L, R * 0.80, R * 0.74),
-            (L,        R * 0.34, R * 0.30)])
-        return _fil(head, 0.2 * R)
+    if role == "sensor_head":
+        # A MACHINED SENSOR MODULE, not an organic skull. This solid used to be a jaw->cheeks->crown ovoid
+        # tapering to a point, which rendered as a smooth egg — and on the general anatomy path it was
+        # OVERRIDING a spec that says, in as many words, "a rounded box with a flat front face for cameras —
+        # NOT an organic skull. This is a ROBOT". A robot's head is a camera/lidar housing: a filleted box with
+        # a flat forward face and a recessed sensor band wrapping the brow. The link frame is [0, L] along +z
+        # and the head is AIMED, so +z is the look direction: z=0 is the neck mount, z=L the face.
+        hy, hx = R * 0.98, R * 0.86               # half-width / half-depth of the housing
+        try:
+            with bd.BuildPart() as hp:
+                with bd.Locations((0, 0, L / 2.0)):
+                    bd.Box(2 * hx, 2 * hy, L)
+                # recessed sensor band around the brow: remove the outer skin over a slice near the face, then
+                # put the core back so the band is a groove in the housing rather than a cut through it.
+                with bd.Locations((0, 0, 0.74 * L)):
+                    bd.Box(2.6 * hx, 2.6 * hy, 0.26 * L, mode=bd.Mode.SUBTRACT)
+                with bd.Locations((0, 0, 0.74 * L)):
+                    bd.Box(1.70 * hx, 1.70 * hy, 0.26 * L)
+                try:                              # soften the housing corners; a sharp box reads unfinished
+                    bd.fillet(hp.edges().filter_by(bd.Axis.Z), min(0.34 * hx, 0.34 * hy))
+                except Exception:  # noqa: BLE001 - awkward edge set after the boolean; keep the crisp box
+                    pass
+            head = hp.part
+            if head is not None and head.is_valid and head.volume > 0:
+                return head
+        except Exception:  # noqa: BLE001 - fall back to the lofted housing below
+            pass
+        return _fil(_loft_solid(bd, [
+            (0.00,     R * 0.72, R * 0.64),
+            (0.30 * L, R * 0.96, R * 0.86),
+            (0.78 * L, R * 0.98, R * 0.90),
+            (L,        R * 0.78, R * 0.72)]), 0.2 * R)
     if role == "hand_plate":                         # a flat mitten: wide in y, thin in x, tapering to fingers
         return _loft_solid(bd, [
             (0.00,     R * 0.7, R * 0.5),
@@ -401,13 +467,43 @@ def build_anatomy(role: str, length_m: float, radius_m: float):
             (0.75 * L, R * 0.9, R * 0.45),
             (L,        R * 0.5, R * 0.30)])
     if role == "foot_pad":
-        # A SOLE: long FORWARD, wide laterally, THIN vertically. The link frame is [0, L] along +z and the ankle
-        # re-aims +z forward, so forward=z, thickness=x, width=y — matching the anatomy compiler's own foot spec.
-        # This used to lay a heel->toe polyline in XY and THEN extrude 0.9L along z, making the part long in x
-        # AND long in z: a ~174 x 114 x 144 mm cube for a humanoid foot, and a brick standing on its end for a
-        # quadruped. A foot that is as tall as it is long is the single most toy-like part on the whole robot.
-        # NB _loft_solid takes (z, half_Y, half_X) — y is the lateral WIDTH, x the vertical THICKNESS, matching
-        # the anatomy compiler's own foot profile [[-th, -w/2], [th, ...]].
+        # A CONTACT BOOT ON AN ANKLE SHANK — deliberately shaped to the COLLIDER the physics actually uses.
+        #
+        # The link frame is [0, L] along +z and the ankle re-aims +z forward, so forward=z, thickness=x,
+        # width=y. This solid used to be a flat SOLE (half-thickness 0.62 R, half-width 0.98 R), which measured
+        # 37 x 61 x 101 mm on the demo dog: a big flat pale paddle, and after the chassis the most toy-like
+        # thing in the render.
+        #
+        # The important part is WHY a rounded boot is the honest shape rather than a prettier one. The foot's
+        # collider is a CAPSULE of radius R spanning [0, L] — so the body the verdict is computed on already
+        # has a circular cross-section of radius R and hemispherical ends. The flat sole was therefore not the
+        # truthful drawing: it was 18.6 mm thick inside a 30 mm collider, i.e. the simulated foot was FATTER
+        # than the pictured one, and the ground contact the gait verdict uses happens on a surface that was
+        # never drawn. Lofting circular sections (half_Y == half_X) reproduces that capsule, so this change
+        # makes picture and physics agree MORE, not less — the opposite trade from bolting a decorative
+        # hemisphere onto a shape the collider does not have.
+        #
+        # Every section stays at or inside R so the boot can never reach below the capsule. That matters
+        # beyond aesthetics: `standing_spawn_z` measures the MESHED model's lowest point, so a visual that
+        # dipped past the collider would silently raise the spawn height — real physics — without moving a
+        # single collider. Verified unchanged at 0.3007 m on the demo dog.
+        #
+        # WHICH BOOT depends on the collider this foot actually stands in, because the two legged archetypes
+        # genuinely differ. A quadruped foot is a CAPSULE — a round shank whose contact rolls, like the rubber
+        # ball on a Go2 — so circular sections (half_Y == half_X) reproduce it exactly. A humanoid foot is a
+        # BOX: a flat plate whose contact is a sole, and drawing a round sausage there would misrepresent the
+        # contact patch just as badly as the flat sole misrepresented the quadruped's capsule. Same principle,
+        # opposite shape; `collider` comes from the segment via `_visual_matches_link`. Unknown/absent collider
+        # keeps the historical sole, so no caller is changed by accident.
+        # NB _loft_solid takes (z, half_Y, half_X) — y is the lateral WIDTH, x the vertical THICKNESS.
+        if collider.lower() in ("capsule", "sphere", "cylinder"):
+            return _loft_solid(bd, [
+                (0.00,      R * 0.56, R * 0.56),      # ankle shank — the narrow neck the bracket clamps
+                (0.10 * L,  R * 0.74, R * 0.74),
+                (0.30 * L,  R * 0.95, R * 0.95),      # boot swells to the capsule section
+                (0.72 * L,  R * 0.99, R * 0.99),      # the sole: the surface that actually touches the floor
+                (0.93 * L,  R * 0.88, R * 0.88),
+                (L,         R * 0.44, R * 0.44)])     # rounded toe cap
         return _loft_solid(bd, [
             (0.00,     R * 0.84, R * 0.55),           # heel — narrower across, thicker
             (0.18 * L, R * 0.98, R * 0.62),           # widest, just ahead of the heel
@@ -420,13 +516,76 @@ def build_anatomy(role: str, length_m: float, radius_m: float):
             with bd.Locations((0, 0, 0.6 * L)):
                 bd.Cylinder(1.0 * R, 0.8 * L)
         return _fil(p.part, 0.1 * R)
-    return _spindle(R)                               # actuator_segment / thigh / shin / arm / quad limb roles
+    # A LEG'S THREE LINKS ARE THREE DIFFERENT PARTS. `_anatomy_role_for` goes to the trouble of distinguishing
+    # hip / thigh / calf BY POSITION, exactly as a real leg is built -- and then every one of them fell through
+    # to the same `_spindle`, so a quadruped leg rendered as three identical beads on a string and the role
+    # vocabulary was differentiated in NAME ONLY. The gait fixes the link LENGTHS (they are the lever arms the
+    # scripted crawl is tuned against, and re-proportioning them is what got reverted on 2026-07-29), so the
+    # shape has to carry the read: a fat abduction drum, a broad flat-sided thigh plate, a slim tapering calf.
+    # `_loft_solid` takes (z, half_Y, half_X); a quadruped leg swings in x-z, so x is fore-aft (broad) and y is
+    # lateral (thin). Every section stays within R so the visual never exceeds the capsule it stands in.
+    if role in ("quad_hip",):                        # abduction housing: short, fat, machined drum
+        return _fil(_loft_solid(bd, [
+            (0.00,     R * 0.86, R * 0.80),
+            (0.26 * L, R * 1.00, R * 0.96),
+            (0.74 * L, R * 0.94, R * 0.90),
+            (L,        R * 0.58, R * 0.54)]), 0.26 * R)
+    if role in ("quad_thigh", "thigh"):              # upper link: broad fore-aft, THIN laterally (a plate link)
+        return _fil(_loft_solid(bd, [
+            (0.00,     R * 0.60, R * 0.94),
+            (0.18 * L, R * 0.64, R * 1.00),
+            (0.70 * L, R * 0.52, R * 0.84),
+            (L,        R * 0.42, R * 0.60)]), 0.16 * R)
+    if role in ("quad_calf", "shin"):                # lower link: slim, tapering to an ANKLE BOSS at the foot
+        # The taper used to run all the way out to 0.25 R x 0.32 R, which on the demo dog's 12.7 mm calf is a
+        # 6 x 8 mm NEEDLE. Against the foot's 30 mm contact boot that is a 4:1 step, and it rendered exactly as
+        # it sounds: a pin stuck into a blob, which re-created the bead-on-a-string read at the ankle that the
+        # hip/thigh/calf split had just removed further up the leg. A real shank does not taper to a point --
+        # it thickens into a machined boss where the foot BOLTS ON (Go2: a ~20 mm shank into a ~44 mm foot,
+        # about 2:1). Keeping the mid-span slim preserves the slender-shank read; only the distal end changes,
+        # so this is a silhouette fix, not a proportion one -- the link's length_m and radius_m are untouched
+        # and the collider is unmoved.
+        return _fil(_loft_solid(bd, [
+            (0.00,     R * 0.56, R * 0.82),
+            (0.30 * L, R * 0.44, R * 0.64),
+            (0.72 * L, R * 0.40, R * 0.52),
+            (0.90 * L, R * 0.54, R * 0.66),          # ankle boss begins
+            (L,        R * 0.60, R * 0.72)]), 0.14 * R)
+    return _spindle(R)                               # actuator_segment / arm roles
+
+
+_GENERATOR_REV: str | None = None
+
+
+def _generator_rev() -> str:
+    """Content hash of THIS module's source, mixed into every visual-mesh cache key.
+
+    The key used to describe only the SEGMENT (shape, length, radius, geometry spec, flags). That silently
+    assumed the code which turns a spec into a solid never changes — but ``build_anatomy`` and
+    ``realize_shape`` ARE that code, and they are precisely what a geometry fix edits. A role solid's spec
+    (``anatomy_role: foot_pad``) is byte-identical before and after such a fix, so the key did not move and
+    every cached STL stayed put.
+
+    Measured, and it is not a hypothetical: changing ``foot_pad`` from a flat sole to a contact boot left the
+    render drawing the OLD 37 x 61 x 101 mm ski while a fresh build produced the new 60 x 60 x 101 mm boot.
+    A geometry change therefore LOOKED like it had done nothing — and the same trap would hand a customer a
+    stale body from a warm cache. Hashing the generator's own source makes any edit to it invalidate the cache
+    automatically, with no version constant for anyone to forget to bump. Computed once per process."""
+    global _GENERATOR_REV
+    if _GENERATOR_REV is None:
+        import hashlib
+        try:
+            _GENERATOR_REV = hashlib.md5(Path(__file__).read_bytes()).hexdigest()[:8]
+        except Exception:  # noqa: BLE001 - an unreadable source must never break meshing; falling back to a
+            _GENERATOR_REV = "nosrc"                # constant simply restores the previous (unversioned) key
+    return _GENERATOR_REV
 
 
 def _seg_mesh_fp(out, s, *, kitbash: bool, synth: bool, actuator_in_mesh: bool = True):
     """The per-segment visual-mesh cache path + resolved kit-bash role. Shared by ``build_visual_meshes`` and
     ``prebake_synth_meshes`` so a parallel pre-bake writes the exact files the compiler later reads. The
-    content hash includes geometry + kit-bash/synth/actuator flags, so any change re-bakes."""
+    content hash includes geometry + kit-bash/synth/actuator flags AND the generator's own source revision
+    (see ``_generator_rev``), so any change — to the spec OR to the code that realizes it — re-bakes."""
     import hashlib
     import json
     actuated = s.joint_type in ("revolute", "prismatic")
@@ -438,7 +597,7 @@ def _seg_mesh_fp(out, s, *, kitbash: bool, synth: bool, actuator_in_mesh: bool =
         if not has_part(kit_role):
             kit_role = None
     sig = json.dumps([s.shape, round(s.length_m, 5), round(s.radius_m, 5), actuated, geom,
-                      bool(kit_role), bool(synth)]
+                      bool(kit_role), bool(synth), _generator_rev()]
                      + ([] if actuator_in_mesh else ["noact"]), sort_keys=True, default=str)
     return out / f"{s.name}_{hashlib.md5(sig.encode()).hexdigest()[:10]}.stl", kit_role
 

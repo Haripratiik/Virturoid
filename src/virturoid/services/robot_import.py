@@ -20,6 +20,7 @@ from collections import defaultdict
 from pathlib import Path
 
 from virturoid.schemas.gene import RobotGene, GeneSegment
+from virturoid.services.body_kind import FLOATING_BASE_CLASSES, family_from_legs
 
 
 def _slug_name(value: str) -> str:
@@ -476,8 +477,10 @@ def import_robot(source: str, *, robot_id: str | None = None, species: str | Non
         segments=segments,
         # a robot that MOVES needs a FREE (floating 6-DOF) base, not a welded one -- "floor"/"table" weld the base
         # to the world so the body cannot translate at all (the compiled model has no base joint, and every gait
-        # rolls out to 0 forward). A manipulator stays table-mounted.
-        base_mount="free" if robot_class in ("mobile_base", "quadruped", "hexapod", "humanoid") else "table",
+        # rolls out to 0 forward). A manipulator stays table-mounted. The set is shared with anatomy_compiler:
+        # the private copy that used to sit here was missing "legged"/"biped"/"aerial"/"aquatic", so a body in
+        # one of those families was bolted to a table on the way in and then judged for not walking.
+        base_mount="free" if robot_class in FLOATING_BASE_CLASSES else "table",
         end_effector_type="gripper" if any("grip" in (s.name.lower()) for s in segments) else "none",
         # ``mass_source`` marks these per-link masses as AUTHORITATIVE: they are the manufacturer's own
         # ``body_mass`` read straight off the customer's model, not our estimate. Grounding must size actuators
@@ -847,13 +850,8 @@ def _infer_class(segments, roots, mj, name_of=None) -> str:
     except Exception:  # noqa: BLE001 - a classification guess must never break the import
         legs, support = 0, 0.0
     if free_root:
-        if legs >= 6:
-            return "hexapod"
-        if legs >= 4:
-            return "quadruped"
-        if legs >= 2:
-            return "humanoid"                                   # a biped: the two chains holding it up
-        return "mobile_base"                                    # rolls, flies or is carried; nothing walks
+        # ONE ladder, shared with every other site that turns a leg count into a family (body_kind).
+        return family_from_legs(legs) or "mobile_base"          # nothing carries it: rolls, flies or is carried
     # FIXED BASE, but that is weak evidence on its own: URDF has no floating-base concept, so MuJoCo's URDF
     # loader adds no freejoint and an ordinary URDF quadruped -- or one whose static torso got fused into the
     # world, leaving four separate leg roots -- looks exactly as "fixed" as a bench-mounted hand. Only a real
@@ -862,7 +860,7 @@ def _infer_class(segments, roots, mj, name_of=None) -> str:
     # fingertips are collinear). Deliberately NOT extended to 2 limbs: a two-fingered gripper would become a
     # biped, and a fixed-base URDF biped is far rarer than that mistake would be common.
     if legs >= 3 and support >= 0.5:
-        return "hexapod" if legs >= 6 else "quadruped"
+        return family_from_legs(legs)
     if n_rev <= 1 and not has_grip:
         return "mobile_base"                                    # a fixed sensor/prop, not an articulated machine
     return "manipulator"                                        # fixed base + articulation = an arm or a hand

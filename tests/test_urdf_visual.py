@@ -95,6 +95,40 @@ class GeneUrdfLayoutTests(unittest.TestCase):
         for r in refs:
             self.assertTrue(os.path.exists(os.path.join(md, r)), f"baked STL must exist on disk: {r}")
 
+    def test_primitive_urdf_is_not_one_flat_grey_for_any_body_kind(self):
+        """The PRIMITIVE branch (no mesh_dir -- i.e. no build123d, which is how CI bakes) is what a customer
+        opens in RViz/Gazebo/Isaac. It used to hand back 62/62 visuals at MuJoCo's default `0.5 0.5 0.5`,
+        because the compiled collision geom carried no `material=` and `geom_rgba` fell through to the class
+        default: a shipped export that looks like grey blocks while the same robot replays coloured in the
+        viewer. Assert the real palette survives, for a legged body, an arm and a wheeled base alike."""
+        from virturoid.services.gene_urdf import gene_to_urdf
+        from virturoid.services.morphology_composer import compose_robot
+        for prompt in ("a hexapod robot", "a tabletop robot arm that sorts blocks", "a wheeled delivery rover"):
+            urdf = gene_to_urdf(compose_robot(prompt))          # no mesh_dir => self-contained primitives
+            colours = re.findall(r'<color rgba="([^"]+)"', urdf)
+            self.assertTrue(colours, f"{prompt}: primitive visuals must carry a material colour")
+            self.assertNotIn("0.500 0.500 0.500", colours,
+                             f"{prompt}: MuJoCo's default grey means the material lookup was lost")
+            self.assertGreater(len(set(colours)), 1, f"{prompt}: the body must not export as one flat colour")
+
+    def test_shipped_demo_urdfs_are_coloured(self):
+        """The TRACKED demo packages under build/ui_verify are the export a fresh clone actually opens."""
+        import os
+        import subprocess
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        try:
+            out = subprocess.run(["git", "ls-files", "build/ui_verify/*/robot/robot.urdf"],
+                                 cwd=root, capture_output=True, text=True, timeout=120)
+        except (OSError, subprocess.SubprocessError) as exc:
+            self.skipTest(f"git unavailable: {exc}")
+        shipped = [os.path.join(root, p) for p in out.stdout.split() if p]
+        if out.returncode != 0 or not shipped:
+            self.skipTest("no tracked demo packages in this checkout")
+        for path in shipped:
+            colours = set(re.findall(r'<color rgba="([^"]+)"', open(path, encoding="utf-8").read()))
+            self.assertGreater(len(colours), 1, f"shipped export is monochrome: {path}")
+            self.assertNotIn("0.500 0.500 0.500 1", colours, f"shipped export is MuJoCo-default grey: {path}")
+
     def test_gene_urdf_uses_named_mujoco_material_colours(self):
         from virturoid.services.gene_urdf import gene_to_urdf
         from virturoid.services.anatomy_compiler import build_from_anatomy

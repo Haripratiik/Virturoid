@@ -506,6 +506,16 @@ def set_payload(gene, *, payload_kg: float = 2.0, girth_scale: bool = True):
             if s.radius_m and s.radius_m > 0:
                 s.radius_m = round(max(0.005, s.radius_m * girth_mult), 5)
     required_by_name = {c["segment"]: c["required_nm"][1] for c in changed}
+    # RECORD WHAT THE ROBOT IS NOW RATED FOR. Nothing downstream could previously tell a heavy robot from a robot
+    # BUILT HEAVY ON PURPOSE, because the requested payload was applied to the joints and then forgotten. That is
+    # not cosmetic: gene_validation's mass_budget screens total mass against the class band for an UNLOADED
+    # machine, so amending a clean 12.8 kg quadruped to carry 15 kg produced a NEW "implausibly heavy" finding and
+    # the amend gate auto-reverted the customer's own explicit request. (Boston Dynamics' Spot is 32.5 kg and
+    # rated for 14 kg -- the band was calling real hardware implausible.) With the rating on the gene, the band
+    # can widen by exactly what was asked for and by nothing else.
+    md = dict(getattr(g, "metadata", None) or {})
+    md["rated_payload_kg"] = round(float(pk), 3)
+    g.metadata = md
     mass0 = round(total_mass, 3)
     _reground_and_gate(g, material=_dominant_material(gene))    # upsizes actuators for the new torque; re-derives mass
     mass1 = round(sum(float(s.mass_kg or 0.0) for s in g.segments), 3)

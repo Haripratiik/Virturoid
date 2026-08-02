@@ -20,6 +20,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+
+_LOG = logging.getLogger(__name__)
 
 LOCOMOTION = "locomotion"
 _FWD_NORM = 1.5   # metres that maps to success_rate 1.0 (a strong learned quad walk ~1.85 m)
@@ -273,7 +276,12 @@ def _recall_gait_source(db, gene, *, task: str = LOCOMOTION) -> tuple[dict, str]
     ``recall_gait`` predates the provenance ledger and intentionally exposes only controller parameters to its
     deploy callers.  The learning path needs the concrete parent skill as well, otherwise it cannot make an
     auditable warm-start edge.
+
+    ``db is None`` is a COLD START, not an error: the build path fits an op-point even when no corpus is
+    reachable (or hints are switched off for a hermetic bench run), and a cold start simply has no prior.
     """
+    if db is None:
+        return None
     hit = _structural_recall(db, gene, task)                 # same hard structural pre-filter as recall_gait
     if hit is not None:
         return hit[0], hit[1]
@@ -288,7 +296,7 @@ def _recall_gait_source(db, gene, *, task: str = LOCOMOTION) -> tuple[dict, str]
     return None
 
 
-_DEFAULT_GAIT = {"freq": 1.5, "hip_amp": 0.9, "knee_amp": 1.0, "duty": 0.25, "kp": 32.0, "kd": 1.5}
+_DEFAULT_GAIT = {"freq": 1.5, "hip_amp": 0.9, "knee_amp": 1.0, "kp": 32.0, "kd": 1.5}
 
 
 class _DeployResult:
@@ -303,16 +311,28 @@ class _DeployResult:
 
 def learn_gait_flywheel(gene, db, *, generations: int = 10, pop: int = 20, steps: int = 900,
                         deploy_steps: int = 1500, seed: int = 0, workers: int = 1, bank: bool = True,
-                        vm=None, max_evals: int | None = None, stop_on_credible: bool = False) -> dict:
+                        vm=None, max_evals: int | None = None, stop_on_credible: bool = False,
+                        recall: bool = True) -> dict:
     """Recall a specific prior -> SCREENED warm-start search -> DEPLOY-SELECT vs the default -> bank -> provenance.
 
     Deploy-select (honesty): the search optimizes at ``steps``, but the winner is re-measured at the longer
     ``deploy_steps`` horizon AND compared to the SHIPPED default gait there — the learned gait is banked ONLY if
     it beats the default at deploy (never trust the search horizon; the bank must always deploy BETTER than default).
+
+    ``recall=False`` runs the same search with NO prior (a cold run) while still banking to ``db``. Callers use it
+    to RE-RUN a body whose warm-started search failed — see ``fit_gait_for_body`` for the measurement that made
+    that necessary.
+
+    THE HORIZON IS PART OF THE ANSWER, so it is reported: ``horizon_steps`` is ``deploy_steps`` and ``settled``
+    says whether that was long enough for ``gait_quality.settling`` to check the body was STILL WALKING at the
+    end. A caller that passes a small ``deploy_steps`` for budget reasons (``adapt_gait`` uses 600) gets
+    ``settled=False`` and must not present the result as a walk claim — measured, the grounded authored cat is
+    "credible" at 1500 and falls at step 2014 (task #267). ``fit_gait_for_body``, which DOES make the claim,
+    passes the settling horizon for both ``steps`` and ``deploy_steps``.
     """
     from virturoid.services.gait_search import evaluate_gait, search_gait
 
-    recalled = _recall_gait_source(db, gene)
+    recalled = _recall_gait_source(db, gene) if recall else None
     prior, prior_skill_id = recalled if recalled is not None else (None, None)
     res = search_gait(gene, generations=generations, pop=pop, steps=steps, seed=seed,
                       workers=workers, warm_start=prior, max_evals=max_evals,
@@ -379,6 +399,10 @@ def learn_gait_flywheel(gene, db, *, generations: int = 10, pop: int = 20, steps
         "search_forward_m": round(res.best_forward, 4),
         "default_forward_m": round(default["forward"], 4),
         "beats_default": bool(beats_default),
+        "credible": bool(learned.get("credible", False)),
+        "horizon_steps": int(deploy_steps),                  # how long anyone actually looked...
+        "settled": learned.get("holds_rate") is not None,    # ...and whether that was long enough to judge
+        "rates": learned.get("rates"),
         "n_evals": int(getattr(res, "n_evals", 0)),
         "stopped_reason": getattr(res, "stopped_reason", "generation_limit"),
         "height_ratio": round(learned["height_ratio"], 3), "survived": bool(learned["survived"]),
@@ -389,3 +413,303 @@ def learn_gait_flywheel(gene, db, *, generations: int = 10, pop: int = 20, steps
                                     if prior_deploy_forward is not None else None),
         "banked_skill": skill_id, "compounding_delta": compounding_delta, "params": res.best_params,
     }
+
+
+# The op-point every legged body is judged at TODAY. It is one body's hand-tuned numbers (the canonical fanned
+# template's), which is exactly why only that body walks under it — see docs/breaking_the_cotuning_wall.md §1.5.
+#
+# ``duty`` WAS a sixth entry here and was removed with the search dimension (2026-08-01, task #265):
+# ``crawl_gait_rollout`` never read it, so every fitted/banked ``duty`` was an unconstrained coordinate whose
+# CEM variance-collapse was then mined and shown to operators as the bank's tightest-clustered parameter. See
+# the note at ``gait_search.PARAM_NAMES`` for the measurement and for what reviving it would require. Banked
+# rows keep the key; nothing reads it, and ``recall_gait`` still returns those dicts verbatim.
+_FIT_PARAMS = ("freq", "hip_amp", "knee_amp", "kp", "kd")
+
+#: The horizon a walk is JUDGED at. 4x the old 1500-step deploy horizon, which was itself the number the whole
+#: pipeline optimised against — and the grounded authored cat's adopted op-point falls at step 2014, i.e. 514
+#: steps after the old verdict stopped looking (task #267). 4x is not a tuned constant; it is "materially
+#: longer than the thing being claimed", and it is cross-checked at 12000 (8x) in the robustness ladder tests.
+_SETTLE_STEPS = 6000
+
+#: Relative perturbation sizes the adopted operating point is probed at, largest first, and how many joint
+#: perturbations per rung. The reported margin is the LARGEST rung at which every probe still walks.
+_ROBUST_LADDER = (1e-1, 1e-2, 1e-3)
+_ROBUST_N = 4
+
+
+def robustness_margin(gene, params: dict, *, steps: int = _SETTLE_STEPS, ladder=_ROBUST_LADDER,
+                      n: int = _ROBUST_N, seed: int = 0) -> dict:
+    """How much relative perturbation does this operating point survive? Returns the largest rung of ``ladder``
+    at which ALL ``n`` jointly-perturbed copies are still a credible walk, or ``None`` below the finest rung.
+
+    A verdict without this is missing its error bar. MEASURED 2026-08-01 (task #267) at the fitted op-points the
+    product actually ships: the canonical template tolerates >=1e-1 on all five parameters, the grounded
+    authored cat's adopted point tolerates less than 1e-5 on four of the five (a 2.4e-5 relative change in step
+    frequency flips it from +0.958 m CREDIBLE WALK to +0.500 m FELL by ROLL-OVER) — four orders of magnitude
+    apart, and both printed the same two words. A number that fragile is not a property of the controller you
+    could deploy; it is a property of one lucky float.
+
+    Costs ``n`` rollouts per rung and STOPS at the first rung that passes, so a robust point costs ``n`` and a
+    fragile one costs ``n * len(ladder)``.
+    """
+    import random
+
+    from virturoid.services.gait_search import evaluate_gait
+    rng = random.Random(seed)
+    keys = [k for k in _FIT_PARAMS if k in params]
+    probes: dict[str, str] = {}
+    best: float | None = None
+    for rel in ladder:
+        ok = 0
+        for _ in range(n):
+            q = {**params, **{k: float(params[k]) * (1.0 + rng.uniform(-rel, rel)) for k in keys}}
+            res = evaluate_gait(gene, q, steps=steps)
+            ok += int(bool(res.get("credible")) and bool(res.get("survived")))
+        probes[f"{rel:g}"] = f"{ok}/{n}"
+        if ok == n:
+            best = float(rel)
+            break                                   # the ladder is ordered largest-first; the first pass is the margin
+    return {"robustness_rel": best, "probes": probes, "steps": int(steps),
+            "note": (f"every one of {n} jointly-perturbed copies still walks at rel {best:g}" if best is not None
+                     else f"fails below rel {min(ladder):g} — this operating point is one lucky float, "
+                          f"not a controller")}
+
+
+def fit_gait_for_body(gene, *, deploy_steps: int = _SETTLE_STEPS, search_steps: int = _SETTLE_STEPS,
+                      max_evals: int = 96,
+                      warm_evals: int = 24, generations: int = 8, pop: int = 24, seed: int = 0,
+                      db=None, bank: bool = True, seed_restarts: int = 3) -> dict:
+    """Give ONE GROUNDED body its OWN operating point, and cache it on ``gene.metadata['gait_params']``.
+
+    Call this AFTER ``ground_and_repair``. The whole point is that a body must be judged with a controller fitted
+    to IT before anything decides it cannot walk: measured on this checkout, the authored dog / cat / horse /
+    cheetah all score ``0.000`` through ``evaluate_robot`` at the shipped ``freq 1.5 / kp 32`` op-point and all
+    reach a CREDIBLE WALK with an op-point of their own. ``anatomy_compiler.ensure_walkable_quad`` reads that
+    ``0.000`` and substitutes a template for the customer's design, so the substitution is really a measurement
+    artefact. See docs/breaking_the_cotuning_wall.md §0/§1.
+
+    Two properties keep this cheap and safe to put on the interactive build path:
+
+    * **Nothing is searched for a body that already walks.** The shipped default is measured first; if it is
+      already a CREDIBLE WALK at the deploy horizon the body keeps it and this returns in ~0.5 s having changed
+      nothing. So no robot that ships today can move.
+    * **Nothing is adopted that does not beat the default at the DEPLOY horizon.** That gate lives in
+      ``learn_gait_flywheel`` (which also recalls a structural prior and banks the result), never in the search's
+      own optimistic score — measured, a cat credible at an 800-step search horizon FELL at 1500.
+
+    ``search_steps == deploy_steps == _SETTLE_STEPS``, AND THEY MUST STAY EQUAL. Both were 1500, and 1500 was
+    exactly where the claim broke: the grounded authored cat's adopted point reads CREDIBLE WALK at 1500 and
+    falls at step 2014 (task #267). Raising only the JUDGING horizon does not fix it, it just adopts nothing —
+    MEASURED on this checkout, three variants at the same 96-eval x 3-seed budget:
+
+        search 1500 / judge 1500          cat ADOPTS (+0.64 m/1000 -> falls at 2014)   dog ADOPTS (rate -> 0.23)
+        search 1500 / judge 6000 + rate   cat ADOPTS NOTHING (141 evals)               dog ADOPTS NOTHING
+        search 6000 / judge 6000 + rate   cat ADOPTS a real walk, rate 0.769 -> 0.636  dog ADOPTS NOTHING
+
+    because ``stop_on_credible`` stops at the first candidate the SEARCH horizon calls credible, so screening
+    cheaply and judging honestly just spends the whole budget rediscovering drift. An optimiser may never be
+    scored at a shorter horizon than the one its answer is judged at — that IS the defect, stated generally.
+
+    ``warm_evals``/``max_evals`` + credible-early-stop bound the cost. THIS IS NOT FREE, and the numbers are
+    MEASURED before -> after, same grounded bodies, same machine:
+
+        body whose default already walks   0.7 s /   0 evals ->   1.0 s /   0 evals   (one rollout, 4x longer)
+        grounded authored cat              2.7 s /   8 evals ->  42.0 s /  66 evals   adopts a REAL walk
+        grounded authored dog             11.9 s /  30 evals -> 145.3 s / 360 evals   adopts NOTHING
+
+    So a fit costs ~1.4x when the body already walks, ~15x when it finds a walk, and ~12x when it proves it
+    cannot — the dog's 145 s is the whole budget spent establishing a negative, which is both the expensive
+    direction and the honest one. Against the 8-170 s range an end-to-end build used to occupy, the ceiling for
+    a legged body moves into the low tens of minutes for the pathological case. A caller that needs it cheaper
+    should cut ``seed_restarts`` or ``max_evals``, NEVER the horizon: a shorter horizon does not make the fit
+    cheaper, it makes the answer wrong. Search runs SERIAL in this mode by construction (``gait_search``
+    disables the process pool so the early stop actually saves rollouts), which also keeps the build path free
+    of multiprocessing.
+
+    ``seed_restarts`` — THE SEARCH IS SEED-FRAGILE ON AUTHORED QUADRUPEDS, so one draw is not a verdict.
+    MEASURED 2026-08-01 (task #265), same grounded body, same code, same 96-eval budget: the authored dog reaches
+    a CREDIBLE WALK on seeds 0/3/4 and FELLS by ROLL-OVER on 1/2 (winning travel +0.796 to +2.069 m, a 2.6x
+    spread); the authored cat wins on 1 of 3 seeds. At a fixed ``seed=0`` that makes a customer's robot walk or
+    fall on a draw nobody chose. This is NOT a regression introduced by fitting per body — it was always there,
+    hidden because ``ensure_walkable_quad`` threw the body away before anything searched it. Stage 1 exposed it by
+    finally trusting the fitter, so the fix is a ROBUST fitter, not going back to substituting the body.
+    A failed search therefore RESTARTS from a decorrelated seed, up to ``seed_restarts`` attempts, keeping the
+    best; a body that succeeds on the first attempt pays nothing extra.
+
+    Returns a disclosure dict (also stored on ``metadata['gait_fit']``). Never raises — but a genuine CRASH is
+    reported as ``ok=False`` with ``error``, distinguishable from a considered decline (``ok=True``,
+    ``adopted=False``), because a swallowed exception that reads as "this body has no better gait" is the exact
+    measurement artefact this function exists to eliminate.
+    """
+    from virturoid.services.gait_search import evaluate_gait
+
+    out: dict = {"ok": True, "searched": False, "adopted": False, "reason": "", "n_evals": 0,
+                 "horizon_steps": int(deploy_steps)}
+    try:
+        default = evaluate_gait(gene, _DEFAULT_GAIT, steps=deploy_steps)
+        out["default_forward_m"] = round(float(default["forward"]), 4)
+        out["default_verdict"] = default.get("verdict")
+        out["default_rates"] = default.get("rates")
+        if bool(default["survived"]) and bool(default.get("credible", False)):
+            # Already walks under the shipped controller -> never churn it. This is what keeps the change
+            # additive: only bodies that would otherwise be discarded pay for (or receive) a new op-point.
+            out["reason"] = "the shipped default gait is already a credible walk for this body"
+            _stash(gene, out)
+            return out
+        n_evals = 0
+        learned: dict = {}
+        attempts = max(1, int(seed_restarts))
+        for _try in range(attempts):
+            # Decorrelated restart seeds. A failed search is a failed DRAW, not a verdict on the body (see
+            # ``seed_restarts`` above), so retry before concluding this body cannot walk. Retry ONLY on failure:
+            # a body that succeeds first time costs exactly what it did before.
+            kw = dict(generations=generations, pop=pop, steps=search_steps, deploy_steps=deploy_steps,
+                      seed=seed + _try * 1009)
+            learned, n_try = _one_search(gene, db=db, bank=bank, warm_evals=warm_evals, max_evals=max_evals,
+                                         out=out, kw=kw)
+            n_evals += n_try
+            if learned.get("beats_default"):
+                out["seed_attempts"] = _try + 1
+                break
+        else:
+            out["seed_attempts"] = attempts
+        out["searched"] = True
+        out.update({k: learned.get(k) for k in ("forward_m", "n_evals", "stopped_reason", "beats_default",
+                                                "credible", "survived", "reused_prior", "banked_skill")})
+        out["n_evals"] = n_evals
+        if learned.get("beats_default"):
+            # STORE WHAT WAS VERIFIED. This used to round to 4 decimals on the way into the cache, so the body
+            # deployed a controller the fitter had never measured. MEASURED 2026-08-01 on the grounded authored
+            # cat (seed 0): validated freq 2.21322363 -> +0.958 m CREDIBLE WALK; stored freq 2.2132 -> +0.500 m
+            # FELL by ROLL-OVER. A 2.4e-5 relative change in step frequency flipped the verdict — these walks sit
+            # on a knife edge, so the exact float that was verified is the only one safe to ship.
+            params = {k: float(learned["params"][k]) for k in _FIT_PARAMS if k in learned["params"]}
+            # RE-VERIFY THE STORED CONTROLLER (belt and braces). Adoption must never accept anything
+            # ``gait_quality.classify`` rejects; the adoption gate in ``learn_gait_flywheel`` already requires
+            # `credible`, and the disagreement seen on the cat came from shipping different numbers than were
+            # gated, not from the gate. Confirming the stored dict closes that class of drift for good.
+            confirm = evaluate_gait(gene, params, steps=deploy_steps)
+            out["confirm_forward_m"] = round(float(confirm["forward"]), 4)
+            out["confirm_verdict"] = confirm.get("verdict")
+            out["confirm_rates"] = confirm.get("rates")          # the rate profile behind the verdict, not just a total
+            out["holds_rate"] = confirm.get("holds_rate")
+            if not (bool(confirm["survived"]) and bool(confirm.get("credible", False))):
+                out["adopted"] = False
+                out["reason"] = (f"searched {n_evals} gaits; the winner did not reproduce as a credible walk when "
+                                 f"re-measured from the stored parameters ({confirm.get('verdict')}) — not adopted")
+                _stash(gene, out)
+                return out
+            # MEASURE THE ERROR BAR BEFORE STORING. A verdict with no robustness number cannot distinguish a
+            # controller from one lucky float, and this fitter has shipped both under the same two words.
+            rob = robustness_margin(gene, params, steps=deploy_steps)
+            out["robustness_rel"] = rob["robustness_rel"]
+            out["robustness_probes"] = rob["probes"]
+            md = dict(getattr(gene, "metadata", None) or {})
+            md["gait_params"] = params
+            gene.metadata = md
+            out["adopted"] = True
+            out["params"] = params
+            _rob = (f"survives {rob['robustness_rel']:g} relative perturbation of every parameter"
+                    if rob["robustness_rel"] is not None else
+                    f"does NOT survive {min(_ROBUST_LADDER):g} relative perturbation — treat it as fragile")
+            out["reason"] = (f"searched {n_evals} gaits for this body over {out.get('seed_attempts')} seed "
+                             f"attempt(s); adopted one that is still walking at step {deploy_steps} "
+                             f"({out['confirm_forward_m']} m, rate {_rate_str(confirm)}) vs the default's "
+                             f"{out['default_forward_m']} m; it {_rob}")
+        else:
+            out["reason"] = (f"searched {n_evals} gaits for this body over {out.get('seed_attempts')} seed "
+                             f"attempt(s); none was still walking at the {deploy_steps}-step horizon")
+    except Exception as exc:  # noqa: BLE001 - fitting an op-point must never BLOCK a build...
+        # ...but it must never masquerade as one either. A swallowed KeyError used to return in 0 s looking
+        # exactly like "searched, adopted nothing", so a crash read as a considered decline — the same artefact
+        # this function exists to remove. Callers and the customer-facing disclosure now see ok=False + error.
+        _LOG.warning("fit_gait_for_body failed for gene %s", getattr(gene, "id", "?"), exc_info=True)
+        out["ok"] = False
+        out["error"] = f"{type(exc).__name__}: {exc}"
+        out["reason"] = (f"gait fit FAILED for this body ({type(exc).__name__}) — this is an error, not a finding: "
+                         f"the body was never measured, so nothing here says it cannot walk")
+    _stash(gene, out)
+    return out
+
+
+def _rate_str(res: dict) -> str:
+    """"1.09 -> 0.87 m/1000 steps" — the travel RATE at the start and the end of the judged run, which is the
+    thing a net displacement hides. Empty when the horizon was too short to have a profile."""
+    rates = res.get("rates") or {}
+    if len(rates) < 2:
+        return "rate not measurable at this horizon"
+    ks = sorted(int(k) for k in rates)
+    return f"{rates[ks[0]]:+.2f} -> {rates[ks[-1]]:+.2f} m/1000 steps"
+
+
+def _one_search(gene, *, db, bank: bool, warm_evals: int, max_evals: int, out: dict, kw: dict):
+    """One SHORT first pass plus the full-budget re-run. Returns ``(learned, n_evals_used)``.
+
+    ``warm_evals`` is small (24) because a GOOD PRIOR should win almost immediately; ``max_evals`` (96) is the
+    real budget. The re-run used to be gated on ``reused_prior``, which meant a body with NO prior — every cold
+    start, and every hermetic run with hints disabled — was searched with the warm budget and never got the
+    other 96. That is a quarter of the intended budget spent on the hardest case, and it is a DECLINE-SHAPED
+    bug: the fitter reports "none was still walking", which reads as a fact about the body.
+
+    It only became load-bearing when the settling gate made `credible` mean "walks" (task #267). MEASURED on
+    this checkout, grounded authored cat, 6000-step horizon: 24 evals x 3 seeds finds nothing and declines,
+    while a settling-aware search with the full budget finds ``freq 2.709 / hip 0.860 / knee 1.018 / kp 70.93 /
+    kd 14.0`` — travel-per-1000 of 0.665 -> 0.614 -> 0.574 -> 0.557 across 1500/2500/4000/6000, still walking
+    at 12000, and 8/8 robust at BOTH rel 1e-3 and 1e-2 (the adopted point scores 0/8 at both). Declining a body
+    that demonstrably walks would just be the same dishonesty pointed the other way.
+    """
+    learned = _open_db_and_learn(gene, db=db, bank=bank, max_evals=warm_evals, **kw)
+    n_evals = int(learned.get("n_evals") or 0)
+    if not learned.get("beats_default"):
+        # SCREEN THE PRIOR AT THE SEARCH LEVEL. This module's contract is that "a bad prior must never hurt",
+        # and gait_search states that an injected prior "is simply one of `pop` candidates and does no harm".
+        # MEASURED 2026-08-01 on the grounded authored dog, that is false: the prior is re-injected as
+        # candidate 0 of EVERY generation and is selected into the ELITE set, which drags the CEM mean with
+        # it. Warm (prior kp 57.0, freq 1.31): 96 evaluations, best -0.075 m, nothing adopted. Cold, same
+        # body, same seed: credible at evaluation 25, +1.715 m, adopted. The prior did not fail to help — it
+        # actively prevented the walk this body can do. So when a warm run comes back empty, re-run it cold
+        # and keep whichever actually beat the default. (The deeper fix belongs in gait_search's elite
+        # selection and is not this change.) With no prior to screen, the same re-run is simply the rest of
+        # the budget, which is why it is no longer conditional on one having been recalled.
+        cold = _open_db_and_learn(gene, db=db, bank=bank, max_evals=max_evals, recall=False, **kw)
+        n_evals += int(cold.get("n_evals") or 0)
+        if learned.get("reused_prior"):
+            out["prior_screened_out"] = True
+        if cold.get("beats_default"):
+            learned = cold
+    return learned, n_evals
+
+
+def _stash(gene, out: dict) -> None:
+    try:
+        md = dict(getattr(gene, "metadata", None) or {})
+        md["gait_fit"] = dict(out)
+        gene.metadata = md
+    except Exception:  # noqa: BLE001 - disclosure is best-effort
+        pass
+
+
+def _open_db_and_learn(gene, *, db, bank: bool, recall: bool = True, **kw) -> dict:
+    """Run ``learn_gait_flywheel`` against the product memory DB, falling back to a DB-less search.
+
+    The flywheel contract is consult-before / bank-after, so the build path uses the real corpus. But a build must
+    not fail because the memory directory is unavailable (or hints are disabled for a hermetic bench run), hence
+    the in-memory fallback.
+    """
+    import os
+
+    if db is not None:
+        return learn_gait_flywheel(gene, db, workers=1, bank=bank, stop_on_credible=True, recall=recall, **kw)
+    if os.environ.get("VIRTUROID_DISABLE_GAIT_HINTS") == "1":
+        # The bench measures the composer+compiler deterministically; a corpus that grew between runs would make
+        # the gate number float, which is the exact flicker VIRTUROID_DISABLE_GAIT_HINTS was introduced to stop.
+        return learn_gait_flywheel(gene, None, workers=1, bank=False, stop_on_credible=True, recall=False, **kw)
+    try:
+        from virturoid.services.agent_tools import safe_build_path
+        from virturoid.services.memory_db import MemoryDB
+        mem = safe_build_path(None, "memory")
+        mem.mkdir(parents=True, exist_ok=True)
+        with MemoryDB(mem / "virturoid_memory.db") as _db:
+            return learn_gait_flywheel(gene, _db, workers=1, bank=bank, stop_on_credible=True, recall=recall, **kw)
+    except Exception:  # noqa: BLE001 - no corpus is a cold start, not a failure
+        return learn_gait_flywheel(gene, None, workers=1, bank=False, stop_on_credible=True, recall=False, **kw)

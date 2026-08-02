@@ -21,7 +21,12 @@ from __future__ import annotations
 import json
 import statistics as st
 
-_PARAM_KEYS = ("freq", "hip_amp", "knee_amp", "duty", "kp", "kd")
+# The parameters worth mining a hint region FROM. ``duty`` was removed here with the search dimension
+# (2026-08-01, task #265): it never reached the controller, so its banked spread was CEM variance-collapse on a
+# null coordinate — and this module then reported it as "nearby walkers cluster duty near 0.25 (65 robots)", the
+# TIGHTEST-looking cluster of all six, because a coordinate with no signal shrinks fastest. A mined hint must
+# describe something that can move a robot. See the note at ``gait_search.PARAM_NAMES``.
+_PARAM_KEYS = ("freq", "hip_amp", "knee_amp", "kp", "kd")
 
 
 def _class_of(gene) -> str:

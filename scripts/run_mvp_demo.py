@@ -5,12 +5,23 @@ base64, verdicts are the real ones (a robot that falls says so), and the flywhee
 
     python scripts/run_mvp_demo.py                 # full battery -> build/demo/index.html
     python scripts/run_mvp_demo.py --mini          # 2-robot quick pass (what the smoke test runs)
+    python scripts/run_mvp_demo.py --llm            # use the configured LLM design path instead of offline
     python scripts/run_mvp_demo.py --no-learn       # skip the flywheel pass (faster)
+    python scripts/run_mvp_demo.py --no-compare     # skip the same-family differentiation panel (faster)
     python scripts/run_mvp_demo.py --out build/demo # choose the output dir
 
 Honesty (see memory 'verify-renders-not-just-numbers'): the gallery shows the render AND the measured verdict for
 every robot, including weak/flagged ones -- never a curated win. The flywheel delta is verify-before vs verify-after
 on the SAME held body at the SAME horizon.
+
+...AND that includes being honest about WHICH BRAIN DESIGNED THE BODY. This page used to be titled "text -> robot"
+while running with the project .env suppressed, which means get_llm() returned None and no language model ever saw
+the prompt: the bodies came from the offline compositor. The renders, the physics and the verdicts were real; the
+implied claim was not. So the run now RESOLVES the design path up front (``_design_path``), says so in a banner at
+the top of the page rather than in a footnote, and stamps every card with the ``design_source`` the composer
+actually stamped on that gene. Offline stays the DEFAULT -- it needs no API key, costs nothing and is what a
+reviewer can reproduce on a fresh clone -- but it is now labelled instead of implied, and ``--llm`` runs the real
+thing when a backend is configured.
 """
 from __future__ import annotations
 
@@ -19,13 +30,11 @@ import base64
 import html
 import os
 import sys
-import tempfile
 import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
-os.environ.setdefault("VIRTUROID_NO_LOCAL_ENV", "1")
 
 # A deliberately DIVERSE battery -- different morphologies exercise different verdict paths (legged gait, manipulator
 # grasp, mobile drive) so the gallery proves breadth, not one lucky body. Order = what a reviewer should see first.
@@ -40,6 +49,62 @@ MINI_BATTERY = [
     {"prompt": "a quadruped robot dog", "note": "legged locomotion"},
     {"prompt": "a robot arm on a table that picks up a block", "note": "manipulation grasp"},
 ]
+
+# SAME FAMILY, DIFFERENT BODIES. The battery above proves BREADTH (a leg, an arm, a wheel); it cannot prove
+# DIFFERENTIATION, because every card is a different class and of course they look different. The question a
+# reviewer actually asks about a text-to-robot product is the narrow one: give it three prompts from ONE family
+# and do you get three robots, or one robot three times? Until recently the honest answer was "one robot three
+# times" -- create_robot ran the walkability gate on an ungrounded, un-tuned body, every authored quadruped
+# measured ~0 m at another robot's hand-tuned operating point, and all of them were replaced by the same fanned
+# template (byte-identical: 13.500 kg, torso:leg 0.498). create_robot now grounds the body, fits an operating
+# point TO it, and only then asks whether it can walk -- so these three stay themselves. That is the property
+# this panel exists to make visible and measurable, and it is measured, not asserted: if a body IS replaced the
+# table says SUBSTITUTED and the claim retracts itself.
+FAMILY_COMPARE = [
+    {"prompt": "a quadruped robot dog", "label": "dog"},
+    {"prompt": "a robot cat", "label": "cat"},
+    {"prompt": "a robot horse", "label": "horse"},
+]
+
+# What the composer stamps on a gene -> what a reader should understand by it. The point of showing this per card
+# is that it is the COMPOSER's own record of which path built that body, not the runner's guess about it.
+_SOURCE_LABEL = {
+    "anatomy": "LLM anatomy graph",
+    "llm_anatomy_graph": "LLM anatomy graph",
+    "anatomy_graph": "LLM anatomy graph",
+    "intent": "LLM design intent",
+    "anatomy_generic": "offline anatomy compiler",
+    "archetype": "offline archetype builder",
+    "anthropometric": "offline anthropometric builder",
+    "aerial_platform": "offline aerial builder",
+    "heuristic": "offline keyword recipe",
+}
+
+
+def _ascii(s: object) -> str:
+    """Console-safe text. Windows consoles default to cp1252, which cannot encode an em-dash -- the first line a
+    new user read was 'Open it in a browser ? it's self-contained'. Verdict strings are interpolated into console
+    output too, so sanitise at the print site rather than hand-checking every literal. The HTML keeps its real
+    typography: that file is written encoding='utf-8' and read by a browser, not a console."""
+    return (str(s).replace("—", "-").replace("–", "-").replace("’", "'").replace("“", '"').replace("”", '"')
+            .encode("ascii", "replace").decode("ascii"))
+
+
+def _design_path() -> dict:
+    """RESOLVE (do not assume) which brain will design the bodies in this run.
+
+    Calls the same ``get_llm("morphology")`` the composer calls, so the banner reports what actually happens
+    rather than what the flags requested: a configured backend that is unreachable at build time still falls back
+    per body, and the per-card ``design_source`` records that. Never returns the backend URL."""
+    try:
+        from virturoid.services.llm_client import get_llm, unwrap_llm
+        llm = get_llm("morphology")
+    except Exception as exc:  # noqa: BLE001 - a probe must never be able to fail a build
+        return {"llm": False, "backend": None, "error": f"{type(exc).__name__}: {exc}"}
+    if llm is None:
+        return {"llm": False, "backend": None}
+    raw = unwrap_llm(llm)
+    return {"llm": True, "backend": getattr(raw, "name", "?"), "model": getattr(raw, "model", None)}
 
 
 def _b64(path: str | None) -> tuple[str, str] | None:
@@ -64,8 +129,49 @@ def _verdict_class(verdict: str, credible: bool | None) -> str:
     return "warn"
 
 
-def build_one(spec: dict, *, quick: bool, learn: bool) -> dict:
-    """create -> render -> verify (+ optional flywheel before/after for legged). Returns a card dict."""
+def _body_metrics(robot_id: str) -> dict:
+    """MEASURE the held body: grounded mass, per-limb leg + torso length, segment/DOF count, the operating point
+    it was fitted with, and whether the walkability gate replaced it with the fanned template. Read off the gene
+    itself, so the comparison table can never disagree with the robot that was rendered and verified."""
+    import re
+
+    out: dict = {}
+    try:
+        from virturoid.services import session_state as S
+        gene = S.get_robot(robot_id)
+        if gene is None:
+            return out
+        legs = [float(getattr(s, "length_m", 0.0) or 0.0) for s in gene.segments
+                if re.search(r"leg", (s.name or "").lower())]
+        torso = [float(getattr(s, "length_m", 0.0) or 0.0) for s in gene.segments
+                 if re.search(r"torso|trunk|spine|chassis", (s.name or "").lower())]
+        # per-LIMB length (not the summed skeleton) is the number that means something next to a torso length
+        n_legs = len({m.group(0) for s in gene.segments
+                      if (m := re.search(r"(?:(?:front|hind)_)?leg\d*_[lr]", (s.name or "").lower()))}) or 4
+        leg_len = (sum(legs) / n_legs) if legs else 0.0
+        torso_len = sum(torso)
+        md = getattr(gene, "metadata", None) or {}
+        fit = md.get("gait_fit") or {}
+        out = {
+            "mass_kg": round(sum(float(getattr(s, "mass_kg", 0.0) or 0.0) for s in gene.segments), 3),
+            "leg_m": round(leg_len, 3), "torso_m": round(torso_len, 3),
+            "torso_over_leg": round(torso_len / leg_len, 3) if leg_len else None,
+            "segments": len(gene.segments), "dof": len(gene.actuated_joints()),
+            "substituted": bool((md.get("walkability_fallback") or {}).get("applied")),
+            # the per-body operating point create_robot fitted (or "shipped default" when the default already walked)
+            "gait": (md.get("gait_params") or None),
+            "gait_note": (fit.get("reason") if fit else None),
+        }
+    except Exception:  # noqa: BLE001 - metrics are descriptive; never fail a build over them
+        pass
+    return out
+
+
+def build_one(spec: dict, *, quick: bool, learn: bool, reuse: dict[str, dict] | None = None) -> dict:
+    """create -> render -> verify (+ optional flywheel before/after for legged). Returns a card dict.
+
+    ``reuse`` maps prompt -> a body the comparison panel already built, so a prompt shared between the two
+    sections is composed ONCE and both sections describe the same robot at different points in its life."""
     from virturoid.services.agent_tools import call_tool
 
     prompt = spec["prompt"]
@@ -73,8 +179,12 @@ def build_one(spec: dict, *, quick: bool, learn: bool) -> dict:
     card: dict = {"prompt": prompt, "note": spec.get("note", ""), "error": None,
                   "img": None, "gif": None, "flywheel": None}
     try:
-        rid = call_tool("create_robot", {"prompt": prompt})["result"]["robot_id"]
+        cr = (reuse or {}).get(prompt) or call_tool("create_robot", {"prompt": prompt})["result"]
+        rid = cr["robot_id"]
         card["robot_id"] = rid
+        # the COMPOSER's own record of which path built this gene -- so the page reports the design path per
+        # robot instead of inferring it once from the flags (a configured LLM that 429s falls back per body)
+        card["design_source"] = cr.get("design_source", "unknown")
 
         rv = call_tool("render_view", {"robot_id": rid}).get("result", {})
         arts = rv.get("artifacts") or []
@@ -110,6 +220,47 @@ def build_one(spec: dict, *, quick: bool, learn: bool) -> dict:
     return card
 
 
+def build_family(specs: list[dict]) -> list[dict]:
+    """Build the same-family comparison row: create -> render -> verify each body at ONE shared horizon.
+
+    APPLES TO APPLES IS THE WHOLE POINT. The gallery cards run a mix of horizons -- a legged card re-verifies after
+    a flywheel training pass, which rewrites the body's operating point -- so lifting their numbers into one table
+    would put a TRAINED dog next to two untrained animals and call the difference morphology. Every body here gets
+    the same 800-step quick rollout and no flywheel pass, because the property on show is the operating point
+    ``create_robot`` fits to each body at BUILD time, before any training.
+
+    Runs BEFORE the battery so the dog it creates can be handed to ``build_one`` by robot_id (``run_gallery``
+    passes it as ``reuse``): the dog in this table is then literally the dog in the card, measured earlier in its
+    life rather than a second dog that happened to come out similar -- and it is built once, not twice."""
+    from virturoid.services.agent_tools import call_tool
+
+    rows: list[dict] = []
+    for spec in specs:
+        prompt = spec["prompt"]
+        t0 = time.time()
+        row: dict = {"prompt": prompt, "label": spec.get("label", prompt), "error": None, "img": None}
+        try:
+            cr = call_tool("create_robot", {"prompt": prompt})["result"]
+            rid = cr["robot_id"]
+            row["design_source"] = cr.get("design_source", "unknown")
+            row["robot_id"] = rid
+            rv = call_tool("render_view", {"robot_id": rid}).get("result", {})
+            arts = rv.get("artifacts") or []
+            row["img"] = _b64(arts[0]) if arts else None
+            vr = call_tool("verify_robot", {"robot_id": rid, "mode": "quick"}).get("result", {})
+            row["verdict"] = vr.get("verdict", "no verdict")
+            row["credible"] = vr.get("credible_walk")
+            row["forward_m"] = vr.get("forward_m")
+            row.update(_body_metrics(rid))
+        except Exception as exc:  # noqa: BLE001
+            row["error"] = f"{type(exc).__name__}: {exc}"
+        row["seconds"] = round(time.time() - t0, 1)
+        rows.append(row)
+        print(f"      [compare] {_ascii(row['label'])}: {_ascii(row.get('verdict') or row.get('error'))} "
+              f"({row.get('mass_kg')} kg, {row.get('seconds')}s)", flush=True)
+    return rows
+
+
 def _card_html(c: dict) -> str:
     if c.get("error"):
         return (f'<article class="card err"><h3>{html.escape(c["prompt"])}</h3>'
@@ -138,14 +289,193 @@ def _card_html(c: dict) -> str:
             f'<p class="note">{html.escape(c.get("note",""))}</p>'
             f'<p class="badge {badge_cls}">{html.escape(str(c.get("verdict","")))}</p>'
             f'{f"<p class=metrics>{metrics}</p>" if metrics else ""}{fly}'
-            f'<p class="foot">{html.escape(c.get("kind","?"))} · {c.get("seconds","?")}s</p></article>')
+            f'<p class="foot">{html.escape(c.get("kind","?"))} · {c.get("seconds","?")}s'
+            f' · designed by {html.escape(_source_label(c.get("design_source")))}</p></article>')
 
 
-def render_html(cards: list[dict], *, quick: bool) -> str:
+def _source_label(src: str | None) -> str:
+    """Human-readable design path for a card, straight off the gene's own ``design_source`` stamp."""
+    return _SOURCE_LABEL.get(str(src or "").lower(), str(src or "unknown"))
+
+
+def _path_banner(path: dict, n_family: int, bodies: list[dict] | None = None) -> str:
+    """The banner that stops this page over-claiming. Top of the document, same weight as the headline.
+
+    This exists because the page previously said 'text -> robot' over a run in which no model read any text. The
+    fix is not to hide the offline path (it is the right default -- no key, no spend, reproducible on a fresh
+    clone); it is to name it, name what it costs, and name what the other path would add.
+
+    RESOLVING a backend is not the same as USING one, which is the trap this banner would otherwise fall into in
+    its LLM form: a configured model that rate-limits, times out or returns a graph that fails grounding falls
+    back PER BODY, and the run would still be headed 'an LLM designed these bodies'. So the LLM branch counts the
+    ``design_source`` stamps the composer actually left and reports the split when it is not unanimous."""
+    if path.get("llm"):
+        model = f' ({html.escape(str(path.get("model")))})' if path.get("model") else ""
+        stamps = [str(b.get("design_source") or "").lower() for b in (bodies or []) if not b.get("error")]
+        n_llm = sum(1 for s in stamps if s in ("anatomy", "llm_anatomy_graph", "anatomy_graph", "intent"))
+        split = ""
+        if stamps and n_llm == 0:
+            split = ('<p><b>&hellip;except that none of them carry an LLM design stamp.</b> The backend was '
+                     'resolved but every body fell back to the offline compositor — unavailable, rate-limited, or '
+                     'its graph failed grounding. Read this page as an offline run.</p>')
+        elif stamps and n_llm < len(stamps):
+            split = (f'<p><b>It did not design all of them.</b> {n_llm} of {len(stamps)} bodies carry an LLM '
+                     f'design stamp; the rest fell back to the offline compositor when the model was unavailable '
+                     f'or its graph failed grounding. Per-card labels below say which is which.</p>')
+        body = (f'<p><b>An LLM designed these bodies.</b> Backend <code>{html.escape(str(path.get("backend")))}'
+                f'</code>{model} was resolved for the <code>morphology</code> role and asked to author each body '
+                f'as an anatomy graph — parts, topology, attachment, proportions — which the general compiler then '
+                f'grounds into geometry. Each card is stamped with the path that actually produced it, so a body '
+                f'the model declined or malformed shows its offline fallback instead of silently borrowing the '
+                f'credit.</p>{split}')
+    else:
+        body = ('<p><b>No LLM was called in this run.</b> The demo runs with the project&rsquo;s <code>.env</code> '
+                'suppressed (<code>VIRTUROID_NO_LOCAL_ENV=1</code>) and no backend configured in the environment '
+                'either, so <code>get_llm()</code> returned nothing — that was checked at the start of the run, not '
+                'assumed. Every body below was composed by the <b>offline compositor</b>: the prompt is routed by '
+                'keyword to a body class, then built by whichever deterministic builder fits it — animal proportion '
+                'priors and size words shape a creature, a requirements recipe (reach, payload) shapes an arm — and '
+                'the geometry is grounded from there. That is a real generator, not a stored model. But its '
+                'vocabulary is the words someone wrote down, so a creature nobody enumerated composes to the generic '
+                'body plan, and each card below says which builder it came from.</p>'
+                '<p><b>What the LLM path adds</b> is exactly that vocabulary: it authors the anatomy for a creature '
+                'the keyword router has never heard of. Re-run with <code>--llm</code> and a configured backend to '
+                'use it. <b>What does not change either way:</b> the physics, the renders and the verdicts. Those '
+                'are MuJoCo rollouts of the body that was actually built, on both paths.</p>')
+    extra = (f'<p>The <b>same-family comparison</b> further down is the load-bearing measurement on this page: '
+             f'{n_family} prompts from one family, and whether they produce {n_family} different bodies or one body '
+             f'{n_family} times — measured, with the numbers printed.</p>' if n_family else "")
+    return f'<section class="honesty"><h2>How this run was built</h2>{body}{extra}</section>'
+
+
+def _family_html(rows: list[dict]) -> str:
+    """The differentiation panel: renders side by side + a table of MEASURED body numbers.
+
+    Read this table adversarially, which is how it is built: if the walkability gate had replaced a body with the
+    shared fanned template, the SUBSTITUTED column would say so and the mass/proportion columns would collapse to
+    one repeated row -- which is precisely what they used to do (13.500 kg / 0.498 for every quadruped prompt)."""
+    if not rows:
+        return ""
+    figs, trs = [], []
+    for r in rows:
+        if r.get("error"):
+            figs.append(f'<figure class="fam err"><figcaption>{html.escape(str(r.get("label")))}</figcaption>'
+                        f'<pre>{html.escape(r["error"])}</pre></figure>')
+            continue
+        img = r.get("img")
+        media = (f'<img src="data:{img[0]};base64,{img[1]}" alt="{html.escape(str(r.get("prompt")))}"/>'
+                 if img else '<div class="noimg">no render</div>')
+        figs.append(f'<figure class="fam"><div class="media">{media}</div>'
+                    f'<figcaption>&ldquo;{html.escape(str(r.get("prompt")))}&rdquo;</figcaption></figure>')
+        sub = ('<span class="bad">SUBSTITUTED</span>' if r.get("substituted")
+               else '<span class="ok">kept — its own body</span>')
+        g = r.get("gait") or {}
+        gait = (f'freq {round(float(g.get("freq", 0)), 2)} / kp {round(float(g.get("kp", 0)), 1)}' if g
+                else 'shipped default')
+        # the fitter's own sentence ("searched N gaits ... walks X m vs the default's Y m") on hover: too long for
+        # a column, too good to throw away -- it is the receipt for the number in the cell
+        gtip = f' title="{html.escape(str(r.get("gait_note")))}"' if r.get("gait_note") else ""
+        vcls = _verdict_class(r.get("verdict", ""), r.get("credible"))
+        trs.append(
+            f'<tr><th>{html.escape(str(r.get("label")))}</th>'
+            f'<td>{r.get("mass_kg")}</td><td>{r.get("leg_m")}</td><td>{r.get("torso_m")}</td>'
+            f'<td>{r.get("torso_over_leg")}</td><td>{r.get("segments")}/{r.get("dof")}</td>'
+            f'<td class="gait"{gtip}>{html.escape(gait)}</td><td>{sub}</td>'
+            f'<td><span class="badge {vcls}">{html.escape(str(r.get("verdict","")))}</span> '
+            f'{("" if r.get("forward_m") is None else str(r.get("forward_m")) + " m")}</td></tr>')
+    dog_note = ('The dog card in the gallery above is <i>this same robot</i>, composed once and shared between the '
+                'two sections: there it is measured after a flywheel training pass, here at build time with no '
+                'training at all, which is why its two distances differ. '
+                if any((r.get("label") or "") == "dog" for r in rows) else "")
+    # SAY WHAT THE OPERATING-POINT COLUMN ACTUALLY SAYS. The build-time fitter only keeps a searched gait when it
+    # beats the shipped default, so on a run where every body walks on the default the column reads "shipped
+    # default" three times -- and a fixed caption crediting "their fitted operating points" would be describing a
+    # different run. Which of the two happened is itself the interesting bit, so report it either way.
+    n_own = sum(1 for r in rows if not r.get("error") and r.get("gait"))
+    n_ok = sum(1 for r in rows if not r.get("error"))
+    if n_own == 0:
+        gait_note = ('Every one of them walked on the shipped default gait — none needed an operating point '
+                     'searched for it, which is the cheap outcome, not a missing step: the fitter only keeps a '
+                     'searched gait when it beats the default. ')
+    elif n_own == n_ok:
+        gait_note = (f'All {n_ok} needed an operating point searched for its own body — the shipped default did '
+                     f'not walk them, and the column names what did. ')
+    else:
+        gait_note = (f'{n_own} of {n_ok} needed an operating point searched for its own body; the other '
+                     f'{n_ok - n_own} already walked on the shipped default. ')
+    # NAME THE CEILING, and only when the data shows it. The offline compositor re-proportions ONE skeleton, so
+    # the segs/DOF column repeats -- that is the honest limit of an offline differentiation claim and the exact
+    # thing the LLM path exists to lift. Conditional, because a mixed-topology family (a 6-leg prompt) would make
+    # the sentence false, and a fixed caption that can go false is the failure mode this whole page is about.
+    topo = {(r.get("segments"), r.get("dof")) for r in rows if not r.get("error") and r.get("segments")}
+    topology_note = (
+        '<p class="small"><b>And the limit of that claim, since the table shows it anyway:</b> the segs/DOF column '
+        'is identical down the page. On this run the prompts differentiate <i>proportion, scale and the fitted '
+        'operating point</i> — they do not author a different skeleton. Same body plan, re-proportioned, each one '
+        're-tuned until it walks. Authoring a genuinely different anatomy for a creature nobody wrote down is what '
+        'the LLM design path is for.</p>' if len(topo) == 1 and len(rows) > 1 else "")
+    return f"""<section class="family">
+  <h2>Same family, different bodies</h2>
+  <p>Breadth (a leg, an arm, a wheel) is easy to fake with a handful of unrelated templates. The harder question:
+     {len(rows)} prompts from <b>one</b> family. Until recently the honest answer was that they collapsed — the
+     walkability gate judged every authored quadruped with another robot&rsquo;s hand-tuned operating point, all of
+     them measured ~0&nbsp;m, and all of them were replaced by the same fanned template at a byte-identical
+     13.500&nbsp;kg and torso:leg&nbsp;0.498. Building now grounds the body, fits an operating point <i>to</i> it,
+     and only then asks whether it can walk.</p>
+  <div class="famrow">{"".join(figs)}</div>
+  {_family_headline(rows)}
+  <div class="tablewrap"><table>
+    <thead><tr><th></th><th>mass (kg)</th><th>leg (m)</th><th>torso (m)</th><th>torso:leg</th>
+      <th>segs/DOF</th><th>operating point</th><th>body</th><th>verdict</th></tr></thead>
+    <tbody>{"".join(trs)}</tbody>
+  </table></div>
+  <p class="small">Every body here was built and verified identically — same 800-step quick rollout, no flywheel
+     pass — so what differs is the bodies. {gait_note}{dog_note}These are original generated bodies, not scans or
+     scale models of the animals; the claim is that the prompts produce <i>different</i> robots that <i>each</i>
+     walk, not that a robot horse is to scale.</p>
+  {topology_note}
+</section>"""
+
+
+def _family_headline(rows: list[dict]) -> str:
+    """COMPUTE the panel's claim from the panel's own numbers, so it can contradict itself in public.
+
+    A comparison table is only evidence if the reader does not have to do the comparing. This counts distinct
+    bodies by (mass, leg, torso) and prints what it finds -- so a run where the gate DOES collapse two prompts
+    onto one template renders '3 prompts -> 2 distinct bodies' in the same red the failing verdicts use, and the
+    section stops claiming differentiation without anyone editing the prose."""
+    ok = [r for r in rows if not r.get("error") and r.get("mass_kg") is not None]
+    if not ok:
+        return ""
+    distinct = {(r.get("mass_kg"), r.get("leg_m"), r.get("torso_m")) for r in ok}
+    subs = sum(1 for r in ok if r.get("substituted"))
+    walks = sum(1 for r in ok if _verdict_class(r.get("verdict", ""), r.get("credible")) == "good")
+    cls = "good" if (len(distinct) == len(ok) and subs == 0) else "bad"
+    masses = " / ".join(str(r.get("mass_kg")) for r in ok)
+    return (f'<p class="headline"><span class="badge {cls}">{len(ok)} prompts &rarr; {len(distinct)} distinct '
+            f'bodies</span> {masses} kg &middot; {subs} substituted &middot; {walks}/{len(ok)} credible walks</p>')
+
+
+def render_html(cards: list[dict], *, quick: bool, path: dict | None = None,
+                family: list[dict] | None = None) -> str:
     good = sum(1 for c in cards if not c.get("error") and _verdict_class(c.get("verdict",""), c.get("credible")) == "good")
     total = len(cards)
     cards_html = "\n".join(_card_html(c) for c in cards)
     mode = "quick" if quick else "full"
+    path = path if path is not None else {"llm": False, "backend": None}
+    banner = _path_banner(path, len(family or []), cards + (family or []))
+    family_html = _family_html(family or [])
+    # the design-path chip must track the RUN, not a slogan: 'zero internal LLM tokens' is a true and load-bearing
+    # claim offline and a false one under --llm, and a page that gets that wrong has no standing to lecture
+    # anyone about honest verdicts.
+    chip = (f'designed by {html.escape(str(path.get("backend")))}' if path.get("llm")
+            else 'offline compositor · zero internal LLM tokens')
+    # only promise the reader a section this run actually produced (--mini has no comparison panel)
+    pointer = ('     Two things worth reading before the pictures: <b>how this run was built</b>, immediately '
+               'below, and the <b>same-family comparison</b> at the bottom, which is the measurement that '
+               'matters most.' if family else
+               '     Start with <b>how this run was built</b>, immediately below — it names which brain designed '
+               'these bodies.')
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Virturoid — text-to-robot gallery</title>
@@ -189,35 +519,84 @@ main {{ display:grid; grid-template-columns:repeat(auto-fill,minmax(320px,1fr));
 .card.err {{ border-color:rgba(248,81,73,.4); }}
 .card.err pre {{ margin:0 16px 14px; color:var(--bad); font-size:11.5px; white-space:pre-wrap; }}
 footer {{ padding:20px 28px 50px; color:var(--dim); font-size:12.5px; border-top:1px solid var(--line); }}
+code {{ background:#0b0f16; border:1px solid var(--line); border-radius:4px; padding:1px 5px; font-size:12.5px; }}
+.honesty {{ margin:22px 28px 0; padding:18px 20px; background:#111722; border:1px solid var(--line);
+            border-left:3px solid var(--accent); border-radius:10px; max-width:88ch; }}
+.honesty h2 {{ margin:0 0 8px; font-size:15px; letter-spacing:.02em; text-transform:uppercase; color:var(--accent); }}
+.honesty p {{ margin:0 0 10px; color:var(--dim); font-size:13.5px; }}
+.honesty p:last-child {{ margin-bottom:0; }}
+.honesty b {{ color:var(--ink); }}
+.family {{ padding:6px 28px 54px; border-top:1px solid var(--line); }}
+.family h2 {{ margin:26px 0 8px; font-size:20px; letter-spacing:-.01em; }}
+.family p {{ margin:0 0 14px; color:var(--dim); max-width:88ch; font-size:13.5px; }}
+.family b {{ color:var(--ink); }}
+.family p.small {{ font-size:12.5px; margin-top:14px; }}
+.family p.headline {{ color:var(--ink); font-size:13.5px; margin-bottom:12px; }}
+.family p.headline .badge {{ margin:0 8px 0 0; padding:4px 10px; }}
+.famrow {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(250px,1fr)); gap:14px; margin-bottom:18px; }}
+figure.fam {{ margin:0; background:var(--panel); border:1px solid var(--line); border-radius:12px; overflow:hidden; }}
+figure.fam figcaption {{ padding:10px 14px; font-size:13px; color:var(--dim); }}
+figure.fam.err pre {{ margin:14px; color:var(--bad); font-size:11.5px; white-space:pre-wrap; }}
+.tablewrap {{ overflow-x:auto; }}
+table {{ border-collapse:collapse; font-size:13px; min-width:640px; }}
+th, td {{ text-align:left; padding:8px 14px 8px 0; border-bottom:1px solid var(--line); white-space:nowrap; }}
+thead th {{ color:var(--dim); font-weight:600; font-size:12px; text-transform:uppercase; letter-spacing:.03em; }}
+tbody th {{ color:var(--ink); }}
+td .badge {{ margin:0; padding:3px 8px; font-size:11.5px; }}
+td.gait {{ color:var(--dim); }}
+.ok {{ color:var(--good); }}
+table .bad {{ color:var(--bad); font-weight:600; }}
 </style></head><body>
 <header>
   <h1>Virturoid <span>text → robot</span></h1>
   <p>Each robot below was generated from the plain-text prompt shown, then simulated and scored with an
-     un-gameable verdict. Renders and metrics are the real ones — bodies that don't work say so.</p>
-  <div class="stat"><b>{good}</b>/{total} credible · mode: {mode} · agent-first (zero internal LLM tokens)</div>
+     un-gameable verdict. Renders and metrics are the real ones — bodies that don't work say so.
+{pointer}</p>
+  <div class="stat"><b>{good}</b>/{total} credible · mode: {mode} · {chip}</div>
 </header>
+{banner}
 <main>
 {cards_html}
 </main>
+{family_html}
 <footer>Generated by <code>scripts/run_mvp_demo.py</code>. Self-contained (renders embedded).
   Verdicts: forward displacement + cadence + upright for legged; friction grasp + lift for arms; wheel contact for
   mobile. The flywheel bars compare verify-before vs verify-after learning a gait on the same body.</footer>
 </body></html>"""
 
 
-def run_gallery(prompts: list[dict], out_dir: str, *, quick: bool = False, learn: bool = True) -> str:
-    """Build the battery and write a self-contained index.html. Returns the HTML path."""
+def run_gallery(prompts: list[dict], out_dir: str, *, quick: bool = False, learn: bool = True,
+                compare: list[dict] | None = None, offline: bool = True) -> str:
+    """Build the battery and write a self-contained index.html. Returns the HTML path.
+
+    ``offline`` (default) suppresses the project ``.env`` so no API key is needed and no model is called; the
+    page says so. ``compare`` runs the same-family differentiation panel and, being built first, donates any
+    body whose prompt the battery also uses."""
+    if offline:
+        # set HERE rather than at import, so --llm can decline it before the first virturoid import
+        os.environ.setdefault("VIRTUROID_NO_LOCAL_ENV", "1")
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     os.environ.setdefault("VIRTUROID_SESSION_DIR", str(out / "session"))
+    path_info = _design_path()
+    print(_ascii("design path: " + (f"LLM backend '{path_info.get('backend')}'" if path_info.get("llm")
+                                    else "OFFLINE compositor (no LLM enabled for this run)")), flush=True)
+    family: list[dict] = []
+    if compare:
+        print(f"[compare] same-family differentiation ({len(compare)} bodies) ...", flush=True)
+        family = build_family(compare)
+    reuse = {r["prompt"]: r for r in family if r.get("robot_id") and not r.get("error")}
     cards = []
     for i, spec in enumerate(prompts, 1):
-        print(f"[{i}/{len(prompts)}] {spec['prompt']} ...", flush=True)
-        c = build_one(spec, quick=quick, learn=learn)
-        print(f"      -> {c.get('verdict', c.get('error'))}  ({c.get('seconds')}s)", flush=True)
+        print(f"[{i}/{len(prompts)}] {_ascii(spec['prompt'])} ...", flush=True)
+        c = build_one(spec, quick=quick, learn=learn, reuse=reuse)
+        # _ascii, not a bare f-string: the verdicts are interpolated here and some carry typographic dashes
+        # ("a scripted gait can't balance a walking biped - needs a learned policy"), which a cp1252 console
+        # renders as a black diamond. Sanitising at the print site covers every string, not one known literal.
+        print(f"      -> {_ascii(c.get('verdict', c.get('error')))}  ({c.get('seconds')}s)", flush=True)
         cards.append(c)
     path = out / "index.html"
-    path.write_text(render_html(cards, quick=quick), encoding="utf-8")
+    path.write_text(render_html(cards, quick=quick, path=path_info, family=family), encoding="utf-8")
     return str(path)
 
 
@@ -227,14 +606,22 @@ def main() -> int:
     ap.add_argument("--mini", action="store_true", help="2-robot quick battery (smoke)")
     ap.add_argument("--quick", action="store_true", help="quick verify mode (faster, less definitive)")
     ap.add_argument("--no-learn", action="store_true", help="skip the flywheel learn pass")
+    ap.add_argument("--no-compare", action="store_true", help="skip the same-family differentiation panel")
+    ap.add_argument("--llm", action="store_true",
+                    help="use the configured LLM design path (reads the project .env) instead of the offline "
+                         "compositor; the page reports which one actually ran")
     args = ap.parse_args()
     battery = MINI_BATTERY if args.mini else FULL_BATTERY
     quick = args.quick or args.mini
     learn = not args.no_learn and not args.mini
+    # the comparison is the point of the full run; --mini stays a 2-card smoke pass (and a 2-card page has no
+    # room for a differentiation claim it did not measure)
+    compare = None if (args.mini or args.no_compare) else FAMILY_COMPARE
     t0 = time.time()
-    path = run_gallery(battery, args.out, quick=quick, learn=learn)
-    print(f"\nGallery ({len(battery)} robots) written in {round(time.time()-t0,1)}s:\n  {path}\n"
-          f"Open it in a browser — it's self-contained.")
+    path = run_gallery(battery, args.out, quick=quick, learn=learn, compare=compare, offline=not args.llm)
+    n = len({s["prompt"] for s in battery} | {s["prompt"] for s in (compare or [])})   # the dog is shared, not doubled
+    print(_ascii(f"\nGallery ({n} robots) written in {round(time.time()-t0,1)}s:\n  {path}\n"
+                 f"Open it in a browser - it's self-contained."))
     return 0
 
 

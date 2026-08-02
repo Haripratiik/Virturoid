@@ -1176,7 +1176,8 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float | None = None, hi
                        knee_amp: float | None = None, duty: float = 0.25, kp: float | None = None,
                        kd: float | None = None, record_qpos: bool = False, frame_every: int = 5,
                        turn_bias: float = 0.0, steer_fn=None, return_control_plan: bool = False,
-                       record_ctrl: bool = False) -> dict:
+                       record_ctrl: bool = False, per_joint_gains: bool | str = False,
+                       live_duty: bool = False) -> dict:
     """STATICALLY-STABLE CRAWL gait for a WIDE-stance quadruped (open-loop, NO policy). Lifts ONE leg at a time
     (the 4 legs at quarter-cycle phases with a LOW-DUTY knee pulse) so 3 feet are ALWAYS planted -> the CoM stays
     inside the support triangle -> it CANNOT roll over. On a FANNED wide-stance body
@@ -1184,7 +1185,30 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float | None = None, hi
     ~1.0 m @ 0.34 m/s, upright roll ~8deg, tall height 0.83, support_frac 0.84) — where the diagonal TROT rolls
     over for want of active balance. Returns the SAME metrics dict as ``recipe_rollout_morph``. REQUIRES a wide
     stance: narrow feet make a thin support triangle that tips even under a crawl (see
-    [[walking-breakthrough-abduction]]). Hip strides fore-aft (world-y); knee lifts; abduction (world-x) held."""
+    [[walking-breakthrough-abduction]]). Hip strides fore-aft (world-y); knee lifts; abduction (world-x) held.
+
+    TWO OPT-IN CONTROLLER CHANGES, both DEFAULT-OFF and byte-identical to the shipped gait when off. This
+    function produces every credible walk the product has, and the bodies are co-tuned with its operating point
+    ([[body-and-gait-are-co-tuned]]), so neither may become the default without its own measured before/after.
+
+    ``per_joint_gains`` — give each actuated DOF its OWN stiffness instead of one scalar ``kp`` for all of them.
+      Today a joint carrying a head and a joint carrying a whole leg get identical gains; measured on the
+      grounded authored bodies, :func:`recipe_gains` (the zero-rollout ``Kp = J_eff * wn^2`` law, already used by
+      the recipe/CPG path) wants a spread of 5.8x (dog) / 8.6x (cheetah) / 9.4x (horse) between the stiffest and
+      softest joint: at kp=32 the hips that carry a whole leg run at 0.49x (dog) to 0.20x (horse) of the
+      stiffness the law asks for, while the knees run 1.8x (horse) to 2.8x (dog) TOO stiff.
+        * ``"recipe"`` (or ``True``) — the ABSOLUTE law: ``kp_j = I_eff_j * wn^2``. Ignores the scalar ``kp``.
+        * ``"scaled"`` — the recipe's SHAPE, anchored on the scalar ``kp`` (``kp_j = kp * r_j / median(r)``).
+          This is the mode that COMPOSES with ``gait_flywheel.fit_gait_for_body``: that fit gives a body its own
+          operating point but still hands every joint on it the same stiffness, so "scaled" keeps the fitted
+          op-point and only redistributes it. ``"recipe"`` would discard the fitted ``kp`` outright.
+      A control plan produced under per-joint gains is marked NON-exportable: the frozen target program carries a
+      scalar ``kp``/``kd`` and cannot reproduce the rollout it would claim to describe (the vectors are attached
+      as ``kp_per_joint``/``kd_per_joint`` for a future exporter that can).
+
+    ``live_duty`` — make the ``duty`` argument actually reach the controller (see the note at the parameter
+      defaults below: it is INERT today). ON, ``duty`` replaces the structurally-derived swing fraction. The
+      >=10-leg stability cap still applies afterwards as a ``min``, so a centipede's duty is still bounded."""
     import mujoco
     import numpy as np
 
@@ -1205,6 +1229,22 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float | None = None, hi
     # (kp/kd) deploys with it — the deploy verdict then matches the tune's credible op-point. Explicit kwarg wins.
     kp = float(_gp.get("kp", 32.0)) if kp is None else float(kp)
     kd = float(_gp.get("kd", 1.5)) if kd is None else float(kd)
+    # `duty` IS NOT READ UNLESS `live_duty=True` (default OFF). It is deliberately absent from the five lines
+    # above, and that is not an oversight in the cache — it is INERT IN THIS FUNCTION. The swing fraction actually
+    # used is `lift_duty`, derived STRUCTURALLY below from the static-stability margin (`beta`: 0.75 for a quad ->
+    # lift_duty 0.25, which is why the signature default LOOKS like the live value and is not). On the grounded
+    # authored dog (MEASURED 2026-08-01):
+    # duty = 0.12 / 0.25 / 0.42 all give forward = +0.345000 exactly, identical to six decimal places.
+    #
+    # This mattered beyond documentation, because `gait_search.PARAM_NAMES` used to SEARCH `duty` over
+    # [0.12, 0.42] and `bank_gait` stored it: the CEM spent a sixth of its dimensionality on a knob with no
+    # effect, and the resulting variance-collapse was then mined and shown to operators as the bank's
+    # tightest-clustered parameter. `duty` has since been REMOVED from the search space, the fitted op-point and
+    # the mined hints (task #265) — see the note at `gait_search.PARAM_NAMES`. It survives HERE, as this
+    # function's parameter, only because `live_duty` (default OFF, wired below at the lift_duty derivation) can
+    # make it real. Turning that on is a REAL CONTROLLER CHANGE — it moves the gait of every body including the
+    # canonical template the whole op-point is co-tuned with — and measured, it is not free, so it stays off.
+    # docs/breaking_the_cotuning_wall.md §3.1.2 describes this as "read from 5 of 6"; it was stronger than that.
 
     from virturoid.services.appendage_map import build_appendage_map
     from virturoid.services.gait_engine import select_duty
@@ -1227,6 +1267,10 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float | None = None, hi
     legs_list = amap.legs
     beta = 0.75 if amap.n_legs == 4 else select_duty(amap, model)
     lift_duty = max(0.15, min(0.5, 1.0 - beta))
+    if live_duty:                                             # OPT-IN: `duty` finally reaches the controller.
+        lift_duty = max(0.05, min(0.9, float(duty)))          # Widened past the structural [0.15, 0.5] window on
+        #                                                       purpose — the whole point is that the CEM's own
+        #                                                       [0.12, 0.42] range becomes reachable end to end.
     xs = sorted({round(lg.tip_xy[0], 2) for lg in legs_list})
     rank_of = {x: i for i, x in enumerate(xs)}
     hip_k: dict = {}; knee_k: dict = {}; seg_of: dict = {}; is_right: dict = {}; hip_sign: dict = {}
@@ -1274,6 +1318,27 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float | None = None, hi
         knee_amp = min(knee_amp, 0.35)                        # low knee lift so few feet leave the ground
         kp = max(kp, 160.0); kd = max(kd, 7.0)                # STIFF stance legs hold the long body up (soft kp=32
         #                                                       let it sink; measured kp~160 keeps height_ratio >0.6)
+    # PER-JOINT PD GAINS (opt-in; see the docstring). The DEFAULT branch builds a flat list of the SAME python
+    # float the loop used to close over, so the arithmetic in `_run` is unchanged term for term and the shipped
+    # gait is byte-identical. Built HERE, after the many-leg block, so the >=10-leg stiffness floor applies to
+    # the vectors exactly as it applies to the scalars.
+    _gain_mode = ("recipe" if per_joint_gains is True else
+                  (str(per_joint_gains) if per_joint_gains else ""))
+    kp_of = [float(kp)] * graph.n_tokens
+    kd_of = [float(kd)] * graph.n_tokens
+    if _gain_mode:
+        if _gain_mode not in ("recipe", "scaled"):
+            raise ValueError(f"per_joint_gains must be False, True/'recipe' or 'scaled' (got {per_joint_gains!r})")
+        _kpv, _kdv, _ = recipe_gains(model, graph)
+        if _gain_mode == "scaled":
+            # Keep the body's OPERATING POINT (the scalar kp/kd, which on a shipped robot is the one
+            # `fit_gait_for_body` fitted to THIS body) and only redistribute it across joints by the recipe's
+            # shape. Normalising on the MEDIAN means the typical joint keeps the fitted stiffness exactly.
+            _kpv = _kpv * (float(kp) / max(1e-9, float(np.median(_kpv))))
+            _kdv = _kdv * (float(kd) / max(1e-9, float(np.median(_kdv))))
+        if len(hip_k) >= 10:                                  # same floor the scalar path just applied
+            _kpv = np.maximum(_kpv, 160.0); _kdv = np.maximum(_kdv, 7.0)
+        kp_of = [float(v) for v in _kpv]; kd_of = [float(v) for v in _kdv]
     dt = float(model.opt.timestep)
     _gz0 = np.asarray(data.geom_xpos[:, 2]); body_g = [gi for gi in range(model.ngeom) if int(model.geom_bodyid[gi]) != 0]
     feet = []
@@ -1324,7 +1389,7 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float | None = None, hi
                 tgt[hip_k[key]] = _qref[hip_k[key]] + amp_key * hip_sign[key] * s
             for k in range(graph.n_tokens):
                 qv = float(d.qvel[vadr[k]])
-                tau = kp * (tgt[k] - float(d.qpos[qadr[k]])) - kd * qv
+                tau = kp_of[k] * (tgt[k] - float(d.qpos[qadr[k]])) - kd_of[k] * qv
                 d.ctrl[act_u[k]] = float(np.clip(tau, -clamps[k], clamps[k]))
             if rec_ctrl:                                      # the exact torques that drive THIS step (parity leg:
                 ctrl_rows.append(np.array(d.ctrl, dtype=float))  # replay these bytes into both engines, v7-F3)
@@ -1351,7 +1416,17 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float | None = None, hi
                "cadence": round(lifts / _T, 2), "upright_frac": round(up_steps / max(1, alive), 3),
                "support_frac": round(support_steps / max(1, alive), 3), "n_feet": int(len(feet_idx)),
                "yaw_change": round(yaw_change, 3), "lateral": round(float(d.qpos[bq + 1] - y0), 3),
-               "gait": "crawl", "n_tokens": graph.n_tokens}
+               "gait": "crawl", "n_tokens": graph.n_tokens,
+               # THE HORIZON THIS RESULT WAS MEASURED AT, and the trace's sampling stride. Without these two a
+               # metrics dict cannot say how long anyone looked, so `gait_quality.settling` cannot tell a walk
+               # from a drift-before-falling and every verdict is implicitly a claim about a horizon nobody
+               # recorded (task #267). `alive` is NOT a substitute: it equals `steps` for every survivor.
+               "steps": int(nsteps), "frame_every": int(frame_every) if record else 0}
+        if _gain_mode:                                        # disclosure, only when the opt-in flag is on, so
+            res["gain_mode"] = _gain_mode                     # the default result dict is unchanged key for key
+            res["kp_span"] = [round(min(kp_of), 3), round(max(kp_of), 3)]
+        if live_duty:
+            res["lift_duty"] = round(float(lift_duty), 4)
         if record:
             res["qpos_frames"] = frames or []
         if rec_ctrl:
@@ -1387,10 +1462,15 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float | None = None, hi
         # Do not export it as though it could.  The caller can fall back to the
         # explicitly-labelled trot starter rather than shipping a mismatched
         # controller.
-        exportable = len(hip_k) > 0 and len(hip_k) < 10
+        # Per-joint gains are NOT representable in this scalar-kp target program, so a plan produced under them
+        # would describe a controller that is not the one just measured. Refuse to call it exportable and carry
+        # the vectors alongside for an exporter that can consume them.
+        exportable = len(hip_k) > 0 and len(hip_k) < 10 and not _gain_mode
         out["control_plan"] = {
             "exportable": exportable,
-            "reason": None if exportable else "crawl requires a dynamic settled reference pose or has no leg map",
+            "reason": (None if exportable else
+                       ("per-joint PD gains are not representable in a scalar-kp target program" if _gain_mode
+                        else "crawl requires a dynamic settled reference pose or has no leg map")),
             "policy_type": "crawl_wave_gait",
             "joint_names": joint_names,
             "default_pose": [float(v) for v in q_def],
@@ -1405,6 +1485,10 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float | None = None, hi
                       "phase": float(best_phd[key]), "hip_sign": float(hip_sign[key])}
                      for key in sorted(hip_k)],
         }
+        if _gain_mode:
+            out["control_plan"].update({"gain_mode": _gain_mode,
+                                        "kp_per_joint": [round(v, 4) for v in kp_of],
+                                        "kd_per_joint": [round(v, 4) for v in kd_of]})
     return out
 
 

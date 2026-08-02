@@ -25,7 +25,7 @@ from virturoid.services.autonomous_builder import build_robot_package_from_promp
 DEMO_SET = {
     "arm_sort": "a tabletop robot arm that sorts red and blue blocks into matching bins",
     "build_a_quadruped_robot_that_walks": "build a quadruped robot that walks",
-    "build_a_dog_robot_that_walks": "build a dog robot that walks",
+    "dog_walk": "build a dog robot that walks",
     "hexapod_walk": "build a six-legged walking robot",
     "build_a_mobile_base_that_delivers_parts_indoors": "build a mobile base that delivers parts indoors",
     "humanoid": "a humanoid robot",

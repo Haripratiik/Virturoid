@@ -50,6 +50,12 @@ class PhysicalPrior:
     source: str
 
 
+# Everything a grounded body does NOT model: battery, compute, wiring harness, fasteners, covers. On commercial
+# machines of these classes it is roughly a quarter of the finished mass (a ~15 kg mid-size quadruped carries
+# ~1.5 kg of battery plus compute, harness and shell), and — the point — it is a FRACTION of the robot, not a
+# constant that happens to make every robot weigh the same. See the clamp in ``ground_gene``.
+_BALANCE_OF_SYSTEM_FRACTION = 0.25
+
 _QUADRUPED_PRIOR = PhysicalPrior("legged.quadruped", (12.0, 15.0), "commercial mid-size quadruped envelope")
 _COBOT_PRIOR = PhysicalPrior("manipulator.cobot", (17.0, 21.0), "6/7-axis collaborative-arm envelope")
 _AMR_PRIOR = PhysicalPrior("mobile.amr", (70.0, 150.0), "warehouse autonomous-mobile-robot envelope")
@@ -275,7 +281,30 @@ def ground_gene(gene, *, material: str = "aluminum", fill: float = 0.3, margin: 
         total += s.mass_kg
     balance_mass = 0.0
     if prior and total < prior.mass_band_kg[0] and not preserve_mass:
-        target = sum(prior.mass_band_kg) / 2.0
+        lo, hi = float(prior.mass_band_kg[0]), float(prior.mass_band_kg[1])
+        # CLAMP INTO THE BAND — do not SNAP TO ITS MIDPOINT.
+        #
+        # What the band protects: a body grounded from geometry + actuators alone has no battery, no compute, no
+        # wiring, no fasteners and no covers, so it is a styrofoam twin of the robot the customer would actually
+        # build. Sizing actuators and signing a walk verdict against that mass is the split-brain this branch
+        # exists to close, and lifting an implausibly light body to the class floor still closes it.
+        #
+        # What it ALSO did, and should not have: `target = mid(band)` made the balance-of-system mass "whatever it
+        # takes to reach one number", so EVERY under-band quadruped came out at EXACTLY 13.500 kg. Measured on
+        # this checkout, the authored dog grounds to 9.593 kg of its own structure+actuators and the cat to
+        # 10.577 -- a real 1 kg difference the design earned -- and both then shipped as 13.500. A dog and a cat
+        # were literally the same robot on the spec sheet. The band was written to stop a body being too light,
+        # not to erase what the body is.
+        #
+        # So: take the balance of system as the FRACTION of finished mass it really is on a commercial machine of
+        # this class (~25%: battery, compute, harness, shell), apply it to the body's OWN grounded mass, and clamp
+        # the result into the band. Lighter body in, lighter body out; nothing escapes the floor.
+        #
+        # Known and deliberately NOT changed here: a body that grounds ABOVE the floor gets no balance-of-system
+        # mass at all, so the mapping still steps at `lo`. Fixing that means giving every prior-classed body its
+        # balance of system, which moves masses that ship today (horse 15.951, cheetah 14.974) and re-sizes their
+        # actuators. That is its own change with its own gate.
+        target = min(hi, max(lo, total / (1.0 - _BALANCE_OF_SYSTEM_FRACTION)))
         balance_mass = max(0.0, target - total)
         root = gene.root()
         if root is not None:
@@ -284,6 +313,9 @@ def ground_gene(gene, *, material: str = "aluminum", fill: float = 0.3, margin: 
             gene.metadata["physical_prior"] = {
                 "id": prior.id, "mass_band_kg": list(prior.mass_band_kg), "source": prior.source,
                 "balance_of_system_mass_kg": round(balance_mass, 3),
+                "balance_of_system_fraction": _BALANCE_OF_SYSTEM_FRACTION,
+                "own_mass_kg": round(total - balance_mass, 3),
+                "clamped_to_band": bool(target in (lo, hi)),
                 "balance_of_system": ["battery", "compute", "wiring", "fasteners", "covers"],
             }
     # RECORD WHAT THESE MASSES WERE DERIVED AT. Without this, a downstream re-ground has no way to reproduce

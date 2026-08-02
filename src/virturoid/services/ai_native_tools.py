@@ -483,10 +483,13 @@ def _honest_biped(gene, *, steps: int = 1500) -> dict | None:
     import mujoco
     import numpy as np
 
-    from virturoid.services.appendage_map import build_appendage_map
+    from virturoid.services.body_kind import measured_legs
     from virturoid.services.gene_compiler import compile_gene_to_mjcf, standing_spawn_z
     m = mujoco.MjModel.from_xml_string(compile_gene_to_mjcf(gene, include_floor=True, spawn_z=standing_spawn_z(gene)))
-    if build_appendage_map(m).n_legs != 2 or m.nu == 0:
+    # the leg count comes from body_kind (the one structural counter), not a private appendage-map call: a
+    # Booster T1 measured ZERO legs here, so the biped block declined and a humanoid was judged by the
+    # multi-leg crawl gait that fells it -- the exact verdict this function exists to prevent.
+    if measured_legs(gene) != 2 or m.nu == 0:
         return None                                              # not a biped -> let the normal gait verdict stand
     # FIRST: the biped's BEST real controller — a banked LEARNED walk policy if one exists (the GPU-trained
     # humanoid), else the trot. If it moves the body FORWARD while upright, report THAT honest walk (the multi-leg
@@ -564,9 +567,21 @@ def _learned_gait_attempt(gene) -> dict | None:
 
 def _honest_gait(gene, *, steps: int = 1200, render: bool = False, tag: str = "gait") -> dict:
     """Run the general scripted gait and return the ANTI-GOODHART verdict (survived+cadence+support+upright+
-    forward, forward == actual displacement) — the honesty gate as a tool result, never a raw qpos dump."""
+    forward+RATE-HOLD, forward == actual displacement) — the honesty gate as a tool result, never a raw qpos dump.
+
+    ``steps`` IS PART OF THE CLAIM. At or above ``gait_quality._SETTLE_MIN_STEPS`` the verdict also asserts the
+    body was STILL WALKING at the end; below it the verdict is only about the horizon it saw, and ``settled``
+    says so in the result. The full (non-quick) legged verify runs the settling horizon precisely because that
+    is where the claim reaches a customer — measured, the grounded authored cat read CREDIBLE WALK at 1500 and
+    fell at step 2014 (task #267).
+
+    The recorded TRACE is subsampled with the horizon (``frame_every`` scales so ~300 frames are kept whatever
+    the horizon), so a 4x longer physics run does NOT make the replay GIF 4x longer or 4x more expensive to
+    render — the extra cost is simulation only.
+    """
     from virturoid.services.morph_policy import crawl_gait_rollout
-    from virturoid.services.gait_quality import classify, orientation_summary
+    from virturoid.services.gait_quality import classify, orientation_summary, settling
+    frame_every = max(5, int(steps) // 300)
     # A LIMBLESS serial spine (a snake) has no legs for the crawl gait — drive it as a land SERPENTINE undulator
     # instead (else it just falls / scores 0). The land analogue of routing a fish to the swim tier.
     try:
@@ -587,7 +602,7 @@ def _honest_gait(gene, *, steps: int = 1200, render: bool = False, tag: str = "g
     # cross-body hint region, and the deploy-select comparison below still guards it against the default.
     try:
         _own = (getattr(gene, "metadata", None) or {}).get("gait_params") or {}
-        _own = {k: float(_own[k]) for k in ("freq", "hip_amp", "knee_amp", "duty", "kp", "kd") if k in _own}
+        _own = {k: float(_own[k]) for k in ("freq", "hip_amp", "knee_amp", "kp", "kd") if k in _own}
         if _own:
             gait_params, gait_source = _own, "tuned_for_this_body"
     except Exception:  # noqa: BLE001 - a malformed cache must never block the verdict
@@ -614,19 +629,19 @@ def _honest_gait(gene, *, steps: int = 1200, render: bool = False, tag: str = "g
                 _h = mine_gait_hints(_db, gene=gene)              # VECTOR-nearest robots seed the deploy hint
             if _h.get("n", 0) >= 2:                              # ≥2 banked walks -> a real mined region to hint from
                 _p = _h["prior"]
-                gait_params = {k: float(_p[k]) for k in ("freq", "hip_amp", "knee_amp", "duty", "kp", "kd")
+                gait_params = {k: float(_p[k]) for k in ("freq", "hip_amp", "knee_amp", "kp", "kd")
                                if k in _p}
                 gait_source = "flywheel_hint"                    # a data-driven hint region, not a copied policy
     except Exception:  # noqa: BLE001 - the flywheel is an accelerant; a miss just uses the default gait
         if gait_source != "tuned_for_this_body":                 # never discard THIS body's own measured op-point
             gait_params = {}
-    r = crawl_gait_rollout(gene, steps=steps, record_qpos=True, **gait_params)
+    r = crawl_gait_rollout(gene, steps=steps, record_qpos=True, frame_every=frame_every, **gait_params)
     # DEPLOY-SELECT safety net: a recalled gait must never make THIS body walk worse than the shipped default
     # (gene-construction paths differ, so a banked gait may not fit every body). When a gait was recalled, ALSO
     # run the default and keep whichever is CREDIBLE (tie-break: further) — so a mismatched banked SLIDE can never
     # beat a credible default. The flywheel only ever helps.
     if gait_params:
-        r_def = crawl_gait_rollout(gene, steps=steps, record_qpos=True)
+        r_def = crawl_gait_rollout(gene, steps=steps, record_qpos=True, frame_every=frame_every)
         cred_r = classify(r).startswith("CREDIBLE")
         cred_def = classify(r_def).startswith("CREDIBLE")
         better_def = (cred_def and not cred_r) or (
@@ -686,6 +701,23 @@ def _honest_gait(gene, *, steps: int = 1200, render: bool = False, tag: str = "g
                 out["flywheel_banked"] = banked
         except Exception:  # noqa: BLE001 - self-update is an accelerant; never let it break a verdict
             pass
+    # SAY WHAT WAS ACTUALLY MEASURED, on every branch (scripted / learned policy / biped stand). A walk verdict
+    # is a claim about a horizon, and until task #267 the horizon was invisible: the grounded authored cat's
+    # "CREDIBLE WALK" was measured at 1500 steps and the body fell at 2014. `horizon_steps` says how long anyone
+    # looked; `settled` says whether that was long enough to check the body was STILL walking at the end;
+    # `travel_rate_m_per_1000` shows the profile a net displacement hides; `robustness_rel` is the error bar —
+    # how much relative perturbation this operating point survives — read from the fit that measured it (never
+    # re-measured here, which would put N extra rollouts on every verify).
+    _s = settling(r)
+    out["horizon_steps"] = int(steps)
+    out["settled"] = _s is not None
+    if _s is not None:
+        out["travel_rate_m_per_1000"] = {int(k): round(v, 3) for k, v in _s["rates"].items()}
+        out["holds_rate"] = bool(_s["holds_rate"])
+    _fit = (getattr(gene, "metadata", None) or {}).get("gait_fit") or {}
+    if out.get("gait_source") == "tuned_for_this_body" and "robustness_rel" in _fit:
+        out["robustness_rel"] = _fit["robustness_rel"]
+        out["robustness_probes"] = _fit.get("robustness_probes")
     if render and r.get("qpos_frames"):
         gif = _render_gait_gif(gene, r["qpos_frames"], tag)
         if gif:
@@ -918,10 +950,29 @@ def _render_gait_gif(gene, qpos_frames, tag: str) -> str | None:
         _RENDER_DIR.mkdir(parents=True, exist_ok=True)
         m = mujoco.MjModel.from_xml_string(compile_gene_to_mjcf(gene, include_floor=True, spawn_z=standing_spawn_z(gene)))
         d = mujoco.MjData(m); frames = []
+        # FRAME THE ACTUAL BODY, as _render_gene already does. A fixed lookat z=0.15 / distance=1.9 is sized for a
+        # quadruped: the humanoid's walk GIF -- the single most-looked-at artifact the gallery produces -- was
+        # cropped to its shins, so the page asserted CREDIBLE WALK over a video of two disembodied legs. Measured
+        # ONCE from the standing pose rather than per frame, so the camera does not breathe with the gait; only
+        # the horizontal pan tracks the body. Excludes world geoms (the floor plane would blow the box up).
+        _span, _dz = 0.6, 0.15
+        try:
+            import numpy as _np
+            mujoco.mj_forward(m, d)
+            _bg = [i for i in range(m.ngeom) if int(m.geom_bodyid[i]) != 0]
+            if _bg:
+                _p = _np.asarray(d.geom_xpos)[_bg]
+                _lo, _hi = _p.min(axis=0), _p.max(axis=0)
+                _span = float(_np.linalg.norm(_hi - _lo)) or 0.6
+                _dz = float((_lo[2] + _hi[2]) / 2.0)          # look at the body's mid-height, not the floor
+        except Exception:  # noqa: BLE001 - framing is cosmetic; a fixed camera beats no GIF
+            pass
+        _dist = float(min(8.0, max(1.2, 2.4 * _span)))        # same 2.4x factor _render_gene is tuned at
         for qp in qpos_frames[::max(1, len(qpos_frames) // 40)]:
             d.qpos[:] = qp; mujoco.mj_forward(m, d)
             rr = mujoco.Renderer(m, height=360, width=480); cam = mujoco.MjvCamera()
-            cam.lookat[:] = [float(qp[0]), float(qp[1]), 0.15]; cam.distance, cam.azimuth, cam.elevation = 1.9, 125, -12
+            cam.lookat[:] = [float(qp[0]), float(qp[1]), _dz]
+            cam.distance, cam.azimuth, cam.elevation = _dist, 125, -12
             rr.update_scene(d, camera=cam); frames.append(PIL.Image.fromarray(rr.render().copy())); rr.close()
         path = _RENDER_DIR / f"{tag}.gif"
         frames[0].save(path, save_all=True, append_images=frames[1:], duration=70, loop=0)
@@ -941,7 +992,17 @@ def create_robot(args: dict) -> dict:
     # Walkable-by-default: a legged body gets a wide walkable stance so it ACTUALLY walks (fanned quad walks
     # ~0.65 m with auto-tune vs ~0.09 m un-fanned). ensure_walkable_quad is a no-op for non-quad morphologies,
     # so manipulators/rovers/etc. are byte-identical.
-    gene = compose_robot(prompt, ensure_walkable=bool(args.get("ensure_walkable", True)))
+    #
+    # ORDER IS THE WHOLE POINT (docs/breaking_the_cotuning_wall.md §1.2, and anatomy_compiler.py's own note at the
+    # substitution site). ensure_walkable_quad DECIDES whether to throw the customer's design away and ship a
+    # template instead, and it decides by measuring the body -- so it must run on the body we actually ship, with
+    # a controller that fits it. Composing with ensure_walkable=True ran that decision HERE, on an UNGROUNDED,
+    # UNTUNED body: a horse weighs 4.2 kg at this point and 21 kg once grounded, and every authored quadruped
+    # measures 0.000 m at the shipped freq 1.5 / kp 32 op-point (which is one other robot's hand-tuned numbers).
+    # So the substitution fired on a measurement artefact. Defer the decision: compose the AUTHORED body, ground
+    # it, fit an op-point to it, and only then ask whether it can walk.
+    want_walkable = bool(args.get("ensure_walkable", True))
+    gene = compose_robot(prompt, ensure_walkable=False)
     # GROUND THE HELD BODY (Stage 2.1). The mass/torque grounding used to run only at export/build time, so the
     # robot the product VERIFIED and TRAINED was not the robot it exported and told the customer to build:
     # measured, a "robot dog" was held at 3.57 kg (-76% vs a Go2's 15 kg) while its own export shipped 13.50 kg
@@ -963,10 +1024,41 @@ def create_robot(args: dict) -> dict:
         # 0/5 product-path walk-rate lift (composer already fans offline; the dominant failure is fore-aft LURCH,
         # not lateral roll-over, which lateral splay cannot fix). stance_repair.py is kept for the factory
         # verify-build (default-gait gate), not the hot path.
+        #
+        # fit_gait_for_body REPLACES tune_crawl_gait here. Same job, but the 6-row grid tuner measured 2.1 s on the
+        # grounded authored dog and returned "no robustly-credible open-loop crawl for this body (use learn_gait)"
+        # -- i.e. it declined, and the body then went to the substitution gate carrying nothing. The flywheel path
+        # recalls a structural prior, searches (bounded, credible-early-stop), re-checks at the DEPLOY horizon and
+        # refuses anything that does not beat the shipped default. Bodies that already walk cost ~0.5 s and are
+        # left byte-identical; the authored dog measures 39 evals / 11.4 s and comes out a CREDIBLE WALK.
         try:
-            from virturoid.services.morph_policy import tune_crawl_gait
-            tune_crawl_gait(gene)
+            from virturoid.services.gait_flywheel import fit_gait_for_body
+            fit_gait_for_body(gene)
         except Exception:  # noqa: BLE001 - a tune failure must never block the build; defaults still apply
+            pass
+    # NOW the walkability decision, on the grounded body with its own operating point. A body is only replaced if
+    # it fails WITH A CONTROLLER OF ITS OWN, which is the only version of that question worth asking.
+    if want_walkable and (gene.robot_class or "") not in ("aerial", "aquatic"):
+        try:
+            from virturoid.services.anatomy_compiler import ensure_walkable_quad
+            swapped = ensure_walkable_quad(gene, prompt)
+            if swapped is not gene:
+                # A SUBSTITUTE comes out of the COMPOSER, i.e. ungrounded — it used to inherit this function's
+                # grounding because the swap happened before it. Ground and fit it too, or a substituted robot
+                # would ship as the styrofoam twin the grounding pass exists to prevent. A body returned with a
+                # WIDENED STANCE is the same grounded body it went in as (only mount rotations moved) and already
+                # carries an op-point fitted to that stance, so it is left exactly as measured.
+                gene = swapped
+                if not (getattr(gene, "metadata", None) or {}).get("grounding"):
+                    try:
+                        from virturoid.services.gene_build import ground_and_repair as _gar
+                        _gar(gene)
+                        if robot_kind(gene) == "legged" and args.get("tune_gait", True):
+                            from virturoid.services.gait_flywheel import fit_gait_for_body
+                            fit_gait_for_body(gene)
+                    except Exception:  # noqa: BLE001 - grounding is the fidelity layer, never a build blocker
+                        pass
+        except Exception:  # noqa: BLE001 - best-effort; never block a build on the walkability check
             pass
     rid = S.put_robot(gene, prompt=prompt)
     out = {"ok": True, **_summary(gene, rid, prompt=prompt), "prompt": prompt}
@@ -1256,6 +1348,74 @@ def render_view(args: dict) -> dict:
     return out
 
 
+_GEOM_TYPE_NAME = {0: "plane", 1: "heightfield", 2: "sphere", 3: "capsule", 4: "ellipsoid",
+                   5: "cylinder", 6: "box", 7: "mesh"}
+
+
+def _contact_disclosure(mv, band: float = 0.02) -> dict:
+    """Name the surface the GROUND CONTACT is actually resolved on, per body that reaches the floor.
+
+    ``render_parity`` proves the drawn body and the simulated body share one collider set. This answers the
+    sharper question a picture invites, and the one place where a pretty render can quietly mislead: the foot
+    you SEE is a generated visual mesh, while the contact the walk verdict is computed from is resolved on the
+    link's collision PRIMITIVE. Those are different surfaces even when they are the same size — a mesh sole and
+    a capsule are not the same contact patch — and the honest move is to say which one the solver used rather
+    than let a boot-shaped render imply a contact shape nobody simulated.
+
+    Reported per foot-like body: the collider's primitive type and size, and whether that body is DRAWN with a
+    mesh. ``drawn_with_mesh`` true + a non-mesh ``collider_type`` is exactly the render/sim asymmetry to
+    disclose. Measurement only — this function never changes a model.
+    """
+    import mujoco
+    import numpy as np
+
+    try:
+        d = mujoco.MjData(mv)
+        if mv.nkey:
+            mujoco.mj_resetDataKeyframe(mv, d, 0)
+        mujoco.mj_forward(mv, d)
+        aabb = mv.geom_aabb.reshape(mv.ngeom, 6)
+        signs = np.array([[x, y, z] for x in (-1, 1) for y in (-1, 1) for z in (-1, 1)], float)
+
+        def low(i):
+            c, h = aabb[i, :3], aabb[i, 3:]
+            w = d.geom_xpos[i] + (c + signs * h) @ d.geom_xmat[i].reshape(3, 3).T
+            return float(w[:, 2].min())
+
+        robot = [i for i in range(mv.ngeom) if int(mv.geom_bodyid[i]) != 0]
+        colliders = [i for i in robot if int(mv.geom_contype[i]) or int(mv.geom_conaffinity[i])]
+        if not colliders:
+            return {"surfaces": [], "note": "this body has no collidable geometry"}
+        floor = min(low(i) for i in colliders)
+        mesh_bodies = {int(mv.geom_bodyid[i]) for i in robot if int(mv.geom_type[i]) == 7}
+        out = []
+        for i in sorted(colliders, key=low):
+            if low(i) > floor + band:
+                continue
+            bid = int(mv.geom_bodyid[i])
+            out.append({
+                "body": mujoco.mj_id2name(mv, mujoco.mjtObj.mjOBJ_BODY, bid) or f"body_{bid}",
+                "collider_type": _GEOM_TYPE_NAME.get(int(mv.geom_type[i]), str(int(mv.geom_type[i]))),
+                "collider_size_m": [round(float(v), 5) for v in mv.geom_size[i] if float(v) > 0.0],
+                "drawn_with_mesh": bid in mesh_bodies,
+            })
+        drawn = [s for s in out if s["drawn_with_mesh"] and s["collider_type"] != "mesh"]
+        return {
+            "surfaces": out,
+            "render_differs_from_contact": bool(drawn),
+            "note": ("the surfaces listed are the ones the solver resolves ground contact on. Where "
+                     "drawn_with_mesh is true the render draws a detailed visual mesh over that link while "
+                     "contact is computed on the collider primitive named here — the picture and the contact "
+                     "patch are different surfaces, so judge footing from collider_type, not from the boot in "
+                     "the image. Render them with render_view(view='collision') to see them directly."
+                     if drawn else
+                     "every ground-contact surface here is drawn as the same primitive the solver uses."),
+        }
+    except Exception as exc:  # noqa: BLE001 - a disclosure that cannot be measured says so
+        return {"error": f"{type(exc).__name__}: {exc}",
+                "note": "could not measure which surface carries ground contact"}
+
+
 def render_parity(gene) -> dict:
     """Measured proof that the RENDERED body and the SIMULATED body are one robot.
 
@@ -1294,6 +1454,7 @@ def render_parity(gene) -> dict:
             "spawn_z_identical": abs(z_v - z_s) < 1e-9,
             "geoms_total": [int(mv.ngeom), int(ms.ngeom)], "visual_meshes": int(mv.nmesh),
             "same_physics": bool(same),
+            "contact": _contact_disclosure(mv),
             "note": ("the rendered body and the simulated body share ONE set of colliders, masses and spawn "
                      "height; the extra geoms on each side are cosmetic (mass=0, contype=0) — motor cans and "
                      "collars on the sim model, surface meshes on the rendered one. "
@@ -1362,7 +1523,13 @@ def verify_robot(args: dict) -> dict:
             res["credible_walk"] = False
         elif kind == "legged":
             # quick uses 800 steps (not 400) so cadence/support register — 400 read a credible walk as a SLIDE.
-            steps = int(args.get("steps", 800 if quick else 1500))
+            # FULL uses the SETTLING horizon, because the full verify is where the walk claim reaches a customer
+            # and 1500 was the horizon the claim was false at: the grounded authored cat read CREDIBLE WALK at
+            # 1500 and fell at step 2014 — the credible walk WAS the fall, happening 514 steps after we stopped
+            # looking (task #267). QUICK stays 800 and now says `settled: false`, so a screen cannot be mistaken
+            # for the claim. The GIF is unaffected: _honest_gait subsamples the trace with the horizon.
+            from virturoid.services.gait_flywheel import _SETTLE_STEPS
+            steps = int(args.get("steps", 800 if quick else _SETTLE_STEPS))
             res = _honest_gait(gene, steps=steps, render=not quick, tag=f"{args['robot_id']}_verify")
             res["credible_walk"] = res["verdict"].startswith("CREDIBLE")
         elif kind == "mobile":

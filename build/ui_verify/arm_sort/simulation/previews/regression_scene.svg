@@ -1,7 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="720" height="520" viewBox="0 0 720 520">
   <rect x="0" y="0" width="720" height="520" fill="#f7f8fa" />
   <text x="24" y="34" font-family="Arial" font-size="22" fill="#1f2933">Regression Scene Preview</text>
-  <text x="24" y="58" font-family="Arial" font-size="13" fill="#5c6670">Scene: Regression for dropped: Real MuJoCo pick-place: dropped in scene scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_000.</text>
+  <text x="24" y="58" font-family="Arial" font-size="13" fill="#5c6670">Scene: Regression for dropped: Real MuJoCo pick-place: dropped in scene scene_938c34b8_stress_000.</text>
   <rect x="60" y="110" width="560" height="320" rx="4" fill="#ddd8cc" stroke="#9b9488" />
   <text x="68" y="128" font-family="Arial" font-size="12" fill="#5a5148">table/workspace</text>
   <circle cx="120" cy="260" r="18" fill="#222831" />

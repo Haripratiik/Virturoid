@@ -82,12 +82,55 @@ def _mech_beam(length: float, radius: float) -> dict:
     industrial / Franka-class arm link), built in the link's [0, length] +z frame. Replaces the smooth tapered
     shaft so a manipulator's links match the mechanical aesthetic of the legged/humanoid limbs (the real
     datasheet motor housing is still rendered at each joint by show_actuators). VISUAL-ONLY — the physics model
-    reads only shape/length/radius/mass, so the arm's dynamics are byte-identical."""
+    reads only shape/length/radius/mass, so the arm's dynamics are byte-identical.
+
+    A long link additionally gets MOUNTING FLANGES at both ends. Measured on the demo arm: every reaching link
+    rendered as one constant-section bar 325 mm long, so the arm read as a bent grey pole -- the manipulator is
+    the one archetype where NO segment reaches the rich `build_anatomy` vocabulary (1 of 7 parts), and a real
+    industrial link is precisely a slim beam BETWEEN two bolted flanges. Built as a `compound` of extrudes that
+    all start at z=0, so the union stays in the link's [0, length] frame and the visual never reaches past the
+    collider's ends. Short orientation stubs (<= ~4 flange thicknesses) stay a plain beam: flanges there would
+    consume the whole link.
+
+    A long link ALSO gets a PROXIMAL JOINT HOUSING, and that is what finally breaks the pole. Flanges alone are
+    ~4.5% of the link's length -- too thin to register at any sane camera distance -- so the silhouette stayed a
+    constant-section bar with the datasheet motor buried INSIDE it: measured can-across/link-diameter of 98.5 mm
+    inside a 60 mm link, i.e. the motor was drawn entirely within the beam's own section and could not be seen at
+    all. A real industrial link is not a constant bar; it is a bulky machined housing at the driven joint that
+    STEPS DOWN to a slim beam along the span. Adding that step means the joint region is genuinely wider than the
+    beam, so the motor and its bearing/clevis hardware read as mounted ON something instead of vanishing into it.
+
+    `beam` stays parts[0] deliberately: `cad_geometry._visual_matches_link` scales a compound by its FIRST
+    sub-part's profile, so the beam must remain the element that defines the link's section, or a grounded
+    re-size would rescale the whole assembly off the housing instead. VISUAL-ONLY throughout -- family stays
+    `compound`, which `_physics_proxy_from_geometry` maps to (fallback_shape, None), so the collider remains the
+    capsule built from length_m/radius_m and the arm's dynamics stay byte-identical."""
     depth = max(0.01, radius)
     width = max(0.008, 0.84 * radius)
-    return {"family": "extrude", "height": round(length, 4), "fillet": round(0.28 * width, 4),
+    beam = {"family": "extrude", "height": round(length, 4), "fillet": round(0.28 * width, 4),
             "chamfer": round(0.42 * width, 5),
             "profile": [[-depth, -width], [0.9 * depth, -width], [0.9 * depth, width], [-depth, width]]}
+    flange_h = max(0.008, 0.045 * length)
+    if length < 4.2 * flange_h:
+        return beam
+    fd, fw = 1.22 * depth, 1.34 * width
+
+    def _flange(z0: float) -> dict:
+        return {"family": "extrude", "height": round(flange_h, 4), "fillet": round(0.22 * width, 4),
+                "chamfer": round(0.30 * width, 5),
+                "profile": [[-fd, -fw], [0.9 * fd, -fw], [0.9 * fd, fw], [-fd, fw]],
+                "at": (0.0, 0.0, round(z0, 4))}
+
+    # The stepped joint housing: taller than a flange so it reads as a section change rather than a bolt ring,
+    # and capped at a sixth of the link so a mid-length link still shows plenty of slim beam to step DOWN to.
+    hd, hw = 1.52 * depth, 1.58 * width
+    housing_h = max(2.2 * flange_h, min(0.165 * length, 3.1 * radius))
+    housing = {"family": "extrude", "height": round(housing_h, 4), "fillet": round(0.30 * width, 4),
+               "chamfer": round(0.34 * width, 5),
+               "profile": [[-hd, -hw], [0.88 * hd, -hw], [0.88 * hd, hw], [-hd, hw]],
+               "at": (0.0, 0.0, 0.0)}
+    return {"family": "compound",
+            "parts": [beam, housing, _flange(0.0), _flange(length - flange_h)]}
 
 
 def _arm_links(reach: float, dof: int, torque: float) -> list[dict]:

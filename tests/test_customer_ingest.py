@@ -61,7 +61,10 @@ class ControlAdopterUnitTests(unittest.TestCase):
         p = map_control_params({"frequency_hz": 1.8, "amplitude": [0.0, 0.6, 0.9, 0.0, 0.6, 0.9]})
         self.assertAlmostEqual(p["freq"], 1.8, places=3)
         self.assertLess(p["hip_amp"], p["knee_amp"])              # smaller nonzero = hip, larger = knee
-        self.assertTrue(all(k in p for k in ("freq", "hip_amp", "knee_amp", "duty", "kp", "kd")))
+        # `duty` is deliberately absent: it was removed from the gait-search space (task #265) because the
+        # crawl controller never read it, so adopting an imported one would only pretend to honor it.
+        self.assertTrue(all(k in p for k in ("freq", "hip_amp", "knee_amp", "kp", "kd")))
+        self.assertNotIn("duty", p)
 
     def test_explicit_gait_keys_win_and_clamp(self):
         from virturoid.services.control_adopter import map_control_params

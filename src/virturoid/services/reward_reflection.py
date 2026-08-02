@@ -85,7 +85,7 @@ def build_reflection_payload(gene, params: dict, expr: str, *, steps: int = 800)
 
     p = _clip(params)
     r = crawl_gait_rollout(gene, steps=steps, freq=p["freq"], hip_amp=p["hip_amp"], knee_amp=p["knee_amp"],
-                           duty=p["duty"], kp=p["kp"], kd=p["kd"], record_qpos=True)
+                           kp=p["kp"], kd=p["kd"], record_qpos=True)
     feats = reward_features_from_rollout(r)
     fwd = float(r.get("forward", 0.0))
     verdict = classify(r) if callable(classify) else "?"

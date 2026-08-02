@@ -16,7 +16,10 @@ import json
 import os
 
 _ISAAC_LAB_TARGET = ">=2.0 (isaaclab namespace)"
-_LEGGED = {"quadruped", "hexapod", "humanoid", "biped", "legged"}
+# Which class strings mean "legged" is body_kind's to say -- a private copy here drifted out of step with the
+# rest of the system (it was missing "octopod" and "bipedal") and decided whether a locomotion training env
+# was exported at all.
+from virturoid.services.body_kind import LEGGED_CLASSES as _LEGGED  # noqa: E402
 
 
 def _pyid(s: str) -> str:

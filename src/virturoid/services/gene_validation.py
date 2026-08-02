@@ -97,10 +97,23 @@ def validate_gene_design(gene, *, material: str = "aluminum", payload_kg: float 
         total_mass = ground_gene(g2)["total_mass_kg"]
         prior = physical_prior_for(g2)
         lo, hi = prior.mass_band_kg if prior is not None else _MASS_BAND.get(cls, (0.1, 200.0))
-        checks["mass_budget"] = lo <= total_mass <= hi
-        if not (lo <= total_mass <= hi):
+        # THE BAND DESCRIBES AN UNLOADED MACHINE. A robot RATED to carry a load is genuinely heavier -- it is
+        # carrying bigger motors and thicker load-path links to hold that load -- so judging it against the
+        # unloaded band calls real hardware implausible (Spot: 32.5 kg, rated 14 kg). Widen the ceiling by the
+        # rating and nothing else: `payload_kg` when the caller states it, else the rating `set_payload` stamped
+        # on the gene. A body that never declared a payload is judged exactly as before.
+        rated = float(payload_kg or 0.0)
+        if not rated:
+            try:
+                rated = float((getattr(gene, "metadata", None) or {}).get("rated_payload_kg") or 0.0)
+            except (TypeError, ValueError):
+                rated = 0.0
+        hi_eff = hi + max(0.0, rated)
+        checks["mass_budget"] = lo <= total_mass <= hi_eff
+        if not (lo <= total_mass <= hi_eff):
+            _rated = f" + {rated:.1f} kg rated payload" if rated else ""
             flag("mass_budget", "med", f"total mass {total_mass:.1f} kg is outside the plausible "
-                 f"{cls or 'robot'} band ({lo}-{hi} kg)", total_mass)
+                 f"{cls or 'robot'} band ({lo}-{hi} kg{_rated})", total_mass)
     except Exception:  # noqa: BLE001
         pass
 

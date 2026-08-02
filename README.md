@@ -176,8 +176,15 @@ python scripts/run_mvp_demo.py --mini      # -> build/demo/index.html : robots b
 
 A self-contained gallery: every robot is composed from a prompt, simulated in MuJoCo, and labelled with the
 verdict it actually earned — including the ones that fail. Nothing here calls an LLM, so it runs on a fresh clone
-with no keys configured. Add `VIRTUROID_LLM_BACKEND=openai` + `OPENAI_API_KEY` to have a language model author
-the anatomy instead of the offline composer; the physics, verdicts, and exports are identical either way.
+with no keys configured — and the page says so at the top, naming the design path it resolved and stamping every
+card with the one that produced that body. Run `--llm` (or set `VIRTUROID_LLM_BACKEND=openai` + `OPENAI_API_KEY`)
+to have a language model author the anatomy instead of the offline compositor; the physics, verdicts, and exports
+are identical either way.
+
+The full run (`python scripts/run_mvp_demo.py`, a few minutes) adds the measurement that matters most: a
+**same-family comparison** — three quadruped-animal prompts, three measurably different bodies, each verified on
+its own, with a `SUBSTITUTED` column that says so if the walkability gate ever replaces one with a shared
+template. `--no-compare` skips it.
 
 ### Virturoid Studio (the app)
 
@@ -220,6 +227,7 @@ python -m virturoid.import_robot path/to/robot.urdf --save-gene build/imported/g
 
 # Browse a gallery of robots built from text, each verified in real physics
 python scripts/run_mvp_demo.py                      # writes a self-contained build/demo/index.html
+python scripts/run_mvp_demo.py --llm                # ...designed by the configured LLM backend instead of offline
 
 # End-to-end: ingest a folder of an existing robot (model + BOM + CAD + description + control script) and improve it
 python scripts/demo_ingest_customer.py

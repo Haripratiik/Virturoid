@@ -244,7 +244,13 @@ class ServicesPipelineTests(unittest.TestCase):
         config = build_perception_config(robot_build.robot_genome, task, robot_build.components, [scene_set])
 
         self.assertTrue(config.validate().ok)
-        self.assertEqual(["scene_" + task.id + "_variation_000", "scene_" + task.id + "_variation_001"], [scene.id for scene in scene_set.scenes])
+        # Scene ids are FILENAMES, so they carry a short digest of the task id, not the prompt slug (a 150-char
+        # tracked path broke `git clone` on Windows). Deterministic for the same task + purpose + index.
+        from virturoid.services.scene_generator import _task_token
+        tok = _task_token(task)
+        self.assertEqual([f"scene_{tok}_variation_000", f"scene_{tok}_variation_001"],
+                         [scene.id for scene in scene_set.scenes])
+        self.assertLessEqual(max(len(s.id) for s in scene_set.scenes), 40)
         self.assertEqual("wrist_lidar", config.sensor_streams[0].name)
         self.assertEqual("lidar", config.sensor_streams[0].sensor_type)
         self.assertEqual(["range_scan", "point_cloud"], config.sensor_streams[0].output_modalities)

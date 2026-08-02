@@ -20,9 +20,31 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 # search bounds per parameter (physically sensible ranges for a wide-stance quad crawl).
-PARAM_NAMES = ("freq", "hip_amp", "knee_amp", "duty", "kp", "kd")
-_LO = {"freq": 0.8, "hip_amp": 0.4, "knee_amp": 0.5, "duty": 0.12, "kp": 24.0, "kd": 1.0}
-_HI = {"freq": 3.2, "hip_amp": 1.5, "knee_amp": 1.5, "duty": 0.42, "kp": 240.0, "kd": 14.0}
+#
+# `duty` WAS SEARCHED HERE AND IS NOW REMOVED (2026-08-01, task #265). It was never applied:
+# ``crawl_gait_rollout`` derives its live swing fraction (``lift_duty``) STRUCTURALLY from the static-stability
+# margin and ignores ``duty`` unless the caller passes ``live_duty=True``, which no caller here does. Measured on
+# the grounded authored dog, duty 0.12 / 0.25 / 0.42 all return forward = +0.345000, identical to six decimals.
+#
+# It was removed rather than left in place because a dead search dimension is not merely wasted budget — it
+# MANUFACTURES FALSE EVIDENCE downstream. CEM elite selection shrinks a coordinate's variance every generation
+# whether or not it has signal, and fastest where it has none, because the elites are then an unbiased random
+# subset. So the 86 banked walks carried duty at mean 0.2544 / stdev 0.0117 against this [0.12, 0.42] range (a
+# uniform draw would be 0.270 / 0.087 — 7x wider), and ``gait_hints.mine_gait_hints`` mined that collapse and
+# showed the operator "nearby walkers cluster duty near 0.25 (65 robots)" as the TIGHTEST-clustered of all six
+# parameters. The flywheel was presenting its purest noise as its strongest evidence.
+#
+# TO REVIVE IT: thread ``live_duty=True`` into ``evaluate_gait`` -> ``_eval_batch`` -> ``search_gait`` so the CEM
+# optimizes a knob that is live DURING the search, then re-bank from scratch under a NEW controller key. Never
+# mix pre/post records, and never just turn ``live_duty`` on at deploy against the existing bank: measured at the
+# op-point ``fit_gait_for_body`` adopts, that costs the grounded dog +2.069 m CREDIBLE WALK -> +1.431 m and the
+# grounded cat +1.333 m CREDIBLE WALK -> +0.356 m FELL by ROLL-OVER.
+#
+# The 86 stored rows are NOT rewritten. The field is inert once nothing reads it, and a destructive migration
+# buys nothing; ``recall_gait`` returns banked dicts verbatim, so an old row keeps its (ignored) duty key.
+PARAM_NAMES = ("freq", "hip_amp", "knee_amp", "kp", "kd")
+_LO = {"freq": 0.8, "hip_amp": 0.4, "knee_amp": 0.5, "kp": 24.0, "kd": 1.0}
+_HI = {"freq": 3.2, "hip_amp": 1.5, "knee_amp": 1.5, "kp": 240.0, "kd": 14.0}
 
 
 @dataclass
@@ -96,16 +118,23 @@ def evaluate_gait(gene, params: dict, *, steps: int = 1200, reward_fn=None) -> d
     trusted-success signals (``credible``/``verdict`` from ``gait_quality.classify``) are computed the SAME way
     regardless and reported SEPARATELY, so ``select_reward`` can rank by trusted success and flag a reward that
     games (high return, low credibility) — the reward is optimized, success is never the reward's to define.
+
+    ``steps`` IS PART OF THE VERDICT, not a cost knob. At and above ``gait_quality._SETTLE_MIN_STEPS`` the
+    rollout can show whether the body was still walking at the end, and ``credible`` then means "walks" rather
+    than "had gone a long way by the time we stopped looking". Below it the settling gate is off and this
+    returns exactly what it always did. A caller whose result DECIDES something (adopt / bank / report to a
+    customer) must therefore pass a horizon long enough to be judged at — see ``gait_flywheel.fit_gait_for_body``
+    for why the search horizon and the judging horizon have to be the SAME number.
     """
-    from virturoid.services.gait_quality import classify
+    from virturoid.services.gait_quality import classify, settling
     from virturoid.services.morph_policy import crawl_gait_rollout
     p = _clip(params)
     r = crawl_gait_rollout(gene, steps=steps, freq=p["freq"], hip_amp=p["hip_amp"], knee_amp=p["knee_amp"],
-                           duty=p["duty"], kp=p["kp"], kd=p["kd"], record_qpos=True)
+                           kp=p["kp"], kd=p["kd"], record_qpos=True)
     if not r.get("finite", True):
         return {"fitness": -10.0, "forward": 0.0, "height_ratio": 0.0, "survived": False,
                 "cadence": 0.0, "support_frac": 0.0, "credible": False, "verdict": "non-finite",
-                "reward_return": -10.0}
+                "reward_return": -10.0, "horizon_steps": int(steps), "rates": {}, "holds_rate": None}
     fwd = float(r.get("forward", 0.0))
     hr = float(r.get("height_ratio", 0.0))
     cad = float(r.get("cadence", 0.0))
@@ -124,9 +153,16 @@ def evaluate_gait(gene, params: dict, *, steps: int = 1200, reward_fn=None) -> d
         except Exception:  # noqa: BLE001 - a bad reward scores -inf-ish, never crashes the search
             reward_return = -1e6
     fitness = reward_return if reward_fn is not None else default_fitness
+    # DISCLOSE THE HORIZON AND THE RATE PROFILE. A bare `forward` is a net displacement, and a net displacement
+    # cannot distinguish walking from drift-before-falling (task #267) — whoever reads this result is entitled to
+    # see how long it was measured for and whether the body was still going at the end. `rates` is {} and
+    # `holds_rate` is None for a horizon too short to say, which is honest rather than a default of True.
+    s = settling(r)
     return {"fitness": fitness, "forward": fwd, "height_ratio": hr, "survived": survived,
             "cadence": cad, "support_frac": sup, "credible": credible, "verdict": verdict,
-            "reward_return": reward_return}
+            "reward_return": reward_return, "horizon_steps": int(steps),
+            "rates": ({int(k): round(v, 4) for k, v in s["rates"].items()} if s else {}),
+            "holds_rate": (bool(s["holds_rate"]) if s else None)}
 
 
 def search_gait(gene, *, generations: int = 8, pop: int = 24, elite_frac: float = 0.3,
@@ -165,7 +201,7 @@ def search_gait(gene, *, generations: int = 8, pop: int = 24, elite_frac: float 
 
     # baseline = the SHIPPED crawl-gait defaults (crawl_gait_rollout's own defaults), so "improvement" is honest
     # (learned vs the default controller), not vs an arbitrary center-of-bounds point.
-    baseline = evaluate_gait(gene, {"freq": 1.5, "hip_amp": 0.9, "knee_amp": 1.0, "duty": 0.25,
+    baseline = evaluate_gait(gene, {"freq": 1.5, "hip_amp": 0.9, "knee_amp": 1.0,
                                     "kp": 32.0, "kd": 1.5}, steps=steps, reward_fn=reward_fn)
     if prior_vec is not None:                                  # transfer-screen the prior ONCE (dossier R3)
         prior_transfer = evaluate_gait(gene, _clip(as_params(prior_vec)), steps=steps, reward_fn=reward_fn)

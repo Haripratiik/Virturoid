@@ -63,7 +63,13 @@ _ROBOT_MATERIALS = (
     # contrast reads; a limb in this + mat_joint housings gives the unified dark-limb look real quadrupeds use.
     '    <material name="mat_cf" rgba="0.155 0.165 0.185 1" specular="0.45" shininess="0.4" reflectance="0.06"/>\n'
     '    <material name="mat_ti" rgba="0.60 0.60 0.65 1" specular="0.5" shininess="0.55" reflectance="0.1"/>\n'
-    '    <material name="mat_shell" rgba="0.20 0.42 0.72 1" specular="0.4" shininess="0.5" reflectance="0.05"/>\n'
+    # mat_shell = the BODYWORK finish (torso/chassis/head/limb fairings). Was a saturated primary blue
+    # (0.20 0.42 0.72), the one colour in this palette that no shipping robot wears: against the charcoal
+    # limbs and gunmetal housings the chassis read as a painted toy block, and "a blue box with a blue ball
+    # for a head" was the first thing a reviewer said about the demo. Real quadruped bodywork is a light
+    # composite shell over a dark structural frame (ANYmal, B2, Franka); that also gives the strongest
+    # value contrast against mat_cf limbs, so the machined detail on the chassis actually reads.
+    '    <material name="mat_shell" rgba="0.80 0.81 0.84 1" specular="0.42" shininess="0.52" reflectance="0.07"/>\n'
     '    <material name="mat_metal" rgba="0.47 0.49 0.53 1" specular="0.78" shininess="0.78" reflectance="0.22"/>\n'
     '    <material name="mat_rubber" rgba="0.13 0.13 0.15 1" specular="0.15" shininess="0.15"/>\n'
 )
@@ -95,6 +101,43 @@ _THREE_LIGHTS = (
     '    <light name="fill" pos="-2.4 1.8 2.2" dir="0.50 -0.40 -1" diffuse="0.24 0.25 0.28" castshadow="false"/>\n'
     '    <light name="rim" pos="-1.4 -2.4 1.8" dir="0.35 0.62 -0.7" diffuse="0.20 0.20 0.23" specular="0.35 0.35 0.40" castshadow="false"/>\n'
 )
+# THE SOLVER CONTRACT, EMITTED ONCE AND SHARED BY BOTH COMPILE PATHS (plain + scene). It used to be two
+# copies of the same literal, which is exactly how a train/deploy divergence starts.
+#
+# `iterations` was never chosen. The fidelity pass that added `integrator="implicitfast"` and the friction
+# cone (bceca7e, "implicitfast, elliptic contacts, structure-aware damping...") set no caps, so MuJoCo's
+# defaults applied BY OMISSION -- Newton at 100 iterations / 50 line-search steps -- while the CPU rollouts
+# separately call `morph_policy.compiled_model(..., solver_iterations=20)`, which overwrites `opt.iterations`
+# AFTER compile. So a generated body was DEPLOYED at 20 iterations on CPU and TRAINED at 100 on MJX: a silent
+# train/deploy split. Emitting 20 closes it -- the CPU override becomes a no-op and both paths step the
+# identical solver -- and it costs no CPU physics, because MuJoCo's Newton solver EARLY-EXITS on tolerance and
+# these bodies converge in a handful of iterations. On MJX/GPU it is NOT free: the jitted kernel cannot branch
+# on convergence and runs the FULL nominal count every step, every env, which is why GPU throughput looked
+# like a mysterious env-count cliff. 20 (not the 10 that would maximise GPU throughput) is deliberate: 10
+# would leave CPU at 20 and GPU at 10, re-creating the very divergence this constant exists to close.
+#
+# WHAT IS DELIBERATELY *NOT* CAPPED HERE, AND WHY -- both were tried and both were measured to cost real
+# product behaviour, so the cheap-looking extra speed is not free:
+#
+#   * `ls_iterations="8"` SUBSTITUTES A CUSTOMER'S BODY. `ensure_walkable_quad` measures a composed body and
+#     swaps in a generic template when it reads as not walking, and the shorter line search pushes one across
+#     that threshold: MEASURED, `compose_robot("a large quadruped robot")` returns the authored
+#     `anatomy_creature_91b931bf` (20 segments, 2.241 m, 3.569 kg) with the line search at its default and the
+#     generic `built_quadruped_18seg` (18 segments, 1.890 m, 14.917 kg) with it at 8. Capping `iterations`
+#     alone leaves composer output BYTE-IDENTICAL for that prompt and for "a small quadruped robot dog".
+#   * `cone="pyramidal"` costs a verdict. `test_customer_ingest::test_adopt_control_script_utilises_and_
+#     improves` tunes the authored quad dog to a credible walk under every other combination but not under
+#     pyramidal+caps at its shipped 4x10 search budget (it recovers at 8x20). It is also not needed for
+#     parity: CPU deploy and MJX train were already BOTH elliptic for generated bodies.
+#
+# See [[body-and-gait-are-co-tuned]] -- the bodies are shaped against this contact model, so the contact model
+# and the line search are controller-level changes that each need their own measured before/after.
+#
+# The contact-rich manipulation call sites (grasp_skill, grasp_eval, push_eval, pick_place_controller on CPU;
+# every mjx_residual_*/mjx_push_*/mjx_grasp_* script on GPU) pin their own iterations after compile -- 30/12
+# and 10/8 respectively -- so this line does not move them at all.
+_PHYSICS_OPTION = ('  <option timestep="0.002" gravity="0 0 -9.81" integrator="implicitfast" cone="elliptic"'
+                   ' iterations="20"/>')
 
 
 def _base_z_for(gene: RobotGene) -> float:
@@ -168,7 +211,7 @@ def compile_gene_to_mjcf(gene: RobotGene, *, include_floor: bool = True, spawn_z
     return (
         f'<mujoco model="{escape(gene.id)}">\n'
         '  <compiler angle="radian" autolimits="true"/>\n'
-        '  <option timestep="0.002" gravity="0 0 -9.81" integrator="implicitfast" cone="elliptic"/>\n'
+        f'{_PHYSICS_OPTION}\n'
         f'{_VISUAL_XML}'
         '  <default>\n'
         '    <joint damping="0.8" armature="0.01" frictionloss="0.05"/>\n'
@@ -502,7 +545,7 @@ def compile_gene_with_scene(gene: RobotGene, scene_objects, *, table: bool = Tru
     lines = [
         f'<mujoco model="{escape(gene.id)}">',
         '  <compiler angle="radian" autolimits="true"/>',
-        '  <option timestep="0.002" gravity="0 0 -9.81" integrator="implicitfast" cone="elliptic"/>',
+        _PHYSICS_OPTION,
         _VISUAL_XML.rstrip("\n"),
         '  <default>',
         '    <joint damping="0.8" armature="0.01" frictionloss="0.05"/>',
@@ -574,6 +617,23 @@ def _body_xml(gene: RobotGene, seg, pos: tuple[float, float, float], indent: int
     material = _MATERIAL_KEY_TO_MJCF.get(seg.material or "") or (
         "mat_joint" if seg.joint_type == "prismatic" else "mat_cf")
     meshed = bool(meshes) and seg.name in meshes and not physics_only
+    # TWO-TONE LIMB on the MESHED path. `_detail_geoms_xml` gives a primitive limb a shell-accent fairing over
+    # its proximal segment precisely so a leg reads as bodywork over dark structure (the Go2/Spot language) --
+    # but that whole block is skipped when the segment has a visual mesh, which is every render and every
+    # viewport. So on the path a customer actually looks at, a leg was one undifferentiated dark mass: a
+    # charcoal mesh, a charcoal 82 mm motor can, repeated four times. Paint the HIP/abduction housing in shell
+    # instead, which is what carries the body colour on a real quadruped. Appearance only -- `seg.material`
+    # (which drives density, the BOM and every mass) is untouched, so this cannot move a gram.
+    if meshed and _anatomy_role_of(seg) == "quad_hip":
+        material = "mat_shell"
+    # Same appearance-only treatment for the FOOT. `_ROLE_MATERIAL` maps every foot/paw/hoof to "metal", so the
+    # part that meets the ground rendered as a pale specular metal paddle — the one surface on a real legged
+    # robot that is never bare metal, because it is the compliant rubber pad that provides traction. The foot's
+    # collider is a capsule with `friction="1 0.05 0.001"`, i.e. the sim is already modelling a high-friction
+    # contact; drawing it as polished metal contradicted the physics being run. As above this touches only the
+    # MJCF material reference, never `seg.material`, so density, the BOM and every mass are untouched.
+    elif meshed and _anatomy_role_of(seg) == "foot_pad":
+        material = "mat_rubber"
     lines.append(_geom_xml(seg, pad + "  ", material=material, meshed=meshed, physics_only=physics_only))
     if seg.parent is None and not physics_only:
         lines.append(f'{pad}  <site name="imu_site" pos="0 0 {seg.length_m / 2.0:.5f}" size="0.005" rgba="0 0 0 0"/>')
@@ -798,6 +858,17 @@ def _detail_geoms_xml(seg, pad: str, *, suppress_motor: bool = False) -> str:
 def _segment_role(seg) -> str:
     geometry = getattr(seg, "geometry", None)
     return str(geometry.get("semantic_role") or "").lower() if isinstance(geometry, dict) else ""
+
+
+def _anatomy_role_of(seg) -> str:
+    """The detailed-solid role this segment is BUILT from, by either vocabulary: the hard-coded composer
+    recipes emit ``family="role"``, the general anatomy compiler stamps ``anatomy_role``."""
+    geometry = getattr(seg, "geometry", None)
+    if not isinstance(geometry, dict):
+        return ""
+    if str(geometry.get("family") or "").lower() == "role":
+        return str(geometry.get("role") or "").lower()
+    return str(geometry.get("anatomy_role") or "").lower()
 
 
 def _actuator_xml(gene: RobotGene) -> str:
