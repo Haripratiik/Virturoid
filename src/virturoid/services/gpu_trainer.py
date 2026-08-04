@@ -436,7 +436,16 @@ def screen_rewards_on_mjx(gene, exprs, *, screen_iters: int = 10, envs: int = 25
     motion gated on survival; the finalist is then trained + verified by the full classify gate downstream, which
     is un-gameable). K candidates cost K short screens on the one 3060 — far less than K full runs. Runs the
     candidates in ONE detached remote orchestrator (survives ssh drops), polled to completion. Returns
-    ``[{expr, screen_score, fwd_vel, alive, rank}]`` best-first, or ``[]`` on a total failure."""
+    ``[{expr, screen_score, fwd_vel, alive, rank}]`` best-first, or ``[]`` on a total failure.
+
+    **NOT WIRED, deliberately — this function has no caller and should not get one as written.** Its screen
+    score is ``abs(fwd_vel)``, which is direction-blind (a reward that drives the body BACKWARD at 1 m/s ties
+    with one that walks forward at 1 m/s) and carries no reward-gaming check. The CPU screen it would replace
+    (``reward_dsl.select_reward`` over ``reward_loop._steered_rollout_fn``) ranks by the ``classify()``-gated
+    TRUSTED success and explicitly flags and drops gamed candidates, so swapping it in would buy GPU speed by
+    giving up the honesty property the whole reward loop exists for. Fix the score (signed forward progress,
+    plus a credibility gate) before calling this; do not call it as-is. ``reward_expr`` DOES reach the trainer
+    for the FINAL run — see ``reward_loop.train_selected_reward_on_gpu``."""
     import json
     import shlex
     import time

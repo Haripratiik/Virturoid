@@ -84,6 +84,60 @@ def test_full_loop_is_honest_and_never_banks_a_non_credible_gait():
     assert isinstance(out["reward_expr"], (str, type(None))) and out["n_candidates"] >= 1
 
 
+# ------------------------------------------------------------------ the reward must reach the TRAINER, not just
+# the CPU gait search. The regression these guard: `gpu_trainer.train_gene_on_gpu` accepted `reward_expr=` and
+# `mjx_morph_attention.py` handled `--reward-expr`, but `reward_expr=` had ZERO callers repo-wide -- the trainer
+# half shipped and the call site never did, so "an LLM-authored reward steers PPO" was a claim about dead code.
+def test_the_selected_reward_expression_reaches_the_gpu_trainer(monkeypatch):
+    from virturoid.services import gpu_trainer as GT
+    from virturoid.services.reward_loop import train_selected_reward_on_gpu
+
+    seen = {}
+
+    def _fake_train(gene, **kw):
+        seen.update(kw)
+        return str(kw["out_path"])
+
+    monkeypatch.setattr(GT, "gpu_available", lambda **kw: True)
+    monkeypatch.setattr(GT, "train_gene_on_gpu", _fake_train)
+    rep = train_selected_reward_on_gpu(_dog(), "max(0.0, forward_vel)*alive - 0.1*slip", iters=7, envs=64)
+
+    assert rep["trained"] is True and rep["policy"]
+    assert seen["reward_expr"] == "max(0.0, forward_vel)*alive - 0.1*slip"   # the expression, not a weight dict
+    assert seen["iters"] == 7 and seen["envs"] == 64
+
+
+def test_train_backend_gpu_hands_the_loops_winner_to_ppo_and_cpu_says_it_did_not(monkeypatch):
+    from virturoid.services import reward_loop as RL
+
+    calls = []
+    monkeypatch.setattr(RL, "train_selected_reward_on_gpu",
+                        lambda gene, expr, **kw: calls.append(expr) or
+                        {"attempted": True, "trained": True, "policy": "p.npz", "reward_expr": expr})
+    kw = dict(task="walk forward", llm=None, n_rewards=2, screen_generations=1, screen_pop=4,
+              final_generations=2, final_pop=6, steps=300, seed=5, bank=False)
+    gpu = RL.run_intelligent_reward_loop(_dog(), train_backend="gpu", **kw)
+    # the WINNER of the honest screen is what PPO gets (or "" when every candidate was gamed and the loop fell
+    # back to the default fitness — the point is that the two can never disagree)
+    assert calls and calls[0] == (gpu["reward_expr"] or "")
+    assert gpu["optimizer"]["steered_ppo"] is True and gpu["policy_npz"] == "p.npz"
+
+    calls.clear()
+    cpu = RL.run_intelligent_reward_loop(_dog(), train_backend="cpu", **kw)
+    assert not calls                                          # cpu is the default and must stay local
+    assert cpu["optimizer"]["steered_ppo"] is False           # ...and must SAY it never steered PPO
+    assert "CEM" in cpu["optimizer"]["cpu"]
+
+
+def test_gpu_backend_degrades_honestly_when_the_box_is_unreachable(monkeypatch):
+    from virturoid.services import gpu_trainer as GT
+    from virturoid.services.reward_loop import train_selected_reward_on_gpu
+    monkeypatch.setattr(GT, "gpu_available", lambda **kw: False)
+    monkeypatch.setattr(GT, "train_gene_on_gpu", lambda *a, **k: pytest.fail("must not train on a dead box"))
+    rep = train_selected_reward_on_gpu(_dog(), "max(0.0, forward_vel)")
+    assert rep["trained"] is False and "did NOT steer PPO" in rep["note"]
+
+
 def test_batched_reward_matches_scalar_and_vectorizes():
     """R1 MJX-port primitive: compile_reward_batched evaluates the SAME reward over arrays (numpy or jax.numpy),
     matching the scalar compiler element-wise, so the CPU search and the GPU trainer share one reward."""

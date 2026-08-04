@@ -96,6 +96,60 @@ class ScanFolderTests(unittest.TestCase):
             self.assertTrue(summary["blockers"])
 
 
+class UnsupportedModelFormatTests(unittest.TestCase):
+    """USD and SDF were ADVERTISED and never implemented.
+
+    ``_EXT_MAP`` classified ``.usd/.usda/.usdc/.usdz`` as ``robot_model`` and ``.sdf`` as ``world_or_model``,
+    i.e. straight into the sim-target candidate set, and the "no model found" blocker read "(URDF/MJCF/SDF/USD)".
+    There is no USD reader and no SDF reader in this repo -- ``model_import.import_model`` takes .xml/.mjcf/.urdf
+    and nothing else -- so a customer dropping an Isaac project had their .usd NOMINATED as the first runnable
+    sim target, watched it fail to import, and got a GENERATED robot with the reason "none of the 1 model
+    file(s) could be imported". USD is the format NVIDIA trained the industry on, so that is the likeliest
+    first impression a prospective customer forms.
+    """
+
+    def test_usd_and_sdf_are_recognized_but_never_nominated(self):
+        for name in ("robot.usd", "robot.usda", "robot.usdc", "robot.usdz", "world.sdf"):
+            artifact_type, category, recognized = classify_name(name)
+            self.assertEqual((artifact_type, category), ("robot_model_unsupported", "model"), name)
+            self.assertTrue(recognized, f"{name} is a robot description, not junk — it must not read unrecognized")
+
+    def test_a_usd_only_project_says_so_and_says_what_to_do(self):
+        with tempfile.TemporaryDirectory() as root:
+            _write(root, "robot.usd")
+            _write(root, "meshes/base.stl")
+            summary = project_graph_summary(scan_folder(root))
+            self.assertIsNone(summary["first_runnable_sim_target"])   # never hand over a file we cannot read
+            self.assertEqual(summary["unsupported_models"], ["robot.usd"])
+            blob = " ".join(summary["blockers"])
+            self.assertIn("URDF", blob)                               # what we DO read
+            self.assertIn("robot.usd", blob)                          # the file, named
+            self.assertIn("no USD importer", blob)                    # the truth, not "no robot description"
+            self.assertIn("Isaac", blob)                              # ...and the step that works
+
+    def test_a_usd_beside_a_urdf_does_not_displace_the_urdf(self):
+        with tempfile.TemporaryDirectory() as root:
+            _write(root, "spot.usd")                                  # exact package-name stem: outscored the urdf
+            _write(root, "spot_description.urdf")
+            summary = project_graph_summary(scan_folder(root))
+            self.assertEqual(summary["first_runnable_sim_target"], "spot_description.urdf")
+            self.assertEqual(summary["unsupported_models"], ["spot.usd"])   # surfaced, not silently dropped
+            self.assertEqual(summary["blockers"], [])                       # a readable model exists
+
+    def test_import_model_names_the_format_and_the_conversion(self):
+        import importlib.util
+        if importlib.util.find_spec("mujoco") is None:
+            self.skipTest("import_model needs MuJoCo")
+        from virturoid.services.model_import import import_model
+        with tempfile.TemporaryDirectory() as root:
+            _write(root, "robot.usda", b"#usda 1.0\n")
+            out = import_model(os.path.join(root, "robot.usda"))
+            self.assertFalse(out["ok"])
+            self.assertEqual(out["format"], "OpenUSD")
+            self.assertIn("no USD importer", out["note"])
+            self.assertIn("URDF", out["note"])
+
+
 class ScanZipTests(unittest.TestCase):
     def test_zip_entries_classified_without_extraction(self):
         with tempfile.TemporaryDirectory() as root:

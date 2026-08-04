@@ -317,6 +317,15 @@ def import_model(path: str) -> dict:
             os.unlink(tmp.name)
             model = mujoco.MjModel.from_xml_string(mjcf)            # re-validate the normalized MJCF
         else:
+            # A bare "unsupported" costs the customer an afternoon. Name the format and the step that works —
+            # USD in particular is the format an Isaac engineer will arrive with, and we have no reader for it
+            # (the only Usd.Stage.Open in this repo is usd_exporter re-reading what it just wrote).
+            from virturoid.services.input_classifier import (UNSUPPORTED_MODEL_ADVICE,
+                                                             UNSUPPORTED_MODEL_FORMATS)
+            fam = UNSUPPORTED_MODEL_FORMATS.get(sfx)
+            if fam:
+                return {"ok": False, "format": fam,
+                        "note": f"{sfx} is {fam}. {UNSUPPORTED_MODEL_ADVICE[fam]}"}
             return {"ok": False, "note": f"unsupported format {sfx!r} — use .xml/.mjcf or .urdf"}
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "note": f"could not load model: {exc}",

@@ -228,7 +228,11 @@ def test_no_agent_facing_text_names_a_tool_that_does_not_exist():
     verbs = _TOOL_VERBS | {n.split("_")[0] for n in TOOLS}
     bad: dict[str, set[str]] = {}
     for src, txt in blobs.items():
-        for ident in set(re.findall(r"\b([a-z][a-z0-9]*(?:_[a-z0-9]+)+)\b", txt)):
+        # `(?!\s*=)` skips KEYWORD ARGUMENTS. Prose like ``train_backend="gpu"`` documents a PARAMETER, not a
+        # tool call, but `train_` is a live tool verb (train_held, train_reward) so a bare prefix match flags it.
+        # A denylist entry would only defer this: every future kwarg sharing a tool verb would trip the same wire.
+        # An identifier written bare ANYWHERE still gets flagged -- that is the case this guard exists for.
+        for ident in set(re.findall(r"\b([a-z][a-z0-9]*(?:_[a-z0-9]+)+)\b(?!\s*=)", txt)):
             if ident in TOOLS or ident in _NOT_A_TOOL:
                 continue
             if ident.split("_")[0] in verbs:

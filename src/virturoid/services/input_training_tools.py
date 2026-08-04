@@ -561,9 +561,21 @@ def _ingest_project(args: dict) -> dict:
     result["held_robot_design_source"] = _design_source or "unknown"
     result["ok"] = True
     if composed_from_description and path:
-        seen = list((result.get("project_graph") or {}).get("robot_models") or [])
-        why = (f"none of the {len(seen)} model file(s) in the project could be imported"
-               if seen else "the project contained no robot description file (URDF/MJCF/SDF/USD)")
+        _pg = result.get("project_graph") or {}
+        seen = list(_pg.get("robot_models") or [])
+        # A project whose ONLY robot description is a USD or SDF is the single likeliest first contact we have
+        # (USD is the format NVIDIA trained the industry on). "no robot description file" would be a lie about
+        # a folder that visibly contains robot.usd, and a bare "unsupported" would waste their afternoon — so
+        # name the format, and name the conversion that works.
+        _unsupported = list(_pg.get("unsupported_models") or [])
+        _guidance = list(_pg.get("unsupported_model_guidance") or [])
+        if seen:
+            why = f"none of the {len(seen)} model file(s) in the project could be imported"
+        elif _unsupported:
+            why = (f"the project's only robot description(s) are in a format Virturoid cannot read "
+                   f"({', '.join(sorted(_unsupported)[:3])}) — it reads URDF and MJCF")
+        else:
+            why = "the project contained no robot description file (URDF/MJCF)"
         result["ok"] = False
         result["substituted"] = True
         result["substitution"] = {
@@ -571,9 +583,11 @@ def _ingest_project(args: dict) -> dict:
             "reason": why,
             "project_path": str(path),
             "model_files_seen": seen[:8],
+            "unsupported_model_files": _unsupported[:8],
             "import_errors": [w for w in result["warnings"] if "import failed" in w][:4],
-            "how_to_fix": "point ingest_project directly at the model file, or fix the import errors above; "
-                          "inspect_project_bundle shows every candidate and why each was ranked where it was",
+            "how_to_fix": ("; ".join(_guidance) if _guidance else
+                           "point ingest_project directly at the model file, or fix the import errors above; "
+                           "inspect_project_bundle shows every candidate and why each was ranked where it was"),
         }
         result["warnings"].insert(0, f"SUBSTITUTED ROBOT: {why}, so the held robot {result['robot_id']} was "
                                      f"GENERATED from your description and is NOT your robot.")

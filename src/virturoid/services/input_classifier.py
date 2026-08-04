@@ -17,11 +17,56 @@ import zipfile
 
 from virturoid.schemas.input_bundle import InputArtifact, InputBundle, ParseStatus
 
+# ---------------------------------------------------------------------------------------------------------
+# FORMATS WE RECOGNIZE AS ROBOT DESCRIPTIONS AND CANNOT READ.
+#
+# There is no USD reader and no SDF reader anywhere in this repo. ``model_import.import_model`` accepts exactly
+# ``.xml``/``.mjcf``/``.urdf`` and returns "unsupported format" for everything else; the only ``Usd.Stage.Open``
+# in the tree is ``usd_exporter`` re-reading a file it just WROTE. These extensions used to map to
+# ``robot_model``/``world_or_model``, i.e. straight into the sim-target candidate set, and the "no model found"
+# blocker advertised "(URDF/MJCF/SDF/USD)" as the formats we accept.
+#
+# That is the most expensive dishonesty available to us: USD is the format NVIDIA has trained the whole industry
+# on, so an Isaac engineer -- our stated target user -- is exactly the person most likely to arrive with one.
+# A .usd-only project was NOMINATED as the first runnable sim target, failed to import, and fell through to the
+# substitution gate, which told them "none of the 1 model file(s) could be imported" without ever naming the
+# real reason or the one step that works.
+#
+# So they are classified as ``robot_model_unsupported``: RECOGNIZED (not junk in the unrecognized bucket), never
+# nominated as a sim target, and always accompanied by the conversion that does work. A bare "unsupported" would
+# waste the engineer's afternoon; the guidance is part of the honesty, not decoration.
+UNSUPPORTED_MODEL_FORMATS: dict[str, str] = {
+    ".usd": "OpenUSD", ".usda": "OpenUSD", ".usdc": "OpenUSD", ".usdz": "OpenUSD", ".sdf": "Gazebo SDF",
+}
+UNSUPPORTED_MODEL_ADVICE: dict[str, str] = {
+    "OpenUSD": "Virturoid has no USD importer — it reads URDF and MJCF. Bring the URDF/MJCF the USD was built "
+               "from (Isaac assets are almost always converted from a ROS robot_description package), or run "
+               "Isaac Sim's URDF/MJCF exporter on the stage, then point ingest_project at that file. Note "
+               "Virturoid does WRITE USD on the way out: export_held(formats=['usd','isaac_lab']).",
+    "Gazebo SDF": "Virturoid has no SDF importer — it reads URDF and MJCF. Most SDF models are generated from a "
+                  "URDF, so ingest that URDF instead. If the SDF is all you have, convert it first "
+                  "(`sdformat_urdf`, or `gz sdf -p model.sdf` to inspect what it declares).",
+}
+
+
+def unsupported_model_guidance(refs) -> list[str]:
+    """One line per unreadable robot-description FORMAT present, naming the files and the step that works."""
+    by_family: dict[str, list[str]] = {}
+    for ref in refs:
+        fam = UNSUPPORTED_MODEL_FORMATS.get(os.path.splitext(str(ref).lower())[1])
+        if fam:
+            by_family.setdefault(fam, []).append(str(ref))
+    return [f"{fam}: found {len(files)} file(s) ({', '.join(sorted(files)[:4])}"
+            f"{', …' if len(files) > 4 else ''}). {UNSUPPORTED_MODEL_ADVICE[fam]}"
+            for fam, files in sorted(by_family.items())]
+
+
 # extension -> (artifact_type, category). Category is the coarse Project-Graph bucket.
 _EXT_MAP: dict[str, tuple[str, str]] = {
     ".urdf": ("robot_model", "model"), ".xacro": ("robot_model", "model"), ".mjcf": ("robot_model", "model"),
-    ".sdf": ("world_or_model", "model"), ".usd": ("robot_model", "model"), ".usda": ("robot_model", "model"),
-    ".usdc": ("robot_model", "model"), ".usdz": ("robot_model", "model"), ".xml": ("xml_model", "model"),
+    ".sdf": ("robot_model_unsupported", "model"), ".usd": ("robot_model_unsupported", "model"),
+    ".usda": ("robot_model_unsupported", "model"), ".usdc": ("robot_model_unsupported", "model"),
+    ".usdz": ("robot_model_unsupported", "model"), ".xml": ("xml_model", "model"),
     ".stl": ("mesh", "mesh"), ".obj": ("mesh", "mesh"), ".dae": ("mesh", "mesh"), ".glb": ("mesh", "mesh"),
     ".fbx": ("mesh", "mesh"), ".ply": ("mesh", "mesh"),
     ".step": ("cad", "cad"), ".stp": ("cad", "cad"), ".iges": ("cad", "cad"), ".igs": ("cad", "cad"),
@@ -85,7 +130,9 @@ def _slug(value: str) -> str:
     return re.sub(r"[^a-zA-Z0-9]+", "_", value.lower()).strip("_") or "project"
 
 
-_XML_ROOTS = (("<mujoco", "robot_model"), ("<robot", "robot_model"), ("<sdf", "world_or_model"))
+# A ``.xml`` whose root is ``<sdf>`` is a Gazebo world/model, which we cannot read either (see
+# UNSUPPORTED_MODEL_FORMATS) — so it is recognized as a robot description we do not support, not nominated.
+_XML_ROOTS = (("<mujoco", "robot_model"), ("<robot", "robot_model"), ("<sdf", "robot_model_unsupported"))
 
 
 def sniff_xml_model(path: str) -> str | None:
@@ -461,6 +508,7 @@ def project_graph_summary(bundle: InputBundle, *, compile_probe=None) -> dict:
     recognized = 0
     unrecognized = 0
     robot_models: list[str] = []
+    unsupported_models: list[str] = []
     for artifact in bundle.artifacts:
         category = artifact.media_type or "unknown"
         by_category[category] = by_category.get(category, 0) + 1
@@ -468,19 +516,29 @@ def project_graph_summary(bundle: InputBundle, *, compile_probe=None) -> dict:
             unrecognized += 1
         else:
             recognized += 1
-        if artifact.artifact_type in {"robot_model", "world_or_model"} \
-                and artifact.parse_status != ParseStatus.UNRECOGNIZED:
-            robot_models.append(artifact.extracted_refs[0] if artifact.extracted_refs else artifact.id)
+        if artifact.parse_status == ParseStatus.UNRECOGNIZED:
+            continue
+        ref = artifact.extracted_refs[0] if artifact.extracted_refs else artifact.id
+        if artifact.artifact_type in {"robot_model", "world_or_model"}:
+            robot_models.append(ref)
+        elif artifact.artifact_type == "robot_model_unsupported":
+            # RECOGNIZED as a robot description, and honestly excluded from the candidate set: we have no reader
+            # for it, so nominating it would guarantee a failed import and then a substituted robot.
+            unsupported_models.append(ref)
 
     # PICK BY EVIDENCE, NOT ALPHABET (see rank_model_candidates). robot_models is returned best-first so the
     # list itself is the ranking, and model_ranking carries the reasons so the choice is auditable.
     ranking = rank_model_candidates(robot_models, root_folder=bundle.root_folder, compile_probe=compile_probe)
     robot_models = [c["ref"] for c in ranking]
+    guidance = unsupported_model_guidance(unsupported_models)
 
     blockers: list[str] = []
     if not robot_models:
-        blockers.append(
-            "No robot description (URDF/MJCF/SDF/USD) found — cannot build a simulation-ready twin.")
+        blockers.append("No robot description Virturoid can read (URDF or MJCF) found — cannot build a "
+                        "simulation-ready twin.")
+        # ...and when the reason is that their model is in a format we don't read, SAY THAT and say what works.
+        # "No robot description found" in a folder that visibly contains robot.usd reads as a scanner bug.
+        blockers.extend(guidance)
 
     return {
         "bundle_id": bundle.id,
@@ -492,6 +550,11 @@ def project_graph_summary(bundle: InputBundle, *, compile_probe=None) -> dict:
         "robot_models": robot_models,
         "model_ranking": [{"ref": c["ref"], "score": round(float(c["score"]), 2), "reasons": c["reasons"],
                            "bodies": c.get("bodies"), "actuators": c.get("actuators")} for c in ranking[:6]],
+        # Robot descriptions we RECOGNIZED and cannot read (USD/SDF). Reported even when a readable model was
+        # also found, so the customer is never left wondering why their .usd was ignored.
+        "unsupported_models": unsupported_models,
+        "unsupported_model_guidance": guidance,
+        "supported_model_formats": [".urdf", ".mjcf", ".xml (MuJoCo)"],
         "first_runnable_sim_target": robot_models[0] if robot_models else None,
         "has_ros": by_category.get("ros", 0) > 0,
         "has_policies": by_category.get("policy", 0) > 0,

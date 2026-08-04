@@ -231,6 +231,25 @@ class IngestProjectTests(unittest.TestCase):
         self.assertTrue(r.get("substituted"))
         self.assertNotIn("Ready to edit/verify", r["summary"])
 
+    def test_a_usd_only_project_names_the_format_and_the_conversion(self):
+        """USD/SDF ingest was advertised (`_EXT_MAP` classified .usd as a robot_model; the blocker string read
+        "(URDF/MJCF/SDF/USD)") and does not exist. The customer most likely to arrive with a .usd is an Isaac
+        engineer -- our stated target user -- and what they used to get was "none of the 1 model file(s) in the
+        project could be imported", which names neither the reason nor the one step that works."""
+        from virturoid.services.input_training_tools import _ingest_project
+        d = tempfile.mkdtemp(prefix="usdproj_")
+        Path(d, "spot.usd").write_text("#usda 1.0\n", encoding="utf-8")
+        r = _ingest_project({"project_path": d, "description": "a four legged robot dog"})
+        self.assertIs(r.get("ok"), False)
+        self.assertTrue(r.get("substituted"))
+        self.assertEqual(r["substitution"]["unsupported_model_files"], ["spot.usd"])
+        self.assertIn("cannot read", r["substitution"]["reason"])
+        self.assertIn("URDF", r["substitution"]["reason"])
+        self.assertNotIn("no robot description file", r["substitution"]["reason"])
+        fix = r["substitution"]["how_to_fix"]
+        self.assertIn("no USD importer", fix)          # the truth
+        self.assertIn("Isaac", fix)                    # ...and the step that works, not a bare "unsupported"
+
     @unittest.skipUnless(_MUJOCO, "URDF import needs MuJoCo to compile the model")
     def test_folder_with_urdf_and_description(self):
         from virturoid.services import session_state as S

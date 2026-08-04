@@ -10,8 +10,14 @@ mock. It composes three existing parts into one closed loop:
                                      and a reward that games (high return, low credibility) is flagged + dropped.
 
 The reward is optimized; success is never the reward's to define — the Eureka/DrEureka failure modes, closed.
-Pure CPU, LLM-optional (heuristic templates backfill), deterministically testable. The MJX/GPU port reuses the
-same feature extractor + reward compilation; only the inner ``search_gait`` swaps for the MJX trainer.
+
+**What "training" means here, exactly.** The default (CPU) path optimizes a 5-scalar CPG gait parameterization
+by CEM — a real physics search steered by the LLM's reward, but not a neural policy and not PPO. Passing
+``train_backend="gpu"`` hands the SELECTED expression to MJX PPO on the GPU box via
+:func:`train_selected_reward_on_gpu`, which is the call site ``gpu_trainer.train_gene_on_gpu(reward_expr=…)``
+and ``scripts/mjx_morph_attention.py --reward-expr`` were written for and did not have: before it,
+``reward_expr=`` had ZERO callers repo-wide, so the plan's "DSL rewards steer MJX PPO" was a trainer half with
+no caller. GPU is remote, slow and optional, so it is opt-in per call and never implicit — a CPU run says so.
 """
 
 from __future__ import annotations
@@ -62,6 +68,54 @@ def _one_round(gene, task, *, llm, reflection, n_rewards, screen_generations, sc
             "n_gamed": sel.get("n_gamed", 0), "n_candidates": len(cands)}
 
 
+def train_selected_reward_on_gpu(gene, reward_expr: str, *, out_path: str | None = None, iters: int = 200,
+                                 envs: int = 512, progress=None, gpu_timeout: float = 20.0) -> dict:
+    """R1's MISSING CALL SITE: hand the SELECTED reward EXPRESSION to MJX PPO on the GPU box.
+
+    Everything under this function already existed and was tested. ``gpu_trainer.train_gene_on_gpu`` accepts
+    ``reward_expr=`` and turns it into ``--reward-expr`` (``gpu_trainer.py:403``); ``mjx_morph_attention.py``
+    compiles it with ``reward_dsl.compile_reward_batched(xp=jax.numpy)`` and REPLACES the shaped legged_gym
+    reward with it (``:423``). What never existed was a caller — ``reward_expr=`` had zero call sites repo-wide,
+    so an LLM-authored reward was proposed, AST-sandboxed, screened and gaming-checked, and then only ever
+    reached the CPU CEM search over 5 CPG scalars.
+
+    Never raises: a missing box, an unreachable box or a red parity gate all return an honest report and leave
+    the CPU result standing. Returns ``{attempted, trained, policy, note, …}``.
+    """
+    report = {"attempted": True, "trained": False, "policy": None, "backend": "mjx_ppo_gpu",
+              "reward_expr": reward_expr or None, "iters": int(iters), "envs": int(envs)}
+    if not str(reward_expr or "").strip():
+        return {**report, "attempted": False,
+                "note": "no reward expression was selected (the loop fell back to the default un-gameable "
+                        "fitness), so there is nothing for the DSL to steer PPO with"}
+    try:
+        from virturoid.services.gpu_trainer import default_training_recipe, gpu_available, train_gene_on_gpu
+    except Exception as exc:  # noqa: BLE001 - GPU support absent -> the CPU result stands, honestly labelled
+        return {**report, "note": f"GPU trainer unavailable: {type(exc).__name__}: {exc}"}
+    if not gpu_available(timeout=gpu_timeout):
+        return {**report, "note": "the GPU box did not answer over Tailscale — this reward steered the CPU gait "
+                                  "search only; it did NOT steer PPO"}
+    try:
+        import re
+        from pathlib import Path
+        from virturoid.services.agent_tools import safe_build_path
+        slug = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(getattr(gene, "id", "") or "")).strip("_")[:60] or "reward_loop"
+        out = (Path(out_path) if out_path else
+               safe_build_path(None, "agent_builds") / slug / "reward_policy.npz")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        recipe = default_training_recipe(gene)          # per-body recipe (cpg / adaptive / deploy-gap deltas)
+        npz = train_gene_on_gpu(gene, out_path=str(out), iters=int(iters), envs=int(envs), progress=progress,
+                                reward_expr=str(reward_expr), **recipe)
+    except Exception as exc:  # noqa: BLE001
+        return {**report, "note": f"GPU training failed: {type(exc).__name__}: {exc}"}
+    if not npz:
+        return {**report, "note": "the GPU trainer returned no policy (parity gate red, launch failure or "
+                                  "timeout) — the CPU gait result stands and PPO was NOT steered"}
+    return {**report, "trained": True, "policy": str(npz), "recipe": recipe,
+            "note": "MJX PPO ran with the selected DSL expression REPLACING the shaped legged_gym reward "
+                    "(mjx_morph_attention --reward-expr); the policy npz loads on the same CPU MorphPolicy path"}
+
+
 def _round_is_better(a, b) -> bool:
     """Prefer a credible round; among equal credibility, more forward travel."""
     if a["v"]["credible"] != b["v"]["credible"]:
@@ -72,7 +126,9 @@ def _round_is_better(a, b) -> bool:
 def run_intelligent_reward_loop(gene, task: str = "walk forward", *, llm=None, n_rewards: int = 4,
                                 screen_generations: int = 3, screen_pop: int = 10,
                                 final_generations: int = 8, final_pop: int = 24, steps: int = 800,
-                                seed: int = 0, iterations: int = 1, bank: bool = True, db=None) -> dict:
+                                seed: int = 0, iterations: int = 1, bank: bool = True, db=None,
+                                train_backend: str = "cpu", gpu_iters: int = 200, gpu_envs: int = 512,
+                                progress=None) -> dict:
     """Author → screen → select → train → verify → REFLECT → (re-propose), with zero hand-written reward code.
 
     1. ``propose_rewards`` writes ``n_rewards`` candidate reward expressions (LLM if given, else templates).
@@ -83,6 +139,9 @@ def run_intelligent_reward_loop(gene, task: str = "walk forward", *, llm=None, n
        ``iterations > 1`` and the gait isn't yet credible, that reflection feeds the next round's proposal
        (the Eureka feedback loop) — otherwise it's returned as diagnostics. The best round across iterations is
        kept, and a credible result is banked to the flywheel keyed by this body's morphology.
+    6. ``train_backend="gpu"`` (or ``"auto"``) then hands the SELECTED expression to MJX PPO on the GPU box —
+       see :func:`train_selected_reward_on_gpu`. ``"cpu"`` (the default) does not, and the report says so
+       rather than letting "trained a policy" stand for a 5-scalar CEM search.
 
     Returns a compact, honest report. Never raises — a total failure returns ``ok: False`` with a reason."""
     try:
@@ -138,6 +197,28 @@ def run_intelligent_reward_loop(gene, task: str = "walk forward", *, llm=None, n
         if r["reward_source"] == "default_fitness_fallback":
             out["note"] = "no reward beat the honesty gate; trained on the default un-gameable fitness"
 
+        # WHAT WAS ACTUALLY OPTIMIZED. Say it in the report rather than letting "train_reward" imply PPO: the
+        # CPU path is CEM over 5 CPG scalars (gait_search), which is a real physics search and is not a policy.
+        out["optimizer"] = {
+            "cpu": "CEM over the 5-scalar CPG gait parameterization (gait_search.search_gait), steered by the "
+                   "selected reward expression and judged by the un-gameable classify() verdict",
+            "steered_ppo": False,
+        }
+        backend = str(train_backend or "cpu").lower()
+        if backend in ("gpu", "auto"):
+            gpu = train_selected_reward_on_gpu(gene, r["reward_expr"] or "", iters=gpu_iters, envs=gpu_envs,
+                                               progress=progress)
+            out["gpu_training"] = gpu
+            out["optimizer"]["steered_ppo"] = bool(gpu.get("trained"))
+            if gpu.get("trained"):
+                out["policy_npz"] = gpu["policy"]
+            elif backend == "gpu":
+                out["warnings"] = [*out.get("warnings", []), f"GPU training did not run: {gpu.get('note')}"]
+        else:
+            out["gpu_training"] = {"attempted": False, "trained": False,
+                                   "note": "train_backend='cpu': the reward steered the CPU gait search only. "
+                                           "Pass train_backend='gpu' to make this same expression steer MJX PPO."}
+
         if bank and v["credible"]:
             try:
                 from virturoid.services.gait_flywheel import bank_gait
@@ -171,11 +252,16 @@ def _train_reward(args: dict) -> dict:
         llm = get_llm()
     except Exception:  # noqa: BLE001 - LLM-off is a first-class path; templates author the rewards
         llm = None
+    backend = str(args.get("train_backend") or "cpu").lower()
+    if backend not in ("cpu", "gpu", "auto"):
+        return {"ok": False, "error": f"train_backend must be 'cpu', 'gpu' or 'auto' (got {backend!r})"}
     out = run_intelligent_reward_loop(
         gene, task=str(args.get("task") or "walk forward"), llm=llm,
         n_rewards=int(args.get("n_rewards", 4)), iterations=int(args.get("iterations", 1)),
         final_generations=int(args.get("generations", 8)), final_pop=int(args.get("pop", 24)),
         steps=int(args.get("steps", 800)), seed=int(args.get("seed", 0)),
+        train_backend=backend, gpu_iters=int(args.get("gpu_iters", 200)),
+        gpu_envs=int(args.get("gpu_envs", 512)),
         db=None)
     out["reward_authored_by"] = "llm" if llm is not None else "templates (no LLM backend configured)"
     return out
@@ -250,18 +336,29 @@ REWARD_LOOP_TOOLS = {
         "handler": _generate_fusion, "heavy": False,
     },
     "train_reward": {
-        "description": "Train a control policy for a held robot from an NLP task ('walk forward fast', 'carry "
-                       "load over rough ground') with NO hand-written reward: the LLM authors candidate reward "
-                       "functions over a safe feature vocabulary, each STEERS a real search, and the winner is "
-                       "chosen by an un-gameable success metric (a reward that games is dropped). Returns the "
-                       "chosen reward, the trained gait, its honest verdict, and banks a credible result to the "
-                       "flywheel. Uses your own LLM subscription when configured; heuristic templates otherwise.",
+        "description": "Optimize a held robot's controller from an NLP task ('walk forward fast', 'carry load "
+                       "over rough ground') with NO hand-written reward: the LLM authors candidate reward "
+                       "functions over a safe, AST-sandboxed feature vocabulary, each STEERS a real physics "
+                       "search, and the winner is chosen by an un-gameable success metric (a reward that games "
+                       "is dropped). BE PRECISE ABOUT WHAT IS TRAINED: by default (train_backend='cpu') the "
+                       "reward steers a CEM search over the 5-scalar CPG gait parameterization -- a real search "
+                       "on real physics, NOT a neural policy and NOT PPO. Set train_backend='gpu' and the SAME "
+                       "expression additionally steers MJX PPO on the GPU box (it replaces the shaped reward "
+                       "outright) and you get a policy .npz back; if the box is unreachable the report says so "
+                       "and the CPU result stands. Returns the chosen reward, the resulting gait, its honest "
+                       "verdict, `optimizer.steered_ppo`, and banks a credible result to the flywheel. Uses "
+                       "your own LLM subscription when configured; heuristic templates otherwise.",
         "parameters": {"type": "object", "required": ["robot_id"], "properties": {
             "robot_id": {"type": "string"},
             "task": {"type": "string", "description": "the goal in plain language"},
             "n_rewards": {"type": "integer", "description": "how many reward candidates to author (default 4)"},
             "iterations": {"type": "integer", "description": "reflect-and-re-propose rounds; >1 runs the Eureka "
                            "feedback loop, stopping early once a credible gait is found (default 1)"},
+            "train_backend": {"type": "string", "enum": ["cpu", "gpu", "auto"], "description": "'cpu' (default) "
+                              "steers the CPG gait search only; 'gpu'/'auto' also steer MJX PPO on the GPU box "
+                              "with the selected expression (remote, minutes, needs VIRTUROID_GPU_SSH)"},
+            "gpu_iters": {"type": "integer", "description": "PPO iterations when train_backend is gpu/auto (200)"},
+            "gpu_envs": {"type": "integer", "description": "parallel MJX envs when train_backend is gpu/auto (512)"},
             "generations": {"type": "integer"}, "pop": {"type": "integer"}}},
         "handler": _train_reward, "heavy": True,
     },
