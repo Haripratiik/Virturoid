@@ -12,6 +12,11 @@ crash as a finding. Three defects, all measured 2026-08-01 (task #265).
 3. FAIL-OPEN. A blanket ``except`` turned an internal ``KeyError`` into a normal-looking "searched, adopted
    nothing" return in 0 s, so a crash read as a considered decline — the artefact the function exists to remove.
 
+4. FIRST-CREDIBLE-WINS (added 2026-08-02, task #267). The fitter stopped at the first draw the horizon called
+   credible and shipped it, so the robustness margin it computed was an annotation on a decision already taken.
+   Measured on the grounded authored cat, that draw is 0/8 at rel 1e-2 and 1e-3 and falls at step 8754 against a
+   6000-step verdict. Sturdiness now leads the ranking and a fragile win keeps searching.
+
 These are unit tests: the physics is stubbed so the CONTRACT is what is under test, not the simulator.
 """
 from __future__ import annotations
@@ -33,10 +38,17 @@ _WINNER = {"freq": 2.21322363, "hip_amp": 0.77019713, "knee_amp": 0.96759659,
            "kp": 174.33467538, "kd": 12.35365122}
 
 
-def _stub_evaluate(credible_for_winner: bool):
-    """Default gait never credible (so a search happens); the winner's credibility is the knob under test."""
+def _stub_evaluate(credible_for_winner: bool, *, sturdy: bool = True):
+    """Default gait never credible (so a search happens); the winner's credibility is the knob under test.
+
+    ``sturdy`` decides whether PERTURBED COPIES of the winner are credible too — i.e. whether the winner is a
+    controller or one lucky float. ``robustness_margin`` probes exactly those copies, so this is the knob that
+    tells the fitter's robustness gate apart from its credibility gate. A stub in which ONLY the exact winning
+    float is credible describes a knife edge, and every op-point measured through it is fragile by construction.
+    """
+    tol = 0.2 if sturdy else 1e-9                 # relative half-width of the winner's credible neighbourhood
     def _ev(gene, params, *, steps=1200, reward_fn=None):
-        is_winner = abs(float(params.get("freq", 0)) - _WINNER["freq"]) < 1e-9
+        is_winner = abs(float(params.get("freq", 0)) - _WINNER["freq"]) <= tol * _WINNER["freq"]
         ok = credible_for_winner and is_winner
         return {"fitness": 1.0 if ok else -1.0, "forward": 0.958 if ok else 0.5,
                 "height_ratio": 1.0 if ok else 0.49, "survived": True,
@@ -71,11 +83,30 @@ def test_a_failed_draw_is_retried_from_a_fresh_seed(monkeypatch):
 
 
 def test_a_body_that_wins_first_time_pays_nothing_extra(monkeypatch):
+    """A STURDY first win ends the search — the extra draws exist for fragility, not as a tax on success."""
     monkeypatch.setattr(GS, "evaluate_gait", _stub_evaluate(True))
     one, seen = _stub_search(fail_first=0)
     monkeypatch.setattr(GF, "_one_search", one)
     out = GF.fit_gait_for_body(_Gene(), bank=False, seed_restarts=5)
     assert out["adopted"] is True and out["seed_attempts"] == 1 and len(seen) == 1
+    assert out["robustness_rel"] is not None and out["fragile"] is False
+
+
+def test_a_fragile_win_is_not_the_end_of_the_search(monkeypatch):
+    """THE TASK #267 CONTRACT AT THE ADOPTION GATE. A credible walk that no perturbed copy of itself can repeat
+    is one lucky float, and the old fitter stopped at the FIRST credible draw and shipped it. MEASURED
+    2026-08-02 on the grounded authored cat: the point it adopts is 0/8 at rel 1e-2 AND 1e-3 and is on the floor
+    by step 8754, while the verdict is measured at 6000 — the settling defect one horizon out. So a fragile win
+    spends the remaining draws looking for a controller instead of banking a coincidence."""
+    monkeypatch.setattr(GS, "evaluate_gait", _stub_evaluate(True, sturdy=False))
+    one, seen = _stub_search(fail_first=0)
+    monkeypatch.setattr(GF, "_one_search", one)
+    out = GF.fit_gait_for_body(_Gene(), bank=False, seed_restarts=3)
+    assert len(seen) == 3, "a fragile win must not end the search"
+    # ...and when no sturdier point exists, the body still keeps the walk it demonstrably has — declining a body
+    # that travels and holds its rate would be the same dishonesty pointed the other way — but it is FLAGGED.
+    assert out["adopted"] is True and out["fragile"] is True and out["robustness_rel"] is None
+    assert "FRAGILE" in out["reason"] and "NOT banked" in out["reason"]
 
 
 def test_restarts_are_bounded(monkeypatch):

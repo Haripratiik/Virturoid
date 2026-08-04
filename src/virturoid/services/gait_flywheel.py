@@ -317,7 +317,10 @@ def learn_gait_flywheel(gene, db, *, generations: int = 10, pop: int = 20, steps
 
     Deploy-select (honesty): the search optimizes at ``steps``, but the winner is re-measured at the longer
     ``deploy_steps`` horizon AND compared to the SHIPPED default gait there — the learned gait is banked ONLY if
-    it beats the default at deploy (never trust the search horizon; the bank must always deploy BETTER than default).
+    it beats the default at deploy (never trust the search horizon; the bank must always deploy BETTER than default)
+    AND ONLY IF IT SURVIVES A PERTURBATION OF ITSELF (``robustness_margin``); see the note at the gate below for the
+    measurement that made the second condition necessary. ``robustness_rel`` is reported either way, so a caller
+    that adopts a fragile point does so knowingly rather than by omission.
 
     ``recall=False`` runs the same search with NO prior (a cold run) while still banking to ``db``. Callers use it
     to RE-RUN a body whose warm-started search failed — see ``fit_gait_for_body`` for the measurement that made
@@ -350,8 +353,25 @@ def learn_gait_flywheel(gene, db, *, generations: int = 10, pop: int = 20, steps
     beats_default = learned_ok and (not default_credible
                                     or abs(learned["forward"]) > abs(default["forward"]) + 0.02)
 
+    # THE ERROR BAR IS PART OF THE DECISION, not a footnote printed beside it. A credible walk that no perturbed
+    # copy of itself can repeat is one lucky float, and BANKING one is how the flywheel comes to serve a fall.
+    # MEASURED 2026-08-02 (task #267) on the grounded authored cat: the op-point the fitter adopts
+    # (freq 1.700 / hip 1.080 / knee 0.939 / kp 94.27 / kd 14.0) travels 3.817 m and holds its rate to step 6000
+    # — and is 0/8 at BOTH rel 1e-2 and 1e-3, and falls at step 8754. It was ALREADY IN THE BANK, recalled as
+    # this body's own prior, winning at evaluation 1 in 3 s. That is the settling defect one horizon out, with
+    # the flywheel now doing the propagating: the corpus had memorised a fall and served it as a warm start.
+    #
+    # A robustness probe is the horizon-FREE version of "is it still walking later", and measured here it
+    # predicts exactly that: the cat's 8/8-robust point (freq 2.709 / kp 70.93) is still walking at 12000 steps
+    # with a flat rate, while the 0/8 point falls at 8754. Chasing the horizon upward cannot be the answer —
+    # every horizon ends somewhere — so the bank is gated on the MARGIN, not only on the verdict.
+    rob: dict = {"robustness_rel": None, "probes": {}}
+    if beats_default:
+        rob = robustness_margin(gene, res.best_params, steps=deploy_steps)
+    sturdy = rob["robustness_rel"] is not None
+
     skill_id = None
-    if bank and beats_default:
+    if bank and beats_default and sturdy:
         skill_id = bank_gait(db, gene, _DeployResult(res.best_params, learned))   # bank the DEPLOY metrics
 
     compounding_delta = None
@@ -403,6 +423,13 @@ def learn_gait_flywheel(gene, db, *, generations: int = 10, pop: int = 20, steps
         "horizon_steps": int(deploy_steps),                  # how long anyone actually looked...
         "settled": learned.get("holds_rate") is not None,    # ...and whether that was long enough to judge
         "rates": learned.get("rates"),
+        # ...and how much of a perturbation the answer survives, which is the part a horizon can never tell you.
+        "robustness_rel": rob["robustness_rel"],
+        "robustness_probes": rob["probes"],
+        "not_banked_reason": (None if skill_id or not (bank and beats_default) else
+                              f"the winning operating point does not survive a {min(_ROBUST_LADDER):g} relative "
+                              f"perturbation of its own parameters ({rob['probes']}) — a bank of controllers "
+                              f"must not hold one lucky float, which a later body would recall as a warm start"),
         "n_evals": int(getattr(res, "n_evals", 0)),
         "stopped_reason": getattr(res, "stopped_reason", "generation_limit"),
         "height_ratio": round(learned["height_ratio"], 3), "survived": bool(learned["survived"]),
@@ -497,6 +524,17 @@ def fit_gait_for_body(gene, *, deploy_steps: int = _SETTLE_STEPS, search_steps: 
       ``learn_gait_flywheel`` (which also recalls a structural prior and banks the result), never in the search's
       own optimistic score — measured, a cat credible at an 800-step search horizon FELL at 1500.
 
+    STURDINESS LEADS THE RANKING, and a FRAGILE WIN DOES NOT END THE SEARCH. Until 2026-08-02 this stopped at
+    the first draw the horizon called credible, measured its robustness, and shipped it either way — so the
+    error bar was an annotation on a decision already taken. That is how the settling defect survived its own
+    fix: on the grounded authored cat the adopted point holds its rate to 6000 and is ON THE FLOOR BY STEP 8754,
+    0/8 perturbed copies surviving at both rel 1e-2 and 1e-3. A horizon can always be outlived; a perturbation
+    probe is the horizon-free form of the same question, and here it separates the two cases cleanly (the cat's
+    8/8-robust point is still walking at 12000). A fragile winner is therefore kept only as a FALLBACK while the
+    remaining seed attempts look for a controller — and if none is found it is still adopted (the body does
+    travel and does hold its rate; declining it would be the same dishonesty pointed the other way) but is
+    flagged ``fragile`` and refused entry to the bank, so no later body recalls it as a warm start.
+
     ``search_steps == deploy_steps == _SETTLE_STEPS``, AND THEY MUST STAY EQUAL. Both were 1500, and 1500 was
     exactly where the claim broke: the grounded authored cat's adopted point reads CREDIBLE WALK at 1500 and
     falls at step 2014 (task #267). Raising only the JUDGING horizon does not fix it, it just adopts nothing —
@@ -558,21 +596,27 @@ def fit_gait_for_body(gene, *, deploy_steps: int = _SETTLE_STEPS, search_steps: 
             return out
         n_evals = 0
         learned: dict = {}
+        best: dict = {}
         attempts = max(1, int(seed_restarts))
+        _try = 0
         for _try in range(attempts):
             # Decorrelated restart seeds. A failed search is a failed DRAW, not a verdict on the body (see
-            # ``seed_restarts`` above), so retry before concluding this body cannot walk. Retry ONLY on failure:
-            # a body that succeeds first time costs exactly what it did before.
+            # ``seed_restarts`` above), so retry before concluding this body cannot walk. Retry ONLY on failure
+            # OR ON A FRAGILE WIN: a body that finds a STURDY op-point first time costs exactly what it did before.
             kw = dict(generations=generations, pop=pop, steps=search_steps, deploy_steps=deploy_steps,
                       seed=seed + _try * 1009)
             learned, n_try = _one_search(gene, db=db, bank=bank, warm_evals=warm_evals, max_evals=max_evals,
                                          out=out, kw=kw)
             n_evals += n_try
-            if learned.get("beats_default"):
-                out["seed_attempts"] = _try + 1
-                break
-        else:
-            out["seed_attempts"] = attempts
+            if not learned.get("beats_default"):
+                continue
+            _ensure_margin(gene, learned, deploy_steps)
+            if not best or _rank(learned) > _rank(best):
+                best = learned
+            if learned.get("robustness_rel") is not None:
+                break                    # a controller, not one lucky float -> stop paying for further draws
+        out["seed_attempts"] = _try + 1
+        learned = best or learned
         out["searched"] = True
         out.update({k: learned.get(k) for k in ("forward_m", "n_evals", "stopped_reason", "beats_default",
                                                 "credible", "survived", "reused_prior", "banked_skill")})
@@ -599,11 +643,15 @@ def fit_gait_for_body(gene, *, deploy_steps: int = _SETTLE_STEPS, search_steps: 
                                  f"re-measured from the stored parameters ({confirm.get('verdict')}) — not adopted")
                 _stash(gene, out)
                 return out
-            # MEASURE THE ERROR BAR BEFORE STORING. A verdict with no robustness number cannot distinguish a
-            # controller from one lucky float, and this fitter has shipped both under the same two words.
-            rob = robustness_margin(gene, params, steps=deploy_steps)
+            # THE ERROR BAR, measured during the search (``_ensure_margin``) so it could STEER it rather than
+            # merely annotate the result. A verdict with no robustness number cannot distinguish a controller
+            # from one lucky float, and this fitter has shipped both under the same two words.
+            _ensure_margin(gene, learned, deploy_steps)
+            rob = {"robustness_rel": learned.get("robustness_rel"),
+                   "probes": learned.get("robustness_probes") or {}}
             out["robustness_rel"] = rob["robustness_rel"]
             out["robustness_probes"] = rob["probes"]
+            out["fragile"] = rob["robustness_rel"] is None
             md = dict(getattr(gene, "metadata", None) or {})
             md["gait_params"] = params
             gene.metadata = md
@@ -611,7 +659,9 @@ def fit_gait_for_body(gene, *, deploy_steps: int = _SETTLE_STEPS, search_steps: 
             out["params"] = params
             _rob = (f"survives {rob['robustness_rel']:g} relative perturbation of every parameter"
                     if rob["robustness_rel"] is not None else
-                    f"does NOT survive {min(_ROBUST_LADDER):g} relative perturbation — treat it as fragile")
+                    f"is FRAGILE — no perturbed copy of it survives even a {min(_ROBUST_LADDER):g} relative "
+                    f"change ({rob['probes']}), a sturdier point was looked for over "
+                    f"{out.get('seed_attempts')} seed attempt(s) and not found, and it is NOT banked for reuse")
             out["reason"] = (f"searched {n_evals} gaits for this body over {out.get('seed_attempts')} seed "
                              f"attempt(s); adopted one that is still walking at step {deploy_steps} "
                              f"({out['confirm_forward_m']} m, rate {_rate_str(confirm)}) vs the default's "
@@ -642,6 +692,35 @@ def _rate_str(res: dict) -> str:
     return f"{rates[ks[0]]:+.2f} -> {rates[ks[-1]]:+.2f} m/1000 steps"
 
 
+def _ensure_margin(gene, learned: dict, steps: int) -> float | None:
+    """The winner's robustness margin, measured ONCE and carried on the result dict.
+
+    ``learn_gait_flywheel`` measures it at the bank gate, so on the normal path this is a lookup. It is
+    re-measured only for a caller (or a test) whose search result predates the field — never guessed, because a
+    missing error bar defaulting to "fine" is precisely the failure mode this whole task exists to remove.
+    """
+    if "robustness_rel" not in learned:
+        rob = robustness_margin(gene, learned.get("params") or {}, steps=steps)
+        learned["robustness_rel"] = rob["robustness_rel"]
+        learned["robustness_probes"] = rob["probes"]
+    return learned.get("robustness_rel")
+
+
+def _rank(learned: dict) -> tuple:
+    """Order two search winners: STURDINESS FIRST, distance only as a tie-break.
+
+    Ranking by distance is what picked the fall. MEASURED 2026-08-02 (task #267) on the grounded authored cat,
+    the full 96-evaluation budget at seed 0 produced exactly two credible candidates out of 97, and the one that
+    travelled 0.16% further (3.817 m vs 3.811 m) was the fragile one — 0/4 perturbed copies surviving against
+    3/4 for its near-twin. A selection rule that reads the last 6 mm of displacement will take the knife edge
+    every time, so displacement is only consulted once sturdiness has tied.
+    """
+    if not learned.get("beats_default"):
+        return (-2.0, 0.0)
+    rel = learned.get("robustness_rel")
+    return (float(rel) if rel is not None else -1.0, abs(float(learned.get("forward_m") or 0.0)))
+
+
 def _one_search(gene, *, db, bank: bool, warm_evals: int, max_evals: int, out: dict, kw: dict):
     """One SHORT first pass plus the full-budget re-run. Returns ``(learned, n_evals_used)``.
 
@@ -651,16 +730,28 @@ def _one_search(gene, *, db, bank: bool, warm_evals: int, max_evals: int, out: d
     other 96. That is a quarter of the intended budget spent on the hardest case, and it is a DECLINE-SHAPED
     bug: the fitter reports "none was still walking", which reads as a fact about the body.
 
-    It only became load-bearing when the settling gate made `credible` mean "walks" (task #267). MEASURED on
-    this checkout, grounded authored cat, 6000-step horizon: 24 evals x 3 seeds finds nothing and declines,
-    while a settling-aware search with the full budget finds ``freq 2.709 / hip 0.860 / knee 1.018 / kp 70.93 /
-    kd 14.0`` — travel-per-1000 of 0.665 -> 0.614 -> 0.574 -> 0.557 across 1500/2500/4000/6000, still walking
-    at 12000, and 8/8 robust at BOTH rel 1e-3 and 1e-2 (the adopted point scores 0/8 at both). Declining a body
-    that demonstrably walks would just be the same dishonesty pointed the other way.
+    It only became load-bearing when the settling gate made `credible` mean "walks" (task #267): on the grounded
+    authored cat at the 6000-step horizon, 24 evals x 3 seeds finds nothing and declines, while the full budget
+    finds a walk. Declining a body that demonstrably walks is the same dishonesty pointed the other way.
+
+    A FRAGILE WIN IS ALSO A REASON TO KEEP LOOKING, which is why the re-run is no longer conditional on failure.
+    An earlier revision of this docstring claimed the full-budget settling-aware search finds the cat
+    ``freq 2.709 / kp 70.93``, "8/8 robust at BOTH rel 1e-3 and 1e-2". RE-MEASURED 2026-08-02, that is HALF true
+    and the false half mattered: the POINT is real and verifies exactly as described (8/8 at both rungs, flat
+    rate 0.547 -> 0.546, still walking at 12000 steps, 6.75 m) — but THIS SEARCH DOES NOT FIND IT. Cold at seeds
+    0 / 1009 / 2018 it returns ``freq 1.700 / kp 94.27``: 0/8 at both rungs and on the floor by step 8754. Two
+    of those three seeds find no credible candidate at all, and the full 96 evals at seed 0 turn up exactly two
+    credible candidates out of 97. So the budget is not the binding constraint — reachability is, and quoting a
+    point the code cannot reach as though it were the code's output is the same class of false claim as quoting
+    a verdict from a horizon that ends before the fall.
     """
     learned = _open_db_and_learn(gene, db=db, bank=bank, max_evals=warm_evals, **kw)
     n_evals = int(learned.get("n_evals") or 0)
-    if not learned.get("beats_default"):
+    # A FRAGILE WIN COUNTS AS AN EMPTY ONE HERE. The warm pass can end in 1 evaluation because the recalled
+    # prior IS the answer — and MEASURED 2026-08-02 on the grounded authored cat, the prior the bank held was
+    # 0/8 robust and falls at step 8754, so "won at evaluation 1 in 3 s" was the corpus handing back a fall it
+    # had memorised. Spending the real budget to look for something sturdier is the point of having a budget.
+    if not learned.get("beats_default") or _ensure_margin(gene, learned, int(kw["deploy_steps"])) is None:
         # SCREEN THE PRIOR AT THE SEARCH LEVEL. This module's contract is that "a bad prior must never hurt",
         # and gait_search states that an injected prior "is simply one of `pop` candidates and does no harm".
         # MEASURED 2026-08-01 on the grounded authored dog, that is false: the prior is re-injected as
@@ -676,6 +767,8 @@ def _one_search(gene, *, db, bank: bool, warm_evals: int, max_evals: int, out: d
         if learned.get("reused_prior"):
             out["prior_screened_out"] = True
         if cold.get("beats_default"):
+            _ensure_margin(gene, cold, int(kw["deploy_steps"]))
+        if _rank(cold) > _rank(learned):     # sturdiness first; see ``_rank`` for why distance cannot lead
             learned = cold
     return learned, n_evals
 

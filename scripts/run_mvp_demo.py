@@ -161,6 +161,11 @@ def _body_metrics(robot_id: str) -> dict:
             # the per-body operating point create_robot fitted (or "shipped default" when the default already walked)
             "gait": (md.get("gait_params") or None),
             "gait_note": (fit.get("reason") if fit else None),
+            # THE ERROR BAR THAT BELONGS NEXT TO THE NUMBER. Two bodies can print the same verdict and a similar
+            # distance while one survives a 10% perturbation of every gait parameter and the other survives none
+            # -- four orders of magnitude apart, historically shown as the same two words (task #267).
+            "robustness_rel": (fit.get("robustness_rel") if fit else None),
+            "fragile": bool(fit.get("fragile")) if fit else False,
         }
     except Exception:  # noqa: BLE001 - metrics are descriptive; never fail a build over them
         pass
@@ -375,12 +380,18 @@ def _family_html(rows: list[dict]) -> str:
         # the fitter's own sentence ("searched N gaits ... walks X m vs the default's Y m") on hover: too long for
         # a column, too good to throw away -- it is the receipt for the number in the cell
         gtip = f' title="{html.escape(str(r.get("gait_note")))}"' if r.get("gait_note") else ""
+        # ...and the MARGIN in the cell itself, not only in the tooltip. An operating point no perturbed copy of
+        # itself survives is one lucky float, and a reader comparing two rows cannot see that from freq/kp.
+        _rel = r.get("robustness_rel")
+        margin = ('' if not g else
+                  f' &middot; survives &plusmn;{_rel:g}' if _rel is not None else
+                  ' &middot; <span class="bad">FRAGILE</span>' if r.get("fragile") else '')
         vcls = _verdict_class(r.get("verdict", ""), r.get("credible"))
         trs.append(
             f'<tr><th>{html.escape(str(r.get("label")))}</th>'
             f'<td>{r.get("mass_kg")}</td><td>{r.get("leg_m")}</td><td>{r.get("torso_m")}</td>'
             f'<td>{r.get("torso_over_leg")}</td><td>{r.get("segments")}/{r.get("dof")}</td>'
-            f'<td class="gait"{gtip}>{html.escape(gait)}</td><td>{sub}</td>'
+            f'<td class="gait"{gtip}>{html.escape(gait)}{margin}</td><td>{sub}</td>'
             f'<td><span class="badge {vcls}">{html.escape(str(r.get("verdict","")))}</span> '
             f'{("" if r.get("forward_m") is None else str(r.get("forward_m")) + " m")}</td></tr>')
     dog_note = ('The dog card in the gallery above is <i>this same robot</i>, composed once and shared between the '

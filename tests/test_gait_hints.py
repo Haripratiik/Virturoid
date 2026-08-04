@@ -13,10 +13,12 @@ os.environ.setdefault("MUJOCO_GL", "glfw")
 _MUJOCO = importlib.util.find_spec("mujoco") is not None
 
 
-def _bank(db, cls, gene_id, params, sr):
+def _bank(db, cls, gene_id, params, sr, forward=None):
     from virturoid.services.gait_flywheel import LOCOMOTION
-    db.record_skill(f"gait::{cls}::{gene_id}", cls, LOCOMOTION, success_rate=sr,
-                    base_config={"gait_params": params, "controller": "crawl_gait"})
+    bc = {"gait_params": params, "controller": "crawl_gait"}
+    if forward is not None:
+        bc["forward_m"] = float(forward)      # the OUTCOME a mined region must be tested against
+    db.record_skill(f"gait::{cls}::{gene_id}", cls, LOCOMOTION, success_rate=sr, base_config=bc)
 
 
 def _bank_vec(db, gene, params, *, forward=1.0):
@@ -49,7 +51,9 @@ class GaitHintsMiningTests(unittest.TestCase):
         h = mine_gait_hints(db, robot_class="quadruped")
         self.assertEqual(h["n"], 3)
         self.assertAlmostEqual(h["prior"]["freq"], 2.0, delta=0.15)   # region tracked the data, not the 1.5 default
-        self.assertTrue(any(hint.get("kind") == "param_region" for hint in h["hints"]))
+        # ...but 3 walks with no recorded travel CANNOT establish a param region, so none is CLAIMED (#266).
+        # The prior stays available as an explicitly un-tuned warm-start seed; a hint is a claim about evidence.
+        self.assertFalse([x for x in h["hints"] if x.get("kind") == "param_region"], h["hints"])
         # the relational hint is DISCOVERED (all 3 have knee_amp > hip_amp)
         self.assertTrue(any(hint.get("kind") == "relation" for hint in h["hints"]))
 
@@ -76,6 +80,92 @@ class GaitHintsMiningTests(unittest.TestCase):
         self.assertGreaterEqual(h["n"], 1)
         self.assertGreater(h["prior"]["freq"], 1.7,                 # pulled toward the SHAPE-similar hexapod (2.2)
                            f"expected the morphology-nearest (hexapod) walk to dominate, got {h['prior']}")
+
+
+class MinedRegionsMustBeEarnedTests(unittest.TestCase):
+    """#266 — a ``param_region`` hint is shown to the operator as EVIDENCE, so it must survive three gates.
+
+    Before this, ``mine_gait_hints`` emitted one for EVERY key in ``_PARAM_KEYS`` with >=2 observations, in
+    identical confident wording, with no dispersion test, no association test and no comparison against the
+    prior the values were drawn from. Measured on the real 90-walk bank it announced "nearby walkers cluster
+    kp near 56.61 (67 robots)" over an advertised cluster of [20.0, 240.0] — a band that SPANS AND EXCEEDS the
+    whole [24, 240] search range. The removed ``duty`` was the extreme case, not the mechanism.
+    """
+    def _db(self):
+        from virturoid.services.memory_db import MemoryDB
+        return MemoryDB(db_path=Path(tempfile.mkdtemp(prefix="hints_gate_")) / "m.db")
+
+    @staticmethod
+    def _regions(h):
+        return {x["param"]: x for x in h["hints"] if x.get("kind") == "param_region"}
+
+    def test_no_region_hint_for_a_parameter_that_spans_its_whole_search_range(self):
+        """THE defect, in one assertion: kp swept across the FULL [24, 240] search range and uncorrelated with
+        travel is not a cluster — it is the search range itself, restated as advice."""
+        from virturoid.services.gait_hints import mine_gait_hints
+        db = self._db()
+        n = 40
+        for i in range(n):
+            kp = 24.0 + (240.0 - 24.0) * i / (n - 1)              # the ENTIRE search range, end to end
+            fwd = 0.6 + 1.4 * ((i * 7) % n) / (n - 1)             # travel: unrelated to kp
+            _bank(db, "quadruped", f"span{i}", {"freq": 1.5, "hip_amp": 0.9, "knee_amp": 1.0,
+                                                "kp": kp, "kd": 1.0 + 13.0 * ((i * 3) % n) / (n - 1)},
+                  0.9, forward=fwd)
+        h = mine_gait_hints(db, robot_class="quadruped")
+        self.assertEqual(h["n"], n)
+        self.assertNotIn("kp", self._regions(h),
+                         f"kp spans 100% of its search range and predicts nothing — no region to claim: {h['hints']}")
+        # and the operator is TOLD why there is no hint, rather than shown silence
+        self.assertTrue(any(s.get("param") == "kp" for s in h.get("suppressed", [])), h.get("suppressed"))
+
+    def test_a_real_parameter_survives_the_gates_and_a_null_one_does_not(self):
+        """The generator must DISCRIMINATE. Same bank, same sample size, same selection machinery: ``freq`` has a
+        genuine operating band (walkers inside it travel far, outside it barely move); ``kd`` is swept across its
+        range with no bearing on travel. One hint must survive, the other must not."""
+        from virturoid.services.gait_hints import mine_gait_hints
+        db = self._db()
+        n = 40
+        for i in range(n):
+            if i % 2 == 0:                                        # REAL signal: freq in a tight band -> walks far
+                freq, fwd = 1.45 + 0.30 * (i / (n - 1)), 2.0 + 0.5 * (i / (n - 1))
+            else:                                                 # far from the band -> barely moves
+                freq, fwd = 0.8 + 2.4 * (i / (n - 1)), 0.4 + 0.2 * (i / (n - 1))
+            kd = 1.0 + 13.0 * ((i * 11) % n) / (n - 1)            # NULL: swept, unrelated to travel
+            _bank(db, "quadruped", f"mix{i}", {"freq": freq, "hip_amp": 0.9, "knee_amp": 1.0, "kp": 32.0,
+                                               "kd": kd}, 0.9, forward=fwd)
+        h = mine_gait_hints(db, robot_class="quadruped")
+        reg = self._regions(h)
+        self.assertIn("freq", reg, f"a parameter with a real, outcome-linked band must still be minable: {h}")
+        self.assertNotIn("kd", reg, f"kd predicts nothing about travel — it must not be advised on: {h['hints']}")
+        # and it RECOVERS the planted band [1.45, 1.75] rather than merely existing — a gate that only ever
+        # says "no" would pass every negative test in this class while being useless
+        self.assertGreaterEqual(reg["freq"]["range"][0], 1.40, reg["freq"])
+        self.assertLessEqual(reg["freq"]["range"][1], 1.80, reg["freq"])
+        # the surviving hint is FALSIFIABLE (the `relation` template's shape): it states a proportion and the
+        # odds the same pattern arises from selection alone, not a bare "walkers cluster X near Y"
+        note = reg["freq"]["note"]
+        self.assertIn("%", note, note)
+        self.assertLessEqual(reg["freq"]["spread_vs_prior"], 0.5, reg["freq"])
+        self.assertLess(reg["freq"]["p_association"], 0.05, reg["freq"])
+        self.assertLess(reg["freq"]["p_vs_winner_null"], 0.05, reg["freq"])
+
+    def test_a_tight_cluster_with_no_outcome_link_is_still_refused(self):
+        """GATE 3, the subtle one. Banked values are CEM WINNERS, and elite selection shrinks a coordinate's
+        variance whether or not it has signal — fastest where it has NONE. So "tight" is not evidence on its own:
+        a band far tighter than the sampling prior, but no tighter than random same-size groups of the banked
+        winners and unlinked to travel, must be refused. (Measured: the removed ``duty`` sat at 13% of a uniform
+        draw — TIGHTER than every real parameter — precisely because nothing pushed back on it.)"""
+        from virturoid.services.gait_hints import mine_gait_hints
+        db = self._db()
+        n = 40
+        for i in range(n):
+            kd = 1.40 + 0.20 * (i / (n - 1))                      # 1.5% of the [1, 14] range: a very tight band
+            _bank(db, "quadruped", f"tight{i}", {"freq": 1.5, "hip_amp": 0.9, "knee_amp": 1.0, "kp": 32.0,
+                                                 "kd": kd}, 0.9,
+                  forward=0.5 + 1.5 * ((i * 13) % n) / (n - 1))   # travel: unrelated to where in the band it sat
+        h = mine_gait_hints(db, robot_class="quadruped")
+        self.assertNotIn("kd", self._regions(h),
+                         f"tight is not the same as earned — nothing links kd to travel: {h['hints']}")
 
 
 @unittest.skipUnless(_MUJOCO, "adaptation runs a short gait search in MuJoCo")

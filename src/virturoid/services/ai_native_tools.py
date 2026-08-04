@@ -718,6 +718,14 @@ def _honest_gait(gene, *, steps: int = 1200, render: bool = False, tag: str = "g
     if out.get("gait_source") == "tuned_for_this_body" and "robustness_rel" in _fit:
         out["robustness_rel"] = _fit["robustness_rel"]
         out["robustness_probes"] = _fit.get("robustness_probes")
+        # A NULL MARGIN MUST NOT READ AS "not measured". It was measured and the answer was "none" — no perturbed
+        # copy of this operating point walks, so the verdict above describes one lucky float rather than a
+        # controller. Measured on the grounded authored cat, that is the difference between a walk that survives
+        # to step 12000 and one that is on the floor by 8754 with the verdict taken at 6000 (task #267).
+        if _fit.get("fragile"):
+            out["robustness_note"] = ("FRAGILE operating point: no perturbed copy of it survives even a "
+                                      "0.001 relative change, so this verdict is not reproducible on hardware "
+                                      "and the gait is not banked for reuse")
     if render and r.get("qpos_frames"):
         gif = _render_gait_gif(gene, r["qpos_frames"], tag)
         if gif:
@@ -1663,9 +1671,39 @@ AI_NATIVE_TOOLS: dict[str, dict] = {
     "get_robot": {"description": "Compact summary of a held robot (class, discovered appendages, height, mass).",
                   "heavy": False, "handler": get_robot, "parameters": {"type": "object", "required": ["robot_id"],
                   "properties": {"robot_id": {"type": "string"}}}},
+    "probe_robot": {"description": "MEASURE the held robot: a queryable read-only surface over the COMPILED "
+                    "MuJoCo model, so an answer cannot disagree with the physics the verdict uses. `fields` "
+                    "selects what to compute (omit for everything): parts/reach/clearance/mass/torque/overlaps/"
+                    "swept. `swept` is the one a static check cannot make — it samples each limited joint across "
+                    "its declared range and reports pairs that collide only AWAY from the rest pose.",
+                    "heavy": True, "handler": probe_robot, "parameters": {"type": "object",
+                    "required": ["robot_id"], "properties": {"robot_id": {"type": "string"},
+                    "fields": {"type": "array", "description": "which measurements to compute; omit for the "
+                               "whole report", "items": {"type": "string", "enum": [
+                                   "parts", "reach", "clearance", "mass", "torque", "overlaps", "swept"]}}}}},
+    "assert_design": {"description": "State what the design MEANT and be checked against it — the other half of "
+                      "probe_robot, which only answers the questions you think to ask. `assertions` is a list of "
+                      "{kind, a, b?, max_m?, min_m?, reason?}; kind:'list' returns the vocabulary. persist:true "
+                      "stores them on the robot so a later edit_robot re-checks the ORIGINAL intent.",
+                      "heavy": True, "handler": assert_design, "parameters": {"type": "object",
+                      "required": ["robot_id"], "properties": {"robot_id": {"type": "string"},
+                      "assertions": {"type": "array", "items": {"type": "object"},
+                                     "description": "list of {kind, a, b?, max_m?, min_m?, reason?}"},
+                      "persist": {"type": "boolean", "default": False},
+                      "kind": {"type": "string", "enum": ["list"],
+                               "description": "single-verb shortcut: 'list' returns the assertion vocabulary"}}}},
     "edit_ops": {"description": "Discover the typed LOCALIZED edit operators (scale_group/set_height/set_material/"
                  "set_leg_count) and their args.", "heavy": False, "handler": edit_ops,
                  "parameters": {"type": "object", "properties": {}}},
+    "scope_amend": {"description": "DRY-RUN an amend: what it would touch (`editable`), what it claims to leave "
+                    "alone (`preserved`), and which established facts it invalidates — WITHOUT editing anything, "
+                    "so the change can be shown or refused before it commits. Takes the same ops as edit_robot.",
+                    "heavy": False, "handler": scope_amend, "parameters": {"type": "object",
+                    "required": ["robot_id"], "properties": {"robot_id": {"type": "string"},
+                    "ops": {"type": "array", "items": {"type": "object"}, "description": "the edit you are "
+                            "considering, as [{op, args}] — the same shape edit_robot takes"},
+                    "op": {"type": "string", "description": "single-op shortcut instead of ops"},
+                    "args": {"type": "object", "description": "args for the single-op shortcut"}}}},
     "edit_robot": {"description": "Apply typed LOCALIZED edits to a held robot (e.g. taller = ops:[{op:'scale_group',"
                    "args:{group:'legs',dims:'length',factor:1.2}}]) — never regenerates. Lands as one undo step; "
                    "returns the diff. Also: op:'list' returns the operator catalog, op:'undo' reverts the last edit.",

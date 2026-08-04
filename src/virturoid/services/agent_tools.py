@@ -331,6 +331,16 @@ _ADVANCED_SIBLINGS: tuple[str, ...] = ("train_reward", "generate_fusion", "gener
 _DESIGN_SIBLINGS: tuple[str, ...] = ("create_robot", "evaluate_held")
 _SCENE_SIBLINGS: tuple[str, ...] = ("edit_scene", "submit_scene_spec")
 
+# MEASURE / DECLARE-INTENT and DRY-RUN-THE-AMEND. These three shipped fully implemented and were registered
+# NOWHERE — so `call_tool`, `tools/list` and `tools/call` all rejected them, while `get_design_schema` was
+# telling the customer's own model "Check it with probe_robot rather than reasoning about frames": we advertised
+# a tool that did not exist on the wire. They are registered in AI_NATIVE_TOOLS now (so tools/call dispatches
+# them), and advertised here on the anchor they belong to rather than added to MCP_TOOL_VIEW, because that view
+# is at its documented cross-client cap of 15 and test_agent_first asserts it. Same treatment as the ingest and
+# advanced-authoring siblings: named in the tools/list payload, callable by name.
+_INSPECT_SIBLINGS: tuple[str, ...] = ("probe_robot", "assert_design")
+_AMEND_SIBLINGS: tuple[str, ...] = ("scope_amend",)
+
 # INGESTION GATEWAY (P0, agentic-ingestion plan): the plan found ZERO ingestion tools in the MCP view, so a
 # customer's own agent (the BYOK model) could not DISCOVER ingestion from tools/list at all. Rather than crowd
 # the lean menu with every importer, ``ingest_project`` is advertised and its description names the sibling
@@ -359,6 +369,18 @@ def tool_specs(view: str | None = None) -> list[dict]:
                 avail = [s for s in _DESIGN_SIBLINGS if s in TOOLS]
                 if avail:
                     desc = desc + " Callable companions: " + ", ".join(avail) + "."
+            if n == "get_robot":                               # MEASURE the model / declare intent as checks
+                avail = [s for s in _INSPECT_SIBLINGS if s in TOOLS]
+                if avail:
+                    desc = (desc + " Callable companions: " + ", ".join(avail)
+                            + " (measure the COMPILED model — reach/clearance/mass/per-joint torque margin/"
+                              "swept self-collision through each joint's range; and state design intent as "
+                              "assertions the harness checks).")
+            if n == "edit_robot":
+                avail = [s for s in _AMEND_SIBLINGS if s in TOOLS]
+                if avail:
+                    desc = (desc + " Callable companion: " + ", ".join(avail)
+                            + " — DRY-RUN the same ops first (blast radius + what it invalidates, nothing edited).")
             if n == "create_scene":
                 avail = [s for s in _SCENE_SIBLINGS if s in TOOLS]
                 if avail:
