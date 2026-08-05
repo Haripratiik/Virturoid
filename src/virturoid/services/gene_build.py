@@ -248,6 +248,13 @@ def grounding_config(gene: RobotGene) -> dict:
     the manufacturer's own and must never be replaced by our primitive-volume estimate; ``preserve_mass`` is
     then True and the material only sizes actuators. Otherwise the material/fill ``ground_gene`` last recorded
     wins, falling back to :data:`DEFAULT_GROUNDING`.
+
+    ``preserve_geometry`` is the same rule for SHAPE, and it is keyed on ``metadata['imported_from']``: every
+    link length and radius on an imported body is a measurement of a machine that already exists, so the two
+    geometry-editing passes in :func:`ground_and_repair` (stress thickening, actuator-housing fit) must report
+    what they find rather than silently re-cut the customer's robot. It stays True across an amend, because
+    what a customer holds and verifies after their own edit is still what the export door has to ship
+    unchanged; a deliberate edit moves the geometry through ``edit_operators``, which is the customer asking.
     """
     meta = getattr(gene, "metadata", None) or {}
     rec = meta.get("grounding") if isinstance(meta.get("grounding"), dict) else {}
@@ -259,6 +266,8 @@ def grounding_config(gene: RobotGene) -> dict:
         "material": str(rec.get("material") or DEFAULT_GROUNDING["material"]),
         "fill": fill if 0.0 < fill <= 1.0 else float(DEFAULT_GROUNDING["fill"]),
         "preserve_mass": str(meta.get("mass_source") or "") == "source_model",
+        "preserve_geometry": bool(str(meta.get("imported_from") or "")
+                                  or str(meta.get("mass_source") or "") == "source_model"),
         "source": ("imported" if str(meta.get("mass_source") or "") == "source_model"
                    else ("recorded" if rec else "default")),
     }
@@ -290,9 +299,23 @@ def ground_and_repair(gene: RobotGene) -> dict:
     mass can drop a link below the SF>=2.0 structural target the readiness ledger fail-closes on, so thicken
     only the under-margined links (SF ~ r^3, +5% headroom) and re-ground -- walking legs stay inside the
     slenderness band (length/diameter >= 2.25) so the fix never re-creates stub legs. Fail-open: a grounding
-    error is reported, never raised."""
+    error is reported, never raised.
+
+    ...AND THE SAME PROTECTION FOR SHAPE AS FOR MASS. Both of those passes RE-CUT the body, which is right for
+    a body we drew and wrong for one the customer handed us: on an imported robot every radius is a measurement
+    of hardware that exists. Measured on a Menagerie Go2 once the importer started reading the customer's real
+    torque limits (23.7/23.7/45.43 N.m instead of a 0.7-5.1 N.m structural guess): the housing-fit pass sized
+    the catalog equivalent of their knee motor at 110 mm and grew all four calves 0.02903 -> 0.03667 m (+26%)
+    and all four hips 0.02674 -> 0.02733 m, at unchanged mass -- so the shipped URDF had a different inertia
+    than the body the verdict was earned on, and ``export_held`` correctly reported ``same_as_verified: false``
+    on a robot nobody had edited. The premise does not even hold on real hardware: a Go2's knee actuator sits
+    at the joint, not inside the shin, and a one-radius capsule cannot say so. So for an imported body both
+    passes REPORT (``housing_over_limb``, ``understrength_links``) instead of editing, and the parts list still
+    names the part that covers the joint -- what changes is that we stop reshaping their robot to fit it."""
     _g = grounding_config(gene)
     _mat, _fill, _keep = _g["material"], _g["fill"], _g["preserve_mass"]
+    _hold_shape = bool(_g["preserve_geometry"])
+    _findings: dict = {}
     try:
         from virturoid.services.grounded_physics import ground_gene
         report = ground_gene(gene, material=_mat, fill=_fill, preserve_mass=_keep)
@@ -300,6 +323,11 @@ def ground_and_repair(gene: RobotGene) -> dict:
         for _ in range(3):
             _st = validate_structure(gene)
             if _st.get("ok", False):
+                break
+            if _hold_shape:                       # their shape, their call: name the weak links, don't re-cut them
+                _findings["understrength_links"] = [
+                    {"link": str(_l.get("name")), "safety_factor": round(float(_l.get("safety_factor") or 0.0), 2)}
+                    for _l in _st.get("links", []) if not _l.get("feasible")][:12]
                 break
             _by_name = {s.name: s for s in gene.segments}
             for _link in _st.get("links", []):
@@ -322,9 +350,14 @@ def ground_and_repair(gene: RobotGene) -> dict:
         # sticks. Real limbs enclose their actuator, so GROW THE LIMB rather than shrink an honest datasheet.
         # Bounded by the same slenderness rule the loop above uses, so a leg never becomes a stub, and followed
         # by a re-ground so mass/inertia track the new geometry.
+        #
+        # ON AN IMPORTED BODY THE CONCLUSION FLIPS. There the datasheet part is a catalog EQUIVALENT for a motor
+        # the customer already owns and already fitted, so a limb thinner than our stand-in is evidence our
+        # stand-in is bigger than their motor -- not evidence their limb is wrong. Record the ratio and leave
+        # the measurement alone; ``spec_sheet``/``ingest_project`` surface it.
         try:
             from virturoid.services.component_geometry import actuator_for_joint
-            _grew = False
+            _grew, _over = False, []
             for _s in gene.segments:
                 _ds = actuator_for_joint(_s)
                 if _ds is None or float(_s.radius_m or 0.0) <= 0.0:
@@ -336,15 +369,27 @@ def ground_and_repair(gene: RobotGene) -> dict:
                 # (a hip abduction block) would be pinned thinner than the motor bolted to it -- which is how the
                 # hexapod ended up as a 5.6 mm rod under a 98 mm motor. A short, chunky joint housing is what a
                 # real hip assembly looks like; fitting the part is the honest constraint, so let it win.
-                if _need > float(_s.radius_m):
-                    _s.radius_m = round(_need, 5)
-                    _grew = True
+                if _need <= float(_s.radius_m):
+                    continue
+                if _hold_shape:
+                    _over.append({"link": _s.name, "catalog_part": _ds.get("part"),
+                                  "part_diameter_m": round(max(float(_env[0]), float(_env[1])), 4),
+                                  "limb_diameter_m": round(2.0 * float(_s.radius_m), 4),
+                                  "ratio": round(_need / float(_s.radius_m), 2)})
+                    continue
+                _s.radius_m = round(_need, 5)
+                _grew = True
+            if _over:
+                _findings["housing_over_limb"] = _over[:12]
             if _grew:
                 report = ground_gene(gene, material=_mat, fill=_fill, preserve_mass=_keep)
         except Exception:  # noqa: BLE001 - housing fit is a fidelity pass, never a build blocker
             pass
     except Exception as _ge:  # noqa: BLE001
         report = {"error": f"{type(_ge).__name__}: {_ge}"}
+    if isinstance(report, dict):
+        report["geometry_preserved"] = _hold_shape
+        report.update(_findings)
     return report
 
 

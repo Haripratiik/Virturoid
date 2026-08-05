@@ -305,6 +305,278 @@ except Exception:  # noqa: BLE001
     pass
 
 
+# ---------------------------------------------------------------- the ADVERTISED schema must be TRUE
+#
+# ``parameters`` is not documentation, it is the CONTRACT a strict MCP client validates ``tools/call`` arguments
+# against — an argument the schema does not declare is REJECTED before it ever reaches the handler. So a
+# parameter a handler honours but the schema hides is not a doc nit; it is a call the customer's agent CANNOT
+# MAKE. Measured at HEAD, 21 of 67 registered tools hid 39 accepted keys between them, and the worst was the one
+# we instruct agents to use most: ``verify_robot`` advertised ``{robot_id}`` alone while accepting ``mode``,
+# ``steps`` and ``scene_id`` — and both the MCP ``initialize`` instructions and the ``design_robot_workflow``
+# prompt told agents to send ``mode:'quick'``. A strict client rejected the exact call the server taught it.
+#
+# The repair DERIVES instead of restating: ``_accepted_params`` reads a handler's own body for the keys it pulls
+# out of its args dict, and ``_publish_accepted_params`` publishes every one the schema is missing. ``_PARAM_DOCS``
+# adds the enum/units/meaning an agent needs where the derived shape is too thin; ``_NOT_ADVERTISED`` is the one
+# place a key can be kept off the contract, and it must say why. Because the source of truth is the handler
+# itself, a parameter added tomorrow cannot go quietly unadvertised — ``tests/test_tool_registration.py`` fails.
+#
+# Applied HERE, in the aggregator, rather than in each sub-registry: this module is the single surface both
+# ``call_tool`` and the MCP server read, so one pass covers ai_native/design/input-training/reward tools alike
+# and there is exactly one schema per tool in the process (the specs are shared dicts, corrected in place).
+
+_COERCE = {"int": "integer", "float": "number", "bool": "boolean", "str": "string"}
+_LITERAL_TYPE = {bool: "boolean", int: "integer", float: "number", str: "string"}
+_ACCEPTED_CACHE: dict = {}
+
+
+def _accepted_params(handler) -> dict[str, dict]:
+    """Every key ``handler`` pulls out of its args dict, with the type/default it is read with.
+
+    Reads the handler's own AST for ``args["k"]``, ``args.get("k")`` and ``args.pop("k")`` (including the
+    ``(args or {}).get("k")`` guard idiom), and infers the JSON-Schema type from the coercion wrapped around the
+    read (``int(...)``/``float(...)``/``bool(...)``/``str(...)``) or from a literal default. Deliberately
+    one-sided: a key forwarded wholesale to another function (``probe(gene, args)``) is not detected, so this
+    UNDER-reports rather than inventing parameters no handler honours.
+
+    Memoized per process. ``inspect.getsource`` reads the file by LINE NUMBER, so a source file edited while
+    this process is alive makes a later call disagree with the one that built the schema; the first read — at
+    import, the same moment the schema is published — is the one that counts."""
+    import ast
+    import inspect
+    import textwrap
+    try:
+        return _ACCEPTED_CACHE[handler]
+    except (KeyError, TypeError):
+        pass
+    try:
+        tree = ast.parse(textwrap.dedent(inspect.getsource(handler)))
+    except (OSError, TypeError, SyntaxError, IndentationError, ValueError):
+        return {}
+    fn = tree.body[0] if tree.body else None
+    if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)) or not fn.args.args:
+        return {}
+    argname = fn.args.args[0].arg
+    parent: dict[int, ast.AST] = {}
+    for node in ast.walk(fn):
+        for child in ast.iter_child_nodes(node):
+            parent[id(child)] = node
+
+    def is_args(node) -> bool:
+        if isinstance(node, ast.Name):
+            return node.id == argname
+        return (isinstance(node, ast.BoolOp) and isinstance(node.op, ast.Or)
+                and bool(node.values) and is_args(node.values[0]))
+
+    def coerced_type(node):
+        """Walk out through ``.lower()``/``or``/parens to the ``int(...)``-style call wrapping the read."""
+        cur = parent.get(id(node))
+        for _ in range(3):
+            if isinstance(cur, ast.Call) and isinstance(cur.func, ast.Name) and cur.func.id in _COERCE:
+                return _COERCE[cur.func.id]
+            if isinstance(cur, (ast.Call, ast.BoolOp, ast.Attribute)):
+                cur = parent.get(id(cur))
+                continue
+            return None
+        return None
+
+    found: dict[str, dict] = {}
+
+    def record(key: str, node, default=None) -> None:
+        prop = found.setdefault(key, {})
+        kind = coerced_type(node)
+        if kind:
+            prop.setdefault("type", kind)
+        if isinstance(default, ast.Constant) and type(default.value) in _LITERAL_TYPE:
+            prop.setdefault("type", _LITERAL_TYPE[type(default.value)])
+            prop.setdefault("default", default.value)
+
+    for node in ast.walk(fn):
+        if (isinstance(node, ast.Subscript) and is_args(node.value)
+                and isinstance(node.slice, ast.Constant) and isinstance(node.slice.value, str)):
+            record(node.slice.value, node)
+        elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr in ("get", "pop") and is_args(node.func.value) and node.args
+                and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str)):
+            record(node.args[0].value, node, node.args[1] if len(node.args) > 1 else None)
+    try:
+        _ACCEPTED_CACHE[handler] = found
+    except TypeError:                                          # unhashable handler; recompute next time
+        pass
+    return found
+
+
+# Keys a handler reads that are deliberately NOT part of the public contract. Empty on purpose: every key the
+# audit found was a real, useful lever an agent was simply unable to pull. An entry here must carry its reason,
+# because it is the one way to keep something off the advertised schema without the guard failing.
+_NOT_ADVERTISED: dict[str, frozenset[str]] = {}
+
+# Where the derived ``{type, default}`` is too thin for an agent to use the parameter correctly. Only consulted
+# for keys the schema was MISSING; a stale entry (naming a key the handler no longer reads) fails the guard.
+_PARAM_DOCS: dict[str, dict[str, dict]] = {
+    "verify_robot": {
+        "mode": {"type": "string", "enum": ["quick", "full"], "default": "full",
+                 "description": "'quick' = the fast iterate check (legged: 800 steps, no GIF, reports "
+                                "settled:false); 'full' = the definitive verdict over the settling horizon, "
+                                "with a GIF for a legged body. Iterate on quick, claim on full."},
+        "steps": {"type": "integer", "description": "override the simulated horizon; default is chosen per "
+                                                    "robot kind and mode (legged full = the settling horizon)"},
+        "scene_id": {"type": "string", "description": "run the verdict inside a HELD scene (create_scene/"
+                                                      "submit_scene_spec). Matters for drive/reach; a legged "
+                                                      "gait verdict stays obstacle-free and says so."},
+    },
+    "edit_robot": {
+        "gate_non_regression": {"type": "boolean", "default": True,
+                                "description": "auto-revert the edit if deterministic design findings get worse"},
+        "gate_connectivity": {"type": "boolean", "default": True,
+                              "description": "reject an edit that newly DETACHES a link from the body"},
+    },
+    "export_held": {
+        "task": {"type": "string", "description": "task the BOM/spec should be sized for (default: the robot's "
+                                                  "own prompt)"},
+        "out_dir": {"type": "string", "description": "output dir, confined under build/ (default agent_exports)"},
+        "certificate_margins": {"type": "boolean", "default": True,
+                                "description": "run the margin checks behind the 'certificate' format"},
+        "dr_sweep": {"type": "boolean", "default": False,
+                     "description": "add a frozen-policy domain-randomization sweep with a Clopper-Pearson bound"},
+        "dr_draws": {"type": "integer", "default": 12, "description": "draws in that DR sweep"},
+    },
+    "export_isaac": {"out_dir": {"type": "string",
+                                 "description": "output dir, confined under build/ (default agent_exports)"}},
+    "train_held": {
+        "iters": {"type": "integer", "default": 200, "description": "PPO iterations when mode='gpu_rl'"},
+        "build_root": {"type": "string", "description": "job workspace, confined under build/"},
+    },
+    "start_training": {
+        "target": {"type": "number", "default": 0.8, "description": "target success rate to build toward"},
+        "build_root": {"type": "string", "description": "job workspace, confined under build/"},
+    },
+    "create_robot": {"tune_gait": {"type": "boolean", "default": True,
+                                   "description": "fit a per-body gait after composing (legged only); false is "
+                                                  "much faster but the body arrives untuned"}},
+    "assert_design": {"list": {"type": "boolean",
+                               "description": "shortcut for kind:'list' — return the assertion vocabulary"}},
+    "ingest_project": {
+        "path": {"type": "string", "description": "alias for project_path"},
+        "nlp": {"type": "string", "description": "alias for description (the plain-language spec to parse)"},
+    },
+    "submit_scene_spec": {
+        "name": {"type": "string", "default": "agent_scene", "description": "name for the held scene"},
+        "theme": {"type": "string", "description": "theme tag recorded on the scene (default 'custom')"},
+    },
+    "submit_task": {
+        "name": {"type": "string", "default": "agent_task", "description": "name for the authored task"},
+        "goal_text": {"type": "string", "description": "plain-language restatement of the goal, kept with the task"},
+    },
+    "pin_part": {"name": {"type": "string", "description": "alias for part"}},
+    "part_specs": {"name": {"type": "string", "description": "alias for part"}},
+    "bank_shape_word": {"program": {"type": "object", "description": "alias for shape_program"}},
+    "ask_episode": {"prompt": {"type": "string", "description": "alias for question"}},
+    "train_reward": {
+        "steps": {"type": "integer", "default": 800, "description": "physics steps per candidate rollout"},
+        "seed": {"type": "integer", "default": 0, "description": "search seed (set it to reproduce a run)"},
+    },
+    "learn_gait": {
+        "workers": {"type": "integer", "default": 1, "description": "parallel rollout workers"},
+        "db_path": {"type": "string", "description": "explicit memory DB path (default the shared memory dir)"},
+    },
+    "plan_training": {"scene_set_refs": {"type": "array", "items": {"type": "string"},
+                                         "description": "scene sets the ladder should plan against"}},
+    "check_perception_leakage": {
+        "id": {"type": "string", "default": "contract_adhoc", "description": "id for this observation contract"},
+        "perception_rung": {"type": "string",
+                            "description": "perception rung of the contract (default rung 0, privileged)"},
+        "task_graph_id": {"type": "string", "default": "task"},
+        "scene_set_id": {"type": "string", "default": "scenes"},
+        "robot_genome_id": {"type": "string", "default": "body"},
+    },
+}
+
+
+def _publish_accepted_params() -> dict[str, list[str]]:
+    """Add every handler-accepted key the tool's schema was hiding. Returns ``{tool: [keys added]}``."""
+    added: dict[str, list[str]] = {}
+    for name, spec in TOOLS.items():
+        params = spec.get("parameters")
+        if not isinstance(params, dict) or params.get("type") != "object":
+            continue
+        props = params.setdefault("properties", {})
+        hidden = _NOT_ADVERTISED.get(name, frozenset())
+        docs = _PARAM_DOCS.get(name, {})
+        for key, derived in sorted(_accepted_params(spec.get("handler")).items()):
+            if key in props or key in hidden:
+                continue
+            props[key] = dict(docs.get(key) or derived)
+            added.setdefault(name, []).append(key)
+    return added
+
+
+def _derive_registry_backed_docs() -> None:
+    """Where a description RESTATES a registry, derive it instead — restating is how it drifts.
+
+    Two shipped instances, both found by diffing the prose against the registry behind it:
+      * ``edit_ops`` named 4 of the 8 ``edit_operators.OPERATORS``, and
+      * ``export_held`` named 8 of the 9 ``_EXPORT_FORMATS`` — the missing one being ``certificate``, the
+        verification certificate, which is the export an honest product most wants an agent to ask for.
+    """
+    _derive_operator_catalog()
+    _derive_export_formats()
+
+
+def _derive_export_formats() -> None:
+    """``export_held``'s format list, from ``agent_design_tools._EXPORT_FORMATS``, as prose AND as an enum."""
+    spec = TOOLS.get("export_held")
+    if spec is None:
+        return
+    try:
+        from virturoid.services.agent_design_tools import _EXPORT_FORMATS
+    except Exception:  # noqa: BLE001
+        return
+    fmts = list(_EXPORT_FORMATS)
+    missing = [f for f in fmts if f not in spec["description"]]
+    if missing:
+        spec["description"] = spec["description"].rstrip() + " Also accepts: " + ", ".join(missing) + "."
+    props = spec["parameters"]["properties"]
+    props["formats"] = {**(props.get("formats") or {}), "type": "array",
+                        "items": {"type": "string", "enum": fmts},
+                        "description": f"any of {', '.join(fmts)}; omit for all {len(fmts)}"}
+
+
+def _derive_operator_catalog() -> None:
+    """``edit_ops``/``edit_robot`` must name EVERY operator ``edit_operators.OPERATORS`` can apply.
+
+    Restating the list in prose let it drift: the shipped description named 4 of 8 (scale_group/set_height/
+    set_material/set_leg_count), so scale_robot, set_payload, add_limb and adopt_walkable_template — four real
+    capabilities, one of them the ONLY way to grow a new limb — were invisible to every agent reading
+    tools/list. Derived from the registry it cannot drift again, and the same names go into ``ops[].op`` as an
+    enum so a client that validates schemas discovers them without reading prose at all."""
+    try:
+        from virturoid.services.edit_operators import OPERATORS
+    except Exception:  # noqa: BLE001 - description enrichment is never worth breaking the registry for
+        return
+    ops = sorted(OPERATORS)
+    if "edit_ops" in TOOLS:
+        TOOLS["edit_ops"]["description"] = (
+            f"Discover the typed LOCALIZED edit operators and their args — all {len(ops)} of them: "
+            + " | ".join(ops) + ". Feed one to edit_robot as ops:[{op, args}].")
+    spec = TOOLS.get("edit_robot")
+    if spec:
+        props = spec["parameters"]["properties"]
+        # `{op:'undo'}` / `{op:'list'}` are accepted inside `ops` too (the single-verb shortcut), so the enum
+        # a strict client validates against has to admit them or it would reject a documented call.
+        verbs = sorted(set(ops) | {"undo", "list"})
+        prev = props.get("ops") or {}
+        props["ops"] = {**prev, "type": "array", "description": prev.get(
+            "description", "list of {op, args} localized edits"),
+            "items": {"type": "object", "required": ["op"],
+                      "properties": {"op": {"type": "string", "enum": verbs},
+                                     "args": {"type": "object", "description": "operator args; see edit_ops"}}}}
+
+
+SCHEMA_REPAIRS: dict[str, list[str]] = _publish_accepted_params()
+_derive_registry_backed_docs()
+
+
 # The CONSOLIDATED MCP surface (agent_first_plan.md G-G). Research: Cursor caps ~40 active tools ACROSS all
 # servers and SILENTLY drops the rest; Codex/weaker clients degrade with a big flat menu. So the MCP server
 # advertises this small, workflow-shaped view (<=15) instead of all ~30 registry tools. Every folded tool is

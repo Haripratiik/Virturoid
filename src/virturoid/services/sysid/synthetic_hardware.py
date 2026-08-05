@@ -48,14 +48,23 @@ def perturbed_model(model, perturbation: dict):
 
 def synthetic_hardware_log(gene, *, perturbation: dict | None = None, delay_ticks: int = DEFAULT_DELAY_TICKS,
                            plan: dict | None = None, budget_s: float = 120.0,
-                           hold_only: bool = False) -> tuple:
+                           hold_only: bool = False, link_scale: float = 1.0) -> tuple:
     """Run the excitation on a perturbed model and return ``(plan, log)`` in the exact schema a real bench log
     would arrive in -- so ``measure_gap`` cannot tell the difference, which is the point of the harness.
 
     ``hold_only`` replaces the excitation with a constant hold: the robot is perturbed exactly as before but
-    never moves. It is the adversarial case for the whole package -- a real gap exists, and NOTHING in the data
+    never moves. It is the adversarial case for the EXPERIMENT -- a real gap exists, and NOTHING in the data
     can locate it. A tool that returns three confident numbers here is broken in the way that matters, so this
     is a first-class mode rather than a test fixture.
+
+    ``link_scale`` is the adversarial case for the FIT, and it is a different failure. It multiplies every
+    link's mass and rotational inertia, which is an error NO combination of frictionloss, damping and armature
+    can express -- and which enters each joint's equation through the SAME ``qdd`` term armature does, so the
+    estimator absorbs it into armature and reports intervals that exclude the true, unchanged value. Measured
+    at 1.30: armature "identified" on 14/14 joints, 13/14 intervals excluding the truth, one joint at +66%,
+    and ``trajectory.improvement_x`` at 0.993 -- the fit made tracking marginally WORSE while every number in
+    it looked like a measurement. That last figure is what ``fit.application_gate`` rules on, and this mode is
+    how it is tested. An excitation cannot fix this one; only a wider model or a refusal can.
     """
     import numpy as np
 
@@ -73,6 +82,12 @@ def synthetic_hardware_log(gene, *, perturbation: dict | None = None, delay_tick
     kp, kd, _ = bench_gains(model)
     dofs = joint_dof_map(model, gene)
     hw = perturbed_model(model, perturbation if perturbation is not None else DEFAULT_PERTURBATION)
+    if float(link_scale) != 1.0:
+        # Body 0 is the world. Mass and inertia move TOGETHER because scaling only one is a physically
+        # incoherent robot, and the point of this mode is a realistic modelling error (a density or fill
+        # fraction that is wrong), not a caricature.
+        hw.body_mass[1:] = np.asarray(hw.body_mass[1:], dtype=float) * float(link_scale)
+        hw.body_inertia[1:] = np.asarray(hw.body_inertia[1:], dtype=float) * float(link_scale)
 
     _, q_cmd = excitation_command_series(gene, plan)
     q0 = start_pose(model, gene)
@@ -95,8 +110,14 @@ def synthetic_hardware_log(gene, *, perturbation: dict | None = None, delay_tick
         "q_meas": q[:, cols].tolist(),
         "qd_meas": qd[:, cols].tolist(),
         "tau_meas": tau[:, cols].tolist(),
+        # MACHINE-READABLE, and required by the log schema. A prose provenance string can be read by a human
+        # and by nothing else; Stage 2's actuator-fidelity rung turns on whether the log was measured on
+        # hardware, and it must not have to infer that from an English sentence it could mis-parse.
+        "measured_on": "sim2sim",
         "provenance": "SYNTHETIC - a second MuJoCo model standing in for hardware. NOT a measurement of any "
-                      "physical robot.",
+                      "physical robot."
+                      + (f" Its links carry {link_scale:g}x our mass and inertia -- an error no fitted "
+                         f"parameter can express." if float(link_scale) != 1.0 else ""),
         "excitation": "hold_only (deliberately uninformative)" if hold_only else "full plan",
     }
     return plan, log

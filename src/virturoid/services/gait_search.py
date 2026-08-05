@@ -70,8 +70,16 @@ class GaitSearchResult:
             "best_survived": self.best_survived, "best_credible": self.best_credible,
             "baseline_forward": round(self.baseline_forward, 4),
             "n_evals": self.n_evals, "stopped_reason": self.stopped_reason,
-            "improvement_x": (round(abs(self.best_forward) / abs(self.baseline_forward), 2)
-                              if self.baseline_forward else None),
+            # THE SAME SIGN DEFECT AS `forward_vel`, one layer up. This was
+            #     round(abs(best_forward) / abs(baseline_forward), 2) if baseline_forward else None
+            # and `forward` is a SIGNED displacement, so a learned gait that walked BACKWARD was reported as a
+            # multiple of forward progress: best -0.491 m against a baseline of +0.039 m printed "12.59x
+            # improvement". Two abs() calls cannot tell "went 12x further" from "went 12x further the wrong way".
+            # Now: a signed ratio, defined only against a baseline that actually went forward. A backward result
+            # reads NEGATIVE, and a baseline that was itself not forward makes the ratio meaningless rather than
+            # impressive -> None. Both raw numbers stay in this dict, so nothing is hidden by the None.
+            "improvement_x": (round(self.best_forward / self.baseline_forward, 2)
+                              if self.baseline_forward > 0 else None),
             "history": [round(h, 4) for h in self.history],
         }
 
@@ -88,7 +96,26 @@ def _clip(vec: dict) -> dict:
 def reward_features_from_rollout(r: dict) -> dict:
     """A ``REWARD_FEATURES`` dict computed from a crawl-gait rollout, for an LLM-authored reward to score."""
     return {
-        "forward_vel": float(r.get("speed", 0.0)) * (1.0 if float(r.get("forward", 0.0)) >= 0 else -1.0),  # real (signed)
+        # `speed` IS ALREADY SIGNED at every producer -- `morph_policy` computes it as `forward / n / dt` with
+        # `forward = qpos[base_x] - x0`, an honest signed displacement, in BOTH rollouts that emit the key
+        # (crawl_gait_rollout:1415, recipe_rollout_morph:990); the degenerate no-leg returns emit a literal 0.0.
+        # So NEVER re-apply the sign of `forward` on top of it. This line used to do exactly that:
+        #
+        #     float(r.get("speed", 0.0)) * (1.0 if float(r.get("forward", 0.0)) >= 0 else -1.0)
+        #
+        # (-1) x (-1) = +1, so a body that walked BACKWARD reported a POSITIVE forward velocity. Measured on the
+        # real Menagerie Go2 ingested through `ingest_project`: forward -0.049 m, speed -0.031 m/s, feature
+        # +0.031. That is not a cosmetic reporting bug -- it INVERTS the objective. Every shipped reward template
+        # that targets this feature (`reward_dsl._TEMPLATES`: velocity_track, progress_upright, smooth_march,
+        # clearance_gait) then pays FULL reward for walking backward: velocity_track scored a -0.409 m/s Go2
+        # 0.9997 of its maximum. The trusted screen does NOT rescue this. `gait_quality.classify` requires
+        # `forward >= 0.3`, so a backward walk is never CREDIBLE and `_steered_rollout_fn` scores it
+        # trusted_success = 0.0 -- but when the WHOLE field reads the same inverted feature, every candidate
+        # scores 0.0, `select_reward`'s gaming test `trusted_success < median(0.0)` is false for all of them, and
+        # the loop reports `gamed: false` while having spent its entire budget optimizing away from success.
+        # Forward walks are unaffected either way (the old multiplier was +1 for them), so this fix changes
+        # nothing except the backward half of the axis, which is the half that was wrong.
+        "forward_vel": float(r.get("speed", 0.0)),                 # real (signed; +x is forward, -x is backward)
         "upright": 2.0 * float(r.get("upright_frac", 0.0)) - 1.0,   # real: [0,1] frac -> [-1,1] alignment proxy
         "height_ratio": float(r.get("height_ratio", 0.0)),         # real
         "contact_frac": float(r.get("support_frac", 0.0)),         # real

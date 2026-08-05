@@ -39,8 +39,14 @@ import math
 import random
 from dataclasses import replace
 
+# The rung labels are CLAIMS, so they say only what the code does. L1 used to read "datasheet torque-speed
+# clamp + PD + latency"; the clamp and the PD are real (``actuator_model.clamp_torque``, the recipe gains) and
+# the LATENCY was not -- there is no actuation-delay representation anywhere in the compiled model or the
+# rollout loop, which ``sysid.calibration.model_represents_actuation_delay`` now checks rather than assumes.
+# A label is the shortest thing on a certificate and the most likely to be quoted, so it does not get to
+# claim a term the simulator does not carry.
 ACTUATOR_LEVELS = {0: "L0 ideal (no actuator model)",
-                   1: "L1 datasheet torque-speed clamp + PD + latency (SHIPPED)",
+                   1: "L1 datasheet torque-speed clamp + PD (SHIPPED; actuation latency NOT modelled)",
                    2: "L2 bench-identified actuator",
                    3: "L3 learned actuator-network"}
 
@@ -164,18 +170,61 @@ def model_sanity(gene) -> dict:
 
 # ------------------------------------------------------------------ actuator fidelity level
 def actuator_fidelity_level(gene) -> dict:
-    """Declare the actuator model the verdict was earned under. We clamp joints to the BOM servo's torque limit
-    (the control-side real_actuator clamp) → L1. Without any torque limit set it would be L0 (ideal)."""
+    """Declare the actuator model the verdict was earned under, and EARN the rung rather than assert it.
+
+    L0/L1 are structural: no per-joint torque clamp → L0 (ideal); joints clamped to the BOM servo's datasheet
+    limit → L1. L2 is *bench-identified actuator*, and it is now a computed verdict rather than a dead
+    constant: ``sysid.calibration.l2_requirements`` checks six things — a fit is attached, the log it was
+    fitted to was measured on physical hardware, the fit covers the machine, applying it measurably improves
+    how the simulator TRACKS that log, the identified actuation delay is APPLIED and not merely reported, and
+    the torque-speed envelope is identified rather than taken from the datasheet — and reports which ones are
+    missing with the evidence for each.
+
+    The tracking requirement is the one that is not about the experiment. The other five can all be satisfied
+    by a fit whose parameters are absorbing an error they do not name: a robot built with 30% heavier links
+    came back "identified" on every joint, with intervals excluding the truth, having made tracking marginally
+    WORSE. Coverage counts APPLIED parameters and that fit applies none, so the rung is refused twice over.
+
+    On this build the rung does NOT move. Three of the six block on our own best fit, and two of those three
+    are ours rather than the customer's: there is nowhere in
+    the compiled model to put an identified transport delay, and a safe excitation (bounded well under
+    datasheet peak torque and no-load speed, because it runs on somebody's robot) cannot reach the saturation
+    regime where the torque-speed knee lives. A fitted robot therefore reports **L1 with its joint dissipation
+    and reflected inertia bench-identified** — which is more than L1 and less than L2, and says so — instead of
+    being promoted to a rung whose label it does not satisfy.
+    """
     actuated = gene.actuated_joints()
     clamped = [s for s in actuated if getattr(s, "actuator_torque_nm", None)]
     level = 1 if actuated and len(clamped) >= max(1, int(0.8 * len(actuated))) else 0
+    try:
+        from virturoid.services.sysid.calibration import l2_requirements
+        l2 = l2_requirements(gene)
+    except Exception as exc:  # noqa: BLE001
+        l2 = {"earned": False, "requirements": [], "blocked_by": ["the L2 check could not run"],
+              "verdict": f"L2 NOT evaluated: {type(exc).__name__}: {exc}"[:160],
+              "bench_identified": {"parameters": [], "n_joints": 0}}
+    if l2.get("earned") and level >= 1:
+        level = 2
+    bench = l2.get("bench_identified") or {}
+    if level == 2:
+        note = ("the actuator is bench-identified against a hardware log and every L2 requirement is met.")
+    elif level == 1 and bench.get("n_joints"):
+        note = ("the verdict was earned with joints clamped to their datasheet torque limits (L1), and "
+                f"{', '.join(bench.get('parameters') or [])} are BENCH-IDENTIFIED on "
+                f"{bench['n_joints']} joint(s) from a system-identification fit. The rung stays at L1 "
+                f"because: {'; '.join(l2.get('blocked_by') or [])}.")
+    elif level == 1:
+        note = ("the verdict was earned with joints clamped to their datasheet torque limits (L1). URDF-only "
+                "ideal actuators (L0) routinely fail to walk on real hardware; L2/L3 (bench/learned actuator "
+                "ID) are the next fidelity rungs.")
+    else:
+        note = ("no per-joint torque clamp detected (L0 ideal) — margins below are advisory only; ground the "
+                "gene (grounded_physics) to size real motors and earn an L1 verdict.")
     return {"level": level, "label": ACTUATOR_LEVELS[level],
             "clamped_joints": len(clamped), "actuated_joints": len(actuated),
-            "note": ("the verdict was earned with joints clamped to their datasheet torque limits (L1). URDF-only "
-                     "ideal actuators (L0) routinely fail to walk on real hardware; L2/L3 (bench/learned actuator "
-                     "ID) are the next fidelity rungs." if level == 1 else
-                     "no per-joint torque clamp detected (L0 ideal) — margins below are advisory only; ground the "
-                     "gene (grounded_physics) to size real motors and earn an L1 verdict.")}
+            "bench_identified": bench,
+            "l2": {k: v for k, v in l2.items() if k != "bench_identified"},
+            "note": note}
 
 
 # ------------------------------------------------------------------ per-joint margins (reuse bom_certificate)

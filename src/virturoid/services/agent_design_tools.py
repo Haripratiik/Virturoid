@@ -787,14 +787,6 @@ def export_held(args: dict) -> dict:
             artifacts["bom"] = str(out_dir / "bom.json")
         except Exception as exc:  # noqa: BLE001
             artifacts["bom_error"] = f"{type(exc).__name__}: {exc}"
-    if "spec" in fmts:
-        try:
-            from virturoid.services.spec_sheet import write_spec_sheet
-            sp = write_spec_sheet(out_dir)
-            if sp:
-                artifacts["spec"] = str(sp)
-        except Exception as exc:  # noqa: BLE001
-            artifacts["spec_error"] = f"{type(exc).__name__}: {exc}"
     if "usd" in fmts:
         # OpenUSD physics articulation for NVIDIA Isaac Sim (transcribed from the simulated MuJoCo model)
         try:
@@ -849,6 +841,19 @@ def export_held(args: dict) -> dict:
             artifacts["certificate"] = str(out_dir / "verification_certificate.json")
         except Exception as exc:  # noqa: BLE001 - a certificate failure must never sink the buildable export
             artifacts["certificate_error"] = f"{type(exc).__name__}: {exc}"
+    # THE SPEC SHEET GOES LAST, because it is a pure read-over-artifacts summary of everything above it. It used
+    # to be written between 'bom' and 'usd' -- i.e. BEFORE the certificate existed -- so the sheet in every
+    # exported package reported `task: "quadruped"` with no verdict, no forward distance and no cross-check
+    # against the certificate's motor selection, while a fully populated verification_certificate.json sat
+    # beside it. Nothing here computes; it only aggregates, so it must run once every input has been written.
+    if "spec" in fmts:
+        try:
+            from virturoid.services.spec_sheet import write_spec_sheet
+            sp = write_spec_sheet(out_dir)
+            if sp:
+                artifacts["spec"] = str(sp)
+        except Exception as exc:  # noqa: BLE001
+            artifacts["spec_error"] = f"{type(exc).__name__}: {exc}"
     real = {k: v for k, v in artifacts.items() if not k.endswith("_error")}
     out = {"ok": bool(real), "artifacts": artifacts, "out_dir": str(out_dir),
            # The customer should not have to open a json to learn whether they were shipped the robot they
@@ -1093,9 +1098,16 @@ AGENT_DESIGN_TOOLS: dict[str, dict] = {
                               "objects": {"type": "array", "items": {"type": "object"}}, "task": {"type": "string"},
                               "robot_spawn_xyz_rpy": {"type": "array"}}}},
     "evaluate_held": {"description": "Score the HELD robot on its task (real MuJoCo) — the exact gene you "
-                      "designed/edited, not a recompose.", "heavy": True, "handler": evaluate_held,
+                      "designed/edited, not a recompose. The task is IMPLIED BY THE MORPHOLOGY — it is not an "
+                      "input; use run_task/submit_task to give the robot a goal you choose.",
+                      "heavy": True, "handler": evaluate_held,
+                      # `task` used to be advertised here and was never read: `evaluate_held` scores the
+                      # morphology-implied task and derives the prompt from the held robot's own metadata, so an
+                      # agent that passed `task:'transport'` got the same verdict it would have got anyway and no
+                      # indication its argument had been dropped. A schema must not promise a lever that moves
+                      # nothing — removed rather than implemented, because task CHOICE already has two tools.
                       "parameters": {"type": "object", "required": ["robot_id"], "properties": {
-                          "robot_id": {"type": "string"}, "task": {"type": "string"}}}},
+                          "robot_id": {"type": "string"}}}},
     "export_held": {"description": "Export the HELD robot to real files. formats (default all): mjcf | cad | urdf | "
                     "ros2 | bom | spec | usd (OpenUSD physics for Isaac Sim) | isaac_lab (full Isaac Lab hand-off). "
                     "Returns paths.", "heavy": True, "handler": export_held,

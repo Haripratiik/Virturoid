@@ -137,25 +137,104 @@ class BomTests(unittest.TestCase):
         self.assertGreaterEqual(select_actuator(heavy.actuator_torque_nm).peak_torque_nm,
                                 select_actuator(base.actuator_torque_nm).peak_torque_nm)
 
-    def test_lidar_scales_with_robot_size(self):
-        # a bigger robot needs a longer-range LiDAR; the part selection scales with size.
+    def test_lidar_range_follows_the_job_not_the_robots_mass(self):
+        # A LiDAR's price is its RANGE, and range is a task requirement. Sizing it by mass alone put an $8,000
+        # Ouster OS1-32 on a 60 kg humanoid and an $18,000 OS2-128 on a 108 kg one, when every real machine of
+        # that class ships a ~$749 Livox Mid-360. So: long range is bought when the JOB is long range.
         from virturoid.services.bom_builder import _pick_lidar
-        self.assertEqual(_pick_lidar(3.0), "Slamtec RPLIDAR A2M12")     # tiny -> 2D puck
-        self.assertEqual(_pick_lidar(40.0), "Ouster OS1-32")           # large -> long-range 3D
-        self.assertNotEqual(_pick_lidar(80.0), _pick_lidar(3.0))       # huge != tiny
+        self.assertEqual(_pick_lidar(3.0, "patrol a room"), "Slamtec RPLIDAR A2M12")   # tiny indoor -> 2D puck
+        self.assertEqual(_pick_lidar(40.0, "patrol a warehouse"), "Livox Mid-360")     # big INDOOR -> class 3D
+        self.assertEqual(_pick_lidar(40.0, "survey an outdoor site"), "Ouster OS1-32")  # the job needs range
+        self.assertEqual(_pick_lidar(80.0, "drive an outdoor haul road"), "Ouster OS2-128")   # big + far
 
-    def test_power_defaults_to_socketed_and_switches_to_battery_on_prompt(self):
-        # Product rule: socketed (wall) power by DEFAULT; a battery ONLY when the prompt asks for untethered use.
+    def test_power_source_is_decided_by_the_robot_kind(self):
+        # A LEGGED robot walks away from the socket: a 4.2 kg enclosed wall PSU is not a candidate part for it at
+        # any wattage. A fixed-base arm legitimately runs off the wall. The prompt can override either default.
+        quad = build_from_anatomy(QUAD)
+        walking = [ln for ln in build_bom(quad, task="patrol a warehouse")["lines"] if ln["category"] == "power"]
+        self.assertTrue(walking, "a power source is always specified")
+        self.assertTrue(all("LiPo" in ln["part"] or "Li-ion" in ln["part"] for ln in walking),
+                        f"a walking robot must carry a battery, got {[ln['part'] for ln in walking]}")
+        self.assertTrue(all("runtime" in ln["detail"] for ln in walking),
+                        "a battery must state the runtime it was sized for")
+        # ... unless the customer explicitly asks for a tethered bench rig
+        tethered = [ln for ln in build_bom(quad, task="step in place on a lab bench")["lines"]
+                    if ln["category"] == "power"]
+        self.assertTrue(all("Mean Well" in ln["part"] for ln in tethered),
+                        f"an explicit bench/tethered prompt pins wall power, got {[ln['part'] for ln in tethered]}")
+        from virturoid.services.morphology_composer import compose_robot
+        arm = compose_robot("a tabletop robot arm", llm=None)
+        fixed = [ln for ln in build_bom(arm, task="sort blocks into bins")["lines"] if ln["category"] == "power"]
+        self.assertTrue(all("Mean Well" in ln["part"] for ln in fixed),
+                        f"a fixed-base arm runs off a socketed supply, got {[ln['part'] for ln in fixed]}")
+
+    def test_one_power_number_everywhere(self):
+        # The package used to carry THREE different power figures: totals said 800.6 W, the PSU line said
+        # "1500 W >= 1133 W draw" (1133 being a different draw x the 1.4 headroom, labelled as the draw), and the
+        # part was 1500 W. There is now one budget; the totals, the budget block and the power line all quote it.
+        for task in ("patrol a warehouse", "step in place on a lab bench"):
+            bom = build_bom(build_from_anatomy(QUAD), task=task)
+            draw = bom["power_budget"]["total_draw_w"]
+            self.assertEqual(bom["totals"]["est_power_w"], draw)
+            self.assertAlmostEqual(draw, bom["power_budget"]["actuators_w"]
+                                   + bom["power_budget"]["electronics_w"], delta=0.2)   # each rounded to 0.1 W
+            power = [ln for ln in bom["lines"] if ln["category"] == "power"]
+            self.assertTrue(power)
+            for ln in power:
+                self.assertIn(f"{draw:.0f} W budgeted draw", ln["detail"],
+                              f"the power line must quote the ONE budget, got: {ln['detail']}")
+
+    def test_actuator_draw_tracks_the_load_not_the_motor_bought(self):
+        # The old bus term was `rated_torque x max_speed x 0.3` over the SELECTED motors -- a corner power no
+        # motor reaches, and a figure that DOUBLED when a joint was handed a motor two rungs too big. It reported
+        # 1409 W for a 14 kg quadruped whose real-world equivalent draws ~150-250 W walking.
+        bom = build_bom(build_from_anatomy(QUAD), task="patrol a warehouse")
+        pb = bom["power_budget"]
+        self.assertGreater(pb["actuators_w"], 0.0)
+        self.assertEqual(pb["driven_axes"], bom["dof"])
+        self.assertLess(pb["total_draw_w"], 600.0, "a small quadruped does not draw a kilowatt to walk")
+
+    def test_customer_material_wins_and_a_refusal_says_why(self):
+        # "…carries a 5 kg payload, aluminium frame" used to ship 12 Steel 4140 links, because the task heuristic
+        # matched "payload" and nothing read the word "aluminium".
+        asked = build_from_anatomy(QUAD)
+        bom = build_bom(asked, task="haul a heavy payload, aluminium frame")
+        self.assertEqual(bom["material_policy"]["requested"], "aluminum")
+        self.assertTrue(bom["material_policy"]["honoured"])
+        mats = {ln["part"] for ln in bom["lines"] if ln["category"] == "material"}
+        self.assertIn("Aluminum 6061-T6", mats)
+        self.assertNotIn("Steel 4140", mats)
+        # and a material the load path cannot use is SUBSTITUTED WITH THE REASON, never silently
+        pla = build_bom(build_from_anatomy(QUAD), task="a 3d-printed PLA frame that hauls heavy crates")
+        self.assertFalse(pla["material_policy"]["honoured"])
+        self.assertEqual(pla["material_policy"]["requested"], "pla")
+        self.assertIn("PLA", pla["material_policy"]["reason"])
+        self.assertIn("Nm", pla["material_policy"]["reason"])       # the reason carries the load it must carry
+
+    def test_actuator_skus_are_standardised_under_a_stated_policy(self):
+        # A generated 16-joint humanoid shipped SIX motor SKUs from four vendors, chosen with no policy at all.
         g = build_from_anatomy(QUAD)
-        default = [ln for ln in build_bom(g, task="step in place on a lab bench")["lines"]
-                   if ln["category"] == "power"]
-        self.assertTrue(default, "a power source is always specified")
-        self.assertTrue(all("Mean Well" in ln["part"] for ln in default),
-                        f"default power must be a socketed wall PSU, got {[ln['part'] for ln in default]}")
-        battery = [ln for ln in build_bom(g, task="a battery-powered robot that roams untethered")["lines"]
-                   if ln["category"] == "power"]
-        self.assertTrue(any("LiPo" in ln["part"] or "Li-ion" in ln["part"] for ln in battery),
-                        f"a battery/untethered prompt must select a battery pack, got {[ln['part'] for ln in battery]}")
+        bom = build_bom(g, task="patrol a warehouse")
+        pol = bom["actuator_policy"]
+        self.assertIn("rule", pol)
+        self.assertLessEqual(pol["skus"], pol["sized_skus"])         # standardising never ADDS part numbers
+        skus = {ln["part"] for ln in bom["lines"] if ln["category"] == "actuator"}
+        self.assertEqual(len(skus), pol["skus"])
+        # every joint still gets a motor that meets its requirement (roll-ups only ever go up)
+        from virturoid.services.component_catalog import resolve_part
+        for s in g.actuated_joints():
+            part = resolve_part(bom["actuator_map"][s.name])
+            req = getattr(s, "torque_req_nm", None) or s.actuator_torque_nm or 6.0
+            self.assertGreaterEqual(part.peak_torque_nm, float(req))
+        # a SKU kept beyond the target count must say WHY it could not be folded
+        for kept in pol.get("kept_separate", []):
+            self.assertTrue(kept["reason"])
+
+    def test_cost_drivers_are_reported(self):
+        bom = build_bom(build_from_anatomy(QUAD), task="patrol a warehouse")
+        cd = bom["cost_drivers"]
+        self.assertAlmostEqual(sum(cd["by_category"].values()), bom["totals"]["price_usd"], places=1)
+        self.assertTrue(cd["top_lines"] and cd["basis"])
 
     def test_compute_scales_with_load_not_just_class(self):
         # The brain is sized by COMPUTE LOAD (DOF + vision/SLAM + whole-body), not the robot class alone.

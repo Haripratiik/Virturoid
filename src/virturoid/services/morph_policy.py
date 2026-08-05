@@ -1007,6 +1007,15 @@ def recipe_rollout_morph(gene, policy: MorphPolicy | None = None, *, steps: int 
         out["tau_cmd"] = np.asarray(tau_trace)                  #   traces for the executable-on-BOM certificate
         out["qvel"] = np.asarray(qv_trace)                      #   (token order == graph.act_u == BOM joint order)
         out["clamps"] = np.asarray(clamps)                     #   per-joint torque CAPACITY -> sizes the real servo
+        # ...and WHICH JOINT each column is, by name. "token order == BOM joint order" was true and was still
+        # only a comment, so the certificate had no way to look a column's part up in bom.json and instead
+        # re-derived one from the clamp -- which is how one package came to ship two motor selections. The
+        # compiler emits `<motor name="{segment}_motor">`, so the segment name is recoverable exactly.
+        _nm = []
+        for _u in act_u:
+            _a = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_ACTUATOR, int(_u)) or ""
+            _nm.append(_a[:-6] if _a.endswith("_motor") else _a)
+        out["joint_segments"] = _nm
     return out
 
 

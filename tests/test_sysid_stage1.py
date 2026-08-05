@@ -358,7 +358,13 @@ def test_an_uninformative_experiment_identifies_nothing_and_names_the_missing_ex
     rows = gap["attribution"]["per_joint"]
     assert rows, "no joints were analysed at all"
     for name, rep in rows.items():
-        assert rep["identified"] == [], f"{name} claimed {rep['identified']} from a hold-only log"
+        # A constant torque OFFSET is the one term a hold CAN identify -- ``EXCITATION_REQUIREMENTS['offset']``
+        # says so outright ("needs only samples"), and it is excluded from ``implicated_parameters`` for
+        # exactly that reason. What must never survive a hold-only log is a PHYSICAL parameter, and an
+        # earlier version of this assertion caught the offset too, so it passed only while the bench gain was
+        # too low to hold the distal joints against gravity in the first place.
+        assert [p for p in rep["identified"] if p != "offset"] == [], (
+            f"{name} claimed {rep['identified']} from a hold-only log")
         for pname in ("frictionloss", "damping", "armature"):
             p = rep["parameters"][pname]
             assert p["reasons_not_identified"], f"{name}/{pname} declined without a reason"

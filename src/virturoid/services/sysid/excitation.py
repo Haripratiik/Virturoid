@@ -112,12 +112,20 @@ def _max_frequency(inertia, damping, amp, gravity_nm, peak_nm, speed_radps):
 
 
 def build_excitation(gene, *, budget_s: float = DEFAULT_BUDGET_S, control_hz: float = DEFAULT_CONTROL_HZ,
-                     backoff: float = LIMIT_BACKOFF) -> dict:
+                     backoff: float = LIMIT_BACKOFF, only_joints=None,
+                     segment_fractions=None) -> dict:
     """Author the bench experiment for ``gene``. Pure measurement + arithmetic; no rollout, no LLM.
 
     The returned plan is JSON-serializable and is the contract between us and the engineer: it declares the
     setup, the PD gains, the per-joint signal, the safety envelope that produced it, and the log schema we need
     back. ``excitation_command_series`` turns it into the actual command array.
+
+    ``only_joints`` and ``segment_fractions`` exist for ONE caller: the follow-up experiment Stage 2 emits for
+    the parameters the first run could not pin (``calibration.follow_up_experiment``). "Ankle friction is not
+    identified" is only actionable if the next sentence is a plan the engineer can run, and that plan should
+    cost 90 seconds on three joints rather than repeat the whole 84-second sweep -- so the joint set narrows
+    and the segment mix leans on whatever excitation was missing (sign reversals for Coulomb friction,
+    acceleration for reflected inertia). Both default to the full experiment, so no existing caller moves.
     """
     import numpy as np
 
@@ -149,7 +157,10 @@ def build_excitation(gene, *, budget_s: float = DEFAULT_BUDGET_S, control_hz: fl
     ctrl_every = max(1, int(round(log_hz / float(control_hz))))
     control_hz_actual = log_hz / ctrl_every
 
-    segs = [s for s in gene.actuated_joints() if s.name in dofs]
+    fractions = tuple((str(nm), float(fr)) for nm, fr in (segment_fractions or SEGMENT_FRACTIONS))
+    wanted = None if only_joints is None else {str(j) for j in only_joints}
+    segs = [s for s in gene.actuated_joints() if s.name in dofs and (wanted is None or s.name in wanted)]
+    missing = sorted(wanted - {s.name for s in segs}) if wanted is not None else []
     n = len(segs)
     per_joint = MIN_PER_JOINT_S if n == 0 else min(MAX_PER_JOINT_S, max(MIN_PER_JOINT_S, budget_s / n))
     over_budget = bool(n and per_joint * n > budget_s + 1e-9)
@@ -233,12 +244,19 @@ def build_excitation(gene, *, budget_s: float = DEFAULT_BUDGET_S, control_hz: fl
                             "separable, expect identifiability to degrade" if per_joint <= MIN_PER_JOINT_S + 1e-9
                             else "")},
         "segments": [{"name": nm, "fraction": fr, "seconds": round(per_joint * fr, 3), "identifies": purpose}
-                     for (nm, fr), purpose in zip(SEGMENT_FRACTIONS, (
+                     for (nm, fr), purpose in zip(fractions, (
                          "viscous damping; makes Coulomb friction separable from the gravity offset via velocity "
                          "sign reversals",
                          "reflected inertia / armature, and the frequency where sim and hardware diverge",
                          "control-signal latency (rise delay) and breakaway stiction",
                          "nothing -- a settle so the next joint starts from rest"))],
+        "segment_fractions": [[nm, fr] for nm, fr in fractions],
+        "scope": {"only_joints": sorted(wanted) if wanted is not None else None,
+                  "requested_joints_not_on_this_robot": missing,
+                  "note": ("the FULL machine" if wanted is None else
+                           "a NARROWED re-run: only the joints named above are commanded, every other joint "
+                           "holds its start pose. A gap number from this plan covers those joints and no "
+                           "others")},
         "safety_envelope": {
             "limit_backoff_frac": backoff, "amplitude_frac_of_halfrange": AMP_FRACTION,
             "amplitude_cap_rad": AMP_CAP_RAD, "torque_frac_of_datasheet_peak": TORQUE_FRACTION,
@@ -250,11 +268,16 @@ def build_excitation(gene, *, budget_s: float = DEFAULT_BUDGET_S, control_hz: fl
         },
         "log_schema": {
             "log_hz": round(log_hz, 3),
-            "required": ["t_s", "q_cmd_rad", "q_meas_rad"],
+            "required": ["t_s", "q_cmd_rad", "q_meas_rad", "measured_on"],
             "strongly_recommended": ["tau_meas_nm"],
             "optional": ["qd_meas_radps"],
             "note": "without tau_meas only the trajectory gap can be reported -- no parameter can be "
                     "attributed, because the residual that carries the attribution is a TORQUE residual",
+            "measured_on": "'hardware' if this log came off a physical robot, 'sim2sim' if it came from a "
+                           "simulated stand-in. Required, and not a formality: the actuator-fidelity ladder "
+                           "reserves its L2 rung for a BENCH-identified actuator, so a fit is only allowed to "
+                           "raise that rung when the log it was fitted to was measured on hardware. An "
+                           "unstated provenance is treated as not-hardware.",
         },
         "joints": joints,
         "excitation_order": [j["joint"] for j in joints if j["excitable"]],
@@ -283,21 +306,24 @@ def excitation_command_series(gene, plan: dict):
     for j in plan["joints"]:
         q0[int(j["dof"])] = float(j["q_start_rad"])
     cmd = np.tile(q0, (total, 1))
+    # A narrowed re-run declares its own segment mix; read it off the PLAN rather than the module constant, or
+    # the follow-up experiment would advertise a triangle-heavy sweep and then command the default one.
+    fractions = tuple((str(nm), float(fr)) for nm, fr in (plan.get("segment_fractions") or SEGMENT_FRACTIONS))
 
     for i, j in enumerate(active):
         adr = int(j["dof"])
         a = i * rows_per_joint
         cmd[a:a + rows_per_joint, adr] = _joint_signal(rows_per_joint, log_hz, float(j["q_start_rad"]),
                                                        float(j["amplitude_rad"]), float(j["f_lo_hz"]),
-                                                       float(j["f_hi_hz"]))
+                                                       float(j["f_hi_hz"]), fractions=fractions)
     return np.arange(total) * dt, cmd
 
 
-def _joint_signal(rows, log_hz, centre, amp, f_lo, f_hi):
+def _joint_signal(rows, log_hz, centre, amp, f_lo, f_hi, *, fractions=None):
     """The four segments, concatenated, for one joint."""
     import numpy as np
 
-    counts = [max(1, int(round(rows * fr))) for _, fr in SEGMENT_FRACTIONS]
+    counts = [max(1, int(round(rows * fr))) for _, fr in (fractions or SEGMENT_FRACTIONS)]
     counts[-1] += rows - sum(counts)
     n_tri, n_chirp, n_step, n_hold = counts
     out = []

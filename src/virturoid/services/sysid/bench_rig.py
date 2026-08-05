@@ -31,6 +31,11 @@ BENCH_WN_RADPS = 12.0
 BENCH_ZETA = 1.0                    # critically damped -- no overshoot into a joint limit
 _DEFAULT_JOINT_LIMIT_RAD = 3.1416   # matches control_script_compiler._derive's fallback
 
+#: Tracking error at which the loop must be able to produce the joint's whole STATIC load (Coulomb friction
+#: plus the gravity hold). ~1.1 deg: small enough that the joint follows its command, large enough that the
+#: gain floor it implies stays far from the sample rate.
+BREAKAWAY_ERR_RAD = 0.02
+
 
 def bench_model(gene):
     """Compile ``gene`` into the bench model: base WELDED, floor REMOVED.
@@ -45,7 +50,17 @@ def bench_model(gene):
     from virturoid.services.gene_compiler import compile_gene_to_mjcf
 
     was_free = getattr(gene, "base_mount", "") == "free"
-    bench_gene = dataclasses.replace(gene, base_mount="floor") if was_free else gene
+    # Welding the base is a statement about the WORLD, not about the joints -- but `_joint_dynamics` branches
+    # on `base_mount`, so re-mounting a free-base body to "floor" silently moved every joint onto the
+    # MANIPULATOR prior. MEASURED on the composed quadruped: the neck's bench damping/armature/frictionloss
+    # came out 0.98/0.10/0.055 against the product model's 0.6/0.03/0.08 -- i.e. the rig was measuring the gap
+    # of a model the product never simulates, and a fit taken here would be quoted against a baseline that
+    # does not exist. Found by Stage 2's staleness check, which compared each fitted parameter's recorded
+    # 'from' against the compiler's current prior and flagged all 42 of them.
+    bench_gene = gene
+    if was_free:
+        meta = {**(getattr(gene, "metadata", None) or {}), "joint_dynamics_base_mount": gene.base_mount}
+        bench_gene = dataclasses.replace(gene, base_mount="floor", metadata=meta)
     xml = compile_gene_to_mjcf(bench_gene, include_floor=False)
     # NOT morph_policy.compiled_model: that cache hands back a SHARED MjModel, and the sensitivity columns below
     # perturb dof_damping/frictionloss/armature in place. One mutated cache entry would silently change the
@@ -79,7 +94,20 @@ def joint_dof_map(model, gene) -> dict:
 def bench_gains(model):
     """Per-DOF ``(kp, kd)`` from the joint-space inertia at the start pose, so the closed-loop natural frequency
     is the same on a 0.5 kg wrist and a 40 kg hip. Same principle as ``morph_policy.recipe_gains``; computed on
-    model DOFs because the bench model has no free base and therefore no morph-graph token alignment."""
+    model DOFs because the bench model has no free base and therefore no morph-graph token alignment.
+
+    **Plus a floor for STATIC load, which inertia scaling alone does not cover.** An inertia-scaled gain sizes
+    the loop against the joint's mass and says nothing about its stiction, and Coulomb friction does not scale
+    with inertia -- a light distal joint on a big gearbox has the least of the first and plenty of the second.
+    MEASURED on the composed quadruped: the four distal leg joints had inertia ~1.5e-3 kg.m^2, so kp came out
+    at 0.22 N.m/rad, and the whole PD authority at the planned 0.068 rad amplitude was 0.015 N.m against
+    0.12 N.m of Coulomb friction. They never broke away: commanded a 3 Hz chirp, they moved at 0.006 rad/s and
+    the identifiability report correctly refused every parameter on them -- and then offered "add sustained
+    motion at moderate speed" as the fix, which is what the plan already commanded. A suggestion that sends an
+    engineer back to their hardware to re-run something that cannot work is the most expensive output this
+    tool has. So the gain is floored at the level that produces the joint's entire static load (friction +
+    gravity hold) at ``BREAKAWAY_ERR_RAD`` of tracking error.
+    """
     import mujoco
     import numpy as np
 
@@ -90,7 +118,9 @@ def bench_gains(model):
     full = np.zeros((nv, nv))
     mujoco.mj_fullM(model, full, data.qM)
     inertia = np.maximum(np.diag(full).copy(), 1e-9)
-    kp = inertia * (BENCH_WN_RADPS ** 2)
+    static = (np.abs(np.asarray(model.dof_frictionloss, dtype=float))
+              + np.abs(np.asarray(data.qfrc_bias[:nv], dtype=float)))
+    kp = np.maximum(inertia * (BENCH_WN_RADPS ** 2), static / BREAKAWAY_ERR_RAD)
     kd = 2.0 * BENCH_ZETA * np.sqrt(np.maximum(kp * inertia, 1e-12))
     return kp, kd, inertia
 

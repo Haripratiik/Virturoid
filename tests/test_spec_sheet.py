@@ -4,8 +4,26 @@ from pathlib import Path
 
 from virturoid.services.spec_sheet import build_spec_sheet, write_spec_sheet
 
+BOM = {
+    "robot_class": "quadruped", "dof": 12,
+    "actuator_map": {"leg0_0": "Unitree GO-M8010-6", "leg0_1": "T-Motor AK80-9"},
+    "totals": {"actuators": 12, "mass_kg": 14.9, "price_usd": 4713.2, "est_power_w": 1329.4},
+    "lines": [
+        {"part": "Unitree GO-M8010-6", "category": "actuator", "qty": 8, "detail": "peak 23.7 Nm @ 24 V"},
+        {"part": "Aluminum 6061-T6", "category": "material", "qty": 13, "mass_kg": 6.4,
+         "detail": "13 links (structural)"},
+        {"part": "Bosch BNO055", "category": "imu", "qty": 1, "detail": "9-DOF IMU"},
+        {"part": "Jetson Orin", "category": "compute", "qty": 1, "detail": "compute module"},
+    ],
+}
 
-def _make_package(d):
+# A minimal but real MuJoCo model, so the bounding box comes from an actual compile rather than a stub.
+MJCF = ('<mujoco><worldbody><geom name="floor" type="plane" size="5 5 .1"/>'
+        '<body name="trunk" pos="0 0 .3"><freejoint/><geom type="box" size=".2 .1 .05"/></body>'
+        '</worldbody></mujoco>')
+
+
+def _make_package(d, *, bom_rel="robot/bill_of_materials.json"):
     d = Path(d)
     (d / "robot").mkdir(parents=True, exist_ok=True)
     (d / "reports").mkdir(parents=True, exist_ok=True)
@@ -13,20 +31,25 @@ def _make_package(d):
         "name": "test.quad", "species": "test.quad", "robot_class": "quadruped",
         "joints": [{"name": f"j{i}"} for i in range(12)],
     }), encoding="utf-8")
-    (d / "robot" / "bill_of_materials.json").write_text(json.dumps({
-        "robot_class": "quadruped", "dof": 12,
-        "actuator_map": {"leg0_0": "Unitree GO-M8010-6", "leg0_1": "T-Motor AK80-9"},
-        "totals": {"actuators": 12, "mass_kg": 14.9, "price_usd": 4713.2, "est_power_w": 1329.4},
-        "lines": [
-            {"part": "Unitree GO-M8010-6", "category": "actuator", "qty": 8, "detail": "peak 23.7 Nm @ 24 V"},
-            {"part": "Bosch BNO055", "category": "imu", "qty": 1, "detail": "9-DOF IMU"},
-            {"part": "Jetson Orin", "category": "compute", "qty": 1, "detail": "compute module"},
-        ],
-    }), encoding="utf-8")
+    bom_path = d / bom_rel
+    bom_path.parent.mkdir(parents=True, exist_ok=True)
+    bom_path.write_text(json.dumps(BOM), encoding="utf-8")
     (d / "reports" / "gene_evaluation_report.json").write_text(json.dumps({
         "task_type": "locomotion", "success_rate": 0.45, "forward_m": 0.83, "cadence_hz": 1.7, "upright_frac": 0.9,
     }), encoding="utf-8")
     return d
+
+
+def _certificate(*, motor="Unitree GO-M8010-6", qty=8, peak=23.7, sim_mass=6.4):
+    return {
+        "identity": {"robot_class": "quadruped", "dof": 12, "species": "test.quad"},
+        "verdict": {"verdict": "CREDIBLE WALK", "credible": True, "gait_source": "default_crawl",
+                    "checks": {"survived": True, "forward_m": 1.087, "speed_mps": 0.679, "cadence": 29.4,
+                               "support_frac": 0.97, "height_ratio": 0.947, "roll_max_deg": 9.7,
+                               "pitch_max_deg": 4.7}},
+        "model_sanity": {"ok": True, "total_mass_kg": sim_mass},
+        "margins": {"available": True, "bom": [{"part": motor, "qty": qty, "peak_nm": peak}]},
+    }
 
 
 def test_spec_sheet_aggregates_genome_bom_eval():
@@ -68,6 +91,204 @@ def test_spec_sheet_handles_missing_bom():
     assert spec["dof"] == 3
     assert spec["physical"]["mass_kg"] is None
     assert spec["summary"]
+    # ...and every missing number says WHY, and what to run. A bare null is the bug, not the sparseness.
+    why = spec["unavailable"]["physical.mass_kg"]
+    assert "bill of materials" in why and "bom" in why
+
+
+# ---------------------------------------------------------------------------------------------------------
+# THE DEFECT: every export_held package shipped a spec sheet whose every field was null, next to a populated
+# bom.json. The data was never absent -- the reader looked for exactly one of the three filenames the
+# pipeline writes.
+# ---------------------------------------------------------------------------------------------------------
+
+def test_spec_sheet_reads_the_bom_wherever_the_pipeline_actually_wrote_it():
+    """``export_held`` writes ``bom.json`` at the package root; the MVP/blueprint writers write
+    ``bom/bom.json``; only the package builder writes ``robot/bill_of_materials.json``. All three must
+    produce the SAME populated sheet -- the numbers are one directory away, not missing."""
+    for rel in ("robot/bill_of_materials.json", "bom.json", "bom/bom.json"):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            (d / "robot").mkdir(parents=True, exist_ok=True)
+            (d / "robot" / "robot_genome.json").write_text(json.dumps({
+                "name": "test.quad", "robot_class": "quadruped",
+                "joints": [{"name": f"j{i}", "joint_type": "revolute"} for i in range(12)]}), encoding="utf-8")
+            (d / rel).parent.mkdir(parents=True, exist_ok=True)
+            (d / rel).write_text(json.dumps(BOM), encoding="utf-8")
+            spec = build_spec_sheet(d)
+        assert spec["physical"]["mass_kg"] == 14.9, f"BOM at {rel} was not read"
+        assert spec["physical"]["actuators"] == 12, rel
+        assert spec["power_and_cost"]["est_power_draw_w"] == 1329.4, rel
+        assert spec["power_and_cost"]["est_parts_cost_usd"] == 4713.2, rel
+        assert spec["actuation"]["peak_joint_torque_nm"] == 23.7, rel
+        assert spec["sensing"] and spec["compute"], rel
+
+
+def test_spec_sheet_takes_size_from_a_root_robot_xml_and_ignores_the_ros2_manifest():
+    """``size_m`` was null on every export because the extent was only looked for under ``simulation/``,
+    while ``export_held`` writes ``robot.xml`` at the package root. ``export/ros2/**/package.xml`` sorts
+    first and is XML but is not a model -- it must not be mistaken for one."""
+    with tempfile.TemporaryDirectory() as tmp:
+        d = _make_package(tmp, bom_rel="bom.json")
+        (d / "export" / "ros2" / "pkg").mkdir(parents=True)
+        (d / "export" / "ros2" / "pkg" / "package.xml").write_text(
+            "<package format='3'><name>virturoid_robot</name></package>", encoding="utf-8")
+        (d / "robot.xml").write_text(MJCF, encoding="utf-8")
+        spec = build_spec_sheet(d)
+    size = spec["physical"]["size_m"]
+    assert size is not None, spec["unavailable"]
+    assert size["length_m"] > 0 and size["width_m"] > 0 and size["height_m"] > 0
+    assert "physical.size_m" not in spec["unavailable"]
+
+
+def test_spec_sheet_reads_the_verification_certificate_when_there_is_no_eval_report():
+    """An export package has no ``gene_evaluation_report.json`` -- but it does carry a signed physics
+    rollout in ``verification_certificate.json``, which this sheet used to ignore, leaving the task
+    ``"quadruped"`` and every gait number absent."""
+    with tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp)
+        (d / "robot").mkdir(parents=True)
+        (d / "robot" / "robot_genome.json").write_text(json.dumps({
+            "name": "test.quad", "robot_class": "quadruped",
+            "joints": [{"name": f"j{i}", "joint_type": "revolute"} for i in range(12)]}), encoding="utf-8")
+        (d / "bom.json").write_text(json.dumps(BOM), encoding="utf-8")
+        (d / "verification_certificate.json").write_text(json.dumps(_certificate()), encoding="utf-8")
+        spec = build_spec_sheet(d)
+    perf = spec["performance"]
+    assert perf["task"] == "locomotion"
+    assert perf["verdict"] == "CREDIBLE WALK" and perf["credible"] is True
+    assert perf["forward_m"] == 1.087 and perf["speed_mps"] == 0.679
+    assert perf["gait_source"] == "default_crawl"
+    assert "verification_certificate" in perf["measured_by"]
+    # success_rate is genuinely NOT in this package -- so say so, actionably, instead of shipping a null.
+    assert perf["success_rate"] is None
+    why = spec["unavailable"]["performance.success_rate"]
+    assert "CREDIBLE WALK" in why and ("evaluate_robot" in why or "build_gene_package" in why)
+    # ...and the one-liner must quote the certificate, not the bare unearned word "walks".
+    assert "certified credible walk" in spec["summary"]
+
+
+def test_spec_sheet_never_ships_a_bare_null_or_empty_field():
+    """Every null / empty value in the sheet must carry an entry in ``unavailable`` saying what is missing
+    and what to run. ``mass_kg: null`` beside a populated BOM is the defect this whole file exists for."""
+    with tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp)
+        (d / "robot").mkdir(parents=True)
+        (d / "robot" / "robot_genome.json").write_text(json.dumps({
+            "name": "bare", "robot_class": "quadruped", "joints": [{"name": "j0"}]}), encoding="utf-8")
+        spec = build_spec_sheet(d)
+    checked = {"physical.mass_kg": spec["physical"]["mass_kg"],
+               "physical.actuators": spec["physical"]["actuators"],
+               "physical.size_m": spec["physical"]["size_m"],
+               "power_and_cost.est_power_draw_w": spec["power_and_cost"]["est_power_draw_w"],
+               "power_and_cost.est_parts_cost_usd": spec["power_and_cost"]["est_parts_cost_usd"],
+               "actuation.peak_joint_torque_nm": spec["actuation"]["peak_joint_torque_nm"],
+               "actuation.actuator_types": spec["actuation"]["actuator_types"],
+               "sensing": spec["sensing"], "compute": spec["compute"],
+               "performance.success_rate": spec["performance"]["success_rate"]}
+    for path, value in checked.items():
+        if value in (None, [], {}):
+            why = spec["unavailable"].get(path)
+            assert why and len(why) > 30, f"{path} is empty with no actionable reason (got {why!r})"
+
+
+def test_spec_sheet_markdown_prints_the_reason_not_the_word_none():
+    with tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp)
+        (d / "robot").mkdir(parents=True)
+        (d / "robot" / "robot_genome.json").write_text(json.dumps({
+            "name": "bare", "robot_class": "quadruped", "joints": [{"name": "j0"}]}), encoding="utf-8")
+        write_spec_sheet(d)
+        md = (d / "reports" / "spec_sheet.md").read_text(encoding="utf-8")
+    assert "| None kg |" not in md and "$None" not in md and "| None Nm |" not in md
+    assert "bill of materials" in md
+    assert "## Not in this package" in md
+
+
+def test_spec_sheet_separates_as_built_mass_from_the_mass_the_verdict_was_measured_at():
+    """The BOM's 14.9 kg includes motors and electronics; the certified body is the 6.4 kg of structure.
+    Printing one number implies the robot was verified at a mass it will never have."""
+    with tempfile.TemporaryDirectory() as tmp:
+        d = _make_package(tmp, bom_rel="bom.json")
+        (d / "verification_certificate.json").write_text(json.dumps(_certificate()), encoding="utf-8")
+        spec = build_spec_sheet(d)
+    mb = spec["physical"]["mass_breakdown"]
+    assert mb["as_built_parts_kg"] == 14.9
+    assert mb["structure_only_kg"] == 6.4
+    assert mb["simulated_body_kg"] == 6.4
+    assert mb["as_built_over_simulated"] == 2.33
+    assert "SIMULATED" in mb["note"]
+
+
+def test_spec_sheet_flags_a_package_that_ships_two_motor_selections():
+    """One package once shipped 8x AK80-64 in bom.json and 8x AK10-9 in the certificate's margins.bom.
+    A spec sheet that quietly picks one is worse than no spec sheet -- it must say so, loudly."""
+    with tempfile.TemporaryDirectory() as tmp:
+        d = _make_package(tmp, bom_rel="bom.json")
+        (d / "verification_certificate.json").write_text(
+            json.dumps(_certificate(motor="T-Motor AK10-9", qty=8, peak=48.0)), encoding="utf-8")
+        write_spec_sheet(d)
+        spec = json.loads((d / "reports" / "spec_sheet.json").read_text(encoding="utf-8"))
+        md = (d / "reports" / "spec_sheet.md").read_text(encoding="utf-8")
+    cons = spec["consistency"]
+    assert cons["ok"] is False
+    assert any("motor_selection" in c for c in cons["contradictions"]), cons
+    assert any("peak_joint_torque_nm" in c for c in cons["contradictions"]), cons
+    assert "INCONSISTENT PACKAGE" in spec["summary"]
+    assert "## INCONSISTENT PACKAGE" in md
+
+
+def test_spec_sheet_flags_a_class_or_dof_mismatch_between_artifacts():
+    """The ingest audit's failure mode: bom.json said `quadruped` for a biped. If the genome, the BOM and
+    the certificate disagree about what this robot even IS, the sheet must not paper over it."""
+    with tempfile.TemporaryDirectory() as tmp:
+        d = _make_package(tmp, bom_rel="bom.json")
+        cert = _certificate()
+        cert["identity"]["robot_class"] = "biped"
+        cert["identity"]["dof"] = 6
+        (d / "verification_certificate.json").write_text(json.dumps(cert), encoding="utf-8")
+        spec = build_spec_sheet(d)
+    bad = " ".join(spec["consistency"]["contradictions"])
+    assert "robot_class" in bad and "dof" in bad, spec["consistency"]
+    assert spec["consistency"]["ok"] is False
+
+
+def test_spec_sheet_agrees_with_the_certificate_on_a_healthy_package():
+    with tempfile.TemporaryDirectory() as tmp:
+        d = _make_package(tmp, bom_rel="bom.json")
+        (d / "verification_certificate.json").write_text(json.dumps(_certificate()), encoding="utf-8")
+        spec = build_spec_sheet(d)
+    cons = spec["consistency"]
+    assert cons["ok"] is True and cons["checked"] >= 4, cons
+    assert {c["check"] for c in cons["checks"]} >= {"robot_class", "dof", "motor_selection", "structural_mass"}
+
+
+def test_spec_sheet_survives_an_unparseable_artifact():
+    """A truncated json must not blank the whole sheet -- fall through to the next candidate name."""
+    with tempfile.TemporaryDirectory() as tmp:
+        d = _make_package(tmp, bom_rel="bom.json")
+        (d / "verification_certificate.json").write_text("{not json", encoding="utf-8")
+        spec = build_spec_sheet(d)
+    assert spec["physical"]["mass_kg"] == 14.9
+    assert spec["sources"]["verification_certificate"] is False
+
+
+def test_export_writes_the_spec_sheet_after_every_artifact_it_summarizes():
+    """The sheet is a pure read-over-artifacts summary, so it must run LAST in ``export_held``. It used to run
+    between 'bom' and 'usd' -- before the certificate block -- so every exported package shipped a sheet with
+    no verdict, no forward distance and no motor-selection cross-check, beside a populated certificate.
+    Cheap source-order check rather than a multi-minute real export; it pins exactly the regression."""
+    import inspect
+
+    from virturoid.services.agent_design_tools import export_held
+    src = inspect.getsource(export_held)
+    cert_at = src.index("verification_certificate.json")
+    spec_at = src.index("write_spec_sheet")
+    assert cert_at < spec_at, (
+        "export_held writes the spec sheet BEFORE the verification certificate, so the sheet cannot read the "
+        "verdict, the gait numbers or the certificate's motor selection -- move the 'spec' block last")
+    bom_at = src.index('"bom.json"')
+    assert bom_at < spec_at, "export_held writes the spec sheet before the BOM it summarizes"
 
 
 def test_deployment_guide_aggregates_artifacts():

@@ -190,7 +190,7 @@ def _handle(method: str, params: dict):
                     "design MEANT as claims the harness checks (kind:'list' for the vocabulary; persist:true so a "
                     "later edit re-checks the original intent). scope_amend {robot_id, ops} DRY-RUNS an edit — "
                     "blast radius + what it invalidates — before edit_robot commits it.\n"
-                    "ADVANCED AUTHORING: train_reward {robot_id, objective} runs the closed reward loop — you "
+                    "ADVANCED AUTHORING: train_reward {robot_id, task} runs the closed reward loop — you "
                     "author a reward-as-code objective, it optimizes + banks the verified pattern (the reward "
                     "flywheel); generate_fusion {robot_id} compiles an EKF/AHRS/odometry sensor-fusion config "
                     "from the robot's real BOM sensors; generate_control_scripts {robot_id} emits the obs-"

@@ -205,8 +205,56 @@ def fingerprint_delta(a: dict, b: dict, *, mass_tol_kg: float = 0.01, dim_tol_m:
             "n_links_changed": len(changed), "changed": changed[:12]}
 
 
+def source_declared_torques(gene) -> dict[str, float]:
+    """``{segment: N.m}`` the CUSTOMER'S OWN MODEL declared, or ``{}`` for a body we generated.
+
+    The torque twin of ``metadata['mass_source']``. ``robot_import`` stamps ``metadata['torque_source'] =
+    'source_model'`` plus a per-joint record when it finds real limits in the file (actuator forcerange, a
+    force-mode motor's ctrlrange, or a joint's actuatorfrcrange). Grounding reads it here so it sizes a BOM
+    part AROUND the manufacturer's number instead of replacing it -- ``preserve_mass`` protected mass and
+    there was no equivalent for torque, so a Menagerie Go2's 23.7/23.7/45.43 N.m shipped as 10.6/10.6/1.5
+    with the ordering INVERTED (the knee is the strongest joint on the real machine and was the weakest by
+    30x on ours), and a UR5e's 150/150/150/28/28/28 became 360/360/48/4.1/1.5/0.5.
+
+    Deliberately reads the METADATA record rather than the segment's current ``actuator_torque_nm``: the
+    record is the source of truth and survives a body that was already grounded wrong once.
+
+    Empty for a segment whose ``torque_req_nm`` has been moved OFF the declared value. That is how a
+    deliberate capability amend still works: ``edit_operators.set_payload`` scales the REQUIREMENT so that
+    re-grounding picks a bigger motor, and a preservation rule with no release would have silently reverted
+    the customer's own explicit "make it lift 10 kg". A declaration describes the joint as it was; once
+    somebody re-specifies the joint, it no longer does.
+    """
+    meta = getattr(gene, "metadata", None)
+    if not isinstance(meta, dict) or str(meta.get("torque_source") or "") != "source_model":
+        return {}
+    rec = meta.get("source_actuator_torque_nm")
+    by = {s.name: s for s in gene.segments}
+    out: dict[str, float] = {}
+    items = (rec.items() if isinstance(rec, dict) and rec
+             # A marker with no per-joint record (an older gene, or one rebuilt by an amend that dropped the
+             # block): fall back to whatever positive limits the segments still carry, which on an imported
+             # body are the imported ones.
+             else [(s.name, s.actuator_torque_nm) for s in gene.segments])
+    for name, value in items:
+        seg = by.get(str(name))
+        if seg is None or seg.joint_type not in ("revolute", "prismatic"):
+            continue
+        try:
+            nm = abs(float(value))
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(nm) or nm <= 0.0:
+            continue
+        req = getattr(seg, "torque_req_nm", None)
+        if req is not None and abs(float(req) - nm) > max(1e-6, 1e-3 * nm):
+            continue                                   # re-specified since import -> let grounding re-size
+        out[str(name)] = nm
+    return out
+
+
 def ground_gene(gene, *, material: str = "aluminum", fill: float = 0.3, margin: float = 1.3,
-                preserve_mass: bool = False) -> dict:
+                preserve_mass: bool = False, preserve_torque: bool | None = None) -> dict:
     """Mutate ``gene`` in place: set each link's mass from material+geometry (+ its actuator's mass) and each
     actuated joint's torque limit to a real actuator's PEAK. The actuator is sized so its CONTINUOUS (rated)
     torque covers the sustained requirement with ``margin`` -- real thermal practice; never size a joint at its
@@ -220,6 +268,20 @@ def ground_gene(gene, *, material: str = "aluminum", fill: float = 0.3, margin: 
     customer's robot with our guess at it (measured on a Menagerie Go2: 15.206 kg of real link masses became
     13.235 kg of carbon-fibre estimates, base 6.921 -> 6.107).
 
+    ``preserve_torque`` is the same protection for ACTUATOR CAPACITY, and it did not exist: mass was safe and
+    torque was overwritten one line later, so an imported robot kept its manufacturer's masses and lost its
+    manufacturer's motors. ``None`` (the default) means AUTO -- on by exactly the joints
+    :func:`source_declared_torques` reports, which is empty for every body we generate, so no existing caller
+    changes behaviour and every import path gets the protection without having to know to ask for it. Pass
+    ``False`` to force a fresh catalog sizing (a deliberate re-spec), ``True`` to protect declared limits on a
+    gene that carries them without the import marker.
+
+    A preserved joint still gets a real BOM part: the declared limit becomes the joint's REQUIREMENT and the
+    same sizing call runs on it, so the parts list stays real and stops claiming a 520 N.m motor drives an
+    87 N.m Panda axis. Why this is urgent beyond accuracy: ``sysid.excitation`` bounds a plan written to be run
+    ON PHYSICAL HARDWARE at a fraction of ``actuator_torque_nm``, and against the invented figures that put
+    180 N.m of commanded torque on the Panda's 87 N.m J2.
+
     The material/fill actually used is RECORDED on the gene (``metadata['grounding']``) so a later re-ground
     reproduces this body instead of silently re-deriving it at a different density. That silent switch is
     exactly what made export ship a different robot than the one verified: ``ground_and_repair`` hardcoded
@@ -228,6 +290,12 @@ def ground_gene(gene, *, material: str = "aluminum", fill: float = 0.3, margin: 
     """
     from virturoid.services.component_catalog import select_actuator
     density = MATERIALS.get(material, MATERIALS["aluminum"])
+    declared = source_declared_torques(gene) if preserve_torque is not False else {}
+    if preserve_torque is True and not declared:
+        declared = {s.name: abs(float(s.actuator_torque_nm))
+                    for s in gene.segments
+                    if s.joint_type in ("revolute", "prismatic") and s.actuator_torque_nm}
+    torque_where = ((getattr(gene, "metadata", None) or {}).get("source_actuator_torque_where") or {})
     bom: list[dict] = []
     structural_mass = {s.name: _link_volume_m3(s.shape, s.length_m, s.radius_m) * density * fill
                        for s in gene.segments}
@@ -244,9 +312,22 @@ def ground_gene(gene, *, material: str = "aluminum", fill: float = 0.3, margin: 
             # SELECTED motor's PEAK; so each re-ground treated a motor peak as the new requirement and sized an even
             # bigger motor -- a 120 Nm joint ratcheted to 520 Nm after two grounds, silently over-sizing every arm
             # (and its housing geom, which then collided in grasp scenes). Now the requirement is remembered.
+            #
+            # A DECLARED LIMIT IS THE REQUIREMENT. When the customer's own file states this joint's capacity
+            # (``keep`` > 0), it is both the number the joint must keep AND the number the BOM part has to
+            # cover: the manufacturer already did this sizing, on hardware. Pinning it as ``torque_req_nm``
+            # also makes a later deliberate re-spec detectable -- see ``source_declared_torques``.
+            keep = float(declared.get(s.name) or 0.0)
             if s.torque_req_nm is None:
-                s.torque_req_nm = derived_loads.get(s.name, abs(s.actuator_torque_nm or 8.0))
+                s.torque_req_nm = keep or derived_loads.get(s.name, abs(s.actuator_torque_nm or 8.0))
             required = s.torque_req_nm
+            # The SELECTION call below is deliberately IDENTICAL for a preserved and a derived joint. The only
+            # difference preservation makes is what ``required`` is (the customer's declared limit rather than
+            # our structural estimate) and that ``actuator_torque_nm`` is not overwritten afterwards.
+            # ``bom_builder`` re-runs exactly this call from ``torque_req_nm`` at the same 1.3x margin to build
+            # bom.json; sizing the preserved joints at a different margin here would have made one package ship
+            # two contradictory motor lists -- the defect bom_builder.py:783 documents, re-created from the
+            # other end.
             if s.joint_type == "prismatic":
                 # A slider needs LINEAR FORCE, while the catalog describes motor
                 # shaft torque. Size a real rotary actuator through a short pinion/
@@ -258,12 +339,17 @@ def ground_gene(gene, *, material: str = "aluminum", fill: float = 0.3, margin: 
                 act = select_actuator(equivalent_torque, margin=margin,
                                       continuous_torque_nm=equivalent_torque * margin)
                 act_mass = act.mass_kg
-                output_force = act.peak_torque_nm / transmission_m
-                s.actuator_torque_nm = round(output_force, 3)
+                # On a slider ``actuator_torque_nm`` carries a FORCE in newtons, and so does a declared
+                # ``forcerange`` on a slide joint -- the two are the same quantity, so ``keep`` substitutes
+                # directly for the catalog part's output force.
+                output_force = keep or (act.peak_torque_nm / transmission_m)
+                if not keep:
+                    s.actuator_torque_nm = round(output_force, 3)
                 bom.append({"role": s.name, "part": act.name, "mass_kg": act.mass_kg,
                             "peak_force_n": round(output_force, 2), "rated_force_n": round(act.rated_torque_nm / transmission_m, 2),
                             "required_force_n": round(float(required), 2), "transmission_m": transmission_m,
-                            "max_speed_radps": act.max_speed_radps})
+                            "max_speed_radps": act.max_speed_radps,
+                            **_source_torque_note(s, keep, torque_where)})
                 if not preserve_mass:
                     s.mass_kg = round(max(0.02, struct + act_mass), 3)
                 total += s.mass_kg
@@ -272,10 +358,12 @@ def ground_gene(gene, *, material: str = "aluminum", fill: float = 0.3, margin: 
             # a real transient reserve above it. This is what makes a grounded body BOTH walk and certify.
             act = select_actuator(required, margin=margin, continuous_torque_nm=required * margin)
             act_mass = act.mass_kg
-            s.actuator_torque_nm = act.peak_torque_nm          # joint limit = peak (transients); duty rides on rated
+            if not keep:
+                s.actuator_torque_nm = act.peak_torque_nm      # joint limit = peak (transients); duty rides on rated
             bom.append({"role": s.name, "part": act.name, "mass_kg": act.mass_kg,
                         "stall_nm": act.peak_torque_nm, "rated_nm": act.rated_torque_nm,
-                        "max_speed_radps": act.max_speed_radps, "required_nm": round(required, 2)})
+                        "max_speed_radps": act.max_speed_radps, "required_nm": round(required, 2),
+                        **_source_torque_note(s, keep, torque_where)})
         if not preserve_mass:
             s.mass_kg = round(max(0.02, struct + act_mass), 3)  # grounded mass = structure + actuator
         total += s.mass_kg
@@ -327,6 +415,24 @@ def ground_gene(gene, *, material: str = "aluminum", fill: float = 0.3, margin: 
                                       "margin": round(float(margin), 6)}
     return {"material": material, "bom": bom, "total_mass_kg": round(total, 3),
             "mass_preserved": bool(preserve_mass),
+            # Visible, per-joint, in the same report the BOM travels in: a reader must be able to tell which
+            # joint limits are the customer's measurement and which are our catalog estimate.
+            "torque_preserved": bool(declared),
+            "n_torque_preserved": len(declared),
+            "torque_source": ((getattr(gene, "metadata", None) or {}).get("torque_source") if declared
+                              else None),
+            "torque_preserved_joints": sorted(declared),
             "actuator_count": len(bom), "physical_prior": (prior.id if prior else None),
             "mass_band_kg": (list(prior.mass_band_kg) if prior else None),
             "balance_of_system_mass_kg": round(balance_mass, 3)}
+
+
+def _source_torque_note(seg, keep: float, where: dict) -> dict:
+    """The BOM row's provenance for this joint's torque limit — measured (theirs) or sized (ours)."""
+    if not keep:
+        return {"torque_source": "sized_from_structural_load"}
+    return {"torque_source": "source_model",
+            "joint_torque_limit_nm": round(float(keep), 3),
+            "declared_in": str(where.get(seg.name) or "the source model"),
+            "part_role": "catalog EQUIVALENT for the customer's own actuator (they already own the motor); "
+                         "the joint limit is theirs, the part is the smallest in our catalog that covers it"}

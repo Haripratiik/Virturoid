@@ -705,13 +705,56 @@ def _joint_dynamics(gene: RobotGene, seg) -> tuple[float, float, float]:
     A table/floor-mounted articulated chain has the reflected inertia and transmission friction of an arm;
     rolling joints and free-base load-bearing limbs use their own lighter priors. New named robot classes still
     receive a useful prior because topology, mounting and the joint's physical role drive the choice.
+
+    A MEASUREMENT OUTRANKS A PRIOR. When a system-identification fit has been applied to this gene
+    (``sysid.apply_calibration``), the fitted value for this joint replaces the structural guess below --
+    which is the whole point of the calibration wedge: the customer runs one bench experiment and the
+    simulator stops being a set of plausible constants. Only parameters that passed the identifiability gates
+    are ever in that record, the prior each one replaced is stored beside it, and
+    ``sysid.revert_calibration`` puts every joint back on this function. Everything else about the emitted
+    joint -- axis, range, name -- is untouched.
     """
+    prior = _joint_dynamics_prior(gene, seg)
+    fitted = _calibrated_dynamics(gene, seg.name)
+    if not fitted:
+        return prior
+    damping, armature, frictionloss = prior
+    return (float(fitted.get("damping", damping)), float(fitted.get("armature", armature)),
+            float(fitted.get("frictionloss", frictionloss)))
+
+
+def _calibrated_dynamics(gene: RobotGene, seg_name: str) -> dict:
+    """``{param: fitted_value}`` from an applied sysid calibration, or ``{}``.
+
+    Imported lazily and guarded: ``sysid`` needs MuJoCo, and ``gene_compiler`` is imported by paths that run
+    without it. A compile must never fail because the calibration package could not load -- it falls back to
+    the structural prior, which is the pre-calibration behaviour. The key check comes BEFORE the import so an
+    uncalibrated gene -- which is every gene, on every compile, on every path -- does not reach across into
+    another package once per joint to be told nothing changed.
+    """
+    meta = getattr(gene, "metadata", None)
+    if not isinstance(meta, dict) or "calibration" not in meta:
+        return {}
+    try:
+        from virturoid.services.sysid.calibration import calibrated_joint_dynamics
+        return calibrated_joint_dynamics(gene, seg_name)
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _joint_dynamics_prior(gene: RobotGene, seg) -> tuple[float, float, float]:
+    """The structural prior, before any measurement. Split out so a calibrated build can still recompute the
+    baseline it replaced (``calibration_report`` uses exactly this to flag a stale record)."""
     name = (seg.name or "").lower()
+    # The mount that decides the DRIVETRAIN prior, which is not always the mount the body is compiled with: a
+    # sysid bench rig welds a free-base robot to a stand to isolate its actuators, and that weld must not
+    # convert every leg joint into an industrial arm axis. `sysid.bench_rig.bench_model` is the only writer.
+    mount = (getattr(gene, "metadata", None) or {}).get("joint_dynamics_base_mount") or gene.base_mount
     if seg.joint_type == "prismatic":
         return (1.2, 0.02, 0.12)
     if _segment_role(seg) == "wheel" or "wheel" in name or "drive" in name:
         return (0.25, 0.02, 0.05)
-    if gene.base_mount in ("table", "floor", "torso"):
+    if mount in ("table", "floor", "torso"):
         # Scale reflected inertia/friction with the selected actuator instead of
         # assigning a shoulder-sized gearbox to every wrist. The fixed 0.45 Nm
         # Coulomb loss left a grounded 0.52 Nm wrist only 0.07 Nm to move, so the

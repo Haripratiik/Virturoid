@@ -308,13 +308,8 @@ def import_robot(source: str, *, robot_id: str | None = None, species: str | Non
     jnts_of: dict[int, list[int]] = {}
     for j in range(mj.njnt):
         jnts_of.setdefault(int(mj.jnt_bodyid[j]), []).append(j)
-    # Actuator force range per actuated joint (for actuator_torque_nm).
-    jnt_force: dict[int, float] = {}
-    for u in range(mj.nu):
-        if int(mj.actuator_trntype[u]) == int(mujoco.mjtTrn.mjTRN_JOINT):
-            jid = int(mj.actuator_trnid[u, 0])
-            fr = mj.actuator_forcerange[u]
-            jnt_force[jid] = max(jnt_force.get(jid, 0.0), abs(float(fr[1])) or abs(float(fr[0])))
+    # THE CUSTOMER'S OWN TORQUE LIMITS, from all three places a real model puts them (see the helper).
+    jnt_force = _declared_joint_torque(mj, mujoco)
 
     roots = [i for i in range(1, mj.nbody) if int(mj.body_parentid[i]) == 0]
     if len(roots) > 1:
@@ -331,6 +326,12 @@ def import_robot(source: str, *, robot_id: str | None = None, species: str | Non
     except Exception:  # noqa: BLE001 - baking source meshes is a fidelity aid, never an import blocker
         _mesh_dir = None
     ee_candidates: list[str] = []
+    # The customer's declared ACTUATOR CAPACITY and JOINT DYNAMICS, kept as a record on the gene so grounding
+    # cannot overwrite what the file already told us (see the metadata block after the loop).
+    src_torque: dict[str, float] = {}
+    src_torque_where: dict[str, str] = {}
+    src_dynamics: dict[str, dict] = {}
+    undeclared_torque: list[str] = []
     for i in range(1, mj.nbody):
         bname = body_name[i]
         parent = None if int(mj.body_parentid[i]) == 0 else body_name[int(mj.body_parentid[i])]
@@ -384,8 +385,26 @@ def import_robot(source: str, *, robot_id: str | None = None, species: str | Non
         _S = _rot_z_to(_v) if _span >= 1e-6 else _np.eye(3)
         _rot_by_id[i] = _S
 
-        joint_type, axis, lo, hi, torque = _joint_for_body(mj, i, jnts_of, jnt_force, bname, warnings)
+        joint_type, axis, lo, hi, torque, jid = _joint_for_body(mj, i, jnts_of, jnt_force, bname, warnings)
         axis = tuple(float(a) for a in (_S.T @ _np.asarray(axis, dtype=float)))   # axis into the segment frame
+        if joint_type in ("revolute", "prismatic") and jid is not None:
+            # CARRY THE DRIVETRAIN, NOT JUST THE SKELETON. armature (reflected rotor inertia), damping and
+            # frictionloss are the three parameters `sysid.fit_parameters` identifies -- and the Go2 declares
+            # all three (0.01 / 2.0 / 0.2) and the Panda two (0.1 / 1.0) right there in the file. Discarding
+            # them and substituting the compiler's structural prior means a calibration run "identifies"
+            # numbers the customer handed us, and a customer comparing their sim to ours sees a gap we
+            # manufactured. The values recorded are the COMPILED ones, i.e. exactly what the customer's own
+            # MuJoCo integrates with (MuJoCo's own default for all three is 0, so an undeclared parameter
+            # records as the 0 their simulator uses -- not as a guess of ours).
+            _dyn = _source_joint_dynamics(mj, jid)
+            if _dyn is not None:
+                src_dynamics[bname] = _dyn
+            _decl = jnt_force.get(jid)
+            if _decl:
+                src_torque[bname] = float(_decl["nm"])
+                src_torque_where[bname] = str(_decl["where"])
+            else:
+                undeclared_torque.append(bname)
         is_leaf = i in leaves
         name_hit = any(h in bname.lower() for h in _EE_NAME_HINTS)
         if is_leaf or name_hit:
@@ -490,6 +509,38 @@ def import_robot(source: str, *, robot_id: str | None = None, species: str | Non
         metadata={"imported_from": "mjcf_or_urdf", "n_bodies": mj.nbody, "n_joints": mj.njnt,
                   "mass_source": "source_model"},
     )
+    # ``torque_source`` is to ACTUATOR CAPACITY what ``mass_source`` above is to mass: a marker that these
+    # numbers are the manufacturer's, not ours, so ``grounded_physics.ground_gene`` sizes a BOM part around them
+    # instead of replacing them with a catalog pick. There was no such marker, and the loss was total: a
+    # Menagerie Go2 that declares 23.7/23.7/45.43 N.m shipped as 10.6/10.6/1.5 -- with the ORDERING INVERTED,
+    # the knee being the strongest joint on the real machine and the weakest by 30x on ours -- and a UR5e's
+    # 150/150/150/28/28/28 became 360/360/48/4.1/1.5/0.5. The safety consequence is not hypothetical:
+    # ``sysid.excitation`` bounds a plan meant to be RUN ON PHYSICAL HARDWARE at a fraction of this number, and
+    # on the Panda that put 180 N.m of commanded torque on an 87 N.m joint.
+    if src_torque:
+        gene.metadata["torque_source"] = "source_model"
+        gene.metadata["source_actuator_torque_nm"] = dict(src_torque)
+        gene.metadata["source_actuator_torque_where"] = dict(src_torque_where)
+    if src_dynamics:
+        gene.metadata["source_joint_dynamics"] = dict(src_dynamics)
+        gene.metadata["source_joint_dynamics_provenance"] = (
+            "read from the customer's compiled model (dof_armature / dof_damping / dof_frictionloss) at "
+            "import; these are the values their own MuJoCo integrates with, not an estimate of ours")
+    if src_torque:
+        _sites = sorted(set(src_torque_where.values()))
+        warnings.append(
+            f"actuator torque limits for {len(src_torque)} joint(s) were read from the source model "
+            f"({'; '.join(_sites)}) and are treated as AUTHORITATIVE: grounding will size a BOM part around "
+            f"them instead of replacing them with a catalog pick. Range "
+            f"{min(src_torque.values()):.2f}-{max(src_torque.values()):.2f} N.m.")
+    if undeclared_torque:
+        warnings.append(
+            f"{len(undeclared_torque)} actuated joint(s) declare NO torque limit anywhere in the source "
+            f"(no actuator forcerange, no force-mode ctrlrange, no joint actuatorfrcrange): "
+            f"{', '.join(sorted(undeclared_torque)[:6])}"
+            f"{'...' if len(undeclared_torque) > 6 else ''}. Grounding will size a catalog actuator for these "
+            f"from the structural load — an ESTIMATE, not your motor. Add actuatorfrcrange (or a motor "
+            f"forcerange) to the joints you care about.")
     # CARRY THE SOURCE'S OWN STANDING POSE. A robot description ships the stance its designers intended as a
     # named keyframe -- 45 of the 74 MuJoCo Menagerie models do (`home`, `stand`, `standing`, `retract`) -- and
     # for a legged robot that pose is the whole point: a Go2's home key is base z=0.27 with every leg at
@@ -650,11 +701,99 @@ def _primary_geom(mj, body_id: int, GEOM, name_of, warnings: list[str]):
     return "box", max(2 * float(size[0]), 1e-3), max(float(size[0]), 1e-3)
 
 
+def _declared_joint_torque(mj, mujoco) -> dict[int, dict]:
+    """``{joint_id: {"nm", "where"}}`` — the torque limit the CUSTOMER'S OWN FILE declares, from all three
+    places a real robot description puts it. We used to read exactly one of them and silently return zero.
+
+      * ``<general|motor forcerange>``     — the clamp MuJoCo applies to the actuator's scalar force.
+        Franka Panda 87/87/87/87/12/12/12, UR5e 150/150/150/28/28/28. This was the only site we read.
+      * ``<motor ctrlrange>`` in FORCE MODE — where ``ctrl`` IS the commanded force, so its range is a torque
+        range. The Unitree Go2 declares 23.7/23.7/45.43 N.m here with ``forcelimited=false``, so reading
+        forcerange returned ``[0, 0]`` and the importer recorded NOTHING for a robot whose real numbers were
+        sitting in the file.
+      * ``<joint actuatorfrcrange>``       — a cap on the TOTAL actuator force at that joint, which is where
+        the Unitree G1 puts its entire torque spec (88/139/50/25/5 N.m) and where nothing on the actuator
+        says anything at all.
+
+    ``ctrlrange`` IS ONLY A TORQUE FOR A FORCE-MODE ACTUATOR, and that has to be checked rather than assumed.
+    The G1's actuators are ``<position>`` servos whose ctrlrange is the joint's POSITION range in radians
+    (``inheritrange="1"``): reading it as a torque would give the 88 N.m hip a limit of 2.88 N.m — 30x too
+    weak — and stamp it as the manufacturer's own number, which is worse than reading nothing. Force mode is
+    ``gaintype=fixed`` (ctrl scaled by a constant), ``biastype=none`` (no position/velocity feedback term) and
+    ``dyntype=none`` (ctrl is not filtered or integrated into a state ctrlrange does not bound) — precisely
+    MJCF's ``<motor>``.
+
+    Units: MuJoCo clamps the scalar force to ``forcerange`` and then applies ``moment * force``, and for a
+    joint transmission the moment is ``gear[0]``. So the JOINT torque limit is ``|gear| * force``, and the
+    force-mode ctrl path is ``|gear| * |gain| * ctrl_max``.
+    """
+    JT = {int(mujoco.mjtTrn.mjTRN_JOINT), int(mujoco.mjtTrn.mjTRN_JOINTINPARENT)}
+    out: dict[int, dict] = {}
+    for u in range(mj.nu):
+        if int(mj.actuator_trntype[u]) not in JT:
+            continue
+        jid = int(mj.actuator_trnid[u, 0])
+        gear = abs(float(mj.actuator_gear[u, 0])) or 1.0
+        cands: list[tuple[float, str]] = []
+        if int(mj.actuator_forcelimited[u]):
+            f = max(abs(float(mj.actuator_forcerange[u][0])), abs(float(mj.actuator_forcerange[u][1])))
+            if f > 0.0:
+                cands.append((gear * f, "actuator/forcerange"))
+        force_mode = (int(mj.actuator_gaintype[u]) == int(mujoco.mjtGain.mjGAIN_FIXED)
+                      and int(mj.actuator_biastype[u]) == int(mujoco.mjtBias.mjBIAS_NONE)
+                      and int(mj.actuator_dyntype[u]) == int(mujoco.mjtDyn.mjDYN_NONE))
+        if force_mode and int(mj.actuator_ctrllimited[u]):
+            k = abs(float(mj.actuator_gainprm[u, 0]))
+            c = max(abs(float(mj.actuator_ctrlrange[u][0])), abs(float(mj.actuator_ctrlrange[u][1])))
+            if k > 0.0 and c > 0.0:
+                cands.append((gear * k * c, "actuator/ctrlrange (force-mode motor) x gear"))
+        if not cands:
+            continue
+        nm, where = min(cands)                      # both clamps apply in series -> the smaller one binds
+        prev = out.get(jid)
+        if prev is None or nm > float(prev["nm"]):  # several actuators on one joint: the strongest sets reach
+            out[jid] = {"nm": nm, "where": where}
+    # The joint-level cap applies whether or not any actuator declared anything — and where nothing else did,
+    # it IS the declaration.
+    for j in range(mj.njnt):
+        if not int(getattr(mj, "jnt_actfrclimited", [0] * mj.njnt)[j]):
+            continue
+        cap = max(abs(float(mj.jnt_actfrcrange[j][0])), abs(float(mj.jnt_actfrcrange[j][1])))
+        if cap <= 0.0:
+            continue
+        prev = out.get(j)
+        if prev is None:
+            out[j] = {"nm": cap, "where": "joint/actuatorfrcrange"}
+        elif cap < float(prev["nm"]):
+            out[j] = {"nm": cap, "where": f"{prev['where']} capped by joint/actuatorfrcrange"}
+    return {k: {"nm": round(float(v["nm"]), 3), "where": v["where"]} for k, v in out.items()
+            if round(float(v["nm"]), 3) > 0.0}
+
+
+def _source_joint_dynamics(mj, j: int) -> dict | None:
+    """``{armature, damping, frictionloss}`` for joint ``j`` as the customer's model compiles them.
+
+    These three are exactly what ``sysid.fit_parameters`` identifies. The Go2 declares all three
+    (``armature=0.01 damping=2.0 frictionloss=0.2``) and the Panda two (``armature=0.1 damping=1.0``); before
+    this the importer had no reference to any of them anywhere in the file and the compiler's structural
+    prior stood in — so a bench calibration "identified" values the customer had already handed us, and the
+    sim-to-sim gap against their own model was one we created at import.
+    """
+    adr = int(mj.jnt_dofadr[j])
+    if adr < 0:
+        return None
+    return {"armature": round(float(mj.dof_armature[adr]), 6),
+            "damping": round(float(mj.dof_damping[adr]), 6),
+            "frictionloss": round(float(mj.dof_frictionloss[adr]), 6)}
+
+
 def _joint_for_body(mj, body_id, jnts_of, jnt_force, bname, warnings):
-    """Return (joint_type, axis, lower, upper, torque) for the joint attaching this body to its parent."""
+    """Return (joint_type, axis, lower, upper, torque, joint_id) for the joint attaching this body to its
+    parent. ``joint_id`` is the SOURCE joint index (None for a weld) so the caller can carry the source's own
+    per-joint drivetrain record — armature/damping/frictionloss — off the same joint."""
     js = jnts_of.get(body_id, [])
     if not js:
-        return None, (0.0, 0.0, 1.0), None, None, None   # welded (fixed) link
+        return None, (0.0, 0.0, 1.0), None, None, None, None   # welded (fixed) link
     if len(js) > 1:
         warnings.append(f"body {bname!r} has {len(js)} joints; a gene segment models one. Using the first.")
     j = js[0]
@@ -663,15 +802,15 @@ def _joint_for_body(mj, body_id, jnts_of, jnt_force, bname, warnings):
     if jt is None:
         warnings.append(f"body {bname!r} uses an unsupported joint type ({'free' if jt_int == 0 else 'ball'}); "
                         "modeled as a fixed weld. Free/ball joints aren't representable in a RobotGene chain.")
-        return None, (0.0, 0.0, 1.0), None, None, None
+        return None, (0.0, 0.0, 1.0), None, None, None, None
     axis = tuple(round(float(v), 4) for v in mj.jnt_axis[j])
     lo = hi = None
     if int(mj.jnt_limited[j]):
         lo, hi = float(mj.jnt_range[j][0]), float(mj.jnt_range[j][1])
     else:
         warnings.append(f"joint on {bname!r} has no limits (continuous); set joint_lower/upper for a bounded design.")
-    torque = round(jnt_force.get(j, 0.0), 3) or None
-    return jt, axis, lo, hi, torque
+    torque = float((jnt_force.get(j) or {}).get("nm") or 0.0) or None
+    return jt, axis, lo, hi, torque, j
 
 
 def _standing_limbs(mj, name_of) -> tuple[int, float]:

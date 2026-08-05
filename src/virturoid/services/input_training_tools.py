@@ -17,6 +17,7 @@ Handlers take ``args: dict`` and return JSON-able dicts (errors as ``{"error": .
 from __future__ import annotations
 
 import os
+import re
 
 
 def _interpret_prompt(args: dict) -> dict:
@@ -266,6 +267,115 @@ def _legged_family(gene) -> str:
     return family_from_legs(measured_legs(gene)) or "legged"
 
 
+#: a per-link mass has to move by more than this before we call the customer's number "replaced" (kg).
+_MASS_TOL_KG = 1e-3
+
+#: a scheme'd URL or a bare host/path (`arxiv.org/abs/...`) -- text that is never a robot specification.
+_URL_RE = re.compile(
+    r"(?:\w+://\S+)|(?:\b(?:www\.)?[\w.-]+\.(?:org|com|net|io|edu|gov|ai|dev|co|uk|de|cn)\b(?:/\S*)?)",
+    re.IGNORECASE)
+
+
+def _strip_urls(text: str) -> str:
+    """Remove links before a dropped README is read as a materials spec.
+
+    The fold-in below exists so a customer needn't retype specs already written in notes.md. But a README is
+    not a spec sheet -- it is prose, badges and CITATIONS -- and the property extractor matches substrings.
+    Measured on the real Menagerie G1: its README cites ``url={https://arxiv.org/abs/2502.08844}``, the
+    ``/abs/`` in that arXiv link parsed as ABS PLASTIC, and ingest silently applied
+    ``set_material(group='all', material='abs_plastic')`` to an imported humanoid -- which re-derives every
+    link mass, so Unitree's 33.341 kg became 30.780 kg of our plastic estimate because of a citation URL.
+
+    A URL can never be a material, a payload or a dimension, so it is dropped before parsing. Prose that
+    really does say "aluminium body, 5 kg payload" is untouched."""
+    try:
+        return _URL_RE.sub(" ", text or "").strip()
+    except Exception:  # noqa: BLE001 - never let sanitising break an ingest
+        return text or ""
+
+
+def _link_shape(gene) -> dict:
+    """``{link_name: (mass_kg, radius_m, length_m)}`` — the snapshot that lets ingest state, as a measurement
+    rather than a hope, whether the body it hands back is still the body the customer handed us."""
+    try:
+        return {s.name: (float(s.mass_kg or 0.0), float(s.radius_m or 0.0), float(s.length_m or 0.0))
+                for s in gene.segments}
+    except Exception:  # noqa: BLE001 - provenance accounting must never break an ingest
+        return {}
+
+
+def _reconcile_mass_provenance(gene, before: dict, result: dict) -> dict:
+    """Make ``metadata['mass_source']`` tell the truth about the masses the gene is actually carrying.
+
+    An imported robot arrives stamped ``mass_source='source_model'``: those per-link masses are the
+    manufacturer's own, read straight off the customer's model. That flag is LOAD-BEARING, not decorative --
+    ``gene_build.grounding_config`` turns it into ``preserve_mass=True`` on every later re-ground, so once it
+    is set, every downstream door (build, export, spec sheet, BOM, certificate) treats whatever masses it
+    finds as authoritative and refuses to touch them.
+
+    So a wrong ``mass_source`` is SELF-SEALING: if ingest replaced the customer's masses with our own estimate
+    and left the flag reading "source_model", the estimate is not merely mislabelled, it is LOCKED IN as the
+    customer's own measurement, permanently and silently, and every artifact downstream cites the
+    manufacturer for a number the manufacturer never published. Measured before this: an ingested Go2 held
+    29.031 kg of our aluminium-and-catalog-motor guesswork under a label that said 15.206 kg of Unitree's.
+
+    Therefore: when the numbers move, the label moves with them. Returns the ledger either way, so the honest
+    case is visible too -- "we preserved it" is a claim that should also be measured, not assumed.
+    """
+    meta = getattr(gene, "metadata", None)
+    after = _link_shape(gene)
+    if not isinstance(meta, dict) or not before or not after:
+        return {}
+    src_total = sum(v[0] for v in before.values())
+    now_total = sum(v[0] for v in after.values())
+    changed = [n for n in (set(before) | set(after))
+               if abs(after.get(n, (0.0,))[0] - before.get(n, (0.0,))[0]) > _MASS_TOL_KG]
+    preserved = not changed and abs(now_total - src_total) <= _MASS_TOL_KG
+    claimed = str(meta.get("mass_source") or "") or None
+    prov = {"claimed_on_import": claimed, "mass_kg_as_imported": round(src_total, 3),
+            "mass_kg_held": round(now_total, 3), "delta_kg": round(now_total - src_total, 3),
+            "n_links_mass_changed": len(changed), "preserved": bool(preserved)}
+    if claimed == "source_model" and not preserved:
+        meta["mass_source"] = "virturoid_estimate"
+        meta["mass_source_replaced"] = {
+            "was": "source_model", "source_model_mass_kg": round(src_total, 3),
+            "held_mass_kg": round(now_total, 3), "n_links": len(changed),
+            "why": "ingest re-derived per-link mass (material grounding and/or an applied edit op), so these "
+                   "masses are Virturoid's estimate and must not be re-preserved as the manufacturer's",
+        }
+        prov["corrected_to"] = "virturoid_estimate"
+        result["warnings"].append(
+            f"the manufacturer's per-link masses ({round(src_total, 3)} kg over {len(before)} links) were "
+            f"REPLACED during ingest by Virturoid's derived masses ({round(now_total, 3)} kg, "
+            f"{len(changed)} link(s) changed) -- metadata['mass_source'] is now 'virturoid_estimate', not "
+            f"'source_model', so nothing downstream cites your manufacturer for our number")
+    elif preserved and claimed == "source_model":
+        prov["note"] = ("your model's own per-link masses are held unchanged; grounding sized actuators "
+                        "around them instead of re-deriving them")
+    # AND NAME THE MATERIAL HONESTLY. `metadata['grounding']` records the density the held masses were derived
+    # at, which is right and load-bearing -- but it is OUR pick unless the customer asked for it, and their
+    # request can perfectly well have been SKIPPED ("this robot has no 'torso' part") while a re-ground stamped
+    # a global material anyway. Report the record and whether they chose it; never let the stamp imply consent.
+    #
+    # Only an IMPORT gets the warning. On a body we composed from the customer's words there is no
+    # manufacturer to misquote -- picking a default density is the design decision they asked us to make --
+    # and warning about it on every description-only ingest would be noise that buries the real one.
+    rec = meta.get("grounding") if isinstance(meta.get("grounding"), dict) else None
+    if rec:
+        asked = {str(m.get("material") or "") for m in (result.get("materials_applied") or [])}
+        mat = str(rec.get("material") or "")
+        prov["material_masses_derived_at"] = mat
+        prov["material_requested_by_customer"] = bool(mat and mat in asked)
+        if mat and mat not in asked and meta.get("imported_from"):
+            result["warnings"].append(
+                f"the held masses were derived at '{mat}' — Virturoid's default for this step, NOT a material "
+                f"you specified"
+                + (f" (your material request was skipped: {result['skipped_ops'][0].get('reason')})"
+                   if result.get("skipped_ops") else "")
+                + "; set it explicitly with the set_material edit op if that is wrong")
+    return prov
+
+
 def _ingest_project(args: dict) -> dict:
     """INGESTION AGENT (Part B): a robotics team drops a project FOLDER/ZIP of their existing robot (URDF/MJCF +
     optional BOM/CAD) plus an NLP description ("aluminum body, carbon-fiber legs, 5 kg payload, 6-DOF arm"), and
@@ -315,6 +425,7 @@ def _ingest_project(args: dict) -> dict:
                     if os.path.isfile(_np):
                         with open(_np, encoding="utf-8", errors="replace") as _f:
                             _txt = _f.read(4000).strip()
+                        _txt = _strip_urls(_txt)
                         if _txt:
                             description = (description + "\n" + _txt).strip() if description else _txt
                             result["notes"].append(f"folded {_nm} from the project into the NLP description")
@@ -475,9 +586,52 @@ def _ingest_project(args: dict) -> dict:
 
     # 4) apply the stated materials (only to parts that EXIST -- no fabrication) + payload, one gate per op
     from virturoid.services.edit_operators import apply_op, segments_for_group
+
+    # GROUND THE ROBOT WE WERE HANDED -- DO NOT RE-DERIVE THE CUSTOMER'S MASSES.
+    #
+    # This step exists so `set_payload` has a real torque/mass baseline. It used to call `ground_gene(gene)`
+    # BARE, which takes the defaults material="aluminum", fill=0.3, preserve_mass=False -- so every link's
+    # mass was thrown away and recomputed as (primitive volume x aluminium density x 0.3) + one of OUR catalog
+    # motors, on a body whose manufacturer masses ALREADY include its motors. Every actuator was counted
+    # twice, against a shape we approximated, at a density nobody asked for. Measured through this tool on
+    # real Menagerie models:
+    #
+    #     Go2   15.206 -> 29.031 kg      Panda  17.452 -> 50.425 kg
+    #     G1    33.341 -> 42.339 kg      UR5e   20.995 -> 25.772 kg
+    #
+    # `grounded_physics.ground_gene`'s own docstring explains exactly why this call needs `preserve_mass` and
+    # names the Go2 as the example -- the knowledge was already in the file; only this call site never used it.
+    #
+    # `gene_build.ground_and_repair` is the SINGLE grounding path both exit doors (package build and
+    # `export_held`) already share, and it reads `grounding_config(gene)`, which sets preserve_mass=True for
+    # `metadata['mass_source'] == 'source_model'` (an import) and otherwise reproduces the body's own recorded
+    # material. Routing through it means the ingest door grounds a body the same way the export door will, so
+    # the robot the customer verifies cannot change weight or shape on its way out.
+    #
+    # It also stops us stamping a material nobody chose: `ground_gene` only records `metadata['grounding']`
+    # when it actually derived the masses, so a preserved import is no longer labelled "aluminum, fill 0.3"
+    # while the ingest report says the aluminium request was SKIPPED for want of a 'torso' part.
+    #
+    # SCOPED TO BODIES WHOSE MASSES ARE AUTHORITATIVE, i.e. an import. A body we COMPOSED from the customer's
+    # words has no manufacturer mass to protect, and moving its grounding is not free: `ground_gene` PINS
+    # `torque_req_nm` on the first ground, so a different first call sizes different motors and every later
+    # step compounds it -- and per [[body-and-gait-are-co-tuned]] a silent mass move trades walk verdicts
+    # across the design bench.
+    #
+    # It also cannot be measured here. The composed path is NOT DETERMINISTIC: three identical calls with
+    # "a quadruped robot dog, aluminum body, 5 kg payload" returned 46.172 / 49.715 / 22.368 kg over 23-25
+    # segments, so no before/after number on that path would mean anything, and a change we cannot measure is
+    # a change we should not make while fixing something else. The composed path therefore keeps exactly the
+    # call it had, and this fix cannot reach it. (That 2.2x spread is a real defect, but a different one.)
+    _shape_before = _link_shape(gene)
+    _authoritative = str((getattr(gene, "metadata", None) or {}).get("mass_source") or "") == "source_model"
     try:
-        from virturoid.services.grounded_physics import ground_gene
-        ground_gene(gene)                                        # real baseline torques/mass so set_payload is grounded
+        if _authoritative:
+            from virturoid.services.gene_build import ground_and_repair
+            ground_and_repair(gene)                              # honours preserve_mass; same path as export
+        else:
+            from virturoid.services.grounded_physics import ground_gene
+            ground_gene(gene)                                    # composed body: unchanged baseline
     except Exception:  # noqa: BLE001
         pass
     for op in props.ops:
@@ -500,6 +654,27 @@ def _ingest_project(args: dict) -> dict:
                     result["warnings"].append(diff["warning"])
         except Exception as exc:  # noqa: BLE001 - a bad op (incl. EditError) is skipped + noted, never aborts ingest
             result["skipped_ops"].append({**op, "reason": str(exc)})
+
+    # 4b) RECONCILE THE PROVENANCE WITH THE NUMBERS -- after the ops, not just after grounding, because an
+    # applied `set_material` / `set_payload` re-derives mass too (`edit_operators._reground_and_gate`). Whatever
+    # replaced the customer's masses, the label must name it; see :func:`_reconcile_mass_provenance`.
+    result["mass_provenance"] = _reconcile_mass_provenance(gene, _shape_before, result)
+    # ...and say the same about their GEOMETRY. Grounding grows a link that is too thin to house the actuator
+    # driving it -- correct for a body WE drew, but on an imported robot those radii are the customer's own
+    # measurements, so a silent change is a different robot handed back under their name (#215/B2). Disclosed,
+    # not suppressed: the growth is what keeps the held body identical to the one the export door emits.
+    if str((getattr(gene, "metadata", None) or {}).get("imported_from") or ""):
+        _now = _link_shape(gene)
+        _grew = [n for n, v in _now.items()
+                 if n in _shape_before and v[1] - _shape_before[n][1] > 1e-6]
+        if _grew:
+            _worst = max(_grew, key=lambda n: _now[n][1] / max(_shape_before[n][1], 1e-9))
+            result["notes"].append(
+                f"grounding widened {len(_grew)} of your link(s) so each can physically house the actuator "
+                f"that drives it (largest: '{_worst}' radius "
+                f"{round(_shape_before[_worst][1], 4)} -> {round(_now[_worst][1], 4)} m); lengths and masses "
+                f"are untouched, and this is the same body the export door produces")
+            result["geometry_changed_links"] = sorted(_grew)[:12]
 
     # 5) hold the unified robot in the session so it's immediately editable / verifiable
     from virturoid.services import session_state as S

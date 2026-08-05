@@ -187,6 +187,18 @@ def test_the_three_are_discoverable_in_the_tools_list_payload():
 # Anything else matching a tool verb is treated as an advertised tool and must dispatch.
 _NOT_A_TOOL = frozenset({"part_fields"})
 
+
+def _not_callable_vocabulary(tools: dict) -> frozenset[str]:
+    """`_NOT_A_TOOL` plus the EDIT OPERATOR names, which are a separate namespace an agent passes INSIDE
+    ``edit_robot {ops:[{op}]}`` and never calls. Derived from ``edit_operators.OPERATORS`` rather than listed,
+    for the same reason `edit_ops`' description is: `adopt_walkable_template` shares the `adopt_` verb with
+    `adopt_control_script`, so restating it here would just move the drift one file over."""
+    try:
+        from virturoid.services.edit_operators import OPERATORS
+    except Exception:  # noqa: BLE001
+        return _NOT_A_TOOL
+    return _NOT_A_TOOL | frozenset(op for op in OPERATORS if op not in tools)
+
 # The verbs tool names are built from. STATIC ON PURPOSE, and unioned with whatever the live registry uses.
 # Deriving this set only from `TOOLS` makes the check go blind at exactly the moment it matters: unregister the
 # last tool starting with `probe_` and `probe` leaves the prefix set, so `probe_robot` in the schema stops
@@ -212,20 +224,11 @@ def test_no_agent_facing_text_names_a_tool_that_does_not_exist():
 
     If this fails on a new schema KEY rather than a tool, add it to `_NOT_A_TOOL`; if it fails on a real tool,
     register it rather than deleting the sentence."""
-    from virturoid.mcp_server import _PROMPTS, _handle
-    from virturoid.services.agent_design_tools import AGENT_DESIGN_TOOLS
     from virturoid.services.agent_tools import TOOLS
 
-    schema = dict(AGENT_DESIGN_TOOLS["get_design_schema"]["handler"]({}))
-    schema.pop("corpus_grounding", None)                    # retrieved from the corpus; not agent-facing prose
-    blobs = {"mcp initialize instructions": _handle("initialize", {})["instructions"],
-             "get_design_schema": str(schema)}
-    for n, p in _PROMPTS.items():
-        blobs[f"mcp prompt {n!r}"] = p["description"] + " " + p["text"]
-    for n, t in TOOLS.items():
-        blobs[f"description of {n!r}"] = t["description"]
-
-    verbs = _TOOL_VERBS | {n.split("_")[0] for n in TOOLS}
+    blobs = _agent_facing_blobs()                           # the SAME corpus the parameter guard below scans,
+    verbs = _TOOL_VERBS | {n.split("_")[0] for n in TOOLS}  # so neither can go blind on text the other reads
+    not_tools = _not_callable_vocabulary(TOOLS)
     bad: dict[str, set[str]] = {}
     for src, txt in blobs.items():
         # `(?!\s*=)` skips KEYWORD ARGUMENTS. Prose like ``train_backend="gpu"`` documents a PARAMETER, not a
@@ -233,7 +236,7 @@ def test_no_agent_facing_text_names_a_tool_that_does_not_exist():
         # A denylist entry would only defer this: every future kwarg sharing a tool verb would trip the same wire.
         # An identifier written bare ANYWHERE still gets flagged -- that is the case this guard exists for.
         for ident in set(re.findall(r"\b([a-z][a-z0-9]*(?:_[a-z0-9]+)+)\b(?!\s*=)", txt)):
-            if ident in TOOLS or ident in _NOT_A_TOOL:
+            if ident in TOOLS or ident in not_tools:
                 continue
             if ident.split("_")[0] in verbs:
                 bad.setdefault(ident, set()).add(src)
@@ -249,3 +252,232 @@ def test_the_design_schema_still_points_at_probe_robot():
     axis = AGENT_DESIGN_TOOLS["get_design_schema"]["handler"]({})["part_fields"]["axis"]
     assert "probe_robot" in axis
     assert "probe_robot" in TOOLS, "the schema tells the customer's LLM to call probe_robot; it must exist"
+
+
+# ---------------------------------------------------------------- the same guard, one level down: PARAMETERS
+#
+# The tool-level guard above says the NAME dispatches. It says nothing about the ARGUMENTS, and that is where
+# the same defect had simply moved: `verify_robot` advertised `inputSchema {robot_id}` while both the MCP
+# `initialize` instructions and the `design_robot_workflow` prompt told agents to send `mode:'quick'`. A strict
+# MCP client validates `tools/call` arguments against the advertised schema and DROPS the call, so the server
+# was instructing clients to make a request it had declared invalid — the tool "existed" and was still
+# unusable as documented. `train_reward {robot_id, objective}` was the same lie with no parameter at all
+# behind it (the handler takes `task`). Two directions are checked, because both were wrong:
+#
+#   (a) PROSE -> SCHEMA: every parameter we NAME in agent-facing text must be declared. (advertised-but-absent)
+#   (b) HANDLER -> SCHEMA: every parameter a handler HONOURS must be declared, or an agent cannot reach it.
+#
+# Both scanners are factored out of their tests so `test_..._has_teeth` can run them against a deliberately
+# broken registry and prove they fail — a guard nobody has ever seen fail is not evidence.
+
+# `tool {a, b}` / `tool {{a:'x'}}` (prompt templates double the braces) and `tool (a:'x')`. Body stops at the
+# next brace so a NESTED literal — `edit_scene {{ops:[{{op:'swap_theme'}}]}}` — contributes `ops` and not the
+# operator's own `op`/`args`, which belong to the ops-item schema rather than the tool's.
+_BRACE_CALL = re.compile(r"\b([a-z][a-z0-9_]*)\s*\{\{?([^{}]*)")
+_PAREN_CALL = re.compile(r"\b([a-z][a-z0-9_]*)\s*\(([^()]*)")
+_KEYED = re.compile(r"\b([a-z][a-z0-9_]*)\s*:")
+_BARE_ITEM = re.compile(r"^\s*([a-z][a-z0-9_]*)\s*$")
+
+
+def _prose_named_params(blobs: dict[str, str], tools: dict) -> dict[tuple[str, str], set[str]]:
+    """``{(tool, param): {sources}}`` for every parameter named in prose that the tool does not declare."""
+    bad: dict[tuple[str, str], set[str]] = {}
+    for src, txt in blobs.items():
+        mentions: list[tuple[str, str]] = []
+        for tool, body in _BRACE_CALL.findall(txt):
+            if tool not in tools:
+                continue
+            keys = set(_KEYED.findall(body))
+            keys |= {m.group(1) for m in (_BARE_ITEM.match(c) for c in body.split(",")) if m}
+            mentions += [(tool, k) for k in keys]
+        for tool, body in _PAREN_CALL.findall(txt):
+            # parens carry ordinary prose ("create_robot (from a prompt)"), so only `key:` counts here
+            if tool in tools:
+                mentions += [(tool, k) for k in _KEYED.findall(body)]
+        for tool, key in mentions:
+            if key not in ((tools[tool].get("parameters") or {}).get("properties") or {}):
+                bad.setdefault((tool, key), set()).add(src)
+    return bad
+
+
+def _agent_facing_blobs() -> dict[str, str]:
+    """Everything we put in front of an LLM: the MCP handshake, the workflow prompts, every tool description."""
+    from virturoid.mcp_server import _PROMPTS, _handle
+    from virturoid.services.agent_design_tools import AGENT_DESIGN_TOOLS
+    from virturoid.services.agent_tools import TOOLS
+
+    schema = dict(AGENT_DESIGN_TOOLS["get_design_schema"]["handler"]({}))
+    schema.pop("corpus_grounding", None)                    # retrieved from the corpus; not agent-facing prose
+    blobs = {"mcp initialize instructions": _handle("initialize", {})["instructions"],
+             "get_design_schema": str(schema)}
+    for n, p in _PROMPTS.items():
+        blobs[f"mcp prompt {n!r}"] = p["description"] + " " + p["text"]
+    for n, t in TOOLS.items():
+        blobs[f"description of {n!r}"] = t["description"]
+    return blobs
+
+
+def test_no_agent_facing_text_names_a_parameter_the_schema_does_not_declare():
+    """(a) advertised-but-absent PARAMETERS. At HEAD this failed on `verify_robot {mode:'quick'}` (named in the
+    initialize instructions AND the design_robot_workflow prompt, absent from a `{robot_id}`-only schema) and on
+    `train_reward {robot_id, objective}` (no such parameter at all — the handler takes `task`).
+
+    Fix by making the schema true, or by correcting the sentence when the parameter really does not exist."""
+    from virturoid.services.agent_tools import TOOLS
+    bad = _prose_named_params(_agent_facing_blobs(), TOOLS)
+    assert not bad, ("agent-facing text names parameters a strict MCP client would reject: "
+                     + "; ".join(f"{t}.{k} (in {sorted(v)})" for (t, k), v in sorted(bad.items())))
+
+
+def _unadvertised_params(tools: dict) -> dict[str, list[str]]:
+    """``{tool: [keys the handler honours but the schema hides]}``."""
+    from virturoid.services.agent_tools import _NOT_ADVERTISED, _accepted_params
+    out: dict[str, list[str]] = {}
+    for name, spec in tools.items():
+        props = set(((spec.get("parameters") or {}).get("properties") or {}))
+        hidden = _accepted_params(spec.get("handler")) .keys() - props - set(_NOT_ADVERTISED.get(name, ()))
+        if hidden:
+            out[name] = sorted(hidden)
+    return out
+
+
+def test_every_parameter_a_handler_honours_is_advertised():
+    """(b) the direction prose alone cannot see. A parameter the handler reads out of ``args`` but the schema
+    never declares is unreachable from a strict client even if no sentence ever mentions it — which is how
+    `verify_robot`'s `steps` and `scene_id` sat hidden with no prose to betray them. Measured at HEAD: 21 tools
+    hid 39 parameters between them; `agent_tools._publish_accepted_params` now derives them from the handlers,
+    so this stays at zero without anyone maintaining a list."""
+    from virturoid.services.agent_tools import TOOLS
+    hidden = _unadvertised_params(TOOLS)
+    assert not hidden, ("handlers honour parameters their schema hides (agents cannot reach them): "
+                        + "; ".join(f"{t}: {ks}" for t, ks in sorted(hidden.items())))
+
+
+def _forwards_args(handler) -> bool:
+    """True if the handler hands its whole args dict to another call (``probe(gene, args)``).
+
+    Such a tool's parameters are read one frame down, where the AST scan cannot see them, so the check below
+    has to excuse it. Detected rather than allowlisted: an allowlist would quietly excuse the next tool that
+    stops forwarding, which is exactly when its dead parameters would start mattering."""
+    import ast
+    import inspect
+    import textwrap
+    try:
+        tree = ast.parse(textwrap.dedent(inspect.getsource(handler)))
+    except Exception:  # noqa: BLE001
+        return True                                          # unreadable source: do not accuse it
+    fn = tree.body[0]
+    if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)) or not fn.args.args:
+        return True
+    argname = fn.args.args[0].arg
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Call):
+            passed = list(node.args) + [k.value for k in node.keywords]
+            if any(isinstance(a, ast.Name) and a.id == argname for a in passed):
+                return True
+    return False
+
+
+def test_no_tool_advertises_a_parameter_its_handler_ignores():
+    """The MIRROR of the guard above, and a lie in the other direction: a schema property nothing reads promises
+    the agent a lever that moves nothing, and it fails SILENTLY — the call succeeds and the argument is dropped.
+    Found at HEAD on `evaluate_held.task`: `evaluate_held` scores the morphology-implied task and takes the
+    prompt from the held robot's metadata, so `task:'transport'` changed nothing and said nothing.
+
+    Handlers that forward their whole args dict one frame down are excused (detected, not allowlisted)."""
+    from virturoid.services.agent_tools import TOOLS, _accepted_params
+    dead: dict[str, list[str]] = {}
+    for name, spec in TOOLS.items():
+        handler = spec.get("handler")
+        if _forwards_args(handler):
+            continue
+        unread = sorted(set((spec.get("parameters") or {}).get("properties") or {}) - set(_accepted_params(handler)))
+        if unread:
+            dead[name] = unread
+    assert not dead, ("tools advertise parameters no handler reads (they are silently dropped): "
+                      + "; ".join(f"{t}: {ks}" for t, ks in sorted(dead.items())))
+
+
+def test_the_curated_parameter_docs_describe_parameters_that_still_exist():
+    """`_PARAM_DOCS` is the one hand-written part of the repair — it supplies enum/units/meaning where the
+    derived shape is too thin. An entry naming a key no handler reads any more is the drift this whole file
+    exists to prevent, so it fails here rather than shipping a documented parameter that does nothing."""
+    from virturoid.services.agent_tools import TOOLS, _accepted_params, _PARAM_DOCS
+    stale = [f"{t}.{k}" for t, doc in _PARAM_DOCS.items() for k in doc
+             if k not in _accepted_params((TOOLS.get(t) or {}).get("handler"))]
+    assert not stale, f"_PARAM_DOCS documents parameters no handler reads: {stale}"
+
+
+def test_verify_robot_advertises_the_mode_the_server_tells_agents_to_send():
+    """THE specific call that was rejected. Named on its own so the failure reads as the customer-facing
+    contract it is, not as an abstract count."""
+    from virturoid.mcp_server import _PROMPTS, _handle
+    from virturoid.services.agent_tools import TOOLS
+    props = TOOLS["verify_robot"]["parameters"]["properties"]
+    for key in ("mode", "steps", "scene_id"):
+        assert key in props, f"verify_robot honours {key!r} but does not advertise it"
+    assert props["mode"].get("enum") == ["quick", "full"], props["mode"]
+    taught = _handle("initialize", {})["instructions"] + _PROMPTS["design_robot_workflow"]["text"]
+    assert "mode:'quick'" in taught, "the instructions that motivated this must still teach the parameter"
+
+
+def test_edit_ops_advertises_every_operator_the_registry_can_apply():
+    """The description named 4 of 8 (scale_group/set_height/set_material/set_leg_count), so scale_robot,
+    set_payload, add_limb and adopt_walkable_template were undiscoverable — including the only op that can grow
+    a new limb. It is derived from ``OPERATORS`` now; this fails if anyone restates it by hand again."""
+    from virturoid.services.agent_tools import TOOLS
+    from virturoid.services.edit_operators import OPERATORS
+    desc = TOOLS["edit_ops"]["description"]
+    missing = [op for op in OPERATORS if op not in desc]
+    assert not missing, f"edit_ops does not name {missing}; derive the description from OPERATORS"
+    enum = TOOLS["edit_robot"]["parameters"]["properties"]["ops"]["items"]["properties"]["op"]["enum"]
+    assert set(OPERATORS) <= set(enum), f"edit_robot ops enum is missing {sorted(set(OPERATORS) - set(enum))}"
+    for verb in ("undo", "list"):                    # the documented single-verb shortcut must stay valid
+        assert verb in enum, f"the ops enum would reject the documented {{op:'{verb}'}} call"
+
+
+def test_export_held_advertises_every_format_it_will_actually_write():
+    """The same drift, one tool over: the description listed 8 of the 9 `_EXPORT_FORMATS`, and the one it left
+    out was `certificate` — the verification certificate. `export_held` REJECTS an unlisted format outright
+    ("unknown format(s) ..."), so a format missing from the description and absent from the schema enum was a
+    real export the customer's agent had no way to ask for."""
+    from virturoid.services.agent_design_tools import _EXPORT_FORMATS
+    from virturoid.services.agent_tools import TOOLS
+    spec = TOOLS["export_held"]
+    missing = [f for f in _EXPORT_FORMATS if f not in spec["description"]]
+    assert not missing, f"export_held does not name {missing}; derive the list from _EXPORT_FORMATS"
+    enum = spec["parameters"]["properties"]["formats"]["items"]["enum"]
+    assert list(enum) == list(_EXPORT_FORMATS), f"formats enum {enum} != registry {list(_EXPORT_FORMATS)}"
+
+
+def test_the_parameter_guards_have_teeth():
+    """A guard nobody has watched fail is decoration. Both scanners are run here against a DELIBERATELY broken
+    registry — a schema with the parameter removed, and a handler that reads a key it never declares — and must
+    flag exactly that. If either returns clean, the tests above are passing vacuously."""
+    from virturoid.services.agent_tools import TOOLS
+
+    # (a) prose names a parameter the schema does not declare -> flagged
+    broken = {"verify_robot": {**TOOLS["verify_robot"],
+                               "parameters": {"type": "object", "required": ["robot_id"],
+                                              "properties": {"robot_id": {"type": "string"}}}}}
+    blob = {"a fake instruction": "verify_robot {robot_id, mode:'quick'} then export_held {robot_id}."}
+    bad = _prose_named_params(blob, broken)
+    assert ("verify_robot", "mode") in bad, f"the prose guard missed a removed parameter: {bad}"
+    # ... and stays quiet on the real, repaired registry
+    assert not _prose_named_params(blob, TOOLS), "flagged a parameter that IS advertised"
+
+    # the hardening this file already carries: `train_backend="gpu"` is a KEYWORD ARGUMENT in prose, not a tool
+    kwarg_blob = {"kwarg prose": "Set train_backend=\"gpu\" and the same expression steers MJX PPO."}
+    verbs = _TOOL_VERBS | {n.split("_")[0] for n in TOOLS}
+    not_tools = _not_callable_vocabulary(TOOLS)
+    flagged = {i for i in re.findall(r"\b([a-z][a-z0-9]*(?:_[a-z0-9]+)+)\b(?!\s*=)", kwarg_blob["kwarg prose"])
+               if i not in TOOLS and i not in not_tools and i.split("_")[0] in verbs}
+    assert not flagged, f"a documented keyword argument was mistaken for a tool: {flagged}"
+
+    # (b) a handler honouring an undeclared key -> flagged
+    def _handler(args: dict) -> dict:
+        return {"ok": True, "n": int(args.get("undeclared_knob", 3))}
+
+    fake = {"fake_tool": {"description": "x", "handler": _handler,
+                          "parameters": {"type": "object", "properties": {}}}}
+    assert _unadvertised_params(fake) == {"fake_tool": ["undeclared_knob"]}, _unadvertised_params(fake)
