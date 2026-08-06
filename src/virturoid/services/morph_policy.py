@@ -465,6 +465,65 @@ _I_REF = 0.04359          # reference quadruped's MEDIAN actuated-DOF joint-spac
 _KP_MIN, _KP_MAX, _KD_MIN, _KD_MAX = 2.0, 192.0, 0.1, 24.0
 
 
+#: A posture hold tolerates this much joint error at the actuator's FULL declared torque. It sets the stiffness
+#: (``kp = tau_max / _HOLD_ERR_RAD``) and it is the whole design of the hold: 0.05 rad is ~3 deg, small enough
+#: that "it held its pose" means what a reader thinks it means, and loose enough that the joint is not commanding
+#: full torque against ordinary contact noise.
+_HOLD_ERR_RAD = 0.05
+#: Explicit-integrator stability ceilings, expressed as fractions of ``I_eff/dt`` and ``I_eff/dt^2``. Without
+#: them the law below detonates on exactly the bodies it exists for: measured 2026-08-04 on an imported Boston
+#: Dynamics Spot (50.3 kg, big torque limits), a stiffness read straight off ``tau_max`` gave joint damping of
+#: ``kd*dt/I ~ 1.3`` — above 1, so each step overshoots further than the last — and the hold diverged to a
+#: 0.594 rad tracking error and reported a robot that "will not hold its pose". Spot holds its pose fine.
+_HOLD_WN_DT, _HOLD_ZETA_DT = 0.5, 0.5
+
+
+def posture_hold_gains(model, data=None):
+    """Per-ACTUATOR ``(kp, kd, tau_max)`` for holding a body at a fixed pose, sized from the SAME
+    ``Kp ~ load / tolerated error`` reasoning a joint's actuator was itself sized by, and then clipped for
+    integrator stability. Indexed by ctrl slot; non-joint transmissions get ``kp = kd = 0``.
+
+    This is not the locomotion law (:func:`recipe_gains`) and must not be confused with it. That one fixes a
+    CLOSED-LOOP NATURAL FREQUENCY so a gait feels the same across morphologies, and caps ``kp`` at ``_KP_MAX``
+    (192) because a gait that routinely saturates its actuators is a gait that will not transfer. A posture hold
+    has the opposite requirement: it must REJECT A STATIC LOAD, and the load is ground reaction, which is exactly
+    the thing ``qfrc_bias`` does not contain. Measured on an imported Menagerie Go2: gravity compensation plus
+    ``kp = 60`` leaves 0.279 rad of steady-state error — the feet are pushing ~37 N up each leg at a ~0.2 m
+    lever, roughly 7.5 N.m the PD has to absorb — and the body reads as sagging when it is only softly held.
+    ``kp = tau_max / 0.05`` takes the same body to 0.026 rad.
+
+    ``data`` supplies the pose the inertia is read at (pass the body posed at the stance you intend to hold);
+    omitted, it is read at ``mj_resetData``'s zero pose.
+    """
+    import mujoco
+    import numpy as np
+
+    if data is None:
+        data = mujoco.MjData(model)
+        mujoco.mj_resetData(model, data)
+    mujoco.mj_forward(model, data)
+    M = np.zeros((model.nv, model.nv), dtype=float)
+    mujoco.mj_fullM(model, M, data.qM)
+    diag = np.diag(M)
+    dt = float(model.opt.timestep)
+    kp = np.zeros(model.nu, dtype=float)
+    kd = np.zeros(model.nu, dtype=float)
+    tau = np.zeros(model.nu, dtype=float)
+    for u in range(model.nu):
+        if int(model.actuator_trntype[u]) != int(mujoco.mjtTrn.mjTRN_JOINT):
+            continue
+        j = int(model.actuator_trnid[u, 0])
+        I = max(1e-4, float(diag[int(model.jnt_dofadr[j])]))
+        fr = model.actuator_forcerange[u]
+        t_max = float(fr[1]) if bool(model.actuator_forcelimited[u]) and fr[1] > fr[0] else 500.0
+        # stiffness the actuator can actually back, then the two integrator ceilings (wn*dt and kd*dt/I)
+        k = min(t_max / _HOLD_ERR_RAD, (_HOLD_WN_DT ** 2) * I / (dt * dt))
+        kp[u] = k
+        kd[u] = min(2.0 * float(np.sqrt(max(k, 0.0) * I)), _HOLD_ZETA_DT * I / dt)   # critically damped, clipped
+        tau[u] = t_max
+    return kp, kd, tau
+
+
 def _effective_inertia(model, graph):
     """Per-actuated-DOF effective (joint-space) inertia: the diagonal of the dense mass matrix at the default
     pose. ``mj_fullM`` densifies the sparse ``data.qM``; ``graph.vadr`` indexes the actuated DOFs. CPU MuJoCo."""

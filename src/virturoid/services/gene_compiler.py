@@ -151,9 +151,52 @@ def _base_z_for(gene: RobotGene) -> float:
     return _MOUNT_Z.get(gene.base_mount, TABLE_TOP_Z)
 
 
+def _with_source_meshes(gene: RobotGene, meshes: dict | None, *, physics_only: bool) -> dict | None:
+    """Fill in each segment's OWN imported mesh when the caller supplied no mesh map of its own.
+
+    An imported segment carries ``geometry={"family": "source_mesh", "path": ...}`` — that link's real geometry,
+    baked into the segment's frame by ``robot_import``. It is part of the gene exactly as ``shape`` and
+    ``length_m`` are, so a compiler that ignores it is describing a robot the gene does not declare. Only the
+    render path ever read it, via ``build_visual_meshes``; every consumer that compiles the gene directly — the
+    exported ``robot.xml`` above all — emitted bare primitives. Measured on a Menagerie Unitree Go2 ingested
+    through the product's own front door: the package a customer opens contained 21 capsules and 25 cylinders
+    and ZERO meshes, against 16 in the file they handed us, and rendered as an unrecognisable pile of pills.
+
+    Three deliberate limits:
+
+      * VISUAL ONLY. These become ``class="visual"`` geoms (``mass=0 contype=0 conaffinity=0``) over the
+        unchanged primitive collider, so the collision set — every geom the physics, the gait and the verdict
+        are computed from — is byte-identical with and without them.
+      * NEVER under ``physics_only``. That model exists to be MJX-safe, and mesh assets are exactly the kind of
+        decoration it strips.
+      * ONLY when the caller passed nothing. A caller that supplies ``meshes`` is managing the asset set and its
+        portability (``write_packaged_visual_mjcf`` rewrites every path relative to the package); quietly adding
+        a machine-local absolute path to that map would put a reference outside the package into a file whose
+        whole purpose is to survive being copied.
+
+    A path that is not on disk is dropped rather than emitted: MuJoCo refuses to compile a model with a mesh it
+    cannot read, so one missing STL would turn a fidelity gain into a total outage for that robot.
+    """
+    if physics_only or meshes:
+        return meshes
+    found: dict[str, str] = {}
+    for s in gene.segments:
+        g = getattr(s, "geometry", None)
+        if not (isinstance(g, dict) and g.get("family") == "source_mesh"):
+            continue
+        p = str(g.get("path") or "")
+        try:
+            if p and Path(p).is_file():
+                found[s.name] = p.replace("\\", "/")
+        except OSError:                              # unreadable path (dead drive, permissions) -> primitive
+            continue
+    return found or meshes
+
+
 def compile_gene_to_mjcf(gene: RobotGene, *, include_floor: bool = True, spawn_z: float | None = None,
                          meshes: dict | None = None, show_actuators: bool = False,
-                         sensor_geoms: dict | None = None, physics_only: bool = False) -> str:
+                         sensor_geoms: dict | None = None, physics_only: bool = False,
+                         source_meshes: bool = True) -> str:
     """Compile a validated gene to a MuJoCo MJCF XML string.
 
     ``spawn_z`` overrides the free-base spawn height — pass ``standing_spawn_z(gene)`` for locomotion so the
@@ -170,11 +213,24 @@ def compile_gene_to_mjcf(gene: RobotGene, *, include_floor: bool = True, spawn_z
     because MJX precompiles a collision function per geom-type-pair PRESENT, and cylinder collisions are
     unimplemented in MJX, so a single visual cylinder crashes ``mjx.put_model`` even at contype=0. The colliders
     that matter (box/capsule/sphere/plane) and the joints/actuators/sites are kept, so the trained dynamics are
-    the same physics the CPU model uses. Use this for the GPU PPO path (``scripts/mjx_*``)."""
+    the same physics the CPU model uses. Use this for the GPU PPO path (``scripts/mjx_*``).
+
+    ``source_meshes=False`` builds the PURE PRIMITIVE model: an imported link's own STL is not resolved and not
+    referenced, so MuJoCo has no asset to read off disk. Everything that decides physics is unchanged (the
+    source meshes are ``class="visual"``, mass=0/contype=0/conaffinity=0), which is exactly why a caller that
+    only wants a measurement should not pay for them. MEASURED on the Menagerie models: resolving and loading
+    them costs a Unitree G1 0.159 s and a Go2 0.251 s PER COMPILE against 0.032 s / 0.024 s without — a 5-10x
+    tax on what ``standing_spawn_z(meshed=False)`` documents as the cheap path. The second reason is not speed:
+    ``ai_native_tools.render_sim_parity`` compares the MESHED spawn height against the PRIMITIVE one, and once
+    the primitive model carried the same meshes that check compared a number with itself (measured identical to
+    the digit on the G1 and the Go2 — 0.8805 and 0.3384 both sides). A tautological gate reads exactly like a
+    passing one."""
     issues = gene.validate()
     if issues:
         raise ValueError(f"cannot compile invalid gene {gene.id}: {'; '.join(issues)}")
 
+    if source_meshes:
+        meshes = _with_source_meshes(gene, meshes, physics_only=physics_only)
     root = gene.root()
     base_z = _base_z_for(gene)
     if spawn_z is not None and gene.base_mount == "free":
@@ -197,8 +253,10 @@ def compile_gene_to_mjcf(gene: RobotGene, *, include_floor: bool = True, spawn_z
         if isinstance(_sc, (list, tuple)) and len(_sc) == 3:
             _mesh_scale[_s.name] = tuple(float(v) for v in _sc)
     mesh_assets = "".join(
+        # ``p`` is escaped because a mesh path can now come from the CUSTOMER'S filesystem (an imported link's
+        # baked STL), and a directory containing '&' would otherwise emit XML MuJoCo cannot parse.
         '    <mesh name="{n}_vis" file="{p}" scale="{sx:.9g} {sy:.9g} {sz:.9g}"/>\n'.format(
-            n=escape(n), p=p, sx=0.001 * _mesh_scale.get(n, (1.0, 1.0, 1.0))[0],
+            n=escape(n), p=escape(str(p)), sx=0.001 * _mesh_scale.get(n, (1.0, 1.0, 1.0))[0],
             sy=0.001 * _mesh_scale.get(n, (1.0, 1.0, 1.0))[1],
             sz=0.001 * _mesh_scale.get(n, (1.0, 1.0, 1.0))[2])
         for n, p in (meshes or {}).items()
@@ -402,6 +460,87 @@ def gene_to_meshed_mjcf(gene: RobotGene, cache_dir: str = "build/_viewmesh", *,
                                 show_actuators=show_actuators, sensor_geoms=sensor_geoms)
 
 
+def stage_mesh(src, dst_dir, owner: str, claimed: dict) -> "Path":
+    """Copy ONE link's mesh into a package directory under a name no OTHER link can take. Returns the path.
+
+    Every exporter that ships meshes has to answer the same question — what do I call this file next to the
+    model? — and every one of them answered it with the source basename, which is not unique. Two links whose
+    baked STLs share a basename land on one file and the second link silently renders as the first; the package
+    still opens, nothing errors, and the robot is just wrong. So the naming rule lives here, once, and both the
+    MJCF and the URDF exporters use it.
+
+    The rule: keep the readable name (``meshes/FL_hip.stl`` reads far better in a shipped package than a hash),
+    and only when it is already claimed BY A DIFFERENT LINK append that link's sanitized name, then a digest, so
+    the disambiguation itself cannot collide. ``claimed`` maps filename -> owning link and must be shared across
+    one export.
+
+    An existing destination is reused only when it is byte-identical to the source (``filecmp`` with
+    ``shallow=False``); a same-size-different-content leftover from an earlier export of a different robot would
+    otherwise be silently shipped as this robot's geometry.
+    """
+    import filecmp
+    import hashlib
+    import re
+    import shutil
+
+    src, dst_dir = Path(src), Path(dst_dir)
+    name = src.name
+    if claimed.setdefault(name, owner) != owner:
+        safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(owner)).strip("_") or "link"
+        name = f"{src.stem}__{safe}{src.suffix}"
+        if claimed.setdefault(name, owner) != owner:
+            name = f"{src.stem}__{hashlib.md5(str(owner).encode('utf-8', 'replace')).hexdigest()[:8]}{src.suffix}"
+            claimed.setdefault(name, owner)
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    dst = dst_dir / name
+    if not (dst.is_file() and filecmp.cmp(str(src), str(dst), shallow=False)):
+        shutil.copyfile(src, dst)
+    return dst
+
+
+def write_exported_mjcf(gene: RobotGene, xml_path: str | Path, *, include_floor: bool = True,
+                        spawn_z: float | None = None) -> dict:
+    """Write the shipped ``robot.xml`` SELF-CONTAINED: any link mesh it references is copied next to it and
+    addressed relatively, so the package opens on a machine that has never seen this one.
+
+    ``compile_gene_to_mjcf`` now resolves an imported link's own mesh (``_with_source_meshes``) to wherever that
+    STL happens to live — under ``build/_importmesh`` on the machine that did the import. Writing that string
+    straight to a file would ship a model whose every mesh reference is an absolute path into somebody else's
+    filesystem: it opens perfectly for whoever exported it and fails for everyone they send it to, which is the
+    worst of the three possible outcomes because nothing looks wrong until it is in a customer's hands. There is
+    direct precedent — the ROS2 export shipped 22 dangling references by copying a URDF and leaving its meshes
+    behind — so the export copies first and references second.
+
+    Returns ``{"path", "meshes", "mesh_dir"}``. Bodies with no meshes at all (anything we generated, which draws
+    from primitives) simply write the same XML they always did and report ``meshes: 0``.
+    """
+    xml_path = Path(xml_path)
+    xml_path.parent.mkdir(parents=True, exist_ok=True)
+    if spawn_z is None:
+        spawn_z = standing_spawn_z(gene)
+    meshes = _with_source_meshes(gene, None, physics_only=False) or {}
+    local: dict[str, str] = {}
+    if meshes:
+        mesh_dir = xml_path.parent / "meshes"
+        claimed: dict[str, str] = {}                 # destination filename -> the segment that owns it
+        for name, src in meshes.items():
+            try:
+                # ``stage_mesh`` keeps the customer's own link filename but never lets two links land on one
+                # file: link names come from their file, so two that differ only in a character we sanitize
+                # would otherwise silently overwrite each other's geometry.
+                dst = stage_mesh(src, mesh_dir, name, claimed)
+                # Relative to the XML, which is how MuJoCo resolves a mesh ``file=`` (and how Isaac's and
+                # RViz's importers resolve one that is not a package:// URI).
+                local[name] = os.path.relpath(dst, start=xml_path.parent).replace("\\", "/")
+            except OSError:                          # unreadable source -> that link ships as its primitive
+                continue
+    xml = compile_gene_to_mjcf(gene, include_floor=include_floor, spawn_z=spawn_z,
+                               meshes=local or None)
+    xml_path.write_text(xml, encoding="utf-8")
+    return {"path": str(xml_path), "meshes": len(local),
+            "mesh_dir": str(xml_path.parent / "meshes") if local else None}
+
+
 def write_packaged_visual_mjcf(gene: RobotGene, package_dir: str | Path, *,
                                model_uri: str = "simulation/robot_visual.xml",
                                include_floor: bool = True, spawn_z: float | None = None,
@@ -488,6 +627,12 @@ def standing_spawn_z(gene: RobotGene, *, clearance: float | None = None, meshed:
     collider, which was the visible foot-penetration bug); pass ``meshed=False`` on hot training paths to
     measure the cheap primitive model instead. Falls back to the legacy height if MuJoCo is unavailable.
 
+    ``meshed=False`` means PRIMITIVE, and it has to keep meaning that. When ``compile_gene_to_mjcf`` learned to
+    resolve an imported link's own STL, this branch silently started loading every one of the customer's meshes
+    too: measured, the "cheap" path on a Unitree G1 went 0.032 -> 0.159 s and on a Go2 0.024 -> 0.251 s, and the
+    two branches returned the same number to the digit because they had become the same model. So it asks for
+    ``source_meshes=False`` explicitly rather than relying on a default that has already changed once.
+
     ``clearance`` defaults to 2 mm for every free body. Visual/collision disagreement is rejected by the
     visual-physics gate instead of being hidden behind an airborne legged-body safety margin."""
     if clearance is None:
@@ -498,7 +643,8 @@ def standing_spawn_z(gene: RobotGene, *, clearance: float | None = None, meshed:
         return _base_z_for(gene)
     ref = _MOUNT_Z["free"]                                       # measure the body's downward reach at 0.1
     for build_xml in ((lambda: gene_to_meshed_mjcf(gene, include_floor=False, spawn_z=ref)) if meshed else None,
-                      lambda: compile_gene_to_mjcf(gene, include_floor=False, spawn_z=ref)):
+                      lambda: compile_gene_to_mjcf(gene, include_floor=False, spawn_z=ref,
+                                                   source_meshes=False)):
         if build_xml is None:
             continue
         try:
@@ -579,6 +725,12 @@ def compile_gene_with_scene(gene: RobotGene, scene_objects, *, table: bool = Tru
     return "\n".join(lines) + "\n"
 
 
+def _is_source_mesh(seg) -> bool:
+    """True when this segment is drawn from the geometry the CUSTOMER imported, not from geometry we generated."""
+    g = getattr(seg, "geometry", None)
+    return isinstance(g, dict) and g.get("family") == "source_mesh"
+
+
 def _body_xml(gene: RobotGene, seg, pos: tuple[float, float, float], indent: int,
               meshes: dict | None = None, show_actuators: bool = False,
               sensor_geoms: dict | None = None, physics_only: bool = False) -> str:
@@ -646,7 +798,18 @@ def _body_xml(gene: RobotGene, seg, pos: tuple[float, float, float], indent: int
         if detail:
             lines.append(detail)
     # Real off-the-shelf actuator: render the datasheet-sized housing of the part that drives this joint.
-    if show_actuators and not physics_only and seg.joint_type == "revolute":
+    #
+    # NOT on a link the CUSTOMER shipped. Their mesh already contains their own motor, gearbox and bearing
+    # housings, so drawing our catalog part on top adds a component that is not on their machine — measured on
+    # an imported Go2, 13 real link meshes were rendered under 26 boxes and 49 cylinders of ours, which is why
+    # the ingested robot read as "a Go2 wearing grey drums" instead of as a Go2. This is the same reasoning that
+    # already suppresses ``_detail_geoms_xml`` for any meshed link; the datasheet housing simply never got the
+    # same treatment because for a body WE designed it is the truthful thing to draw. Appearance only: every
+    # geom involved is mass=0/contype=0/conaffinity=0, and the BOM still cites the actuator it always did.
+    # Keyed on ``meshed and`` source-mesh, not on the geometry spec alone: if the customer's STL could not be
+    # read this link falls back to a primitive, and a bare primitive with no housing at all is worse than today.
+    if (show_actuators and not physics_only and seg.joint_type == "revolute"
+            and not (meshed and _is_source_mesh(seg))):
         from virturoid.services.component_geometry import actuator_housing_xml
         act = actuator_housing_xml(seg, pad + "  ")
         if act:

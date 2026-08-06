@@ -89,18 +89,19 @@ def gene_to_urdf(gene, *, name: str | None = None, mesh_dir: str | None = None) 
     seg_mesh: dict[str, str] = {}
     if mesh_dir:
         try:
-            import shutil
-
             from virturoid.services.cad_geometry import build_visual_meshes
             # Bake into the process-shared cache (bakes each unique segment shape ONCE), then copy the referenced
             # STLs next to robot.urdf so the exported package remains self-contained (no external dependency).
+            from virturoid.services.gene_compiler import stage_mesh
             baked = build_visual_meshes(gene, _mesh_cache_dir())
             os.makedirs(str(mesh_dir), exist_ok=True)
+            # ``stage_mesh``, not a copy keyed on the basename: the old rule skipped the copy whenever a file of
+            # that name already sat in ``mesh_dir``, so two links whose baked STLs share a basename shipped ONE
+            # geometry under both names -- and a leftover from an earlier export of a DIFFERENT robot was
+            # adopted as this one's. Shared claim map => one destination file per link, verified byte-identical.
+            claimed: dict[str, str] = {}
             for seg, src in baked.items():
-                dst = os.path.join(str(mesh_dir), os.path.basename(src))
-                if not os.path.exists(dst):
-                    shutil.copyfile(src, dst)
-                seg_mesh[seg] = dst
+                seg_mesh[seg] = str(stage_mesh(src, mesh_dir, seg, claimed))
         except Exception:  # noqa: BLE001 - no build123d / awkward solid -> primitive visuals below
             seg_mesh = {}
 
@@ -150,10 +151,28 @@ def gene_to_urdf(gene, *, name: str | None = None, mesh_dir: str | None = None) 
             mat = (f'<material name="{nm}_m{g}"><color rgba="{rgba[0]:.3f} {rgba[1]:.3f} {rgba[2]:.3f} 1" /></material>'
                    if len(rgba) >= 3 else "")
             vis.append(f'    <visual>{origin}<geometry>{geom}</geometry>{mat}</visual>')
-            col.append(f'    <collision>{origin}<geometry>{geom}</geometry></collision>')
+            # COLLISION == WHAT ACTUALLY COLLIDES. Every geom used to be transcribed into both blocks, so the
+            # shipped URDF declared the decoration -- motor housings, panel/vent detail, the visual-only shells
+            # that carry mass=0 contype=0 conaffinity=0 -- as real collision geometry. Measured: a hexapod
+            # exported 62 <collision> elements where the model we simulate, verify and train on collides with
+            # 26; a Go2 exported 46 against 13. That is a customer loading our URDF into Gazebo or RViz and
+            # getting a robot that self-collides on parts our own simulator passes straight through.
+            #
+            # It also has to be read from ``contype``/``conaffinity`` rather than from the geom's provenance,
+            # because otherwise the collision set MOVES whenever the visual layer changes: attaching an
+            # imported link's own mesh suppresses that link's housing + detail geoms, which silently dropped 33
+            # of the Go2's 46 declared collisions. Reading what collides makes the URDF's collision set equal
+            # to the compiled model's -- for a generated body and an imported one alike -- and invariant to
+            # every visual decision above.
+            if int(model.geom_contype[g]) or int(model.geom_conaffinity[g]):
+                col.append(f'    <collision>{origin}<geometry>{geom}</geometry></collision>')
         if not vis:                                     # a geom-less body still needs a renderable stub
             vis.append('    <visual><geometry><box size="0.02 0.02 0.02" /></geometry></visual>')
-            col.append('    <collision><geometry><box size="0.02 0.02 0.02" /></geometry></collision>')
+        if not col:
+            # A body whose every geom is visual-only has no collider to declare. Every link carried a collision
+            # element before this, and some importers assume one, so it keeps a 1 mm placeholder at the link
+            # origin rather than none: structurally the same file, and honest about there being nothing there.
+            col.append('    <collision><geometry><box size="0.001 0.001 0.001" /></geometry></collision>')
         # VISUAL-MESH BRIDGE: if this link's segment baked a shape-program STL, the link's VISUAL becomes that
         # single mesh (identity origin — the STL is already in the link's [0,length] +z frame), while COLLISION
         # keeps the primitive geoms above (physics untouched). This is what makes an octopus render as an octopus.

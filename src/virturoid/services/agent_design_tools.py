@@ -753,9 +753,13 @@ def export_held(args: dict) -> dict:
     task = str(args.get("task") or (S.robot_meta(args["robot_id"]) or {}).get("prompt", ""))
     artifacts: dict = {}
     if "mjcf" in fmts:
-        from virturoid.services.gene_compiler import compile_gene_to_mjcf, standing_spawn_z
+        # write_exported_mjcf, not a bare compile+write: an IMPORTED robot's links are drawn from the customer's
+        # own baked STLs, and those have to be copied next to robot.xml and referenced relatively or the shipped
+        # model points back at this machine's build/_importmesh cache. For a body we generated there are no
+        # meshes to carry and this writes exactly the same XML it always did.
+        from virturoid.services.gene_compiler import standing_spawn_z, write_exported_mjcf
         p = out_dir / "robot.xml"
-        p.write_text(compile_gene_to_mjcf(gene, include_floor=True, spawn_z=standing_spawn_z(gene)), encoding="utf-8")
+        write_exported_mjcf(gene, p, include_floor=True, spawn_z=standing_spawn_z(gene))
         artifacts["mjcf"] = str(p)
     if "cad" in fmts:
         try:

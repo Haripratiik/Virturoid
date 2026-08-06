@@ -124,9 +124,11 @@ def test_a_bad_assertion_teaches_instead_of_crashing(held_dog):
     from virturoid.services.agent_tools import call_tool
     env = call_tool("assert_design", {"robot_id": held_dog,
                                       "assertions": [{"kind": "expect_teleport", "a": "torso"}]})
-    assert env["ok"] is True, env                                # the dispatcher did not blow up ...
     r = env["result"]
+    assert isinstance(r, dict), env                              # the dispatcher did not blow up (no traceback) ...
     assert r["ok"] is False and "unknown kind" in r["error"]     # ... and the tool refused, naming the fix
+    assert env["ok"] is False, "a refused call must not be wrapped in a success envelope"
+    assert "unknown kind" in env["error"], env                   # the reason reaches the envelope the client reads
     assert "expect_contact" in r["assertions"], "a refusal must hand back the vocabulary"
 
 
@@ -138,9 +140,12 @@ def test_an_unknown_robot_is_an_honest_failure_not_a_crash(tool):
     if tool == "scope_amend":
         args["ops"] = [{"op": "set_height", "args": {"target_m": 0.5}}]
     env = call_tool(tool, args)
-    assert env["ok"] is True, env
+    assert isinstance(env.get("result"), dict), env               # structured refusal, not a stack trace
     assert env["result"]["ok"] is False
     assert "no robot" in env["result"]["error"], env["result"]
+    # ... and the envelope says so too. mcp_server sets isError from env["ok"], so ok=True here told the client
+    # that "no robot 'no_such_robot_xyz'" was a successful call.
+    assert env["ok"] is False, env
 
 
 # ---------------------------------------------------------------- on the MCP wire, not just in the registry

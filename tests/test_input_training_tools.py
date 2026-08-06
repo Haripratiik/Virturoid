@@ -86,9 +86,19 @@ class ToolRegistrationTests(unittest.TestCase):
         self.assertEqual(out["total_dividends"], 0)             # empty ledger reads as honest-empty
 
     def test_bad_args_return_structured_error(self):
+        """A bad argument is answered, not raised -- and the answer is not dressed up as a success.
+
+        The property this test was written for is unchanged: ``call_tool`` does not blow up, and the caller
+        gets a structured payload naming what was missing. What moved is the ENVELOPE's ``ok``. It used to be
+        True for every call the dispatcher survived, so ``{"ok": true, "result": {"error": "prompt is
+        required"}}`` went out to MCP clients -- and ``mcp_server._tools_call`` sets ``isError`` from the
+        envelope, so the agent was told a refusal had succeeded. ``ok`` now means THE CALL DID WHAT WAS ASKED.
+        """
         r = call_tool("interpret_prompt", {})                   # missing prompt
-        self.assertTrue(r.get("ok"))                            # call_tool succeeds; handler reports the error
-        self.assertIn("error", r["result"])
+        self.assertIsInstance(r["result"], dict)                # no traceback: the handler answered ...
+        self.assertIn("error", r["result"])                     # ... and the payload names the missing arg
+        self.assertFalse(r["ok"])                               # ... and the envelope does not claim success
+        self.assertIn("prompt", r["error"])                     # the reason reaches the envelope the client reads
 
 
 @unittest.skipUnless(_MUJOCO, "needs MuJoCo for the physics-grounded amplifier")

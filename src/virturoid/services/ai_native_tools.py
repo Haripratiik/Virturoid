@@ -13,6 +13,19 @@ from pathlib import Path
 _RENDER_DIR = Path("build/agent_renders")
 
 
+def _render_dir() -> Path:
+    """The render directory as an ABSOLUTE path, resolved at CALL time.
+
+    ``_RENDER_DIR`` is relative, so ``str(dir / name)`` handed back to a caller was a CWD-relative string like
+    ``build\\agent_renders\\robot_x_view.png``. An MCP host launched from a different working directory than the
+    one the server process happens to sit in cannot open that -- the picture existed on disk and the path to it
+    did not resolve. Resolving here (rather than freezing an absolute constant at import) keeps the existing
+    behaviour that a test or a run under a different CWD writes under THAT CWD's ``build/``; only the string we
+    report changes, from relative to absolute. Matches what ``safe_build_path``/``export_held`` already return.
+    """
+    return (Path.cwd() / _RENDER_DIR).resolve()
+
+
 # ------------------------------------------------------------------ helpers
 def _summary(gene, robot_id: str | None = None, prompt: str = "") -> dict:
     """Compact, LLM-legible read of a robot: class, discovered appendages (GEN-1, structural), size, mass."""
@@ -123,14 +136,29 @@ def _select_mujoco_gl() -> str:
 
 def _render_gene(gene, tag: str, *, azimuth: float = 50.0, elevation: float = -16.0,
                  collision: bool = False) -> str | None:
+    """The path to a rendered PNG, or ``None``. Kept for callers that treat a render as value-add; anything that
+    must EXPLAIN a missing picture should call :func:`_render_gene_detail` and report the reason."""
+    return _render_gene_detail(gene, tag, azimuth=azimuth, elevation=elevation, collision=collision)[0]
+
+
+def _render_gene_detail(gene, tag: str, *, azimuth: float = 50.0, elevation: float = -16.0,
+                        collision: bool = False) -> tuple[str | None, str | None]:
+    """Render the gene and return ``(absolute_png_path, failure_reason)`` -- exactly one of the two is set.
+
+    This used to be one function that returned ``str | None`` and swallowed every exception, so a failed render
+    was indistinguishable from a render nobody asked for: the caller got ``None`` and had nothing to tell the
+    engineer. The reason is now carried out, and the path is ABSOLUTE and verified to exist on disk before it is
+    handed back -- a render tool must never report a path that does not open.
+    """
     import os
-    _select_mujoco_gl()
+    backend = _select_mujoco_gl()
     try:
         import mujoco
         import PIL.Image
 
         from virturoid.services.gene_compiler import compile_gene_to_mjcf, gene_to_meshed_mjcf, standing_spawn_z
-        _RENDER_DIR.mkdir(parents=True, exist_ok=True)
+        out_dir = _render_dir()
+        out_dir.mkdir(parents=True, exist_ok=True)
         # SHOW THE BODY THAT IS ACTUALLY SIMULATED when asked. ``collision=True`` builds the exact model the
         # gait/verdict path runs (compile_gene_to_mjcf, no visual mesh layer) at the exact spawn height it uses,
         # so "what you see" and "what gets verified" can be put side by side instead of taken on trust.
@@ -146,9 +174,12 @@ def _render_gene(gene, tag: str, *, azimuth: float = 50.0, elevation: float = -1
             except Exception:  # noqa: BLE001
                 xml = compile_gene_to_mjcf(gene, include_floor=True, spawn_z=spawn_z)
         m = mujoco.MjModel.from_xml_string(xml)
+        scene_option = mujoco.MjvOption()
+        drawn = None
         if collision:
             # Hide every geom that does NOT collide (mass=0 contype=0 cosmetics: motor cans, collars, hubs,
             # fairings) so what is left on screen is exactly the set of bodies the verdict is computed from.
+            drawn = []
             for _i in range(m.ngeom):
                 if int(m.geom_bodyid[_i]) == 0:
                     continue                                    # keep the floor
@@ -156,6 +187,15 @@ def _render_gene(gene, tag: str, *, azimuth: float = 50.0, elevation: float = -1
                     m.geom_rgba[_i] = (0.0, 0.0, 0.0, 0.0)
                 else:
                     m.geom_rgba[_i] = (0.95, 0.45, 0.15, 0.95)   # the colliders, unmistakably
+                    m.geom_matid[_i] = -1                        # a material's rgba would win over the colour above
+                    drawn.append(_i)
+            # ...and TURN THAT GROUP ON. MjvOption defaults to geomgroup [1,1,1,0,0,0], and an imported robot
+            # parks its collision geoms in group 3 by the Menagerie convention (visual meshes in 0/2). So on
+            # every imported model -- Go2, G1, Spot, ANYmal -- the collision view drew an empty floor: 13 of 13
+            # colliders were in a group the renderer had switched off, and the 13 cosmetics that WERE in a
+            # visible group had just been set to alpha 0 by the loop above. The tool that exists to show "the
+            # exact bodies the verdict is computed on" showed nothing, and reported a path to the picture of it.
+            scene_option.geomgroup[:] = 1
         d = mujoco.MjData(m)
         # SHOW THE POSE THE BODY SHIPS IN. mj_resetData goes to qpos0 — every joint at zero — so a design that
         # DECLARED where it rests was rendered in a stance it never holds. Measured: a SCARA and a rail rendered
@@ -179,7 +219,9 @@ def _render_gene(gene, tag: str, *, azimuth: float = 50.0, elevation: float = -1
         # excluding world geoms (the floor plane is effectively infinite and would blow the box up). The 3.2x
         # factor is chosen so a typical quad still frames at ~1.9 -- existing renders are preserved, tall bodies
         # simply stop being cropped.
-        _bg = [i for i in range(m.ngeom) if int(m.geom_bodyid[i]) != 0]
+        # Frame what will actually be DRAWN: in the collision view the cosmetics are alpha-0, so including them
+        # in the box zooms the camera out around bodies nobody can see.
+        _bg = drawn if drawn else [i for i in range(m.ngeom) if int(m.geom_bodyid[i]) != 0]
         if _bg:
             import numpy as _np
             _p = _np.asarray(d.geom_xpos)[_bg]
@@ -191,11 +233,22 @@ def _render_gene(gene, tag: str, *, azimuth: float = 50.0, elevation: float = -1
         else:
             cam.lookat[:] = [0.0, 0.0, 0.15]; cam.distance = 1.9
         cam.azimuth, cam.elevation = float(azimuth), float(elevation)
-        rr.update_scene(d, camera=cam); img = PIL.Image.fromarray(rr.render().copy()); rr.close()
-        path = _RENDER_DIR / f"{tag}.png"; img.save(path)
-        return str(path)
-    except Exception:  # noqa: BLE001 - rendering is value-add; the edit/verdict still stands
-        return None
+        rr.update_scene(d, camera=cam, scene_option=scene_option)
+        frame = rr.render().copy(); img = PIL.Image.fromarray(frame); rr.close()
+        # A UNIFORM frame is not a picture of a robot. On a headless box with the wrong GL backend MuJoCo hands
+        # back an all-black buffer and every downstream step happily reports a path to it, so the one artefact a
+        # customer actually looks at is a black rectangle with a green tick over it. Catch it here and say so;
+        # the test is deliberately strict (every pixel identical) so a dark-but-real render is never rejected.
+        if int(frame.max()) == int(frame.min()):
+            return None, (f"the renderer produced a blank frame (every pixel identical, MUJOCO_GL={backend!r}) — "
+                          f"the GL backend cannot draw here; set MUJOCO_GL=egl (GPU, headless) or osmesa "
+                          f"(software) and retry")
+        path = out_dir / f"{tag}.png"; img.save(path)
+        if not path.is_file() or path.stat().st_size == 0:
+            return None, f"the render was written to {path} but the file is missing or empty"
+        return str(path), None
+    except Exception as exc:  # noqa: BLE001 - rendering is value-add; the edit/verdict still stands
+        return None, f"{type(exc).__name__}: {exc}"
 
 
 # swim/fly INTENT words. AQUATIC bodies are simulated in water (T7, _honest_swim) and AERIAL bodies are flown as
@@ -955,7 +1008,8 @@ def _render_gait_gif(gene, qpos_frames, tag: str) -> str | None:
         import PIL.Image
 
         from virturoid.services.gene_compiler import compile_gene_to_mjcf, standing_spawn_z
-        _RENDER_DIR.mkdir(parents=True, exist_ok=True)
+        gif_dir = _render_dir()                                  # ABSOLUTE, for the same reason _render_gene is
+        gif_dir.mkdir(parents=True, exist_ok=True)
         m = mujoco.MjModel.from_xml_string(compile_gene_to_mjcf(gene, include_floor=True, spawn_z=standing_spawn_z(gene)))
         d = mujoco.MjData(m); frames = []
         # FRAME THE ACTUAL BODY, as _render_gene already does. A fixed lookat z=0.15 / distance=1.9 is sized for a
@@ -982,7 +1036,7 @@ def _render_gait_gif(gene, qpos_frames, tag: str) -> str | None:
             cam.lookat[:] = [float(qp[0]), float(qp[1]), _dz]
             cam.distance, cam.azimuth, cam.elevation = _dist, 125, -12
             rr.update_scene(d, camera=cam); frames.append(PIL.Image.fromarray(rr.render().copy())); rr.close()
-        path = _RENDER_DIR / f"{tag}.gif"
+        path = gif_dir / f"{tag}.gif"
         frames[0].save(path, save_all=True, append_images=frames[1:], duration=70, loop=0)
         return str(path)
     except Exception:  # noqa: BLE001
@@ -1037,11 +1091,28 @@ def create_robot(args: dict) -> dict:
         # grounded authored dog and returned "no robustly-credible open-loop crawl for this body (use learn_gait)"
         # -- i.e. it declined, and the body then went to the substitution gate carrying nothing. The flywheel path
         # recalls a structural prior, searches (bounded, credible-early-stop), re-checks at the DEPLOY horizon and
-        # refuses anything that does not beat the shipped default. Bodies that already walk cost ~0.5 s and are
-        # left byte-identical; the authored dog measures 39 evals / 11.4 s and comes out a CREDIBLE WALK.
+        # refuses anything that does not beat the shipped default. Bodies that already walk are left
+        # byte-identical.
+        #
+        # THE COST, RE-MEASURED 2026-08-05 on this checkout, because the figures written here when the fit
+        # landed ("~0.5 s for a body that already walks; the authored dog 39 evals / 11.4 s and a CREDIBLE
+        # WALK") predate the 6000-step settling horizon and the 3 seed restarts that arrived in the same
+        # commit, and are now wrong by an order of magnitude in both directions:
+        #
+        #     grounded authored hexapod    24.2 s     3 evals   adopts
+        #     grounded authored cat        56.0 s    87 evals   adopts
+        #     grounded authored dog       124.7 s   360 evals   ADOPTS NOTHING
+        #     this whole function, dog    143.6 s              (compose 0.11 s, ground <0.01 s -- it is the fit)
+        #
+        # The dog no longer comes out a credible walk at all: at the horizon that can see the fall, the honest
+        # answer is the expensive one. Nothing here should be trimmed to make that cheaper. What a TEST SUITE
+        # does about it is VIRTUROID_GAIT_FIT_CACHE / VIRTUROID_SKIP_GAIT_FIT -- see gait_flywheel._FIT_CACHE.
         try:
             from virturoid.services.gait_flywheel import fit_gait_for_body
-            fit_gait_for_body(gene)
+            # cache=True lets a STRUCTURALLY IDENTICAL body reuse an identical fit -- and it does nothing at all
+            # unless VIRTUROID_GAIT_FIT_CACHE=1, which only a test suite sets. A product run has the flag unset
+            # and searches every body every time, exactly as before.
+            fit_gait_for_body(gene, cache=True)
         except Exception:  # noqa: BLE001 - a tune failure must never block the build; defaults still apply
             pass
     # NOW the walkability decision, on the grounded body with its own operating point. A body is only replaced if
@@ -1063,7 +1134,7 @@ def create_robot(args: dict) -> dict:
                         _gar(gene)
                         if robot_kind(gene) == "legged" and args.get("tune_gait", True):
                             from virturoid.services.gait_flywheel import fit_gait_for_body
-                            fit_gait_for_body(gene)
+                            fit_gait_for_body(gene, cache=True)
                     except Exception:  # noqa: BLE001 - grounding is the fidelity layer, never a build blocker
                         pass
         except Exception:  # noqa: BLE001 - best-effort; never block a build on the walkability check
@@ -1344,11 +1415,24 @@ def render_view(args: dict) -> dict:
     view = str(args.get("view", "visual")).lower()
     if view not in ("visual", "collision"):
         return {"ok": False, "error": f"unknown view '{view}'; choose 'visual' or 'collision'"}
-    img = _render_gene(gene, f"{args['robot_id']}_{'collision' if view == 'collision' else 'view'}",
-                       azimuth=float(args.get("azimuth", 50.0)),
-                       elevation=float(args.get("elevation", -16.0)), collision=(view == "collision"))
-    out = {"ok": bool(img), "artifacts": [img] if img else [], "view": view,
-           "error": None if img else "render unavailable"}
+    img, why = _render_gene_detail(gene, f"{args['robot_id']}_{'collision' if view == 'collision' else 'view'}",
+                                   azimuth=float(args.get("azimuth", 50.0)),
+                                   elevation=float(args.get("elevation", -16.0)),
+                                   collision=(view == "collision"))
+    # THE PATH IS THE PRODUCT. This is the tool an engineer calls to SEE the robot, so it either hands back one
+    # absolute path to a file that opens, or it says why not in words someone can act on. It used to report the
+    # picture only under ``artifacts`` (so the obvious ``result['path']`` read as None on a render that had in
+    # fact succeeded), as a CWD-relative string, and on failure as the bare phrase "render unavailable".
+    if img is None:
+        return {"ok": False, "path": None, "artifacts": [], "view": view,
+                "error": f"could not render '{args['robot_id']}': {why}",
+                "robot_id": args["robot_id"]}
+    p = Path(img)
+    if not p.is_file():                                        # never report a path that does not open
+        return {"ok": False, "path": None, "artifacts": [], "view": view,
+                "error": f"the renderer reported {p} but no file is there", "robot_id": args["robot_id"]}
+    out = {"ok": True, "path": str(p), "artifacts": [str(p)], "bytes": p.stat().st_size, "view": view,
+           "error": None, "robot_id": args["robot_id"]}
     # SAY WHICH ROBOT THIS PICTURE IS. The visual render adds detailed surface meshes that the gait sim does not
     # build, so "is the thing I'm looking at the thing you verified?" is a fair question with a measurable
     # answer. Attach it rather than leaving the customer to trust a comment in the source.
@@ -1476,6 +1560,360 @@ def render_parity(gene) -> dict:
                 "note": "could not measure render/sim parity for this body"}
 
 
+# ------------------------------------------------------- WHOSE CONTROLLER IS THIS VERDICT ABOUT? (imported bodies)
+#
+# A motion verdict is never a claim about a BODY. It is a claim about a BODY UNDER A CONTROLLER, and until this
+# block existed we published the first sentence while only ever measuring the second.
+#
+# THE DEFECT, MEASURED 2026-08-04 on the real MuJoCo Menagerie Go2 driven through `agent_tools.call_tool`:
+# ingest reads its mass as 15.206 kg (exactly the manufacturer's) and `verify_robot` then answers
+# "FELL by YAW-DRIFT (roll 151 / pitch 86 / yaw 174 deg max), survived false". Every number in that sentence is
+# true and the sentence is useless, because a Go2 walks perfectly well — with UNITREE's controller. We drove the
+# customer's machine with OUR generic crawl gait (`morph_policy.crawl_gait_rollout` at its shipped freq 1.5 /
+# kp 32, or a hint region mined from OTHER robots' banked walks), it fell, and we reported the fall in a
+# grammatical form an engineer reads as a finding about their robot. It is a finding about our gait.
+#
+# THE RULE. `verify_robot` may state a motion verdict ABOUT THE CUSTOMER'S ROBOT only when the controller that
+# produced it is one we produced FOR THAT BODY — an operating point fitted to this gene (`tuned_for_this_body`)
+# or a policy trained on it (`learned_policy`). For an IMPORTED body under a generic prior, the honest output is
+# a REFUSAL to rule on locomotion, the facts we can measure without a controller, the generic-gait rollout kept
+# verbatim but explicitly labelled as ours, and the two things that would actually answer the question.
+#
+# WHAT THIS DOES NOT DO. It does not touch `gait_quality.classify`, which is the un-gameable verdict and this
+# product's differentiator. The classifier was never wrong; it was answering a question the customer did not ask.
+# Its string is carried through byte-identical under `under_our_generic_gait.verdict`. A body WE composed is
+# untouched on every field — our generic gait IS the shipped controller for a body we designed, so the verdict
+# there is exactly the claim we are entitled to make.
+#
+# WHAT A ROBOT PACKAGE ACTUALLY SHIPS (swept, all 63 MuJoCo Menagerie packages, 2026-08-04): 39/63 carry at least
+# one keyframe (`home` x30, `stand`, `retract`, `pickup`, `hover`); 46/63 declare position servos with real
+# gains, 11/63 pure torque motors. That is a POSE and a JOINT-LEVEL SERVO. **Not one of the 63 ships a
+# locomotion controller** — no gait, no policy, no trajectory. The thing we would need in order to answer "does
+# your robot walk" is precisely the thing that is never in the box, which is why the honest answer is a refusal
+# plus a route, and not a better guess.
+#: ``gait_source`` values that mean "a controller WE produced FOR THIS BODY". Everything else — ``default_crawl``
+#: (the crawl gait's shipped constants) and ``flywheel_hint`` (a region mined from OTHER bodies' banked walks) —
+#: is a generic prior fitted to no particular robot.
+_FITTED_TO_THIS_BODY = ("tuned_for_this_body", "learned_policy", "biped_learned")
+
+
+def _import_provenance(gene) -> dict | None:
+    """``{...}`` when this body came in through the import path, else ``None`` (we composed it ourselves).
+
+    Keyed on ``metadata['imported_from']``, which ``robot_import.import_robot`` sets once and which
+    ``gene_build`` already trusts to decide whether the customer's geometry may be regenerated — so an imported
+    body is recognised here by exactly the marker the rest of the system recognises it by, not a second guess.
+    """
+    meta = getattr(gene, "metadata", None) or {}
+    if not str(meta.get("imported_from") or ""):
+        return None
+    return {"source": str(meta.get("imported_from")),
+            "mass_from_source": str(meta.get("mass_source") or "") == "source_model",
+            "torque_from_source": str(meta.get("torque_source") or "") == "source_model",
+            "declared_rest_pose": meta.get("rest_pose_source")}
+
+
+def _controller_free_facts(gene, *, hold_steps: int = 1200) -> dict:
+    """What can be said about an imported machine WITHOUT having its controller. Four measurements, each a fact
+    about the ROBOT rather than about a gait:
+
+    * ``joint_limits_respected`` — is the pose the customer's own model declares inside every joint range it
+      declares? Pure kinematics; no actuator is commanded.
+    * ``self_collision_at_home`` — do any of the customer's own links interpenetrate at that pose? Read off
+      MuJoCo's own contact list (exact geometry), not an AABB approximation.
+    * ``static_holding_torque`` — the torque each joint must produce to hold the limb distal to it at that
+      pose, versus the torque limit the customer's model declares for it. Zero rollouts, zero controller: it is
+      arithmetic over the compiled model, and it is the number a datasheet is checked against.
+    * ``stands_under_gravity`` — the one dynamic check, and the only one here that commands anything: hold every
+      joint at the declared pose with a gravity-compensated position hold, torques CLAMPED to the customer's own
+      declared limits, and watch the base for ``hold_steps``. A posture hold is not locomotion — it commands one
+      constant setpoint and never sequences a step — so it cannot be mistaken for a gait, and the clamp is what
+      keeps it from being vacuous: gravity compensation that exceeds the declared limit gets cut off and the
+      machine sags, which is exactly the honest failure to report.
+
+    Every one of these is measured on ``compile_gene_to_mjcf``'s model — the same model the verdict and the
+    ``render_view(view='collision')`` picture come from — so nothing here can disagree with what is on screen.
+    """
+    import mujoco
+    import numpy as np
+
+    from virturoid.services.gene_compiler import compile_gene_to_mjcf, standing_spawn_z
+
+    meta = getattr(gene, "metadata", None) or {}
+    pose_src = meta.get("rest_pose_source")
+    out: dict = {"declared_home_pose": (
+        str(pose_src) if pose_src else
+        "your model declares no rest keyframe — everything below was measured at its ZERO pose, which for a "
+        "legged robot means straight legs and is not a stance any real machine holds")}
+
+    m = mujoco.MjModel.from_xml_string(
+        compile_gene_to_mjcf(gene, include_floor=True, spawn_z=standing_spawn_z(gene)))
+    d = mujoco.MjData(m)
+    if m.nkey:
+        mujoco.mj_resetDataKeyframe(m, d, 0)
+    mujoco.mj_forward(m, d)
+
+    # --- kinematic: is the declared pose legal? -----------------------------------------------------------
+    over = []
+    for j in range(m.njnt):
+        if int(m.jnt_type[j]) not in (2, 3) or not bool(m.jnt_limited[j]):
+            continue
+        q = float(d.qpos[int(m.jnt_qposadr[j])])
+        lo, hi = float(m.jnt_range[j, 0]), float(m.jnt_range[j, 1])
+        if q < lo - 1e-6 or q > hi + 1e-6:
+            nm = mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_JOINT, j) or f"joint{j}"
+            over.append({"joint": nm, "angle_rad": round(q, 4), "range_rad": [round(lo, 4), round(hi, 4)]})
+    out["joint_limits_respected"] = {"ok": not over, "violations": over[:8],
+                                     "n_limited_joints": int(sum(1 for j in range(m.njnt)
+                                                                 if bool(m.jnt_limited[j])))}
+
+    # --- kinematic: does the body pass through itself at that pose? ---------------------------------------
+    pen = []
+    for c in range(int(d.ncon)):
+        con = d.contact[c]
+        b1, b2 = int(m.geom_bodyid[con.geom1]), int(m.geom_bodyid[con.geom2])
+        if b1 == 0 or b2 == 0 or float(con.dist) > -1e-4:       # floor contact / touching, not interpenetrating
+            continue
+        pen.append({"a": mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_BODY, b1) or f"body{b1}",
+                    "b": mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_BODY, b2) or f"body{b2}",
+                    "depth_mm": round(-float(con.dist) * 1000.0, 2)})
+    out["self_collision_at_home"] = {"ok": not pen, "pairs": pen[:8]}
+
+    # --- static: what torque does the declared pose demand of each joint? ---------------------------------
+    # qfrc_bias at rest IS the generalized force gravity+bias demands of each DOF; forcerange is what the
+    # customer's model says that joint can produce. No controller is involved in either number.
+    #
+    # SAY EXACTLY WHAT THIS IS. The body is spawned 2 mm clear of the floor, so this is each joint carrying the
+    # limb DISTAL TO IT — the number a datasheet is checked against, and the same one ``probe_robot(fields=
+    # ['torque'])`` reports. It is NOT the ground-reaction share a standing robot's legs carry; that load shows
+    # up in ``stands_under_gravity``, where the hold runs clamped to these very limits and a joint that cannot
+    # carry its share saturates. Naming this "holds its own weight" would overclaim a hanging-limb torque.
+    worst, tight = None, []
+    for u in range(m.nu):
+        if int(m.actuator_trntype[u]) != int(mujoco.mjtTrn.mjTRN_JOINT):
+            continue
+        j = int(m.actuator_trnid[u, 0])
+        need = abs(float(d.qfrc_bias[int(m.jnt_dofadr[j])]))
+        fr = m.actuator_forcerange[u]
+        cap = float(fr[1]) if bool(m.actuator_forcelimited[u]) and fr[1] > fr[0] else None
+        if cap is None or cap <= 0:
+            continue
+        nm = mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_JOINT, j) or f"joint{j}"
+        frac = need / cap
+        if worst is None or frac > worst[1]:
+            worst = (nm, frac, need, cap)
+        if frac > 1.0:
+            tight.append({"joint": nm, "needs_nm": round(need, 2), "declared_limit_nm": round(cap, 2)})
+    out["static_holding_torque"] = {
+        "ok": not tight, "over_limit": tight[:8],
+        "worst_joint": (None if worst is None else
+                        {"joint": worst[0], "uses_frac_of_declared_limit": round(worst[1], 3),
+                         "needs_nm": round(worst[2], 2), "declared_limit_nm": round(worst[3], 2)}),
+        "note": ("torque each joint must produce to hold the limb DISTAL TO IT at the declared pose, against "
+                 "the torque limit YOUR model declares for that joint"
+                 + (" (your numbers, read at import)" if str(meta.get("torque_source") or "") == "source_model"
+                    else " (estimated by us — your model declared none)")
+                 + ". Ground-reaction load is not in this number; see stands_under_gravity, where the hold runs "
+                   "clamped to these same limits")}
+
+    # --- dynamic: does it stay up? -------------------------------------------------------------------------
+    # TILT IS MEASURED RELATIVE TO THE SPAWN ATTITUDE, never as an absolute Euler angle. An IMPORTED root carries
+    # the rotation that aligns its reconstructed link frame (`gene_compiler._pose_keyframe`), so the Go2's base
+    # quaternion reads roll 90.0 / pitch 76.5 deg AT STEP ZERO, before any physics runs — a body standing
+    # perfectly square on four feet. An absolute gate would have failed every imported robot at t=0 and called it
+    # a topple, which is the same class of false statement this whole block exists to remove.
+    from virturoid.services.morph_policy import posture_hold_gains
+
+    free_base = any(int(m.jnt_type[j]) == 0 for j in range(m.njnt))
+    if not free_base:
+        out["stands_under_gravity"] = {"applicable": False,
+                                       "note": "this body is mounted, not free-standing — there is no stance to hold"}
+        return out
+    kp_v, kd_v, tau_v = posture_hold_gains(m, d)
+    tgt = np.array(d.qpos, dtype=float)
+    acts = [(u, int(m.jnt_qposadr[int(m.actuator_trnid[u, 0])]), int(m.jnt_dofadr[int(m.actuator_trnid[u, 0])]),
+             float(tgt[int(m.jnt_qposadr[int(m.actuator_trnid[u, 0])])]))
+            for u in range(m.nu) if int(m.actuator_trntype[u]) == int(mujoco.mjtTrn.mjTRN_JOINT)]
+    base = next((int(m.jnt_bodyid[j]) for j in range(m.njnt) if int(m.jnt_type[j]) == 0), 1)
+    up0 = np.array(d.xmat[base]).reshape(3, 3)[:, 2].copy()
+    z0 = float(d.qpos[2])
+    sat, z_half = 0, z0
+    for t in range(int(hold_steps)):
+        for u, qadr, vadr, want in acts:
+            cmd = d.qfrc_bias[vadr] + kp_v[u] * (want - d.qpos[qadr]) - kd_v[u] * d.qvel[vadr]
+            if abs(cmd) > tau_v[u]:
+                sat += 1
+            d.ctrl[u] = float(np.clip(cmd, -tau_v[u], tau_v[u]))
+        mujoco.mj_step(m, d)
+        if t == int(hold_steps) // 2:
+            z_half = float(d.qpos[2])
+    up1 = np.array(d.xmat[base]).reshape(3, 3)[:, 2]
+    tilt = float(np.degrees(np.arccos(np.clip(float(np.dot(up0, up1)), -1.0, 1.0))))
+    z1 = float(d.qpos[2])
+    jerr = max((abs(float(d.qpos[q]) - w) for _u, q, _v, w in acts), default=0.0)
+    sat_frac = sat / max(1, int(hold_steps) * max(1, len(acts)))
+    # STANDING IS CONVERGENCE, NOT A SMALL NUMBER. Judging the raw settle against a fraction of spawn height
+    # mislabels a small robot: an imported google_barkour_vb settles 20 mm on a 125 mm base — 16% — while sitting
+    # dead level (0.0 deg tilt, 0.011 rad tracking error, ZERO torque saturation). That is a machine standing
+    # still, and a percentage gate called it a collapse. What separates standing from collapsing is whether the
+    # base STOPPED MOVING: over the second half of the hold, a stander has converged and a collapser has not.
+    settling = abs(z1 - z_half)
+    stands = (tilt < 15.0 and jerr < 0.15 and settling < 0.005 and z1 > 0.5 * max(z0, 1e-9))
+    # STATIC STABILITY DECIDES WHETHER "did not stand" MEANS ANYTHING. A body with >=3 ground contacts can be
+    # held up by posture alone; a biped cannot — balancing 2 legs needs an ACTIVE controller, which is precisely
+    # the thing we said we do not have. Reporting "your humanoid did not stand" without that caveat would be a
+    # brand-new false implication, so the finding is marked inconclusive instead of being stated. An UNKNOWN leg
+    # count is inconclusive too, never presumed stable: an imported Agility Cassie measures 0 legs here, and
+    # presuming stability would have published exactly that false statement about a biped.
+    try:
+        from virturoid.services.body_kind import measured_legs
+        legs = measured_legs(gene)
+    except Exception:  # noqa: BLE001
+        legs = None
+    statically_stable = legs is not None and int(legs) >= 3
+    secs = round(int(hold_steps) * float(m.opt.timestep), 2)
+    out["stands_under_gravity"] = {
+        "applicable": True, "held_s": secs,
+        "stands": True if stands else (False if statically_stable else None),
+        "conclusive": bool(stands or statically_stable),
+        "base_height_m": [round(z0, 4), round(z1, 4)], "base_sag_m": round(z0 - z1, 4),
+        "still_settling_m": round(settling, 5), "tilt_from_spawn_deg": round(tilt, 1),
+        "joint_tracking_err_rad": round(jerr, 4), "torque_saturated_frac": round(sat_frac, 3),
+        "n_legs": legs,
+        "how": ("your declared home pose held by a joint position hold, torques clamped to the limits your own "
+                "model declares. A posture hold is not a gait: it commands one constant setpoint and never "
+                "sequences a step"),
+    }
+    if not stands and not statically_stable:
+        out["stands_under_gravity"]["why_inconclusive"] = (
+            f"we measure {legs} ground-contact limbs on this body, so it is not statically stable — staying "
+            f"upright needs an ACTIVE balance controller, which is exactly what we do not have for your robot. "
+            f"That it went down under a PASSIVE posture hold says nothing about whether your machine balances.")
+    return out
+
+
+def _reframe_for_imported_body(res: dict, gene, kind: str) -> None:
+    """Rewrite a verdict on an IMPORTED body so it cannot be read as a claim about the customer's machine.
+
+    In place, and only when two things are true at once: the body came in through the import path, AND the
+    controller that produced the verdict is a generic prior of ours rather than something fitted to this body.
+    A body we composed keeps every field byte-for-byte; so does an imported body under a controller we trained
+    or fitted FOR it, because there the verdict IS about a controller-body pair we are entitled to describe.
+    """
+    prov = _import_provenance(gene)
+    if prov is None:
+        return
+    src = str(res.get("gait_source") or "")
+    if src in _FITTED_TO_THIS_BODY:                              # our controller, fitted to THEIR body -> a fair claim
+        res["controller_provenance"] = {
+            "whose": "ours, fitted to this body",
+            "what": src,
+            "verdict_is_about": "your body under the controller we produced for it — not your own controller",
+            "note": "if you have your own controller, import it (import_onnx_policy / sandbox_policy / "
+                    "import_control_script) and re-verify: this number is our best, not your machine's ceiling"}
+        return
+
+    original = str(res.get("verdict") or "")
+    if kind == "legged" and original:
+        try:
+            facts = _controller_free_facts(gene)
+        except Exception as exc:  # noqa: BLE001 - a refusal must still be a refusal when the facts won't measure
+            facts = {"error": f"{type(exc).__name__}: {exc}",
+                     "note": "the controller-free measurements could not be taken on this body"}
+        stand = facts.get("stands_under_gravity") or {}
+        _lead = "NO LOCOMOTION VERDICT — we do not have your robot's controller"
+        if stand.get("stands"):
+            head = (f"{_lead}. What we CAN state: it STANDS under gravity at its own declared home pose "
+                    f"({stand['held_s']} s, sag {stand['base_sag_m']:.3f} m, tilt "
+                    f"{stand['tilt_from_spawn_deg']:.1f} deg from spawn)")
+        elif stand.get("applicable") and not stand.get("conclusive"):
+            head = (f"{_lead}, and with {stand.get('n_legs')} legs it cannot be balanced by a posture hold "
+                    f"either — staying up needs the active balance controller we do not have. Structural facts "
+                    f"we CAN state are below")
+        elif stand.get("applicable"):
+            head = (f"{_lead}. What we CAN state: it did NOT hold its own declared home pose under gravity "
+                    f"(sag {stand.get('base_sag_m')} m, tilt {stand.get('tilt_from_spawn_deg')} deg from spawn) "
+                    f"— read the stance/torque figures below before reading anything into the gait numbers")
+        else:
+            head = _lead
+        res["locomotion_verdict"] = None
+        res["verdict"] = head
+        res["measured_without_your_controller"] = facts
+        res["under_our_generic_gait"] = {
+            "verdict": original,                                 # gait_quality.classify(), byte-identical
+            "gait": f"our generic crawl gait ({src or 'default_crawl'})",
+            "forward_m": res.get("forward_m"), "survived": res.get("survived"),
+            "horizon_steps": res.get("horizon_steps"),
+            "means": ("this is a measurement of OUR gait on YOUR body. Our crawl gait is a fixed open-loop "
+                      "pattern fitted to no particular robot; it was never tuned for yours and is not what your "
+                      "robot runs. Read it as evidence about our controller, NOT as a finding about your "
+                      "machine — a robot that walks on your bench will still fall here."),
+        }
+    elif kind == "manipulator" and isinstance(res.get("grasp"), dict):
+        g = res["grasp"]
+        det = (g.get("detail") or {}) if isinstance(g.get("detail"), dict) else {}
+        reasons = {str(a.get("reason") or "") for a in (det.get("attempts") or []) if isinstance(a, dict)}
+        no_gripper = bool(reasons) and reasons <= {"no_grasp_site"}
+        reach = original.split(";")[0].strip()                   # ARTICULATES/STUCK — kinematics, controller-free
+        if no_gripper:
+            res["verdict"] = f"{reach}; NO GRIPPER in your model — there is nothing here to grasp with"
+            g["means"] = ("your model ships no gripper site, so no grasp was attempted. This is a structural "
+                          "fact about the file you gave us, not a capability judgement.")
+        else:
+            res["verdict"] = f"{reach}; NO GRASP VERDICT — we do not have your gripper's controller"
+            g["means"] = ("this is a measurement of OUR generic grasp-and-lift script on YOUR gripper. It was "
+                          "never tuned for your hand and is not what your robot runs. Read it as evidence "
+                          "about our script, NOT as a finding about your gripper.")
+        g["under"] = "our generic grasp-and-lift script"
+        res["grasp_verdict_scope"] = "our script on your gripper"
+    elif kind == "manipulator":
+        # QUICK mode on an arm: the only thing measured is REACH, and reach is kinematics — link lengths and
+        # joint ranges, no controller anywhere in it. Attaching "under our controller, not yours" to a ruler
+        # would be a caveat with nothing behind it, so the verdict stands and only the provenance block is added.
+        pass
+    elif original:
+        # mobile / aerial / aquatic / anything else: those verdicts DO come out of a controller of ours (the
+        # drive script, the flight controller), so the scope has to travel with the sentence.
+        res["verdict"] = f"{original} — under OUR generic controller, not yours"
+
+    # BE PRECISE ABOUT WHAT WE DID AND DID NOT GET. "We do not have your controller" is a vague complaint on its
+    # own; paired with the list of what we DID take from the customer's file it becomes a checkable statement,
+    # and it forestalls the reasonable objection "my model has a home keyframe, why didn't you use it" — we did.
+    took = ["the joint ranges your model declares"]
+    if prov["mass_from_source"]:
+        took.insert(0, "your per-link masses, verbatim")
+    if prov["torque_from_source"]:
+        took.insert(0, "your declared actuator torque limits, verbatim")
+    if prov["declared_rest_pose"]:
+        took.append(f"your declared rest pose ({prov['declared_rest_pose']})")
+    res["controller_provenance"] = {
+        "whose": "ours, generic — fitted to no particular robot",
+        "what": src or "generic scripted controller",
+        "yours_was_not_supplied": True,
+        "verdict_is_about": "our controller on your body",
+        "what_we_took_from_your_model": took,
+        "what_your_model_could_not_supply": (
+            "a controller. A robot description ships geometry, inertia, limits and at most a rest POSE plus "
+            "joint-level servo gains — never a gait, a policy or a trajectory. Swept across all 63 MuJoCo "
+            "Menagerie packages: 39 carry a keyframe, 46 declare position servos, and ZERO ship a locomotion "
+            "controller. The one thing needed to answer 'does this robot walk' is the one thing never in the box"),
+        "why_this_matters": ("a motion verdict is a claim about a BODY UNDER A CONTROLLER. We have your body "
+                             "and not your controller, so we decline to rule on what your robot can do."),
+    }
+    res["imported"] = prov
+    res["to_get_a_real_verdict"] = [
+        {"if": "you already have a controller for this robot",
+         "do": "import_onnx_policy (a .onnx policy), sandbox_policy (inline Python), or import_control_script — "
+               "then verify_robot again; the verdict then describes YOUR controller on YOUR body"},
+        {"if": "you want US to produce one for this body",
+         "do": "adapt_gait fits an operating point to this specific gene, and train_held learns a policy on it. "
+               "Either makes the verdict a claim about a controller measured on YOUR robot"},
+        {"if": "you only need the structural facts",
+         "do": "probe_robot (mass / torque margins / clearance / self-collision through the joint ranges) and "
+               "render_view(view='collision') — none of those need a controller at all"},
+    ]
+
+
 def simulate_gait(args: dict) -> dict:
     """Run the general scripted gait on a held robot and return the honest verdict (+ optional GIF)."""
     from virturoid.services import session_state as S
@@ -1492,7 +1930,11 @@ def verify_robot(args: dict) -> dict:
     never gets a bogus gait verdict on a rover or an arm. Dispatches on structural ``robot_kind``: legged ->
     gait (survived/cadence/forward), mobile -> DRIVE (real travel + upright), manipulator -> REACH (workspace
     span), spray/other -> honest structural read (no locomotion verdict). ``mode``: ``full`` (default; long +
-    a GIF for legged) or ``quick`` (fast iterate check). Folds simulate_gait (G-G)."""
+    a GIF for legged) or ``quick`` (fast iterate check). Folds simulate_gait (G-G).
+
+    A verdict on an IMPORTED body is additionally scoped to the controller that produced it — see
+    ``_reframe_for_imported_body``. We have the customer's robot and not the customer's controller, so on a
+    generic prior this tool DECLINES to rule on locomotion and reports what it can measure without one."""
     from virturoid.services import session_state as S
     from virturoid.services.task_matched_eval import robot_kind
     gene = S.get_robot(args["robot_id"])
@@ -1558,6 +2000,13 @@ def verify_robot(args: dict) -> dict:
         if scene_note:
             res["scene_id"] = sid
             res["scene_note"] = scene_note
+        # WHOSE CONTROLLER WAS THAT? An imported robot driven by our generic prior gets its verdict reframed so
+        # the sentence cannot be read as a claim about the customer's machine (see the block above _honest_gait's
+        # callers). No-op for every body we composed, and for an imported body under a controller fitted to it.
+        try:
+            _reframe_for_imported_body(res, gene, kind)
+        except Exception:  # noqa: BLE001 - the reframe is a disclosure; never let it swallow a measured verdict
+            pass
         _flag_physics_envelope(res, (S.robot_meta(args["robot_id"]) or {}).get("prompt", ""), kind)
         # a camera-equipped robot's ONBOARD camera + CV is exercised here (not just the rangefinder): render its
         # own functional robot_cam (FOV + resolution from the real camera part) at a target and report what it SEES.
@@ -1716,7 +2165,8 @@ AI_NATIVE_TOOLS: dict[str, dict] = {
                    "properties": {"robot_id": {"type": "string"}}}},
     "render_view": {"description": "Render a held robot to a PNG (an agent should SEE what it built). "
                     "view='visual' (default) draws the detailed surface; view='collision' draws the EXACT bodies "
-                    "the physics verdict is computed on. Returns a path plus a measured render/sim parity read.",
+                    "the physics verdict is computed on. Returns `path` — an ABSOLUTE path to a PNG that exists on "
+                    "disk — plus a measured render/sim parity read; on failure ok=false and `error` says why.",
                     "heavy": True, "handler": render_view, "parameters": {"type": "object", "required": ["robot_id"],
                     "properties": {"robot_id": {"type": "string"}, "azimuth": {"type": "number"},
                                    "elevation": {"type": "number"},
@@ -1726,7 +2176,10 @@ AI_NATIVE_TOOLS: dict[str, dict] = {
                       "parameters": {"type": "object", "required": ["robot_id"], "properties": {
                           "robot_id": {"type": "string"}, "steps": {"type": "integer"}, "render": {"type": "boolean"}}}},
     "verify_robot": {"description": "The anti-hallucination gate: honest gait metrics + verdict + a GIF, so a walk "
-                     "is never claimed without traces.", "heavy": True, "handler": verify_robot,
+                     "is never claimed without traces. On an IMPORTED robot driven by our generic gait it returns "
+                     "NO LOCOMOTION VERDICT — we have your body, not your controller — plus the facts measurable "
+                     "without one (stands at your declared home pose, joint limits, self-collision, torque "
+                     "margins) and the route to a real verdict.", "heavy": True, "handler": verify_robot,
                      "parameters": {"type": "object", "required": ["robot_id"], "properties": {"robot_id": {"type": "string"}}}},
     "create_scene": {"description": "Build a THEMED scene (warehouse/house/kitchen/lab/yard) for a task and hold it.",
                      "heavy": False, "handler": create_scene, "parameters": {"type": "object", "properties": {

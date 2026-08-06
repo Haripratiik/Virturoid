@@ -1162,7 +1162,7 @@ def _splay_before_substituting(gene, base: float):
     md.pop("gait_params", None)                          # the old op-point was fitted to the OLD stance
     md.pop("gait_fit", None)
     cand.metadata = md
-    fit = fit_gait_for_body(cand) or {}
+    fit = fit_gait_for_body(cand, cache=True) or {}
     cval = float(evaluate_robot(cand).get("value", 0.0))
     if cval <= base:                                     # the splay did not earn its place -> keep the body as authored
         return gene, base, fit0
@@ -1227,7 +1227,7 @@ def ensure_walkable_quad(gene, prompt: str = "", *, force: bool = False):
             # which is the version of this that was tried and reverted on 2026-07-29.
             try:
                 from virturoid.services.gait_flywheel import fit_gait_for_body
-                _fit = fit_gait_for_body(gene) or {}
+                _fit = fit_gait_for_body(gene, cache=True) or {}
                 if _fit.get("adopted"):
                     base = float(evaluate_robot(gene).get("value", 0.0))
             except Exception:  # noqa: BLE001 - fitting is an accelerant; the honest verdict stands without it

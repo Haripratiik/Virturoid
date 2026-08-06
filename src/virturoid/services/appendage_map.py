@@ -6,8 +6,9 @@ hexapod's 6, a snake's spine, a rover's wheels — where the old name-regex CPG 
 
 Measured rules (probed on the live build path, docs/generality_plan.md §1):
   * a token = one actuated joint; chains = maximal root->leaf paths in the token tree (``MorphGraph.parent``).
-  * GROUNDED = the chain's lowest geom (incl. welded foot bodies) sits within ``ground_tol`` of the body's
-    lowest geom overall. Legs/wheels/spine are grounded; arms + neck/tail are not (they ride high, z~0.44).
+  * GROUNDED = the chain's TIP — the body it reaches farthest, incl. welded foot bodies; see ``chain_tip`` —
+    sits within ``ground_tol`` of the body's lowest geom overall. Legs/wheels/spine are grounded; arms +
+    neck/tail are not (they ride high, z~0.44).
   * WHEEL = grounded chain with a CONTINUOUS (unlimited) hinge (a free-spinning driven wheel).
   * SPINE = the body IS one long grounded serial chain (len >= ``spine_min``) with no other grounded chains
     (a snake/eel) — undulates, doesn't step.
@@ -129,21 +130,40 @@ def build_appendage_map(model, *, ground_tol: float = 0.10, spine_min: int = 6) 
         kids.setdefault(p, []).append(t)
     roots = [t for t in range(n) if graph.parent[t] == -1]
 
-    # TIP = the KINEMATICALLY deepest body under a chain's first body (incl. branches + welded feet/grippers).
-    # A leg's tip is the foot (rides low, near the floor); an arm's tip is the gripper (rides high, in free
-    # space) — so grounded-ness must test the TIP's height, NOT the chain's lowest point (an arm mounts its
-    # BASE low, which fooled a min-z test into calling it grounded). This is the leg/arm discriminator.
+    # TIP = the body under a chain's first body that the chain physically REACHES FARTHEST (incl. branches +
+    # welded feet/grippers). A leg's tip is the foot (rides low, near the floor); an arm's tip is the gripper
+    # (rides high, in free space) — so grounded-ness must test the TIP's height, NOT the chain's lowest point
+    # (an arm mounts its BASE low, which fooled a min-z test into calling it grounded). Leg/arm discriminator.
     def chain_tip(main_tokens):
+        """Reach = the KINEMATIC PATH LENGTH from the chain's root (the parent->child offsets summed along
+        the body tree), with hop count breaking exact ties.
+
+        HOP COUNT ALONE WAS THE RULE, and hop count is only a proxy for distality: it holds on a serial limb
+        and breaks on a CLOSED-LOOP one. Measured on Cassie, whose foot is driven through a four-bar:
+        ``left-plantar-rod`` hangs one hop DEEPER than ``left-foot`` (tarsus -> foot-crank -> plantar-rod)
+        but it is the rod that closes the loop back onto the foot (cassie.xml ``<connect body1=
+        "left-plantar-rod" body2="left-foot">``) and it rides 0.12 m ABOVE it. The rod was taken for the tip,
+        so the tip sat 0.12 m off the floor, so BOTH legs read as ungrounded — and a biped came out with
+        ZERO legs and kind "manipulator", i.e. judged by the arm rubric. (It only ever passed because a
+        SYNTHETIC decoration geom on that rod used to be the lowest thing on the robot; once the import
+        carried the customer's real meshes, the foot became the lowest point, as it physically is.)
+
+        Path length is non-decreasing down a branch, so the tip is still a leaf and a gripper still beats the
+        wrist it hangs off; what changes is that SIBLING branches are compared by how far they actually
+        extend, not by how many joints happen to be stacked in them."""
         root_b = bod[main_tokens[0]]
-        best_b, best_depth = bod[main_tokens[-1]], -1
+        best_b, best_key = bod[main_tokens[-1]], (-1.0, -1)
         for bb in range(int(model.nbody)):
-            pb, depth, found = bb, 0, False
+            pb, depth, reach, found = bb, 0, 0.0, False
             while pb > 0:
                 if pb == root_b:
                     found = True; break
-                pb = int(model.body_parentid[pb]); depth += 1
-            if found and depth > best_depth:
-                best_depth, best_b = depth, bb
+                par = int(model.body_parentid[pb])
+                reach += float(np.linalg.norm(data.xpos[pb] - data.xpos[par]))
+                pb = par; depth += 1
+            key = (round(reach, 9), depth)
+            if found and key > best_key:
+                best_key, best_b = key, bb
         return body_low(best_b), (float(data.xpos[best_b][0]), float(data.xpos[best_b][1])), best_b
 
     # build each root's main path (root -> deepest leaf via single-child descent; branch = end-effector/gripper)

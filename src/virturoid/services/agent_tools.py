@@ -670,9 +670,17 @@ def tool_specs(view: str | None = None) -> list[dict]:
 
 
 def call_tool(name: str, args: dict | None = None) -> dict:
-    """Dispatch a tool by name. Returns ``{ok, tool, result}`` or ``{ok: False, tool, error}`` — never raises,
-    so an agent gets a structured error instead of a crash. H3: every result carries ``took_s`` so an agent can
-    budget (verify_full ~14 s vs quick ~0.1 s)."""
+    """Dispatch a tool by name. Returns ``{ok, tool, result}`` or ``{ok: False, tool, error, result?}`` — never
+    raises, so an agent gets a structured error instead of a crash. H3: every result carries ``took_s`` so an
+    agent can budget (verify_full ~14 s vs quick ~0.1 s).
+
+    ``ok`` means THE CALL DID WHAT WAS ASKED, not "the dispatcher survived". A handler that refused reports it
+    the way every handler here reports it — a top-level ``ok: False`` and/or a truthy ``error`` — and that is
+    lifted to the envelope, because ``{"ok": true, "result": {"error": "path not found: ..."}}`` is a success
+    envelope carrying a failure, and a client that checks the envelope (as an MCP host does, to decide whether
+    to set ``isError``) reads it as a success. A bad VERDICT is a different thing and stays ``ok: True``:
+    handlers report those as ``credible_walk``/``success``/``feasible`` false on an otherwise fine result.
+    """
     import time
     spec = TOOLS.get(name)
     if spec is None:
@@ -682,6 +690,11 @@ def call_tool(name: str, args: dict | None = None) -> dict:
         result = spec["handler"](args or {})
         if isinstance(result, dict):
             result.setdefault("took_s", round(time.monotonic() - t0, 3))
+            if result.get("ok") is False or result.get("error"):
+                # keep ``result`` on the envelope: the payload of a refusal is often the fix (the operator
+                # vocabulary, the accepted formats), and callers that read ``env["result"]`` still work.
+                return {"ok": False, "tool": name, "result": result,
+                        "error": str(result.get("error") or f"{name} reported failure without a reason")}
         return {"ok": True, "tool": name, "result": result}
     except KeyError as exc:
         return {"ok": False, "tool": name, "error": f"missing required argument: {exc}", "took_s": round(time.monotonic() - t0, 3)}

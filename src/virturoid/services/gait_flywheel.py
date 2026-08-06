@@ -464,6 +464,81 @@ _ROBUST_LADDER = (1e-1, 1e-2, 1e-3)
 _ROBUST_N = 4
 
 
+# ------------------------------------------------------------------ making a TEST SUITE able to afford this
+#
+# THE COST IS REAL AND IT IS THE POINT. ``fit_gait_for_body`` is a bounded CEM search over 6000-step rollouts,
+# and MEASURED on this checkout (2026-08-05, one CPU, grounded bodies straight out of ``create_robot``):
+#
+#     grounded authored hexapod    24.2 s     3 evals   ADOPTS
+#     grounded authored cat        56.0 s    87 evals   ADOPTS
+#     grounded authored dog       124.7 s   360 evals   ADOPTS NOTHING  (the whole budget spent on an honest no)
+#
+# That is the price of judging a body with a controller of its own instead of throwing the body away, and NONE
+# of it should be negotiated down in the product. But a test suite that calls ``create_robot`` ~50 times pays it
+# ~50 times, and ``tests/test_ai_native.py`` alone builds the SAME "a quadruped robot dog" NINE times — 19
+# minutes of re-deriving one answer. Two switches, BOTH DEFAULT-OFF so a product run is byte-identical:
+#
+#   VIRTUROID_GAIT_FIT_CACHE=1  memoize the fit on the body's STRUCTURAL key for the life of the process.
+#                               Loses no coverage whatsoever: every structurally distinct body still runs the
+#                               real search, including the expensive negative. Only the Nth identical rebuild is
+#                               free. This is the one the suite leans on.
+#   VIRTUROID_SKIP_GAIT_FIT=1   the fit is a DISCLOSED no-op. For a test whose subject is something else
+#                               entirely (the tool dispatcher, a scene, a URDF round-trip) and which would
+#                               otherwise pay two minutes to re-establish a locomotion fact it never reads.
+#                               It is deliberately visible in the result (``skipped: True`` and a reason that
+#                               names the variable) rather than silent, because a fit that returns
+#                               "adopted: False" quietly is the exact measurement artefact this module exists
+#                               to remove -- see the ``ok=False`` handling at the bottom of ``fit_gait_for_body``.
+#
+# THE CACHE IS OPT-IN AT THE CALL SITE (``cache=True``), and only the BUILD PATH opts in. That is deliberate
+# and it was found the hard way: keying on ``structural_gait_key`` alone is NOT safe, because that function
+# answers for a gene with no segments at all -- every stub gene in tests/test_gait_fit_robustness.py hashes to
+# the same 'b4b292ac85f6e215' -- and pinning the monkeypatched ``evaluate_gait``/``_one_search`` by ``id()``
+# does not save it either, since CPython reuses the address once monkeypatch drops the previous stub. The first
+# version of this cache duly handed ``test_restarts_are_bounded`` another test's adopted walk. A test that
+# drives the fitter DIRECTLY must always get a real run, so the fitter never caches unless asked.
+_FIT_CACHE: dict[tuple, tuple[dict, dict]] = {}
+
+
+def _fit_cache_key(gene, kw: dict):
+    """The identity of THIS fit, or ``None`` when it must not be cached."""
+    import os
+
+    if os.environ.get("VIRTUROID_GAIT_FIT_CACHE") != "1":
+        return None
+    segs = getattr(gene, "segments", None)
+    if not segs:                                     # no body -> no structural identity worth keying on
+        return None
+    try:
+        body = structural_gait_key(gene)
+    except Exception:  # noqa: BLE001 - a partial gene has no structural identity -> never cached
+        return None
+    return (body, tuple(sorted(kw.items()))) if body else None
+
+
+def clear_fit_cache() -> None:
+    """Drop the memoized fits. For a test that deliberately wants the search to run again."""
+    _FIT_CACHE.clear()
+
+
+def _remember(key, gene, out: dict) -> dict:
+    """Snapshot a COMPLETED fit under ``key`` and return ``out`` unchanged.
+
+    Both halves of the result are kept: the disclosure dict AND the metadata the fit wrote onto the gene, since
+    an adopted operating point lives on ``metadata['gait_params']`` and a caller handed back only the dict would
+    be holding a body that never got its controller.
+
+    A CRASH (``ok=False``) is never cached. It is not an answer about the body, so the next caller must get a
+    real attempt rather than a memoized failure.
+    """
+    if key is None or not out.get("ok", True):
+        return out
+    md = getattr(gene, "metadata", None) or {}
+    _FIT_CACHE[key] = (dict(out), {k: dict(md[k]) for k in ("gait_params", "gait_fit")
+                                   if isinstance(md.get(k), dict)})
+    return out
+
+
 def robustness_margin(gene, params: dict, *, steps: int = _SETTLE_STEPS, ladder=_ROBUST_LADDER,
                       n: int = _ROBUST_N, seed: int = 0) -> dict:
     """How much relative perturbation does this operating point survive? Returns the largest rung of ``ladder``
@@ -505,7 +580,7 @@ def robustness_margin(gene, params: dict, *, steps: int = _SETTLE_STEPS, ladder=
 def fit_gait_for_body(gene, *, deploy_steps: int = _SETTLE_STEPS, search_steps: int = _SETTLE_STEPS,
                       max_evals: int = 96,
                       warm_evals: int = 24, generations: int = 8, pop: int = 24, seed: int = 0,
-                      db=None, bank: bool = True, seed_restarts: int = 3) -> dict:
+                      db=None, bank: bool = True, seed_restarts: int = 3, cache: bool = False) -> dict:
     """Give ONE GROUNDED body its OWN operating point, and cache it on ``gene.metadata['gait_params']``.
 
     Call this AFTER ``ground_and_repair``. The whole point is that a body must be judged with a controller fitted
@@ -515,11 +590,14 @@ def fit_gait_for_body(gene, *, deploy_steps: int = _SETTLE_STEPS, search_steps: 
     ``0.000`` and substitutes a template for the customer's design, so the substitution is really a measurement
     artefact. See docs/breaking_the_cotuning_wall.md §0/§1.
 
-    Two properties keep this cheap and safe to put on the interactive build path:
+    Two properties keep this BOUNDED and safe to put on the interactive build path — bounded, not cheap; the
+    "~0.5 s" this docstring used to promise was written against a 1500-step horizon and one seed, and the same
+    commit that wrote it raised the horizon to 6000 and the restarts to 3. RE-MEASURED 2026-08-05: a grounded
+    authored hexapod 24.2 s / 3 evals, a cat 56.0 s / 87, a dog 124.7 s / 360 and no adoption:
 
     * **Nothing is searched for a body that already walks.** The shipped default is measured first; if it is
-      already a CREDIBLE WALK at the deploy horizon the body keeps it and this returns in ~0.5 s having changed
-      nothing. So no robot that ships today can move.
+      already a CREDIBLE WALK at the deploy horizon the body keeps it and this returns after that ONE rollout
+      having changed nothing. So no robot that ships today can move.
     * **Nothing is adopted that does not beat the default at the DEPLOY horizon.** That gate lives in
       ``learn_gait_flywheel`` (which also recalls a structural prior and banks the result), never in the search's
       own optimistic score — measured, a cat credible at an 800-step search horizon FELL at 1500.
@@ -578,11 +656,39 @@ def fit_gait_for_body(gene, *, deploy_steps: int = _SETTLE_STEPS, search_steps: 
     reported as ``ok=False`` with ``error``, distinguishable from a considered decline (``ok=True``,
     ``adopted=False``), because a swallowed exception that reads as "this body has no better gait" is the exact
     measurement artefact this function exists to eliminate.
+
+    ``cache=True`` lets an identical body reuse an identical fit, but ONLY when ``VIRTUROID_GAIT_FIT_CACHE=1``;
+    the build path asks for it and a test suite turns it on. ``VIRTUROID_SKIP_GAIT_FIT=1`` makes the whole fit a
+    disclosed no-op. Both default OFF — see the block above ``_FIT_CACHE`` for what they cost and what they buy.
     """
+    import os
+
     from virturoid.services.gait_search import evaluate_gait
 
     out: dict = {"ok": True, "searched": False, "adopted": False, "reason": "", "n_evals": 0,
                  "horizon_steps": int(deploy_steps)}
+    if os.environ.get("VIRTUROID_SKIP_GAIT_FIT") == "1":
+        # SAY SO. A caller reading `searched: False, adopted: False` off a real fit is being told "this body was
+        # measured and kept its default"; here it means "nothing was measured", and those must not look alike.
+        out["skipped"] = True
+        out["reason"] = ("gait fitting was DISABLED for this process by VIRTUROID_SKIP_GAIT_FIT=1 — this body "
+                         "was never searched, so nothing here is a finding about whether it can walk")
+        _stash(gene, out)
+        return out
+    _ckey = _fit_cache_key(gene, {"deploy_steps": deploy_steps, "search_steps": search_steps,
+                                  "max_evals": max_evals, "warm_evals": warm_evals,
+                                  "generations": generations, "pop": pop, "seed": seed,
+                                  "bank": bank, "seed_restarts": seed_restarts,
+                                  "db": db is not None}) if cache else None
+    if _ckey is not None and _ckey in _FIT_CACHE:
+        # A structurally identical body already paid for this exact search. Replay BOTH mutations the real call
+        # makes -- the adopted operating point and the disclosure -- so the returned gene is indistinguishable
+        # from a freshly fitted one; returning the dict alone would hand back a body with no gait_params.
+        cached_out, cached_md = _FIT_CACHE[_ckey]
+        md = dict(getattr(gene, "metadata", None) or {})
+        md.update({k: dict(v) for k, v in cached_md.items()})
+        gene.metadata = md
+        return dict(cached_out)
     try:
         default = evaluate_gait(gene, _DEFAULT_GAIT, steps=deploy_steps)
         out["default_forward_m"] = round(float(default["forward"]), 4)
@@ -593,7 +699,7 @@ def fit_gait_for_body(gene, *, deploy_steps: int = _SETTLE_STEPS, search_steps: 
             # additive: only bodies that would otherwise be discarded pay for (or receive) a new op-point.
             out["reason"] = "the shipped default gait is already a credible walk for this body"
             _stash(gene, out)
-            return out
+            return _remember(_ckey, gene, out)
         n_evals = 0
         learned: dict = {}
         best: dict = {}
@@ -642,7 +748,7 @@ def fit_gait_for_body(gene, *, deploy_steps: int = _SETTLE_STEPS, search_steps: 
                 out["reason"] = (f"searched {n_evals} gaits; the winner did not reproduce as a credible walk when "
                                  f"re-measured from the stored parameters ({confirm.get('verdict')}) — not adopted")
                 _stash(gene, out)
-                return out
+                return _remember(_ckey, gene, out)
             # THE ERROR BAR, measured during the search (``_ensure_margin``) so it could STEER it rather than
             # merely annotate the result. A verdict with no robustness number cannot distinguish a controller
             # from one lucky float, and this fitter has shipped both under the same two words.
@@ -679,7 +785,7 @@ def fit_gait_for_body(gene, *, deploy_steps: int = _SETTLE_STEPS, search_steps: 
         out["reason"] = (f"gait fit FAILED for this body ({type(exc).__name__}) — this is an error, not a finding: "
                          f"the body was never measured, so nothing here says it cannot walk")
     _stash(gene, out)
-    return out
+    return _remember(_ckey, gene, out)
 
 
 def _rate_str(res: dict) -> str:

@@ -581,13 +581,37 @@ def _generator_rev() -> str:
     return _GENERATOR_REV
 
 
+def _src_mesh_fp(out, s, src):
+    """Destination for an IMPORTED link's own mesh inside ``out``.
+
+    Keyed by the source file's identity (path + size + mtime) and NOT by the kit-bash/synth/actuator flags that
+    ``_seg_mesh_fp`` hashes: the customer's geometry is the same file whichever way we would have drawn a link of
+    ours, so one copy serves every render mode instead of one per flag combination (a 30-link G1 carries ~60 MB).
+    Re-baking the import writes a new mtime and therefore a new name, so a re-imported robot never reads a stale
+    copy. The segment name is sanitized because link names come from the customer's file, not from us."""
+    import hashlib
+    import re
+
+    st = src.stat()
+    sig = f"{src.resolve()}|{st.st_size}|{int(st.st_mtime)}"
+    stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(s.name or "link")).strip("_") or "link"
+    return out / f"{stem}_src_{hashlib.md5(sig.encode()).hexdigest()[:10]}.stl"
+
+
 def _seg_mesh_fp(out, s, *, kitbash: bool, synth: bool, actuator_in_mesh: bool = True):
     """The per-segment visual-mesh cache path + resolved kit-bash role. Shared by ``build_visual_meshes`` and
     ``prebake_synth_meshes`` so a parallel pre-bake writes the exact files the compiler later reads. The
     content hash includes geometry + kit-bash/synth/actuator flags AND the generator's own source revision
-    (see ``_generator_rev``), so any change — to the spec OR to the code that realizes it — re-bakes."""
+    (see ``_generator_rev``), so any change — to the spec OR to the code that realizes it — re-bakes.
+
+    The segment name is sanitized into the stem for the same reason ``_src_mesh_fp`` sanitizes it: once a robot
+    can be IMPORTED, ``s.name`` is the customer's link name, not ours. A link called ``arm/1`` turned this into
+    a path with a directory component that nobody creates, so the bake raised mid-body and the link fell back to
+    a bare primitive on a robot whose whole point was that it keeps the customer's geometry. The hash is what
+    makes the name unique; the stem only has to be readable and legal."""
     import hashlib
     import json
+    import re
     actuated = s.joint_type in ("revolute", "prismatic")
     geom = getattr(s, "geometry", None)
     kit_role = (geom.get("role") if isinstance(geom, dict) and geom.get("family") == "role" else None) \
@@ -599,7 +623,8 @@ def _seg_mesh_fp(out, s, *, kitbash: bool, synth: bool, actuator_in_mesh: bool =
     sig = json.dumps([s.shape, round(s.length_m, 5), round(s.radius_m, 5), actuated, geom,
                       bool(kit_role), bool(synth), _generator_rev()]
                      + ([] if actuator_in_mesh else ["noact"]), sort_keys=True, default=str)
-    return out / f"{s.name}_{hashlib.md5(sig.encode()).hexdigest()[:10]}.stl", kit_role
+    stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(s.name or "link")).strip("_") or "link"
+    return out / f"{stem}_{hashlib.md5(sig.encode()).hexdigest()[:10]}.stl", kit_role
 
 
 def prebake_synth_meshes(gene, out_dir: str, *, kitbash: bool = True, llm=None, max_workers: int = 6,
@@ -656,33 +681,52 @@ def build_visual_meshes(gene, out_dir: str, *, cache: bool = True, kitbash: bool
 
     Cached by a content hash of the segment's shape params INCLUDING its geometry spec, so re-rendering the
     same body is instant but a changed shape re-bakes. Returns ``{segment_name: absolute_stl_path}``.
-    Requires build123d (raises if absent; callers that want a graceful fallback should catch and compile
-    without meshes)."""
+    Requires build123d to GENERATE a link (raises if absent, as before; callers that want a graceful fallback
+    should catch and compile without meshes) -- but a link the customer SHIPPED is only copied, so a wholly
+    imported robot still renders as itself on a machine with no CAD kernel. Serving someone their own robot
+    must not depend on our ability to draw ours."""
     import hashlib
     import json
+    import shutil
 
-    import build123d as bd
+    bd = None                                        # imported lazily: only GENERATING a link needs the kernel
 
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     meshes: dict[str, str] = {}
     for s in gene.segments:
-        if s.joint_type == "prismatic":              # gripper/hand fingers keep their primitive
-            continue
-        actuated = s.joint_type in ("revolute", "prismatic")
         geom = getattr(s, "geometry", None)
-        # Kit-bash a real, license-clean link mesh for this part when enabled and one is catalogued for the
-        # role; otherwise synth / procedural anatomy / generic detail. Flags are in the cache key (toggle rebakes).
         # THE CUSTOMER'S OWN MESH WINS. An imported segment carries family="source_mesh" pointing at that link's
         # real geometry, baked into this segment's frame at import. Never re-synthesize over it: the whole point
         # of ingesting someone's robot is that the robot stays theirs.
-        if isinstance(geom, dict) and geom.get("family") == "source_mesh":
+        from_source = isinstance(geom, dict) and geom.get("family") == "source_mesh"
+        # Gripper/hand fingers keep their primitive -- EXCEPT when the customer shipped that finger's real
+        # geometry. A Franka Panda's two jaws are prismatic, so this skip silently dropped 2 of its 11 imported
+        # link meshes and the hand rendered as a pair of bare pins beside the real wrist.
+        if s.joint_type == "prismatic" and not from_source:
+            continue
+        actuated = s.joint_type in ("revolute", "prismatic")
+        # Kit-bash a real, license-clean link mesh for this part when enabled and one is catalogued for the
+        # role; otherwise synth / procedural anatomy / generic detail. Flags are in the cache key (toggle rebakes).
+        if from_source:
             src = Path(str(geom.get("path") or ""))
             if src.is_file():
-                meshes[s.name] = str(src.resolve()).replace("\\", "/")
+                # COPY IT INTO ``out_dir`` instead of pointing at the import cache. Callers treat the returned
+                # path set as the asset directory they asked us to fill: ``write_packaged_visual_mjcf`` relpaths
+                # each entry against the package and publishes ``viewer_assets/<name>`` in its mesh index, and
+                # ``gene_urdf`` copies each basename next to robot.urdf. Handing back a path in build/_importmesh
+                # made both of those describe files that were never shipped -- the package's own index pointed at
+                # ``simulation/viewer_assets/base.stl`` while its XML pointed back out of the package at a
+                # machine-local cache. One copy per content hash, so re-rendering the same body stays instant.
+                fp = _src_mesh_fp(out, s, src)
+                if not (cache and fp.exists() and fp.stat().st_size == src.stat().st_size):
+                    shutil.copyfile(src, fp)
+                meshes[s.name] = str(fp.resolve()).replace("\\", "/")
                 continue
         fp, kit_role = _seg_mesh_fp(out, s, kitbash=kitbash, synth=synth, actuator_in_mesh=actuator_in_mesh)
         if not (cache and fp.exists()):
+            if bd is None:
+                import build123d as bd                # noqa: PLW2901 - raises here exactly as it used to
             baked = None
             if kit_role is not None:                 # real Menagerie link mesh, fitted to this link's frame
                 from virturoid.services.part_catalog import fitted_part_stl
@@ -768,17 +812,45 @@ def export_gene_cad(gene, out_dir: str, *, material: str = "aluminum") -> dict:
     solids = []
     total_mass = 0.0
     used_grounded = False
+    import hashlib
+    import re
+    import shutil
+    named: dict[str, str] = {}                           # file stem -> the ONE link that owns it
     for s in gene.segments:
-        if getattr(s, "geometry", None):                 # blueprint specified an ARBITRARY shape for this block
-            solid = realize_shape(s.geometry)
+        # An IMPORTED link's ``geometry`` is not a shape program -- it is a pointer at the customer's own baked
+        # mesh -- and ``realize_shape`` does not know that family, so it fell through to its malformed-spec
+        # fallback: a capsule at the DEFAULT 100 mm x 30 mm, for every link. Measured on a Menagerie Go2, that
+        # shipped the 0.376 m chassis as 395.84 cm3 against a real ~11,300, and every hip and thigh at an
+        # identical 474.53 cm3 despite differing 2.2x in length -- a CAD package with the right part names, the
+        # right masses, and nobody's geometry. Their real geometry goes to the STL lane, where a triangle mesh
+        # belongs; the STEP lane gets the link solid built from THIS link's own measured length/radius, which is
+        # a B-rep we can honestly compute volume and inertia from. ``geometry_source`` says which is which, so
+        # nothing downstream can read the STEP as the customer's CAD.
+        geom = getattr(s, "geometry", None)
+        imported = isinstance(geom, dict) and geom.get("family") == "source_mesh"
+        src_mesh = None
+        if imported:
+            p = Path(str(geom.get("path") or ""))
+            src_mesh = p if p.is_file() else None
+        if geom and not imported:
+            solid = realize_shape(geom)                  # blueprint specified an ARBITRARY shape for this block
             solid = _add_selected_actuator_housing(solid, s, proximal_z_mm=0.0)
         else:                                            # default detailed link (tube + collars + motor can)
             from virturoid.services.component_geometry import actuator_for_joint
             solid = build_link_solid(s.shape, s.length_m, s.radius_m,
                                      s.joint_type in ("revolute", "prismatic"),
                                      actuator_spec=actuator_for_joint(s))
-        bd.export_step(solid, str(out / "step" / f"{s.name}.step"))
-        bd.export_stl(solid, str(out / "stl" / f"{s.name}.stl"))
+        # Link names come from the customer's file once a robot can be imported, so they are sanitized into a
+        # legal stem and disambiguated: two links must never write one CAD file.
+        stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(s.name or "link")).strip("_") or "link"
+        if named.setdefault(stem, s.name) != s.name:
+            stem = f"{stem}_{hashlib.md5(str(s.name).encode('utf-8', 'replace')).hexdigest()[:8]}"
+            named.setdefault(stem, s.name)
+        bd.export_step(solid, str(out / "step" / f"{stem}.step"))
+        if src_mesh is not None:
+            shutil.copyfile(src_mesh, out / "stl" / f"{stem}.stl")   # the customer's OWN surface, unmodified
+        else:
+            bd.export_stl(solid, str(out / "stl" / f"{stem}.stl"))
         vol_m3 = float(solid.volume) * 1e-9          # mm^3 -> m^3
         solid_mass = vol_m3 * density                # mass IF this link were a SOLID `material` billet
         # B3b (2026-07-24 audit): prefer the GROUNDED buildable mass the URDF/BOM/sim all report -- a real link
@@ -795,7 +867,11 @@ def export_gene_cad(gene, out_dir: str, *, material: str = "aluminum") -> dict:
         parts.append({"name": s.name, "volume_cm3": round(float(solid.volume) * 1e-3, 2),
                       "mass_kg": round(mass, 3), "ixx_kg_m2": round(ixx, 6),
                       "mass_basis": "grounded" if grounded > 0 else "solid_volume",
-                      "step": f"step/{s.name}.step", "stl": f"stl/{s.name}.stl"})
+                      # Which lane is whose: "customer_mesh" means the STL is the geometry they gave us and the
+                      # STEP is our parametric stand-in at their measured length/radius (a triangle mesh has no
+                      # B-rep to write); "generated" means both lanes are ours.
+                      "geometry_source": "customer_mesh" if src_mesh is not None else "generated",
+                      "step": f"step/{stem}.step", "stl": f"stl/{stem}.stl"})
         solids.append(solid)
     # A POSITIONED ASSEMBLY, not a pile of parts at the origin. Every link solid is AUTHORED at (0,0,0) along its
     # own +z, so boolean-unioning them fused the whole robot into one blob at one point: the file was named

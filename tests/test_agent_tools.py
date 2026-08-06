@@ -100,5 +100,37 @@ class AgentToolsTests(unittest.TestCase):
             self.assertIn(row["verdict"], ("pass", "fail"))
 
 
+class EnvelopeHonestyTests(unittest.TestCase):
+    """``ok`` must mean THE CALL DID WHAT WAS ASKED.
+
+    Measured before the fix: 28 of the 28 registry tools that can be driven to fail with a junk required
+    argument returned ``{"ok": true, "result": {"error": "..."}}``. The MCP wire sets ``isError`` straight from
+    that ``ok`` (mcp_server._tools_call), so a client was told "path not found" was a success.
+    """
+
+    MISSING = str(Path(tempfile.gettempdir()) / "virturoid_no_such_project_dir_9f3a")
+
+    def test_a_bad_path_reports_failure_on_the_envelope(self):
+        if "ingest_project" not in {s["name"] for s in tool_specs()}:
+            self.skipTest("ingest_project is not registered in this environment")
+        r = call_tool("ingest_project", {"path": self.MISSING})
+        self.assertFalse(r["ok"], f"a call that could not find its input must not report ok=True: {r}")
+        self.assertIn("path not found", r["error"])
+        self.assertIn("error", r["result"], "the failing payload is still handed back, not thrown away")
+
+    def test_an_unknown_robot_reports_failure_on_the_envelope(self):
+        r = call_tool("get_robot", {"robot_id": "robot_does_not_exist_9f3a"})
+        self.assertFalse(r["ok"], r)
+        self.assertIn("no robot", r["error"])
+
+    def test_a_bad_verdict_is_still_a_successful_call(self):
+        """The other half of the contract: ``ok`` is about the CALL, not the answer. An empty memory is a real
+        answer to a real question, so it stays ok=True — the flip must not swallow honest negative results."""
+        with tempfile.TemporaryDirectory() as tmp:
+            r = call_tool("recall_knowledge", {"prompt": "an arm", "memory_dir": tmp})
+            self.assertTrue(r["ok"], r)
+            self.assertIsNone(r["result"].get("error"))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -158,6 +158,58 @@ def _root_own_span(mj, body_id: int):
     return span if span >= 0.02 else None
 
 
+def _import_mesh_key(source: str, robot_id: str | None) -> str:
+    """Directory name under ``build/_importmesh`` for THIS import's baked link meshes.
+
+    The key used to be the caller's ``robot_id`` or, when that was absent, the model's BASENAME — and the
+    product's own ingest path passes no robot_id, so every customer who ever drops a ``go2.xml``, a
+    ``robot.urdf`` or a ``scene.xml`` wrote into one shared directory. Two imports of different robots then
+    overwrite each other's STLs link by link, and an import running while another reads produces a
+    partially-written file: measured, that surfaced as ``decoder failed for mesh file ... has wrong size;
+    perhaps this is an ASCII file?`` and MuJoCo refuses to compile the model AT ALL, so a name collision does
+    not degrade one link's appearance, it takes the whole robot down.
+
+    The basename is kept as a readable prefix (these directories get inspected by hand) and disambiguated with a
+    digest of the model's ABSOLUTE path, so the same file re-imported reuses its own directory — the cache still
+    works — while two different files never share one.
+    """
+    import hashlib
+
+    if robot_id:
+        return _slug_name(robot_id)
+    src = str(source or "")
+    stem = os.path.basename(src) or "import"
+    try:
+        ident = str(Path(src).resolve()) if (len(src) < 512 and Path(src).exists()) else src[:4096]
+    except OSError:
+        ident = src[:4096]
+    return f"{_slug_name(stem)}_{hashlib.md5(ident.encode('utf-8', 'replace')).hexdigest()[:10]}"
+
+
+def _link_mesh_stem(body_name: str, claimed: dict[str, str]) -> str:
+    """A filename stem for THIS link's baked STL that no OTHER link in the same import can take.
+
+    ``_slug_name`` is many-to-one: it rewrites every run of characters a filesystem dislikes into a single
+    ``_``, so a customer whose model names two links ``arm/1`` and ``arm:1`` -- or ``left hip`` and
+    ``left_hip``, both of which occur in CAD- and xacro-exported URDFs -- collapses them onto ONE file. The
+    second bake then overwrites the first and both segments' ``geometry.path`` point at it, so one link
+    silently renders as another link's geometry. Nothing errors; the model still compiles; the robot is just
+    wrong in a way that only shows up by eye. (Swept: zero of the 63 MuJoCo Menagerie packages collide, which
+    is exactly why this cannot be left to be caught by a real model in CI.)
+
+    MuJoCo body names are unique, so the body name itself is the key: the readable slug is kept when it is
+    free, and disambiguated with a digest OF THE ORIGINAL NAME when it is not. Deterministic, so re-importing
+    the same model reuses the same files, and stable regardless of the order links are baked in.
+    """
+    import hashlib
+
+    stem = _slug_name(body_name)
+    if claimed.setdefault(stem, body_name) != body_name:
+        stem = f"{stem}_{hashlib.md5(body_name.encode('utf-8', 'replace')).hexdigest()[:8]}"
+        claimed.setdefault(stem, body_name)
+    return stem
+
+
 def _bake_source_mesh(mj, body_id: int, S, out_path) -> bool:
     """Write THIS body's own mesh geoms, transformed into our LINK frame, as one binary STL (millimetres).
 
@@ -190,8 +242,14 @@ def _bake_source_mesh(mj, body_id: int, S, out_path) -> bool:
     if not tris:
         return False
     T = np.concatenate(tris, axis=0)
+    # ATOMIC: build the whole STL beside the target and rename it into place. A binary STL declares its triangle
+    # count in the header, so a reader that opens one mid-write sees a length that disagrees with the file size
+    # and MuJoCo rejects it outright -- taking down the entire model, not just this link. Writing in place made
+    # that reachable whenever two imports overlapped; os.replace is atomic on both POSIX and Windows, so a reader
+    # now sees either the previous complete file or the new complete file and never a half of either.
+    tmp = f"{out_path}.{os.getpid()}.part"
     try:
-        with open(out_path, "wb") as fh:
+        with open(tmp, "wb") as fh:
             fh.write(b"\0" * 80)
             fh.write(struct.pack("<I", len(T)))
             for t in T:
@@ -199,7 +257,12 @@ def _bake_source_mesh(mj, body_id: int, S, out_path) -> bool:
                 ln = float(np.linalg.norm(n))
                 n = n / ln if ln > 1e-12 else np.zeros(3)
                 fh.write(struct.pack("<12fH", *n, *t[0], *t[1], *t[2], 0))
+        os.replace(tmp, out_path)
     except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
         return False
     return True
 
@@ -321,10 +384,11 @@ def import_robot(source: str, *, robot_id: str | None = None, species: str | Non
     _rot_by_id: dict[int, object] = {}          # body id -> S_i, the body-frame -> LINK-frame rotation
     try:                                        # per-link STLs of the customer's own meshes (visual only)
         from pathlib import Path as _P
-        _mesh_dir = _P("build/_importmesh") / _slug_name(robot_id or os.path.basename(str(source)) or "import")
+        _mesh_dir = _P("build/_importmesh") / _import_mesh_key(source, robot_id)
         _mesh_dir.mkdir(parents=True, exist_ok=True)
     except Exception:  # noqa: BLE001 - baking source meshes is a fidelity aid, never an import blocker
         _mesh_dir = None
+    _mesh_stems: dict[str, str] = {}            # baked STL stem -> the ONE link allowed to write it
     ee_candidates: list[str] = []
     # The customer's declared ACTUATOR CAPACITY and JOINT DYNAMICS, kept as a record on the gene so grounding
     # cannot overwrite what the file already told us (see the metadata block after the loop).
@@ -439,7 +503,7 @@ def import_robot(source: str, *, robot_id: str | None = None, species: str | Non
         # amend operator keeps working on numbers it understands.
         _geo = None
         if _mesh_dir is not None:
-            _fp = _mesh_dir / f"{_slug_name(bname)}.stl"
+            _fp = _mesh_dir / f"{_link_mesh_stem(bname, _mesh_stems)}.stl"
             if _bake_source_mesh(mj, i, _S, _fp):
                 _geo = {"family": "source_mesh", "path": str(_fp.resolve()).replace("\\", "/"),
                         "provenance": "customer_import"}
