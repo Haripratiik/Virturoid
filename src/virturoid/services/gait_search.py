@@ -60,8 +60,13 @@ class GaitSearchResult:
     best_credible: bool = False
     history: list = field(default_factory=list)   # per-generation best fitness
     prior_transfer_forward: float | None = None   # zero-shot forward of a warm-start prior on THIS body (R3 screen)
-    n_evals: int = 0                              # candidate rollouts; baseline/deploy checks are separate
+    n_evals: int = 0                              # candidates drawn; baseline/deploy checks are separate
     stopped_reason: str = "generation_limit"
+    # --- the error bar the search itself measured, when it was asked to search robustly (``robust_rel``) ---
+    best_robust_frac: str | None = None   # "k/n" perturbed copies of the winner that still walked
+    best_robust_credible: bool = False    # every perturbed copy walked -> a controller, not one lucky float
+    robust_rel: float | None = None       # the relative perturbation each candidate was scored under
+    n_rollouts: int = 0                   # PHYSICS ROLLOUTS actually run — the honest cost, >= n_evals
 
     def to_dict(self) -> dict:
         return {
@@ -70,6 +75,10 @@ class GaitSearchResult:
             "best_survived": self.best_survived, "best_credible": self.best_credible,
             "baseline_forward": round(self.baseline_forward, 4),
             "n_evals": self.n_evals, "stopped_reason": self.stopped_reason,
+            # A VERDICT WITHOUT ITS ERROR BAR IS NOT A VERDICT. ``best_credible`` prints the same two words for a
+            # controller and for one lucky float; these three say which it was, at the cost the search paid.
+            "best_robust_frac": self.best_robust_frac, "best_robust_credible": self.best_robust_credible,
+            "robust_rel": self.robust_rel, "n_rollouts": self.n_rollouts,
             # THE SAME SIGN DEFECT AS `forward_vel`, one layer up. This was
             #     round(abs(best_forward) / abs(baseline_forward), 2) if baseline_forward else None
             # and `forward` is a SIGNED displacement, so a learned gait that walked BACKWARD was reported as a
@@ -192,15 +201,129 @@ def evaluate_gait(gene, params: dict, *, steps: int = 1200, reward_fn=None) -> d
             "holds_rate": (bool(s["holds_rate"]) if s else None)}
 
 
+def perturbed_params(params: dict, rel: float, rng, keys=PARAM_NAMES) -> dict:
+    """ONE jointly-perturbed copy of an operating point: every searched parameter independently scaled by
+    ``1 + U(-rel, rel)``.
+
+    This is the single definition of "a nearby operating point" in the codebase, and it is shared deliberately:
+    ``gait_flywheel.robustness_margin`` MEASURES an adopted point with it and ``search_gait`` OPTIMISES against
+    it, so the thing being reported and the thing being selected for are the same thing. Two copies of this
+    distribution would let the search quietly optimise a slightly different neighbourhood than the one the error
+    bar describes.
+
+    Relative (not absolute) because the parameters differ by two orders of magnitude — ``kd`` lives in [1, 14] and
+    ``kp`` in [24, 240], so one absolute epsilon would be a rounding error on one axis and a redesign on another.
+    Relative also matches how a hardware tolerance is quoted (+/- x% of a gain), which is what the margin is
+    ultimately claiming something about.
+    """
+    return {**params, **{k: float(params[k]) * (1.0 + rng.uniform(-rel, rel))
+                         for k in keys if k in params}}
+
+
+def evaluate_gait_robust(gene, params: dict, *, steps: int = 1200, reward_fn=None,
+                         rel: float = 0.01, n: int = 2, seed: int = 0) -> dict:
+    """``evaluate_gait``, but scored by the candidate's NEIGHBOURHOOD instead of its single luckiest rollout.
+
+    Returns the nominal result dict with five extra keys: ``robust_fitness`` (the MEAN fitness over the nominal
+    point and its ``n`` perturbed copies), ``robust_frac`` ("k/n" copies that still walked), ``robust_rank``
+    (that fraction as a number, or -1.0 for a candidate that did not walk at all), ``robust_credible`` (every
+    copy walked) and ``n_rollouts`` (what this cost).
+
+    WHY THE MEAN AND NOT THE WORST. Both were tried. A single fall scores ``height_ratio - 1.2`` — around -0.7 —
+    while a non-credible SLIDE that merely survives scores ``0.3 * forward >= 0``, so a worst-case rule ranks a
+    knife-edge walk BELOW a body that never lifts a foot, and the CEM mean then migrates out of the walking
+    region entirely. The mean discounts fragility hard while staying a smooth signal, and the ORDERING never
+    rests on it alone: ``_robust_key`` puts ``robust_rank`` first, so the mean only breaks ties between
+    candidates whose neighbourhoods held up equally often.
+
+    SCREENED, so this is nearly free where it does not matter: a candidate that does not walk at its OWN
+    parameters cannot be robust, and spending ``n`` more rollouts to confirm that takes budget from the search.
+    Only a nominally credible candidate pays for probes — measured on the cat, 2 of 97 candidates.
+
+    ``seed`` fixes the perturbation draws. A caller that will later REPORT a margin must measure it with a
+    DIFFERENT seed than it searched under, or the error bar is quoted on the same draws it was optimised
+    against; ``gait_flywheel`` holds one out for exactly that reason.
+    """
+    import random
+
+    base = evaluate_gait(gene, params, steps=steps, reward_fn=reward_fn)
+    base["robust_rel"] = float(rel)
+    base["n_rollouts"] = 1
+    if n < 1 or not (bool(base.get("credible")) and bool(base.get("survived"))):
+        base["robust_fitness"] = float(base["fitness"])
+        base["robust_frac"] = None
+        base["robust_credible"] = False
+        base["robust_rank"] = -1.0            # did not walk at its own numbers -> below every walker
+        return base
+    rng = random.Random(seed)
+    total = float(base["fitness"])
+    ok = 0
+    for _ in range(int(n)):
+        r = evaluate_gait(gene, perturbed_params(params, rel, rng), steps=steps, reward_fn=reward_fn)
+        total += float(r["fitness"])
+        ok += int(bool(r.get("credible")) and bool(r.get("survived")))
+    base["n_rollouts"] = 1 + int(n)
+    base["robust_fitness"] = total / float(1 + int(n))
+    base["robust_frac"] = f"{ok}/{int(n)}"
+    base["robust_credible"] = ok == int(n)
+    base["robust_rank"] = float(ok) / float(n)
+    return base
+
+
+def _robust_key(r: dict) -> tuple:
+    """Order candidates: HOW MUCH OF THE NEIGHBOURHOOD WALKS first, distance only inside that.
+
+    ``robust_rank`` is the FRACTION of perturbed copies that walked (-1.0 for a candidate that did not walk at
+    its own numbers, so it is below every walker). Lexicographic rather than a weighted scalar because the two
+    questions are not commensurable — no amount of extra travel makes an operating point that no perturbed copy
+    of itself can repeat into a deployable one.
+
+    IT IS A FRACTION AND NOT A BOOLEAN, and that was MEASURED, not chosen. The first version keyed on
+    "every copy walked", so every non-robust candidate tied at 0 and the mean fitness broke the tie — which let
+    a NON-CREDIBLE SLIDE (fitness ``0.3 * forward``, always >= 0) outrank a fragile but real WALK (mean of one
+    good rollout and two falls, ~0.8). On the grounded authored cat that flipped the fit from "adopts a fragile
+    walk, flagged and unbanked" to "adopts nothing and ships the default, which falls" — a strictly worse
+    outcome dressed as a stricter one. Grading by fraction keeps every walker above every non-walker while still
+    preferring the wider basin, which is the whole point.
+
+    With robust scoring off, ``robust_rank`` is absent, every candidate ties at 0.0 and this degenerates to
+    today's fitness ordering exactly.
+    """
+    return (float(r.get("robust_rank", 0.0)), float(r.get("robust_fitness", r.get("fitness", -1e9))))
+
+
 def search_gait(gene, *, generations: int = 8, pop: int = 24, elite_frac: float = 0.3,
                 steps: int = 1000, seed: int = 0, workers: int | None = None,
                 warm_start: dict | None = None, progress=None, reward_fn=None,
-                max_evals: int | None = None, stop_on_credible: bool = False) -> GaitSearchResult:
+                max_evals: int | None = None, stop_on_credible: bool = False,
+                robust_rel: float | None = None, robust_n: int = 2,
+                hold_exploration: bool = True) -> GaitSearchResult:
     """CEM over the crawl-gait parameters. Returns the best DEPLOYABLE gait found for ``gene``.
 
     ``warm_start`` (a prior gait's params, e.g. recalled from the flywheel for a STRUCTURALLY-SIMILAR body) seeds
     the CEM mean and narrows the initial spread, so the search EXPLOITS the specific prior instead of cold-starting
     — this is the flywheel compounding: a learned gait for one quadruped accelerates the next quadruped's search.
+
+    ``robust_rel`` TURNS THIS INTO A ROBUSTNESS-AWARE SEARCH, and it is the answer to task #267. Off (the
+    default), every candidate is one rollout and the winner is whichever single draw scored highest — which on
+    the grounded authored cat is a point where a **2.4e-5 relative change in step frequency flips CREDIBLE WALK
+    to FELL by ROLL-OVER**. Optimising a scalar computed from one deterministic rollout selects for exactly that:
+    the highest point in the landscape is systematically a spike, because a spike is what a maximum of a rough
+    function looks like. On, each candidate is scored by its NEIGHBOURHOOD at relative size ``robust_rel``
+    (``evaluate_gait_robust``), candidates are ranked robust-first (``_robust_key``), and ``stop_on_credible``
+    stops only for a candidate whose perturbed copies ALSO walk — so an early lucky draw no longer ends the
+    search. Same instinct as the morphology domain randomisation already in the trainer, pointed at the gait
+    parameters instead of at the body.
+
+    ``hold_exploration`` (robust mode only) stops the CEM from NARROWING while nothing has walked yet — see the
+    block at the elite update. Robust ranking fixes WHICH point is chosen; this is about whether the search can
+    reach a good one at all, which is the constraint task #267 measured as binding.
+
+    THE SEED AXIS is covered where it actually lives. ``crawl_gait_rollout`` is deterministic in
+    ``(gene, params)`` — there is no rollout seed to perturb — so the only stochastic axis is the SEARCH draw,
+    and that is handled one level up by ``gait_flywheel.fit_gait_for_body``'s decorrelated ``seed_restarts``
+    (measured: the authored dog walks on seeds 0/3/4 and falls on 1/2). Claiming a seed-robustness probe inside
+    this function would be measuring the same number twice.
     """
     import numpy as np
 
@@ -232,11 +355,38 @@ def search_gait(gene, *, generations: int = 8, pop: int = 24, elite_frac: float 
                                     "kp": 32.0, "kd": 1.5}, steps=steps, reward_fn=reward_fn)
     if prior_vec is not None:                                  # transfer-screen the prior ONCE (dossier R3)
         prior_transfer = evaluate_gait(gene, _clip(as_params(prior_vec)), steps=steps, reward_fn=reward_fn)
-    best = {"fitness": -1e9}
+    # ``robust_rank`` -2.0 puts the empty seed below even a candidate that did not walk (-1.0), so the FIRST
+    # result always replaces it — otherwise a generation in which nothing walked would leave ``best_params`` at
+    # the untested centre of the bounds.
+    best = {"fitness": -1e9, "robust_fitness": -1e9, "robust_rank": -2.0}
     best_params = as_params(mean)
     history: list[float] = []
     n_evals = 0
+    n_rollouts = 1 + (1 if prior_transfer is not None else 0)   # the baseline (and the prior screen) are rollouts too
     stopped_reason = "max_evals" if max_evals is not None else "generation_limit"
+    robust = robust_rel is not None and float(robust_rel) > 0.0
+    #: the perturbation draws THE SEARCH optimises against. Derived from the search seed so a restart re-draws
+    #: them, and deliberately far from the seed ``gait_flywheel`` reports its margin under — see
+    #: ``evaluate_gait_robust``: an error bar measured on the draws it was fitted to is not an error bar.
+    probe_seed = int(seed) * 7919 + 104729
+
+    def _score(params):
+        if not robust:
+            return evaluate_gait(gene, params, steps=steps, reward_fn=reward_fn)
+        return evaluate_gait_robust(gene, params, steps=steps, reward_fn=reward_fn,
+                                    rel=float(robust_rel), n=int(robust_n), seed=probe_seed)
+
+    #: the semantic stop signal. Without robust scoring it is "the horizon called this credible", which is what
+    #: shipped a point that a 2.4e-5 change in one parameter flips to a roll-over; with it, a candidate must also
+    #: survive being perturbed before it is allowed to end the search.
+    #:
+    #: ``stopped_reason`` KEEPS THE STRING ``credible_walk`` either way — the reason really is "a credible walk
+    #: was found", the robust bar only makes that harder to clear — because callers compare it literally
+    #: (``agent_design_tools`` prints ``stopped_reason == 'credible_walk'``) and a renamed constant would turn a
+    #: STRONGER result into a report of no early stop at all. What changed is carried by ``best_robust_frac`` /
+    #: ``best_robust_credible``, which say which bar was cleared.
+    _stop_key = "robust_credible" if robust else "credible"
+    _stop_name = "credible_walk"
 
     for g in range(generations):
         remaining = budget - n_evals
@@ -252,34 +402,65 @@ def search_gait(gene, *, generations: int = 8, pop: int = 24, elite_frac: float 
         if stop_on_credible:
             results = []
             for params in params_list:
-                result = evaluate_gait(gene, params, steps=steps, reward_fn=reward_fn)
+                result = _score(params)
                 results.append(result)
                 n_evals += 1
-                if bool(result.get("credible")):
-                    stopped_reason = "credible_walk"
+                n_rollouts += int(result.get("n_rollouts", 1))
+                if bool(result.get(_stop_key)):
+                    stopped_reason = _stop_name
                     break
+        elif robust:
+            # Serial WITHIN a candidate (its probes depend on its own nominal result), parallel ACROSS them —
+            # otherwise turning robust scoring on would quietly cancel a caller's ``workers``, which is the one
+            # setting that pays for the extra rollouts.
+            results = _eval_batch(gene, params_list, steps, workers, reward_fn=reward_fn,
+                                  robust=(float(robust_rel), int(robust_n), probe_seed))
+            n_evals += len(results)
+            n_rollouts += sum(int(r.get("n_rollouts", 1)) for r in results)
         else:
             results = _eval_batch(gene, params_list, steps, workers, reward_fn=reward_fn)
             n_evals += len(results)
+            n_rollouts += len(results)
         samples = samples[:len(results)]
         params_list = params_list[:len(results)]
-        fits = np.array([r["fitness"] for r in results])
-        order = np.argsort(fits)[::-1]
-        elite = samples[order[:min(len(results), n_elite)]]
+        if robust:
+            order = sorted(range(len(results)), key=lambda i: _robust_key(results[i]), reverse=True)
+        else:
+            order = list(np.argsort(np.array([r["fitness"] for r in results]))[::-1])
+        elite = samples[[int(i) for i in order[:min(len(results), n_elite)]]]
         mean = elite.mean(axis=0)
-        std = elite.std(axis=0) + 1e-3                          # keep exploration alive
-        credible_indices = [i for i, r in enumerate(results) if bool(r.get("credible"))]
-        gbest_i = (max(credible_indices, key=lambda i: float(results[i]["fitness"]))
-                   if stopped_reason == "credible_walk" and credible_indices else int(order[0]))
-        if fits[gbest_i] > best["fitness"]:
+        elite_std = elite.std(axis=0) + 1e-3                    # keep exploration alive
+        if hold_exploration and robust and not any(bool(r.get("credible")) for r in results):
+            # NOTHING IN THIS GENERATION WALKED, so the elites are the best of a set of falls and their spread
+            # carries no information about where a walk is. CEM shrinks the sampling width every generation
+            # regardless — and FASTEST where there is no signal, because unranked elites are then an unbiased
+            # random subset. This module has already been burned by exactly that: the dead ``duty`` coordinate
+            # (see PARAM_NAMES) collapsed to a 7x-too-narrow band and the flywheel mined the collapse as its
+            # strongest evidence. Collapsing the WHOLE distribution around noise is the same error with a worse
+            # consequence — it is how the search stops being able to REACH a robust point at all, which task
+            # #267 measures as the binding constraint (a full 96-eval budget on the grounded authored cat turns
+            # up 2 credible candidates of 97 at seed 0 and none at two other seeds, while a point that is 8/8
+            # robust and 30% faster exists in the same box).
+            #
+            # So: keep moving the mean (fall height still carries a little signal) but DO NOT narrow until
+            # something walks. Until then this is honest random search over the region, which at a 2% hit rate
+            # beats a confident collapse into the wrong basin.
+            std = np.maximum(elite_std, std)
+        else:
+            std = elite_std
+        stop_indices = [i for i, r in enumerate(results) if bool(r.get(_stop_key))]
+        gbest_i = (max(stop_indices, key=lambda i: _robust_key(results[i]))
+                   if stopped_reason == _stop_name and stop_indices else int(order[0]))
+        if _robust_key(results[gbest_i]) > _robust_key(best):
             best = results[gbest_i]
             best_params = params_list[gbest_i]
         history.append(float(best["fitness"]))
         if progress:
             progress(f"gen {g + 1}/{generations}: best fitness {best['fitness']:+.3f} "
                      f"(forward {best['forward']:+.3f} m, hr {best['height_ratio']:.2f}, "
-                     f"survived {best['survived']})")
-        if stopped_reason == "credible_walk":
+                     f"survived {best['survived']}"
+                     + (f", neighbours {best.get('robust_frac')}" if robust else "") + ")")
+        if stopped_reason == _stop_name:
             break
 
     return GaitSearchResult(
@@ -288,24 +469,39 @@ def search_gait(gene, *, generations: int = 8, pop: int = 24, elite_frac: float 
         best_credible=bool(best.get("credible", False)),
         baseline_forward=float(baseline["forward"]), history=history,
         prior_transfer_forward=(float(prior_transfer["forward"]) if prior_transfer is not None else None),
-        n_evals=n_evals, stopped_reason=stopped_reason)
+        n_evals=n_evals, stopped_reason=stopped_reason,
+        best_robust_frac=best.get("robust_frac"), best_robust_credible=bool(best.get("robust_credible", False)),
+        robust_rel=(float(robust_rel) if robust else None), n_rollouts=n_rollouts)
 
 
-def _eval_batch(gene, params_list, steps, workers, reward_fn=None):
+def _eval_batch(gene, params_list, steps, workers, reward_fn=None, robust=None):
     """Evaluate a population, in parallel across processes when possible (falls back to serial).
 
     A compiled ``reward_fn`` (a code object closing over ``eval``) is NOT picklable, so a reward-steered search
-    runs SERIAL — correct and safe; the reward loop uses modest pop/generations so the cost is bounded."""
+    runs SERIAL — correct and safe; the reward loop uses modest pop/generations so the cost is bounded.
+
+    ``robust`` is ``(rel, n, seed)`` when each candidate is to be scored across its neighbourhood. Every element
+    is a plain number, so the robust path parallelises exactly like the plain one — deliberately, because
+    robustness-aware search is the mode that most needs a caller's ``workers``."""
+    def _one(p):
+        if robust is None:
+            return evaluate_gait(gene, p, steps=steps, reward_fn=reward_fn)
+        rel, n, seed = robust
+        return evaluate_gait_robust(gene, p, steps=steps, reward_fn=reward_fn, rel=rel, n=n, seed=seed)
+
     if reward_fn is not None or workers is None or workers <= 1:
-        return [evaluate_gait(gene, p, steps=steps, reward_fn=reward_fn) for p in params_list]
+        return [_one(p) for p in params_list]
     try:
         from concurrent.futures import ProcessPoolExecutor
         with ProcessPoolExecutor(max_workers=workers) as ex:
-            return list(ex.map(_worker, [(gene, p, steps) for p in params_list]))
+            return list(ex.map(_worker, [(gene, p, steps, robust) for p in params_list]))
     except Exception:  # noqa: BLE001 - multiprocessing/pickling issues -> serial
-        return [evaluate_gait(gene, p, steps=steps) for p in params_list]
+        return [_one(p) for p in params_list]
 
 
 def _worker(args):
-    gene, params, steps = args
-    return evaluate_gait(gene, params, steps=steps)
+    gene, params, steps, robust = args
+    if robust is None:
+        return evaluate_gait(gene, params, steps=steps)
+    rel, n, seed = robust
+    return evaluate_gait_robust(gene, params, steps=steps, rel=rel, n=n, seed=seed)

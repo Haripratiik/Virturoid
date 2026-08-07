@@ -301,12 +301,155 @@ def _source_rest_pose(mj, name_of, BODY) -> tuple[dict, str | None]:
     return pose, (kname or f"key{kid}")
 
 
+# --------------------------------------------------------------------------------- import memoization
+#
+# IMPORTING A REAL ROBOT IS NOT CHEAP, and the test suite imports the same handful over and over. MEASURED on
+# this checkout (2026-08-06, one CPU), a single ``import_robot`` call: Unitree G1 13.88 s, Go2 11.29 s, Talos
+# 7.45 s, Booster T1 4.93 s, Panda 4.07 s, Spot 3.84 s, UR5e 3.49 s, Cassie 2.79 s. The suite names ~115
+# Menagerie model references across nine test files -- go2.xml 26 times, g1.xml 13, ur5e.xml 11 -- and every one
+# re-parses the same unchanged file, re-walks the same body tree and re-bakes the same per-link STLs. A memoized
+# repeat costs 2-4 ms, so on those eight files alone the suite stops paying ~563 s (9.4 min).
+#
+#   VIRTUROID_IMPORT_CACHE=1   memoize the import on the SOURCE's identity for the life of the process.
+#
+# DEFAULT-OFF, exactly like ``VIRTUROID_GAIT_FIT_CACHE`` (gait_flywheel), so a product run is byte-identical and
+# a customer re-importing a file they just edited can never be handed yesterday's robot. Two things this has to
+# get right, and both were failure modes of the gait cache before it got them right:
+#
+#   * CALLERS MUTATE WHAT THEY ARE GIVEN. ``ingest_project`` re-grounds masses onto the gene, amend operators
+#     rewrite segments in place, and several tests set ``gene.loop_closures = []`` or poke ``metadata``. Handing
+#     the same object to the next caller would let one import silently rewrite another's robot. So the cache
+#     stores a SERIALIZED snapshot (``RobotGene.to_dict``, which round-trips) and every hit is rebuilt from a
+#     deep copy of it -- including the first store, so nothing the caller does afterwards can reach the cache.
+#   * THE KEY MUST COVER EVERYTHING THAT CHANGES THE ANSWER. Not just the path: a CONTENT DIGEST of the model
+#     file (mtime alone is not enough -- see ``_import_cache_key``), the two options that alter the result
+#     (``robot_id`` picks the baked-mesh directory and the gene id; ``species`` names it), AND a bounded
+#     fingerprint of the model's own directory -- because an MJCF pulls in ``<include>`` files, meshes and
+#     keyframes that live beside it, and a robot whose mesh changed is a different robot while its own .xml is
+#     byte-for-byte unchanged. An XML STRING has no path, so it is keyed by digest of the text itself.
+#
+# A FAILED import is never cached (same rule as gait_flywheel._remember): a parse error is not an answer about
+# the model, and the next caller must get a real attempt.
+_IMPORT_CACHE: dict[tuple, dict] = {}
+# The directory walk is bounded so a customer who drops a model into a 100k-file monorepo pays milliseconds, not
+# seconds. Truncation is recorded IN the fingerprint, so a truncated key never compares equal to a complete one.
+_DIR_FINGERPRINT_CAP = 5000
+
+
+def _dir_fingerprint(root: Path) -> tuple:
+    """``(n_files, total_bytes, newest_mtime_ns, truncated)`` for everything under ``root``.
+
+    Deterministic (sorted walk) and cheap: 30-200 files for a Menagerie package, a few milliseconds. It is a
+    fingerprint, not a hash of contents -- an edit that preserves a file's size AND its mtime is invisible to
+    it, which is the documented limit of a process-scoped, opt-in test cache.
+    """
+    n = total = newest = 0
+    try:
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames.sort()
+            for fn in sorted(filenames):
+                try:
+                    st = os.stat(os.path.join(dirpath, fn))
+                except OSError:
+                    continue
+                n += 1
+                total += int(st.st_size)
+                newest = max(newest, int(st.st_mtime_ns))
+                if n >= _DIR_FINGERPRINT_CAP:
+                    return (n, total, newest, True)
+    except OSError:
+        return (-1, 0, 0, False)
+    return (n, total, newest, False)
+
+
+_HASH_MODEL_MAX_BYTES = 4 * 1024 * 1024
+
+
+def _import_cache_key(source: str, robot_id: str | None, species: str | None):
+    """The identity of THIS import, or ``None`` when it must not be cached.
+
+    The MODEL FILE ITSELF is keyed by CONTENT DIGEST, not by mtime. Mtime alone is not safe here: a test that
+    writes a fixture URDF, imports it, rewrites it and imports again is an ordinary thing to do, and Windows
+    file timestamps are not guaranteed to resolve two writes milliseconds apart -- so an mtime key can hand back
+    the previous robot for the new file. A digest cannot. It costs microseconds on the tens-of-KB XML a robot
+    description actually is, and files past ``_HASH_MODEL_MAX_BYTES`` fall back to size+mtime.
+    """
+    import hashlib
+
+    if os.environ.get("VIRTUROID_IMPORT_CACHE") != "1":
+        return None
+    opts = (robot_id, species)
+    try:
+        p = Path(source)
+        if len(source) < 512 and p.is_file():
+            st = p.stat()
+            if int(st.st_size) <= _HASH_MODEL_MAX_BYTES:
+                with open(p, "rb") as fh:
+                    body = ("sha256", hashlib.sha256(fh.read()).hexdigest())
+            else:
+                body = ("stat", int(st.st_size), int(st.st_mtime_ns))
+            return ("file", str(p.resolve()), body, _dir_fingerprint(p.parent), opts)
+    except OSError:
+        return None
+    return ("text", hashlib.sha256(source.encode("utf-8", "replace")).hexdigest(), opts)
+
+
+def clear_import_cache() -> None:
+    """Drop the memoized imports. For a test that deliberately wants the parser to run again."""
+    _IMPORT_CACHE.clear()
+
+
+def _snapshot_import(out: dict) -> dict:
+    """A detached, serializable copy of an import result — safe to hand out again, whatever the caller does."""
+    import copy
+
+    gene = out.get("gene")
+    return {
+        "gene": copy.deepcopy(gene.to_dict()) if gene is not None else None,
+        "warnings": list(out.get("warnings") or []),
+        "backend_support": copy.deepcopy(out.get("backend_support") or {}),
+        "species": out.get("species"), "robot_class": out.get("robot_class"),
+        "valid": bool(out.get("valid")),
+    }
+
+
+def _restore_import(snap: dict) -> dict:
+    import copy
+
+    d = snap.get("gene")
+    return {
+        "gene": RobotGene.from_dict(copy.deepcopy(d)) if d is not None else None,
+        "warnings": list(snap.get("warnings") or []),
+        "backend_support": copy.deepcopy(snap.get("backend_support") or {}),
+        "species": snap.get("species"), "robot_class": snap.get("robot_class"),
+        "valid": bool(snap.get("valid")),
+    }
+
+
 def import_robot(source: str, *, robot_id: str | None = None, species: str | None = None) -> dict:
     """Import a URDF/MJCF (file path or XML string) into a RobotGene.
 
     Returns ``{"gene", "warnings", "backend_support", "species", "robot_class", "valid"}``.
     Needs MuJoCo. Raises only if the source can't be parsed at all (with a clear message).
+
+    Memoized ONLY under ``VIRTUROID_IMPORT_CACHE=1`` (see the block above); otherwise every call does the full
+    parse, exactly as before.
     """
+    key = _import_cache_key(source, robot_id, species)
+    snap = _IMPORT_CACHE.get(key) if key is not None else None
+    if snap is not None:
+        return _restore_import(snap)
+    out = _import_robot_uncached(source, robot_id=robot_id, species=species)
+    if key is not None:
+        try:                                     # a cache may make an import faster; it may never make it fail
+            _IMPORT_CACHE[key] = _snapshot_import(out)
+        except Exception:  # noqa: BLE001 - unsnapshotable result -> simply not memoized
+            pass
+    return out
+
+
+def _import_robot_uncached(source: str, *, robot_id: str | None = None, species: str | None = None) -> dict:
+    """The real import. ``import_robot`` is the (opt-in) memoizing front door onto this."""
     import mujoco
 
     warnings: list[str] = []
@@ -553,11 +696,15 @@ def import_robot(source: str, *, robot_id: str | None = None, species: str | Non
                             f"chose {ee_name!r} — set the correct one if wrong.")
 
     robot_class = _infer_class(segments, roots, mj, name_of)
+    # THE LOOPS ARE PART OF THE MACHINE (see _source_loop_closures). Read before the gene is built so they are
+    # on it from the start and `validate()` below rules on them like any other field.
+    loop_closures = _source_loop_closures(mj, mujoco, body_name, _rot_by_id, warnings)
     gene = RobotGene(
         id=robot_id or "imported_robot",
         species=species or f"{robot_class}.imported",
         robot_class=robot_class,
         segments=segments,
+        loop_closures=loop_closures,
         # a robot that MOVES needs a FREE (floating 6-DOF) base, not a welded one -- "floor"/"table" weld the base
         # to the world so the body cannot translate at all (the compiled model has no base joint, and every gait
         # rolls out to 0 forward). A manipulator stays table-mounted. The set is shared with anatomy_compiler:
@@ -849,6 +996,94 @@ def _source_joint_dynamics(mj, j: int) -> dict | None:
     return {"armature": round(float(mj.dof_armature[adr]), 6),
             "damping": round(float(mj.dof_damping[adr]), 6),
             "frictionloss": round(float(mj.dof_frictionloss[adr]), 6)}
+
+
+def _source_loop_closures(mj, mujoco, body_name: dict, rot_by_id: dict, warnings: list[str]) -> list[dict]:
+    """The source model's ``<equality>`` block, as far as a RobotGene can carry it.
+
+    A CLOSED-LOOP ROBOT WITHOUT ITS LOOPS IS A DIFFERENT MACHINE. Agility's Cassie declares four
+    ``<connect>`` constraints -- the plantar rod to the foot and the achilles rod to the heel spring, per leg --
+    and those four are what make each leg a four-bar linkage instead of a leg with two rods dangling off it.
+    The importer read the body tree and nothing else, so the twin compiled with ``neq = 0``: the rods swung
+    free, the linkage did not exist, and we verified, certified and exported that machine as the customer's.
+
+    Nothing here is new machinery. ``RobotGene.loop_closures`` already models exactly this, ``gene_compiler``
+    already emits ``<connect>`` from it, and ``gene_validation`` already checks ``loop_closures_compiled``
+    against ``m.neq``. This is the READ that was never wired.
+
+    Two frames have to be reconciled, the same pair the rest of this importer reconciles:
+      * MJCF's ``anchor`` is in **body1's own frame**; a segment's frame is the LINK frame, whose +z runs
+        along the link axis (see ``_link_vector``). So the anchor is rotated by ``S^T`` like every other
+        vector this importer carries across.
+      * A ``<connect>`` may name SITES rather than bodies (both ToddlerBots do). Then the anchor is the
+        site's position on its body and ``eq_data`` is zero, so the site has to be resolved to its body.
+
+    Everything the gene CANNOT model is reported instead of dropped in silence. ``<equality><joint>`` -- a
+    coupled/mimic DOF, which is what a Robotiq or Panda gripper uses to slave one finger to the other -- has no
+    representation in a RobotGene at all, and 24 of the 37 Menagerie models that declare equalities declare
+    only that kind. Saying so is the difference between a lossy import and a wrong one.
+    """
+    import numpy as np
+
+    CONNECT = int(mujoco.mjtEq.mjEQ_CONNECT)
+    SITE = int(mujoco.mjtObj.mjOBJ_SITE)
+    _TYPE = {int(getattr(mujoco.mjtEq, n)): n.replace("mjEQ_", "").lower()
+             for n in dir(mujoco.mjtEq) if n.startswith("mjEQ_")}
+    active0 = getattr(mj, "eq_active0", None)
+    if active0 is None:
+        active0 = getattr(mj, "eq_active", None)
+
+    loops: list[dict] = []
+    unmodelled: dict[str, int] = {}
+    skipped: list[str] = []
+    for e in range(int(getattr(mj, "neq", 0))):
+        et = int(mj.eq_type[e])
+        if et != CONNECT:
+            k = _TYPE.get(et, str(et))
+            unmodelled[k] = unmodelled.get(k, 0) + 1
+            continue
+        if active0 is not None and not int(active0[e]):
+            skipped.append("one <connect> is shipped DISABLED (active=\"false\") and was not carried")
+            continue
+        objtype = int(mj.eq_objtype[e]) if hasattr(mj, "eq_objtype") else -1
+        o1, o2 = int(mj.eq_obj1id[e]), int(mj.eq_obj2id[e])
+        if objtype == SITE:
+            b1, b2 = int(mj.site_bodyid[o1]), int(mj.site_bodyid[o2])
+            anchor = np.asarray(mj.site_pos[o1], dtype=float)
+        else:
+            b1, b2 = o1, o2
+            anchor = np.asarray(mj.eq_data[e][:3], dtype=float)
+        a, b = body_name.get(b1), body_name.get(b2)
+        if b1 <= 0 or b2 <= 0 or not a or not b:
+            skipped.append("a <connect> anchors a body to the WORLD; a RobotGene loop joins two segments")
+            continue
+        if a == b:
+            skipped.append(f"a <connect> joins {a!r} to itself")
+            continue
+        if int(mj.body_parentid[b2]) == b1 or int(mj.body_parentid[b1]) == b2:
+            # `validate()` rejects this on purpose: a parent and child are already rigidly related through
+            # their joint, so restating the edge as a loop is a contradiction rather than a second path.
+            skipped.append(f"a <connect> joins {a!r} and {b!r}, which are already parent and child")
+            continue
+        S = rot_by_id.get(b1)
+        local = (np.asarray(S, dtype=float).T @ anchor) if S is not None else anchor
+        loops.append({"a": a, "b": b, "anchor": [round(float(v), 6) for v in local]})
+
+    if loops:
+        _pairs = ", ".join(sorted({f"{lc['a']}<->{lc['b']}" for lc in loops})[:4])
+        warnings.append(
+            f"{len(loops)} closed kinematic loop(s) were read from the source's <equality><connect> and are "
+            f"carried on the gene ({_pairs}{'...' if len(loops) > 4 else ''}). Without them the twin is a "
+            f"DIFFERENT MACHINE — the loop members swing free and the linkage does not exist.")
+    for msg in dict.fromkeys(skipped):
+        warnings.append(f"equality constraint not carried: {msg}.")
+    if unmodelled:
+        _kinds = ", ".join(f"{n}x <{k}>" for k, n in sorted(unmodelled.items()))
+        warnings.append(
+            f"the source declares {sum(unmodelled.values())} equality constraint(s) a RobotGene cannot model "
+            f"({_kinds}) and they were NOT carried. A <joint> equality couples two DOF (a mimic/slaved gripper "
+            f"finger); the twin's corresponding joints move independently.")
+    return loops
 
 
 def _joint_for_body(mj, body_id, jnts_of, jnt_force, bname, warnings):

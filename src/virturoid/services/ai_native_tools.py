@@ -771,6 +771,15 @@ def _honest_gait(gene, *, steps: int = 1200, render: bool = False, tag: str = "g
     if out.get("gait_source") == "tuned_for_this_body" and "robustness_rel" in _fit:
         out["robustness_rel"] = _fit["robustness_rel"]
         out["robustness_probes"] = _fit.get("robustness_probes")
+        # PER PARAMETER, because that is the half a reader can act on. The joint scalar says "how far can
+        # everything move at once" and averages the axes together; measured (task #267) the grounded authored
+        # cat is below 1e-5 on FOUR of five while the canonical template is >=1e-1 on all five, and the
+        # difference between "keep the step frequency within 10%" and "one part in 10^5 of step frequency rolls
+        # it over" is the whole deployability question. Read from the fit that measured it; never re-measured
+        # here, which would put N extra rollouts on every verify.
+        out["robustness_per_param"] = _fit.get("robustness_per_param")
+        if _fit.get("robustness_note"):
+            out["robustness_note"] = _fit["robustness_note"]
         # A NULL MARGIN MUST NOT READ AS "not measured". It was measured and the answer was "none" — no perturbed
         # copy of this operating point walks, so the verdict above describes one lucky float rather than a
         # controller. Measured on the grounded authored cat, that is the difference between a walk that survives

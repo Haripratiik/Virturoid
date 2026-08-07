@@ -30,6 +30,19 @@ os.environ.setdefault("VIRTUROID_ALLOW_HEURISTIC_FALLBACK", "1")
 # 144.3 s -> 3.4 s on the repeat, same adopted parameters, same reason string.
 os.environ.setdefault("VIRTUROID_GAIT_FIT_CACHE", "1")
 
+# ---------------------------------------------------------------- affording REAL robots instead of fixtures
+#
+# The same argument, one layer up. Fixtures have lied in this repo, so the import tests are pointed at the real
+# MuJoCo Menagerie -- and a real robot description is expensive to parse: MEASURED per ``import_robot`` call,
+# Unitree G1 13.88 s, Go2 11.29 s, Talos 7.45 s, UR5e 3.49 s. The suite names ~115 Menagerie model references
+# across nine files (go2.xml 26 times, g1.xml 13, ur5e.xml 11), each one re-parsing a file that has not changed.
+#
+# Memoizing on the SOURCE's identity -- content digest of the model file, plus a fingerprint of the directory
+# its meshes and <include>s live in, plus the options that alter the result -- makes the repeats 2-4 ms and
+# costs no coverage: every distinct model still runs the real importer. Measured saving on the eight most-cited
+# files alone: 563 s. Default-off in the product (see robot_import._IMPORT_CACHE), on here.
+os.environ.setdefault("VIRTUROID_IMPORT_CACHE", "1")
+
 
 def pytest_configure(config):
     config.addinivalue_line(

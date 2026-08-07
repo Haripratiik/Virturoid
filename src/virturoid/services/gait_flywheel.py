@@ -298,6 +298,26 @@ def _recall_gait_source(db, gene, *, task: str = LOCOMOTION) -> tuple[dict, str]
 
 _DEFAULT_GAIT = {"freq": 1.5, "hip_amp": 0.9, "knee_amp": 1.0, "kp": 32.0, "kd": 1.5}
 
+#: THE PERTURBATION THE SEARCH ITSELF OPTIMISES AGAINST, and how many probes each surviving candidate pays for.
+#:
+#: 1e-2 because that is the SIM-TO-REAL number: hardware tolerance on a PD gain and on a commanded step
+#: frequency is ~1%, so an operating point that only walks inside a tighter band than that is not a controller
+#: anybody can deploy — it is a property of one float in one simulator. Measured (task #267) at the point the
+#: fitter used to adopt for the grounded authored cat: 0 of 8 perturbed copies survive at 1e-2.
+#:
+#: 2 probes, not 4, because this runs per CANDIDATE rather than once per fit, and it is SCREENED — only a
+#: candidate that is already credible at its own parameters pays for probes at all (measured on the cat, 2 of
+#: 97). A knife edge is a knife edge: it does not need four probes to be caught, and the adopted point is
+#: re-measured afterwards on the full ``_ROBUST_LADDER`` at ``_ROBUST_N`` with HELD-OUT draws anyway.
+_SEARCH_ROBUST_REL = 1e-2
+_SEARCH_ROBUST_N = 2
+
+#: The perturbation draws the REPORTED margin is measured on. Deliberately unrelated to the ones ``search_gait``
+#: scores candidates against (it derives those from the search seed), because a margin measured on the same
+#: draws the winner was selected under is an error bar quoted on its own training set — it would read high
+#: exactly when the search had overfitted the probe, which is the one case it exists to catch.
+_MARGIN_SEED = 20260802
+
 
 class _DeployResult:
     """A result-shaped holder carrying DEPLOY-horizon metrics for banking."""
@@ -312,7 +332,8 @@ class _DeployResult:
 def learn_gait_flywheel(gene, db, *, generations: int = 10, pop: int = 20, steps: int = 900,
                         deploy_steps: int = 1500, seed: int = 0, workers: int = 1, bank: bool = True,
                         vm=None, max_evals: int | None = None, stop_on_credible: bool = False,
-                        recall: bool = True) -> dict:
+                        recall: bool = True, robust_rel: float | None = _SEARCH_ROBUST_REL,
+                        robust_n: int = _SEARCH_ROBUST_N) -> dict:
     """Recall a specific prior -> SCREENED warm-start search -> DEPLOY-SELECT vs the default -> bank -> provenance.
 
     Deploy-select (honesty): the search optimizes at ``steps``, but the winner is re-measured at the longer
@@ -337,9 +358,14 @@ def learn_gait_flywheel(gene, db, *, generations: int = 10, pop: int = 20, steps
 
     recalled = _recall_gait_source(db, gene) if recall else None
     prior, prior_skill_id = recalled if recalled is not None else (None, None)
+    # ROBUSTNESS-AWARE BY DEFAULT (task #267). The search is asked for a controller, not for the single highest
+    # rollout it can find: every candidate that walks at its own parameters is re-scored across a neighbourhood
+    # of size ``robust_rel``, ranked robust-first, and the credible-early-stop only fires for a candidate whose
+    # perturbed copies walk too. ``robust_rel=None`` restores the old single-rollout search exactly, which is
+    # what the before/after ablation for this task was measured with.
     res = search_gait(gene, generations=generations, pop=pop, steps=steps, seed=seed,
                       workers=workers, warm_start=prior, max_evals=max_evals,
-                      stop_on_credible=stop_on_credible)
+                      stop_on_credible=stop_on_credible, robust_rel=robust_rel, robust_n=robust_n)
     # DEPLOY-SELECT at the deploy horizon: learned winner vs the shipped default. Bank ONLY a CREDIBLE walk that
     # beats the default — a slide (fast but no real stepping) must never enter the bank.
     learned = evaluate_gait(gene, res.best_params, steps=deploy_steps)
@@ -367,6 +393,9 @@ def learn_gait_flywheel(gene, db, *, generations: int = 10, pop: int = 20, steps
     # every horizon ends somewhere — so the bank is gated on the MARGIN, not only on the verdict.
     rob: dict = {"robustness_rel": None, "probes": {}}
     if beats_default:
+        # HELD-OUT DRAWS. ``robustness_margin`` defaults to ``_MARGIN_SEED``, which is not the seed the search
+        # scored candidates under — so a robustness-aware search that overfitted its own probe draws is caught
+        # here rather than confirmed here.
         rob = robustness_margin(gene, res.best_params, steps=deploy_steps)
     sturdy = rob["robustness_rel"] is not None
 
@@ -426,6 +455,22 @@ def learn_gait_flywheel(gene, db, *, generations: int = 10, pop: int = 20, steps
         # ...and how much of a perturbation the answer survives, which is the part a horizon can never tell you.
         "robustness_rel": rob["robustness_rel"],
         "robustness_probes": rob["probes"],
+        "robustness_per_param": rob.get("per_param_rel"),
+        "robustness_note": margin_sentence(rob) if beats_default else None,
+        # The WHOLE margin measurement, carried intact. Rebuilding it field-by-field downstream is how
+        # ``margin_sentence`` came to print "per parameter (n=None each)": the sample sizes were dropped on the
+        # way out and the sentence lost the one number that makes its two halves comparable.
+        "robustness": dict(rob),
+        # What the search itself saw, at the perturbation it was scored under — reported separately from the
+        # held-out margin above so the two can DISAGREE visibly instead of silently agreeing.
+        "search_robust_frac": getattr(res, "best_robust_frac", None),
+        "search_robust_rel": getattr(res, "robust_rel", None),
+        # THE HONEST COST: every physics rollout this call ran — the CEM's, the two deploy-horizon comparisons,
+        # the prior's deploy check, and the margin ladder. ``n_evals`` counts CANDIDATES and is now smaller than
+        # the work done, so reporting it alone would understate robustness-aware search precisely where it costs.
+        "n_rollouts": (int(getattr(res, "n_rollouts", 0)) + 2 + (1 if prior_deploy_forward is not None else 0)
+                       + int(rob.get("n_rollouts") or 0)),
+        "n_rollouts_margin": int(rob.get("n_rollouts") or 0),
         "not_banked_reason": (None if skill_id or not (bank and beats_default) else
                               f"the winning operating point does not survive a {min(_ROBUST_LADDER):g} relative "
                               f"perturbation of its own parameters ({rob['probes']}) — a bank of controllers "
@@ -462,6 +507,9 @@ _SETTLE_STEPS = 6000
 #: perturbations per rung. The reported margin is the LARGEST rung at which every probe still walks.
 _ROBUST_LADDER = (1e-1, 1e-2, 1e-3)
 _ROBUST_N = 4
+
+#: (``_SEARCH_ROBUST_REL`` / ``_SEARCH_ROBUST_N`` / ``_MARGIN_SEED`` are defined ABOVE ``learn_gait_flywheel``
+#: because they are default ARGUMENT values there, and Python binds those at definition time.)
 
 
 # ------------------------------------------------------------------ making a TEST SUITE able to afford this
@@ -540,9 +588,11 @@ def _remember(key, gene, out: dict) -> dict:
 
 
 def robustness_margin(gene, params: dict, *, steps: int = _SETTLE_STEPS, ladder=_ROBUST_LADDER,
-                      n: int = _ROBUST_N, seed: int = 0) -> dict:
+                      n: int = _ROBUST_N, seed: int = _MARGIN_SEED, per_param: bool = True,
+                      per_param_n: int | None = None) -> dict:
     """How much relative perturbation does this operating point survive? Returns the largest rung of ``ladder``
-    at which ALL ``n`` jointly-perturbed copies are still a credible walk, or ``None`` below the finest rung.
+    at which ALL ``n`` jointly-perturbed copies are still a credible walk, or ``None`` below the finest rung —
+    plus, when ``per_param``, the SAME margin measured one parameter at a time.
 
     A verdict without this is missing its error bar. MEASURED 2026-08-01 (task #267) at the fitted op-points the
     product actually ships: the canonical template tolerates >=1e-1 on all five parameters, the grounded
@@ -551,30 +601,92 @@ def robustness_margin(gene, params: dict, *, steps: int = _SETTLE_STEPS, ladder=
     apart, and both printed the same two words. A number that fragile is not a property of the controller you
     could deploy; it is a property of one lucky float.
 
-    Costs ``n`` rollouts per rung and STOPS at the first rung that passes, so a robust point costs ``n`` and a
-    fragile one costs ``n * len(ladder)``.
+    THE PER-PARAMETER BREAKDOWN IS WHERE THAT COMPARISON LIVES, which is why it is on by default. The joint
+    margin answers "how far can everything move at once" and collapses to a single scalar; the per-parameter
+    margins answer "which knob is the customer not allowed to touch", and that is the actionable half — a body
+    whose margin is 1e-1 on four axes and 1e-3 on ``freq`` needs its step frequency pinned, not a redesign.
+    Each parameter is probed ALONE (the others held exactly), so the number is attributable.
+
+    ``seed`` defaults to ``_MARGIN_SEED``, which is HELD OUT from the draws ``search_gait`` optimises against.
+    Measuring the margin on the search's own probe draws would report the fit, not the point.
+
+    ``per_param_n`` defaults to ``n``, i.e. the two estimates use the SAME number of draws. It was briefly 2,
+    for cost, and the grounded authored cat printed the result: "survives a 0.1 relative perturbation of all 5
+    parameters at once; per parameter: kd 0.001, freq 0.1, ...". Both halves were honest small samples and the
+    sentence still read as a contradiction, which is the failure mode this whole task is about. Equal-sized
+    samples plus the disclosed ``n`` in ``margin_sentence`` make disagreement legible as sampling noise instead.
+
+    COST. The joint ladder costs ``n`` rollouts per rung and STOPS at the first rung that passes, so a robust
+    point costs ``n`` and a fragile one ``n * len(ladder)``. The per-parameter pass adds at best
+    ``len(params) * per_param_n`` (every axis sturdy at the top rung) and at worst that times ``len(ladder)``:
+    for five parameters, a 3-rung ladder and ``n=4``, 20 to 60 rollouts. Measured on the grounded bodies at the
+    6000-step horizon that is roughly 10-60 s — real, and it is the price of an error bar rather than an
+    assertion. It is paid ONCE per adopted operating point, not per candidate.
     """
     import random
 
-    from virturoid.services.gait_search import evaluate_gait
-    rng = random.Random(seed)
-    keys = [k for k in _FIT_PARAMS if k in params]
-    probes: dict[str, str] = {}
-    best: float | None = None
-    for rel in ladder:
-        ok = 0
-        for _ in range(n):
-            q = {**params, **{k: float(params[k]) * (1.0 + rng.uniform(-rel, rel)) for k in keys}}
-            res = evaluate_gait(gene, q, steps=steps)
-            ok += int(bool(res.get("credible")) and bool(res.get("survived")))
-        probes[f"{rel:g}"] = f"{ok}/{n}"
-        if ok == n:
-            best = float(rel)
-            break                                   # the ladder is ordered largest-first; the first pass is the margin
-    return {"robustness_rel": best, "probes": probes, "steps": int(steps),
-            "note": (f"every one of {n} jointly-perturbed copies still walks at rel {best:g}" if best is not None
-                     else f"fails below rel {min(ladder):g} — this operating point is one lucky float, "
-                          f"not a controller")}
+    from virturoid.services.gait_search import evaluate_gait, perturbed_params
+
+    spent = [0]
+
+    def _walks(q) -> bool:
+        spent[0] += 1
+        res = evaluate_gait(gene, q, steps=steps)
+        return bool(res.get("credible")) and bool(res.get("survived"))
+
+    def _ladder(keys, probes_n, rng) -> tuple[float | None, dict]:
+        probes: dict[str, str] = {}
+        for rel in ladder:
+            ok = sum(int(_walks(perturbed_params(params, rel, rng, keys=keys))) for _ in range(probes_n))
+            probes[f"{rel:g}"] = f"{ok}/{probes_n}"
+            if ok == probes_n:
+                return float(rel), probes          # ladder is largest-first; the first pass IS the margin
+        return None, probes
+
+    keys = tuple(k for k in _FIT_PARAMS if k in params)
+    best, probes = _ladder(keys, int(n), random.Random(seed))
+    out = {"robustness_rel": best, "probes": probes, "steps": int(steps), "n": int(n),
+           "note": (f"every one of {n} jointly-perturbed copies still walks at rel {best:g}" if best is not None
+                    else f"fails below rel {min(ladder):g} — this operating point is one lucky float, "
+                         f"not a controller")}
+    pp_n = int(n if per_param_n is None else per_param_n)
+    if per_param and keys:
+        out["per_param_rel"] = {k: _ladder((k,), pp_n, random.Random(seed + i + 1))[0]
+                                for i, k in enumerate(keys)}
+        out["per_param_n"] = pp_n
+    out["n_rollouts"] = spent[0]                  # what the error bar COST, disclosed with the error bar
+    return out
+
+
+def margin_sentence(rob: dict, *, head: bool = True) -> str:
+    """The error bar as one line of English, for printing NEXT TO the two-word verdict.
+
+    THE HONESTY DEFECT task #267 names is not that the margin was unmeasured — it is that a point tolerating
+    1e-1 on every parameter and a point tolerating less than 1e-5 on four of five both print "CREDIBLE WALK",
+    four orders of magnitude apart, with nothing beside them to tell a reader which one they are holding.
+
+    Parameters are listed TIGHTEST FIRST, because the tightest one is the operating constraint: it is the knob
+    a deployment has to pin, and it is what the joint scalar averages away. ``head=False`` gives only that list,
+    for a caller that has already said the joint part in its own words.
+
+    THE SAMPLE SIZES ARE PRINTED. Both halves are small-sample estimates over random perturbation draws, and
+    they can disagree — the grounded authored cat has produced "0.1 jointly" beside "kd 0.001" from the same
+    measurement. Stating ``n`` makes that read as the sampling noise it is, instead of as a contradiction the
+    reader has to resolve by guessing which number to believe.
+    """
+    pp = rob.get("per_param_rel") or {}
+    tight = ", ".join(f"{k} <{min(_ROBUST_LADDER):g}" if v is None else f"{k} {v:g}"
+                      for k, v in sorted(pp.items(), key=lambda kv: (kv[1] is not None, kv[1] or 0.0)))
+    pn = rob.get("per_param_n")
+    tail = f"; per parameter (n={pn} each): {tight}" if tight else ""
+    if not head:
+        return tail.lstrip("; ") if tail else "per-parameter margin not measured"
+    rel, n = rob.get("robustness_rel"), rob.get("n") or _ROBUST_N
+    lead = (f"survives a {rel:g} relative perturbation of all {len(pp) or len(_FIT_PARAMS)} parameters at once "
+            f"({n}/{n} probes)" if rel is not None else
+            f"survives NO perturbation as large as {min(_ROBUST_LADDER):g} in any of {n} probes — one lucky "
+            f"float, not a controller")
+    return lead + tail
 
 
 def fit_gait_for_body(gene, *, deploy_steps: int = _SETTLE_STEPS, search_steps: int = _SETTLE_STEPS,
@@ -601,6 +713,15 @@ def fit_gait_for_body(gene, *, deploy_steps: int = _SETTLE_STEPS, search_steps: 
     * **Nothing is adopted that does not beat the default at the DEPLOY horizon.** That gate lives in
       ``learn_gait_flywheel`` (which also recalls a structural prior and banks the result), never in the search's
       own optimistic score — measured, a cat credible at an 800-step search horizon FELL at 1500.
+
+    THE SEARCH ITSELF IS ROBUSTNESS-AWARE (task #267, 2026-08-06). Every candidate that walks at its own
+    parameters is re-scored across a neighbourhood of relative size ``_SEARCH_ROBUST_REL`` — the sim-to-real
+    tolerance, ~1e-2 — and ranked robust-first, and the credible-early-stop fires only for a candidate whose
+    perturbed copies walk too. That closes the loop the two paragraphs below only annotated: ranking winners by
+    sturdiness AFTER the fact cannot help if the only winner the optimiser ever produces is a spike, and a
+    single-rollout objective produces spikes by construction, because a spike is what the maximum of a rough
+    function looks like. MEASURED before -> after on the grounded authored cat, whose adopted point was 0/8 at
+    both 1e-2 and 1e-3: see the task #267 report for the per-body table and the cost.
 
     STURDINESS LEADS THE RANKING, and a FRAGILE WIN DOES NOT END THE SEARCH. Until 2026-08-02 this stopped at
     the first draw the horizon called credible, measured its robustness, and shipped it either way — so the
@@ -701,6 +822,7 @@ def fit_gait_for_body(gene, *, deploy_steps: int = _SETTLE_STEPS, search_steps: 
             _stash(gene, out)
             return _remember(_ckey, gene, out)
         n_evals = 0
+        n_rollouts = 1                                   # the default-gait probe above is already one rollout
         learned: dict = {}
         best: dict = {}
         attempts = max(1, int(seed_restarts))
@@ -714,6 +836,7 @@ def fit_gait_for_body(gene, *, deploy_steps: int = _SETTLE_STEPS, search_steps: 
             learned, n_try = _one_search(gene, db=db, bank=bank, warm_evals=warm_evals, max_evals=max_evals,
                                          out=out, kw=kw)
             n_evals += n_try
+            n_rollouts += int(learned.get("n_rollouts_attempt") or learned.get("n_rollouts") or 0)
             if not learned.get("beats_default"):
                 continue
             _ensure_margin(gene, learned, deploy_steps)
@@ -725,8 +848,10 @@ def fit_gait_for_body(gene, *, deploy_steps: int = _SETTLE_STEPS, search_steps: 
         learned = best or learned
         out["searched"] = True
         out.update({k: learned.get(k) for k in ("forward_m", "n_evals", "stopped_reason", "beats_default",
-                                                "credible", "survived", "reused_prior", "banked_skill")})
+                                                "credible", "survived", "reused_prior", "banked_skill",
+                                                "search_robust_frac", "search_robust_rel")})
         out["n_evals"] = n_evals
+        out["n_rollouts"] = n_rollouts
         if learned.get("beats_default"):
             # STORE WHAT WAS VERIFIED. This used to round to 4 decimals on the way into the cache, so the body
             # deployed a controller the fitter had never measured. MEASURED 2026-08-01 on the grounded authored
@@ -753,28 +878,36 @@ def fit_gait_for_body(gene, *, deploy_steps: int = _SETTLE_STEPS, search_steps: 
             # merely annotate the result. A verdict with no robustness number cannot distinguish a controller
             # from one lucky float, and this fitter has shipped both under the same two words.
             _ensure_margin(gene, learned, deploy_steps)
-            rob = {"robustness_rel": learned.get("robustness_rel"),
-                   "probes": learned.get("robustness_probes") or {}}
+            rob = dict(learned.get("robustness") or
+                       {"robustness_rel": learned.get("robustness_rel"),
+                        "probes": learned.get("robustness_probes") or {},
+                        "per_param_rel": learned.get("robustness_per_param")})
             out["robustness_rel"] = rob["robustness_rel"]
             out["robustness_probes"] = rob["probes"]
+            # THE PER-PARAMETER ERROR BAR, which is the half of this that a reader can act on: it is what
+            # separates "this body walks, keep its step frequency within 10%" from "this body walks, and one
+            # part in 10^5 of step frequency rolls it over". Both used to print CREDIBLE WALK and nothing else.
+            out["robustness_per_param"] = rob["per_param_rel"]
+            out["robustness_note"] = margin_sentence(rob)
             out["fragile"] = rob["robustness_rel"] is None
             md = dict(getattr(gene, "metadata", None) or {})
             md["gait_params"] = params
             gene.metadata = md
             out["adopted"] = True
             out["params"] = params
-            _rob = (f"survives {rob['robustness_rel']:g} relative perturbation of every parameter"
-                    if rob["robustness_rel"] is not None else
+            _rob = (margin_sentence(rob) if rob["robustness_rel"] is not None else
                     f"is FRAGILE — no perturbed copy of it survives even a {min(_ROBUST_LADDER):g} relative "
                     f"change ({rob['probes']}), a sturdier point was looked for over "
-                    f"{out.get('seed_attempts')} seed attempt(s) and not found, and it is NOT banked for reuse")
-            out["reason"] = (f"searched {n_evals} gaits for this body over {out.get('seed_attempts')} seed "
-                             f"attempt(s); adopted one that is still walking at step {deploy_steps} "
-                             f"({out['confirm_forward_m']} m, rate {_rate_str(confirm)}) vs the default's "
-                             f"{out['default_forward_m']} m; it {_rob}")
+                    f"{out.get('seed_attempts')} seed attempt(s) and not found, and it is NOT banked for reuse "
+                    f"({margin_sentence(rob, head=False)})")
+            out["reason"] = (f"searched {n_evals} gaits ({n_rollouts} physics rollouts) for this body over "
+                             f"{out.get('seed_attempts')} seed attempt(s); adopted one that is still walking at "
+                             f"step {deploy_steps} ({out['confirm_forward_m']} m, rate {_rate_str(confirm)}) vs "
+                             f"the default's {out['default_forward_m']} m; it {_rob}")
         else:
-            out["reason"] = (f"searched {n_evals} gaits for this body over {out.get('seed_attempts')} seed "
-                             f"attempt(s); none was still walking at the {deploy_steps}-step horizon")
+            out["reason"] = (f"searched {n_evals} gaits ({n_rollouts} physics rollouts) for this body over "
+                             f"{out.get('seed_attempts')} seed attempt(s); none was still walking at the "
+                             f"{deploy_steps}-step horizon")
     except Exception as exc:  # noqa: BLE001 - fitting an op-point must never BLOCK a build...
         # ...but it must never masquerade as one either. A swallowed KeyError used to return in 0 s looking
         # exactly like "searched, adopted nothing", so a crash read as a considered decline — the same artefact
@@ -809,6 +942,10 @@ def _ensure_margin(gene, learned: dict, steps: int) -> float | None:
         rob = robustness_margin(gene, learned.get("params") or {}, steps=steps)
         learned["robustness_rel"] = rob["robustness_rel"]
         learned["robustness_probes"] = rob["probes"]
+        learned["robustness_per_param"] = rob.get("per_param_rel")
+        learned["robustness_note"] = margin_sentence(rob)
+        learned["robustness"] = dict(rob)
+        learned["n_rollouts_margin"] = int(rob.get("n_rollouts") or 0)
     return learned.get("robustness_rel")
 
 
@@ -853,6 +990,7 @@ def _one_search(gene, *, db, bank: bool, warm_evals: int, max_evals: int, out: d
     """
     learned = _open_db_and_learn(gene, db=db, bank=bank, max_evals=warm_evals, **kw)
     n_evals = int(learned.get("n_evals") or 0)
+    rollouts = int(learned.get("n_rollouts") or 0)
     # A FRAGILE WIN COUNTS AS AN EMPTY ONE HERE. The warm pass can end in 1 evaluation because the recalled
     # prior IS the answer — and MEASURED 2026-08-02 on the grounded authored cat, the prior the bank held was
     # 0/8 robust and falls at step 8754, so "won at evaluation 1 in 3 s" was the corpus handing back a fall it
@@ -870,12 +1008,17 @@ def _one_search(gene, *, db, bank: bool, warm_evals: int, max_evals: int, out: d
         # the budget, which is why it is no longer conditional on one having been recalled.
         cold = _open_db_and_learn(gene, db=db, bank=bank, max_evals=max_evals, recall=False, **kw)
         n_evals += int(cold.get("n_evals") or 0)
+        rollouts += int(cold.get("n_rollouts") or 0)
         if learned.get("reused_prior"):
             out["prior_screened_out"] = True
         if cold.get("beats_default"):
             _ensure_margin(gene, cold, int(kw["deploy_steps"]))
         if _rank(cold) > _rank(learned):     # sturdiness first; see ``_rank`` for why distance cannot lead
             learned = cold
+    # BOTH passes' physics, not just the winner's: this is what the attempt COST, which is the number a caller
+    # deciding whether it can afford robustness-aware search needs. Each pass's own count already includes the
+    # margin ladder it paid for, so this is not double-counted.
+    learned["n_rollouts_attempt"] = rollouts
     return learned, n_evals
 
 
