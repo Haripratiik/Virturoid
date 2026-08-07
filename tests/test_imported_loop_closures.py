@@ -74,6 +74,11 @@ def _source_connect_count(path: str) -> int:
     return sum(1 for e in range(int(m.neq)) if int(m.eq_type[e]) == int(mujoco.mjtEq.mjEQ_CONNECT))
 
 
+def _twin_connect_count(m) -> int:
+    import mujoco
+    return sum(1 for e in range(int(m.neq)) if int(m.eq_type[e]) == int(mujoco.mjtEq.mjEQ_CONNECT))
+
+
 def _imported(rel: str):
     from virturoid.services.robot_import import import_robot
     out = import_robot(_src(rel), robot_id=f"loops_{Path(rel).parent.name}")
@@ -97,16 +102,24 @@ def _twin(gene, *, with_loops: bool = True):
 # ------------------------------------------------------------------------------- neq: source vs twin
 @pytest.mark.parametrize("rel", _CONNECT_PACKAGES)
 def test_the_twins_neq_matches_the_source(rel):
-    """The whole defect in one assertion, across every Menagerie package that declares a <connect>."""
+    """The whole defect in one assertion, across every Menagerie package that declares a <connect>.
+
+    Counted per KIND, not as one total: the twin also carries `<equality><joint>` couplings now (see
+    tests/test_imported_coupled_joints.py), so a bare ``neq ==`` would pass while the loops silently vanished
+    and an equal number of couplings appeared in their place.
+    """
     want = _source_connect_count(_src(rel))
     assert want > 0, f"premise gone: {rel} no longer declares any <connect>"
     out = _imported(rel)
     gene = out["gene"]
     assert len(gene.loop_closures) == want, (
         f"{rel}: source declares {want} <connect>, the gene carries {len(gene.loop_closures)}")
-    assert int(_twin(gene).neq) == want, (
-        f"{rel}: the compiled twin carries {int(_twin(gene).neq)} equality constraints against the source's "
-        f"{want} — the loops did not survive to the model")
+    m = _twin(gene)
+    assert _twin_connect_count(m) == want, (
+        f"{rel}: the compiled twin carries {_twin_connect_count(m)} <connect> against the source's {want} — "
+        f"the loops did not survive to the model")
+    assert int(m.neq) == want + len(gene.coupled_joints), (
+        f"{rel}: twin neq {int(m.neq)} != {want} loop(s) + {len(gene.coupled_joints)} coupling(s)")
     assert out["valid"], f"{rel}: reading the loops made the gene invalid: {out['warnings']}"
 
 
@@ -232,13 +245,16 @@ def test_the_loops_are_disclosed_in_the_import_warnings():
     assert "closed kinematic loop" in ws and "left-plantar-rod<->left-foot" in ws, ws
 
 
-def test_a_joint_equality_is_reported_not_silently_dropped():
-    """24 of the 37 Menagerie models that declare equalities declare ONLY ``<equality><joint>`` — a coupled
-    (mimic) DOF, which a RobotGene cannot express at all. Dropping it is a loss; dropping it silently is the
-    defect. The Panda's hand couples its two fingers exactly this way."""
-    ws = " ".join(_imported("franka_emika_panda/panda.xml")["warnings"])
-    assert "cannot model" in ws and "<joint>" in ws, ws
-    assert "move independently" in ws, ws
+def test_a_joint_equality_a_gene_CANNOT_model_is_reported_not_silently_dropped():
+    """The honesty half, now that most couplings ARE carried (tests/test_imported_coupled_joints.py).
+
+    What remains unmodellable is a coupling whose two joints sit on the SAME body: a gene segment models one
+    joint, so a multi-DOF link has nowhere to put the second. iit_softfoot is the whole of that class in the
+    corpus — 45 of them — and it must say so rather than drop them in silence.
+    """
+    ws = " ".join(_imported("iit_softfoot/softfoot.xml")["warnings"])
+    assert "not carried" in ws, ws
+    assert "SAME body" in ws, ws
 
 
 def test_a_connect_restating_a_parent_child_edge_is_refused_with_a_reason():

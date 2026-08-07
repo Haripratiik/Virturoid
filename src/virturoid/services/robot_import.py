@@ -696,15 +696,17 @@ def _import_robot_uncached(source: str, *, robot_id: str | None = None, species:
                             f"chose {ee_name!r} — set the correct one if wrong.")
 
     robot_class = _infer_class(segments, roots, mj, name_of)
-    # THE LOOPS ARE PART OF THE MACHINE (see _source_loop_closures). Read before the gene is built so they are
-    # on it from the start and `validate()` below rules on them like any other field.
-    loop_closures = _source_loop_closures(mj, mujoco, body_name, _rot_by_id, warnings)
+    # THE CONSTRAINTS ARE PART OF THE MACHINE (see _source_equalities). Read before the gene is built so they
+    # are on it from the start and `validate()` below rules on them like any other field.
+    loop_closures, coupled_joints = _source_equalities(
+        mj, mujoco, body_name, _rot_by_id, segments, warnings)
     gene = RobotGene(
         id=robot_id or "imported_robot",
         species=species or f"{robot_class}.imported",
         robot_class=robot_class,
         segments=segments,
         loop_closures=loop_closures,
+        coupled_joints=coupled_joints,
         # a robot that MOVES needs a FREE (floating 6-DOF) base, not a welded one -- "floor"/"table" weld the base
         # to the world so the body cannot translate at all (the compiled model has no base joint, and every gait
         # rolls out to 0 forward). A manipulator stays table-mounted. The set is shared with anatomy_compiler:
@@ -998,8 +1000,46 @@ def _source_joint_dynamics(mj, j: int) -> dict | None:
             "frictionloss": round(float(mj.dof_frictionloss[adr]), 6)}
 
 
-def _source_loop_closures(mj, mujoco, body_name: dict, rot_by_id: dict, warnings: list[str]) -> list[dict]:
-    """The source model's ``<equality>`` block, as far as a RobotGene can carry it.
+# MuJoCo's own defaults for a constraint's solver reference (mjModel is populated with these when the file
+# says nothing). Matching them is how "the source did not declare a stiffness" is told apart from "the source
+# declared exactly the default" -- in both cases we emit NOTHING and MuJoCo re-applies the same numbers, so the
+# twin never carries a stiffness we invented. See ``gene_compiler._solver_ref_attrs``.
+_MJ_DEFAULT_SOLREF = (0.02, 1.0)
+_MJ_DEFAULT_SOLIMP = (0.9, 0.95, 0.001, 0.5, 2.0)
+
+
+def _source_solver_ref(mj, e: int) -> dict:
+    """``{"solref": [...], "solimp": [...]}`` for equality ``e``, with defaulted entries OMITTED.
+
+    THE SOURCE'S STIFFNESS IS PART OF THE SOURCE'S MACHINE. ``agility_cassie/cassie.xml`` opens its equality
+    block with ``solref="0.005 1"`` -- four times stiffer than MuJoCo's default -- because a four-bar linkage
+    held at the default visibly comes apart. Carrying the ``<connect>`` but not its solver reference imported
+    the topology and dropped the tolerance, and the measured residual said so: 32.83 mm of separation between
+    the plantar rod and the foot over 2000 stepped frames, against 14.82 mm at the source's own number.
+
+    THE RESIDUAL THAT REMAINS IS NOT THIS. Cassie and iit_softfoot still sit at 14.82 / 25.13 mm while their
+    SOURCE models settle to 1.47 / 0.14 mm, and the gap is a SUSTAINED offset from ~0.5 s onward, not an impact
+    transient. Two hypotheses were tested and one survived: our fixed ``timestep`` is NOT the cause (rerunning
+    the twin at Cassie's own 0.0005 s gives 14.83 mm -- no change), while raising the constraint IMPEDANCE
+    collapses it (a diagnostic ``solimp="0.9999 ..."`` takes Cassie to 0.85 mm). So the twin's linkage carries a
+    sustained load the source's does not, and the default impedance yields under it. That is a defect in the
+    reconstructed geometry, NOT a dropped equality parameter -- and Cassie's file declares the DEFAULT solimp,
+    so stiffening it here would be inventing a number the customer never wrote in order to hide a mismatch
+    somewhere else. It stays default, and this comment is the record of why.
+    """
+    out: dict = {}
+    ref = [float(v) for v in mj.eq_solref[e]]
+    imp = [float(v) for v in mj.eq_solimp[e]]
+    if any(abs(a - b) > 1e-12 for a, b in zip(ref, _MJ_DEFAULT_SOLREF)):
+        out["solref"] = [round(v, 8) for v in ref]
+    if any(abs(a - b) > 1e-12 for a, b in zip(imp, _MJ_DEFAULT_SOLIMP)):
+        out["solimp"] = [round(v, 8) for v in imp]
+    return out
+
+
+def _source_equalities(mj, mujoco, body_name: dict, rot_by_id: dict, segments: list,
+                       warnings: list[str]) -> tuple[list[dict], list[dict]]:
+    """The source model's ``<equality>`` block, as far as a RobotGene can carry it: ``(loops, couplings)``.
 
     A CLOSED-LOOP ROBOT WITHOUT ITS LOOPS IS A DIFFERENT MACHINE. Agility's Cassie declares four
     ``<connect>`` constraints -- the plantar rod to the foot and the achilles rod to the heel spring, per leg --
@@ -1007,25 +1047,34 @@ def _source_loop_closures(mj, mujoco, body_name: dict, rot_by_id: dict, warnings
     The importer read the body tree and nothing else, so the twin compiled with ``neq = 0``: the rods swung
     free, the linkage did not exist, and we verified, certified and exported that machine as the customer's.
 
-    Nothing here is new machinery. ``RobotGene.loop_closures`` already models exactly this, ``gene_compiler``
-    already emits ``<connect>`` from it, and ``gene_validation`` already checks ``loop_closures_compiled``
-    against ``m.neq``. This is the READ that was never wired.
+    A ROBOT WITHOUT ITS COUPLINGS IS EQUALLY A DIFFERENT MACHINE, and that is the second half. A Panda's two
+    fingers are ONE gripper DOF, joined by ``<equality><joint>``; so are a Robotiq's two drivers, a Stretch's
+    four telescoping stages, and a ToddlerBot's nine geared pairs. Those were disclosed-but-dropped, which left
+    a twin whose gripper can open one jaw.
 
-    Two frames have to be reconciled, the same pair the rest of this importer reconciles:
+    Two frames have to be reconciled for a ``<connect>``, the same pair the rest of this importer reconciles:
       * MJCF's ``anchor`` is in **body1's own frame**; a segment's frame is the LINK frame, whose +z runs
         along the link axis (see ``_link_vector``). So the anchor is rotated by ``S^T`` like every other
         vector this importer carries across.
       * A ``<connect>`` may name SITES rather than bodies (both ToddlerBots do). Then the anchor is the
         site's position on its body and ``eq_data`` is zero, so the site has to be resolved to its body.
 
-    Everything the gene CANNOT model is reported instead of dropped in silence. ``<equality><joint>`` -- a
-    coupled/mimic DOF, which is what a Robotiq or Panda gripper uses to slave one finger to the other -- has no
-    representation in a RobotGene at all, and 24 of the 37 Menagerie models that declare equalities declare
-    only that kind. Saying so is the difference between a lossy import and a wrong one.
+    A ``<joint>`` equality needs a third reconciliation, between JOINTS and SEGMENTS. A gene segment models
+    exactly one joint -- the one attaching it to its parent, which ``_joint_for_body`` picks as the body's
+    FIRST -- and the compiler names it ``<segment>_joint``. So a coupling is carryable only when each of its
+    two joints is its own body's first, the two bodies differ, and both survived as segments that actually have
+    a joint. Measured over the corpus that is 51 of the 96 ``<joint>`` equalities and 18 of the 19 packages
+    that declare one; the 45 that remain are all iit_softfoot's, where both coupled joints sit on the SAME
+    body (a multi-DOF link a one-joint segment cannot represent).
+
+    Everything the gene still CANNOT model is reported instead of dropped in silence -- a higher-degree
+    ``polycoef``, a coupling that pins one DOF to a constant, a ``<weld>``/``<tendon>``/``<flex>`` equality.
+    Saying so is the difference between a lossy import and a wrong one.
     """
     import numpy as np
 
     CONNECT = int(mujoco.mjtEq.mjEQ_CONNECT)
+    JOINT = int(mujoco.mjtEq.mjEQ_JOINT)
     SITE = int(mujoco.mjtObj.mjOBJ_SITE)
     _TYPE = {int(getattr(mujoco.mjtEq, n)): n.replace("mjEQ_", "").lower()
              for n in dir(mujoco.mjtEq) if n.startswith("mjEQ_")}
@@ -1033,18 +1082,55 @@ def _source_loop_closures(mj, mujoco, body_name: dict, rot_by_id: dict, warnings
     if active0 is None:
         active0 = getattr(mj, "eq_active", None)
 
+    first_joint_of: dict[int, int] = {}
+    for j in range(int(getattr(mj, "njnt", 0))):
+        first_joint_of.setdefault(int(mj.jnt_bodyid[j]), j)
+    jointed = {s.name for s in segments if s.joint_type in ("revolute", "prismatic")}
+
     loops: list[dict] = []
+    couplings: list[dict] = []
     unmodelled: dict[str, int] = {}
     skipped: list[str] = []
     for e in range(int(getattr(mj, "neq", 0))):
         et = int(mj.eq_type[e])
-        if et != CONNECT:
+        if et not in (CONNECT, JOINT):
             k = _TYPE.get(et, str(et))
             unmodelled[k] = unmodelled.get(k, 0) + 1
             continue
         if active0 is not None and not int(active0[e]):
-            skipped.append("one <connect> is shipped DISABLED (active=\"false\") and was not carried")
+            kind = "connect" if et == CONNECT else "joint"
+            skipped.append(f"one <{kind}> is shipped DISABLED (active=\"false\") and was not carried")
             continue
+
+        if et == JOINT:
+            j1, j2 = int(mj.eq_obj1id[e]), int(mj.eq_obj2id[e])
+            poly = [float(v) for v in mj.eq_data[e][:5]]
+            if j2 < 0:
+                # One joint and a polynomial in nothing: this PINS the DOF to a constant. It is a lock, not a
+                # coupling, and calling it one would hold the joint at a value the design never chose.
+                skipped.append("a <joint> equality pins ONE joint to a constant rather than coupling two")
+                continue
+            if any(abs(v) > 1e-12 for v in poly[2:]):
+                skipped.append("a <joint> equality uses a higher-degree polycoef; a gene coupling is linear "
+                               "(offset + ratio), and truncating the curve would be a different machine")
+                continue
+            b1, b2 = int(mj.jnt_bodyid[j1]), int(mj.jnt_bodyid[j2])
+            n1, n2 = body_name.get(b1), body_name.get(b2)
+            if b1 == b2:
+                skipped.append(f"a <joint> equality couples two joints on the SAME body ({n1!r}); a gene "
+                               "segment models one joint, so a multi-DOF link cannot carry it")
+                continue
+            if first_joint_of.get(b1) != j1 or first_joint_of.get(b2) != j2:
+                skipped.append("a <joint> equality names a joint that is not its body's first; the segment "
+                               "models a different DOF of that link")
+                continue
+            if not n1 or not n2 or n1 not in jointed or n2 not in jointed:
+                skipped.append("a <joint> equality names a link that did not survive as a jointed segment")
+                continue
+            couplings.append({"a": n1, "b": n2, "offset": round(poly[0], 8), "ratio": round(poly[1], 8),
+                              **_source_solver_ref(mj, e)})
+            continue
+
         objtype = int(mj.eq_objtype[e]) if hasattr(mj, "eq_objtype") else -1
         o1, o2 = int(mj.eq_obj1id[e]), int(mj.eq_obj2id[e])
         if objtype == SITE:
@@ -1067,23 +1153,36 @@ def _source_loop_closures(mj, mujoco, body_name: dict, rot_by_id: dict, warnings
             continue
         S = rot_by_id.get(b1)
         local = (np.asarray(S, dtype=float).T @ anchor) if S is not None else anchor
-        loops.append({"a": a, "b": b, "anchor": [round(float(v), 6) for v in local]})
+        loops.append({"a": a, "b": b, "anchor": [round(float(v), 6) for v in local],
+                      **_source_solver_ref(mj, e)})
 
     if loops:
         _pairs = ", ".join(sorted({f"{lc['a']}<->{lc['b']}" for lc in loops})[:4])
+        _stiff = sorted({str(lc["solref"]) for lc in loops if "solref" in lc})
         warnings.append(
             f"{len(loops)} closed kinematic loop(s) were read from the source's <equality><connect> and are "
             f"carried on the gene ({_pairs}{'...' if len(loops) > 4 else ''}). Without them the twin is a "
-            f"DIFFERENT MACHINE — the loop members swing free and the linkage does not exist.")
+            f"DIFFERENT MACHINE — the loop members swing free and the linkage does not exist."
+            + (f" The source's own solver stiffness is carried with them (solref {', '.join(_stiff)})."
+               if _stiff else
+               " The source declares no solref, so MuJoCo's default stiffness applies — as it does for the"
+               " source itself."))
+    if couplings:
+        _pairs = ", ".join(sorted({f"{cj['a']}={cj['ratio']:g}x{cj['b']}" for cj in couplings})[:4])
+        warnings.append(
+            f"{len(couplings)} coupled (mimic/slaved) joint pair(s) were read from the source's "
+            f"<equality><joint> and are carried on the gene ({_pairs}"
+            f"{'...' if len(couplings) > 4 else ''}). These DOF move together, not independently — a gripper "
+            f"whose two fingers are one DOF opens as one jaw pair, not two.")
     for msg in dict.fromkeys(skipped):
         warnings.append(f"equality constraint not carried: {msg}.")
     if unmodelled:
         _kinds = ", ".join(f"{n}x <{k}>" for k, n in sorted(unmodelled.items()))
         warnings.append(
             f"the source declares {sum(unmodelled.values())} equality constraint(s) a RobotGene cannot model "
-            f"({_kinds}) and they were NOT carried. A <joint> equality couples two DOF (a mimic/slaved gripper "
-            f"finger); the twin's corresponding joints move independently.")
-    return loops
+            f"({_kinds}) and they were NOT carried. A <weld> pins two bodies rigidly and a <tendon> constrains "
+            f"a routed length; the twin's corresponding parts move independently.")
+    return loops, couplings
 
 
 def _joint_for_body(mj, body_id, jnts_of, jnt_force, bname, warnings):

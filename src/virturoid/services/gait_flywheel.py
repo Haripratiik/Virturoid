@@ -309,7 +309,24 @@ _DEFAULT_GAIT = {"freq": 1.5, "hip_amp": 0.9, "knee_amp": 1.0, "kp": 32.0, "kd":
 #: candidate that is already credible at its own parameters pays for probes at all (measured on the cat, 2 of
 #: 97). A knife edge is a knife edge: it does not need four probes to be caught, and the adopted point is
 #: re-measured afterwards on the full ``_ROBUST_LADDER`` at ``_ROBUST_N`` with HELD-OUT draws anyway.
-_SEARCH_ROBUST_REL = 1e-2
+#: *** DEFAULTED OFF: THE ROBUSTNESS-AWARE SEARCH WAS MEASURED AND IT DOES NOT WORK. *** Controlled A/B, 3 base
+#: seeds x seed_restarts=3 per arm per body, max_evals=96, search_steps=deploy_steps=6000, arm OFF = this set to
+#: None (documented at ``search_gait`` as restoring the pre-337f44a single-rollout search exactly):
+#:     adoptions          6/15 -> 8/15   (it adopts MORE, which reads like a win and is not one)
+#:     STURDY adoptions   4/6 = 67%  ->  5/8 = 63%   -- the sturdy FRACTION got WORSE
+#:     wall clock         +24% overall, +62% on the dog
+#:     hexapod            winners BYTE-IDENTICAL across both arms on all 3 seeds -- zero effect
+#: Both extra adoptions are fragile, and the dog's seed-202 winner was adopted with its own in-search screen
+#: reading ``search_robust_frac: "0/2"``. A search that reports zero-of-two robust and adopts anyway is not
+#: selecting for robustness. The reported margin does not predict either: on cat/202 it moved 0.01 -> 0.001,
+#: i.e. the disclosed number got WORSE while the point was still adopted.
+#: The MACHINERY is kept (pass ``robust_rel=`` explicitly) because the measurement is worth reproducing and the
+#: neighbourhood scoring is correct in itself -- what is refuted is that scoring a 2-probe neighbourhood at the
+#: END of a CEM whose population already collapsed can find a robust basin the search never visited.
+#: [[knife-edge-optima]]: the fitter's point is strictly dominated by one that is 30% FASTER and 12x more
+#: robust, and REACHABILITY is the binding constraint -- 96 evals yield 2 credible candidates of 97 at one seed
+#: and zero at two others. A different SAMPLING strategy is the open lead, not a different ranking rule.
+_SEARCH_ROBUST_REL = None
 _SEARCH_ROBUST_N = 2
 
 #: The perturbation draws the REPORTED margin is measured on. Deliberately unrelated to the ones ``search_gait``

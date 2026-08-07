@@ -89,9 +89,34 @@ class RobotGene:
     # instead HANG several of them, which have no visited-set guard (gait_flywheel._leg_count,
     # morphology_composer, heldout_set, grounded_physics, robot_probe, structural_validation).
     #
-    # Each entry: {"a": segment, "b": segment, "anchor": [x, y, z] | None}. The anchor is the meeting point in
-    # `a`'s local frame; omitted, it is a's tip.
+    # Each entry: {"a": segment, "b": segment, "anchor": [x, y, z] | None, "solref": [d, w] | None,
+    # "solimp": [dmin, dmax, width, mid, power] | None}. The anchor is the meeting point in `a`'s local frame;
+    # omitted, it is a's tip.
+    #
+    # `solref`/`solimp` are the SOLVER REFERENCE of this constraint — how stiffly the solver is asked to hold
+    # the two anchors together. They belong on the loop and not in the compiler because they are the SOURCE's
+    # number when the body was imported: Cassie ships `<equality solref="0.005 1"/>`, four times stiffer than
+    # MuJoCo's 0.02 default, and a four-bar linkage compiled at the softer default visibly separates at the
+    # joint under load. Omitted (None) means "the source did not say", and the compiler emits nothing so
+    # MuJoCo's own default applies — never a number we invented.
     loop_closures: list[dict] = field(default_factory=list)
+    # COUPLED (mimic/slaved) DOF: one joint driven as a linear function of another.
+    #
+    # A Panda's two fingers are ONE gripper DOF, not two; a Robotiq 2F-85's right driver mirrors its left; a
+    # Stretch's four telescoping arm stages extend as one. MuJoCo writes this as `<equality><joint>`, and
+    # 96 of the constraints in the Menagerie corpus are of that kind. With no representation for it the twin's
+    # fingers moved independently — a gripper that opens one jaw is not the customer's gripper.
+    #
+    # Like `loop_closures` this is a TOP-LEVEL constraint list rather than a field on GeneSegment, for the same
+    # reason: it relates two segments without making `segments` anything other than a tree.
+    #
+    # Each entry: {"a": segment, "b": segment, "ratio": float, "offset": float, "solref": ..., "solimp": ...}.
+    # `a` is the DRIVEN joint and `b` the driver, and the relation is the one MuJoCo solves:
+    #     q_a = offset + ratio * q_b
+    # (MuJoCo's `polycoef` is a 5th-order polynomial; every coupling in the corpus is degree 1, and a
+    # higher-degree one is reported as unmodellable rather than truncated.) Both segments must carry a real
+    # joint — the compiler names joints `<segment>_joint`, so a welded segment has no joint to couple.
+    coupled_joints: list[dict] = field(default_factory=list)
     metadata: dict = field(default_factory=dict)
 
     # ---- tree helpers -------------------------------------------------------
@@ -161,6 +186,32 @@ class RobotGene:
             elif frozenset((a, b)) in _tree_edges:
                 issues.append(f"loop_closure {i} joins {a!r} and {b!r}, which are already parent and child")
 
+        # A coupling names two segments that each carry a REAL joint. The compiler emits joints as
+        # `<segment>_joint` and emits none at all for a weld, so a coupling onto a welded segment names a joint
+        # MuJoCo does not have and the whole model fails to compile — a loud failure, but at build time, far
+        # from the design that caused it. And a ratio of zero is not a coupling: it pins the driven joint to a
+        # constant, which is a different constraint than the one this field claims to model.
+        _jointed = {s.name for s in self.segments if s.joint_type in ("revolute", "prismatic")}
+        for i, cj in enumerate(self.coupled_joints or []):
+            a, b = (cj or {}).get("a"), (cj or {}).get("b")
+            if a not in _names or b not in _names:
+                issues.append(f"coupled_joint {i} joins {a!r} and {b!r}; both must be existing segments")
+            elif a == b:
+                issues.append(f"coupled_joint {i} couples {a!r} to itself")
+            elif a not in _jointed or b not in _jointed:
+                _weld = a if a not in _jointed else b
+                issues.append(f"coupled_joint {i} couples {a!r} and {b!r}, but {_weld!r} has no joint to couple")
+            else:
+                try:
+                    _ratio = float((cj or {}).get("ratio", 1.0))
+                    float((cj or {}).get("offset", 0.0) or 0.0)
+                except (TypeError, ValueError):
+                    issues.append(f"coupled_joint {i} has a non-numeric ratio/offset")
+                else:
+                    if _ratio == 0.0 or _ratio != _ratio or abs(_ratio) == float("inf"):
+                        issues.append(f"coupled_joint {i} has ratio {_ratio!r}; a coupling ratio must be finite "
+                                      "and non-zero")
+
         ees = [s for s in self.segments if s.is_end_effector]
         if len(ees) != 1:
             issues.append(f"exactly one segment must be the end effector, found {len(ees)}")
@@ -182,6 +233,7 @@ class RobotGene:
             # Round-trips, because the species tree persists genes through here — a field that vanishes on
             # to_dict is a field the flywheel silently loses.
             "loop_closures": [dict(lc) for lc in (self.loop_closures or [])],
+            "coupled_joints": [dict(cj) for cj in (self.coupled_joints or [])],
             "metadata": dict(self.metadata),
             "segments": [
                 {"name": s.name, "parent": s.parent, "shape": s.shape, "length_m": s.length_m,
@@ -206,6 +258,7 @@ class RobotGene:
             design_source=str(d.get("design_source", "unknown")),
             composition_notes=list(d.get("composition_notes", [])),
             loop_closures=[dict(lc) for lc in (d.get("loop_closures") or [])],
+            coupled_joints=[dict(cj) for cj in (d.get("coupled_joints") or [])],
             metadata=dict(d.get("metadata", {})),
             segments=[
                 GeneSegment(
@@ -242,6 +295,14 @@ def amend_gene(
     This is how a new customer's robot reuses an existing species: keep the parent body,
     override only what differs (scale a link, swap the end effector, add/remove a segment).
     ``segment_overrides`` maps segment name -> field overrides (e.g. {"length_m": 0.4}).
+
+    THE PARENT'S CONSTRAINTS COME WITH THE PARENT'S BODY. An amend that kept the segments but dropped
+    ``loop_closures``/``coupled_joints`` turned a closed-loop machine back into an open one and a one-DOF
+    gripper back into two, quietly, at the exact op a customer reaches for most (``design_critic``'s
+    ``add_parallel_gripper`` amends an imported arm). They are carried, FILTERED to what the amended body can
+    still satisfy: a constraint naming a segment this amend removed -- or one whose joint an override turned
+    into a weld -- is dropped, because keeping it would make every such amend raise on ``validate()`` instead
+    of amending.
     """
     removed = set(remove_segments or [])
     segments: list[GeneSegment] = []
@@ -251,6 +312,13 @@ def amend_gene(
         ov = (segment_overrides or {}).get(s.name)
         segments.append(replace(s, **ov) if ov else replace(s))
     segments.extend(add_segments or [])
+
+    _live = {s.name for s in segments}
+    _jointed = {s.name for s in segments if s.joint_type in ("revolute", "prismatic")}
+    _loops = [dict(lc) for lc in (parent.loop_closures or [])
+              if (lc or {}).get("a") in _live and (lc or {}).get("b") in _live]
+    _coupled = [dict(cj) for cj in (parent.coupled_joints or [])
+                if (cj or {}).get("a") in _jointed and (cj or {}).get("b") in _jointed]
     return RobotGene(
         id=new_id,
         species=species,
@@ -259,5 +327,7 @@ def amend_gene(
         parent_species=parent.species,
         base_mount=base_mount or parent.base_mount,
         end_effector_type=end_effector_type or parent.end_effector_type,
+        loop_closures=_loops,
+        coupled_joints=_coupled,
         metadata={**parent.metadata, **(metadata or {}), "amended_from": parent.id},
     )
