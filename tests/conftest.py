@@ -5,11 +5,45 @@ tests, so a configured OpenAI/Claude/local backend can't leak into the offline,
 deterministic test expectations. Set before any virturoid import resolves a backend.
 """
 
+import atexit
 import os
+import shutil
+import tempfile
 
 import pytest
 
 os.environ.setdefault("VIRTUROID_NO_LOCAL_ENV", "1")
+
+# ---------------------------------------------------------------- the suite is not a writer to the real bank
+#
+# MEASURED 2026-08-07: running pytest grew ``build/memory/virturoid_memory.db`` from 97 to 101 locomotion
+# rows, and four rows in that bank carry the body class ``totally_made_up_xyz`` -- a fixture name from
+# ``tests/test_structural_dispatch.py``. Nothing was misbehaving: the suite calls ``verify_robot``, which
+# calls ``_auto_bank_gait``, which banks. The path was simply a constant, so every run banked into the
+# developer's own memory.
+#
+# The reason that matters more than tidiness: THE BANK IS THE THING WE MEASURE. The evidence gates, the
+# fragility re-measurement and the hint-mining runs all read it, so a suite that writes to it is a suite
+# editing its own evidence -- and fixture rows were being counted as observations in an analysis of whether
+# the flywheel has any signal at all. It is also the shared state that makes two concurrent suites corrupt
+# each other.
+#
+# Set here, at conftest import, because pytest imports conftest before any test module and therefore before
+# any virturoid module binds ``DEFAULT_DB_PATH`` / ``DEFAULT_MEMORY_DIR``. An autouse fixture would be too
+# late for those import-time bindings.
+#
+# The session bank starts EMPTY rather than as a copy of the developer's. A test that needs banked rows
+# should bank them itself: depending on whatever a particular machine has accumulated is not reproducible,
+# and a green suite that silently requires 101 local rows is not evidence of anything.
+_SESSION_MEMORY_DIR = tempfile.mkdtemp(prefix="virturoid-test-memory-")
+os.environ.setdefault("VIRTUROID_MEMORY_DIR", _SESSION_MEMORY_DIR)
+
+
+@atexit.register
+def _drop_session_memory_dir() -> None:
+    # Only ever the directory this process created, and only if it is still the one in force.
+    if os.environ.get("VIRTUROID_MEMORY_DIR") == _SESSION_MEMORY_DIR:
+        shutil.rmtree(_SESSION_MEMORY_DIR, ignore_errors=True)
 # Production builds are LLM-first and fail closed when no design model is
 # configured.  Tests exercise the explicitly supported offline compatibility
 # lane instead of silently depending on that production fallback.

@@ -210,7 +210,10 @@ def _link_mesh_stem(body_name: str, claimed: dict[str, str]) -> str:
     return stem
 
 
-def _bake_source_mesh(mj, body_id: int, S, out_path) -> bool:
+_STL_MAX_FACES = 200000        # MuJoCo's own stl_decoder ceiling; over it the model is rejected outright
+
+
+def _bake_source_mesh(mj, body_id: int, S, out_path, *, notes: list | None = None, label: str = "") -> bool:
     """Write THIS body's own mesh geoms, transformed into our LINK frame, as one binary STL (millimetres).
 
     The importer builds two lanes: a FAITHFUL one that keeps the customer's MJCF + meshes, and an EDITABLE
@@ -242,6 +245,22 @@ def _bake_source_mesh(mj, body_id: int, S, out_path) -> bool:
     if not tris:
         return False
     T = np.concatenate(tris, axis=0)
+    # MUJOCO'S STL DECODER REFUSES A MESH OVER 200 000 FACES, AND IT REFUSES THE WHOLE MODEL WITH IT. A link's
+    # baked STL is the WELD of every mesh geom on that body, so a body carrying several dense visual meshes can
+    # clear the cap even when no single source mesh does: measured on Menagerie's apptronik_apollo, `torso_link`
+    # welds to 201 358 triangles (150 000 + 51 358) and the twin then failed to compile at all -- not
+    # "the torso looks wrong", but `decoder failed for mesh file ... torso_link.stl` taking down a 37-segment
+    # humanoid. Truncate rather than emit a file MuJoCo will reject, and SAY SO: this drops geometry, and a
+    # customer whose torso is missing its last shroud is owed the reason. Truncation, not a uniform stride --
+    # these triangles are a SOUP, not an indexed mesh, so striding them halves the density everywhere and the
+    # link renders see-through, while truncating keeps whole sub-meshes intact in the order they were welded.
+    if len(T) > _STL_MAX_FACES:
+        if notes is not None:
+            notes.append(f"link {label!r} welds {len(T)} mesh triangles, over MuJoCo's {_STL_MAX_FACES}-face "
+                         f"STL decoder ceiling; the baked visual mesh was truncated to {_STL_MAX_FACES}. The "
+                         f"collider and all kinematics are unaffected — this is the drawn surface only, and "
+                         f"the untouched original is in the faithful native lane.")
+        T = T[:_STL_MAX_FACES]
     # ATOMIC: build the whole STL beside the target and rename it into place. A binary STL declares its triangle
     # count in the header, so a reader that opens one mid-write sees a length that disagrees with the file size
     # and MuJoCo rejects it outright -- taking down the entire model, not just this link. Writing in place made
@@ -410,6 +429,10 @@ def _snapshot_import(out: dict) -> dict:
         "backend_support": copy.deepcopy(out.get("backend_support") or {}),
         "species": out.get("species"), "robot_class": out.get("robot_class"),
         "valid": bool(out.get("valid")),
+        # The simulability verdict is part of the RESULT, not a side effect: a memoized import that dropped it
+        # would hand the second caller a twin marked simulable that was never simulated.
+        "simulable": bool(out.get("simulable", True)),
+        "simulation_check": copy.deepcopy(out.get("simulation_check") or {}),
     }
 
 
@@ -423,13 +446,18 @@ def _restore_import(snap: dict) -> dict:
         "backend_support": copy.deepcopy(snap.get("backend_support") or {}),
         "species": snap.get("species"), "robot_class": snap.get("robot_class"),
         "valid": bool(snap.get("valid")),
+        "simulable": bool(snap.get("simulable", True)),
+        "simulation_check": copy.deepcopy(snap.get("simulation_check") or {}),
     }
 
 
 def import_robot(source: str, *, robot_id: str | None = None, species: str | None = None) -> dict:
     """Import a URDF/MJCF (file path or XML string) into a RobotGene.
 
-    Returns ``{"gene", "warnings", "backend_support", "species", "robot_class", "valid"}``.
+    Returns ``{"gene", "warnings", "backend_support", "species", "robot_class", "valid", "simulable",
+    "simulation_check"}``. ``valid`` is true only when the gene passes schema validation AND the compiled twin
+    survives a bounded settle + excitation without going non-finite (see ``_simulability_probe``); ``simulable``
+    and ``simulation_check`` say which of the two failed and why.
     Needs MuJoCo. Raises only if the source can't be parsed at all (with a clear message).
 
     Memoized ONLY under ``VIRTUROID_IMPORT_CACHE=1`` (see the block above); otherwise every call does the full
@@ -467,6 +495,8 @@ def _import_robot_uncached(source: str, *, robot_id: str | None = None, species:
     if "<xacro:" in _text or "${" in _text or _is_xacro_suffix:
         return {
             "gene": None, "backend_support": {}, "species": None, "robot_class": None, "valid": False,
+            "simulable": False,
+            "simulation_check": {"ok": False, "checked": False, "reason": "no gene was produced"},
             "warnings": ["this is a xacro template with unexpanded macros (${...} / <xacro:...>), not a loadable "
                          "URDF. Expand it first: `ros2 run xacro xacro robot.urdf.xacro > robot.urdf` (or "
                          "`rosrun xacro xacro`), then import the generated .urdf."],
@@ -492,6 +522,8 @@ def _import_robot_uncached(source: str, *, robot_id: str | None = None, species:
             pass
         return {
             "gene": None, "backend_support": {}, "species": None, "robot_class": None, "valid": False,
+            "simulable": False,
+            "simulation_check": {"ok": False, "checked": False, "reason": "no gene was produced"},
             "warnings": ["this is an MJCF INCLUDE FRAGMENT, not a standalone model: it has a <mujoco> root but "
                          "declares no <body>, so it only contributes keyframes/assets/defaults to a parent model "
                          "that <include>s it. Import the model file instead." + _sibling],
@@ -647,7 +679,7 @@ def _import_robot_uncached(source: str, *, robot_id: str | None = None, species:
         _geo = None
         if _mesh_dir is not None:
             _fp = _mesh_dir / f"{_link_mesh_stem(bname, _mesh_stems)}.stl"
-            if _bake_source_mesh(mj, i, _S, _fp):
+            if _bake_source_mesh(mj, i, _S, _fp, notes=warnings, label=bname):
                 _geo = {"family": "source_mesh", "path": str(_fp.resolve()).replace("\\", "/"),
                         "provenance": "customer_import"}
         segments.append(GeneSegment(
@@ -664,25 +696,56 @@ def _import_robot_uncached(source: str, *, robot_id: str | None = None, species:
     # likewise merged into the world on reload).
     root_segs = [s for s in segments if s.parent is None]
     if len(root_segs) != 1 or any(r.joint_type not in (None, "fixed") for r in root_segs):
+        import numpy as _np
+
         base_name = next((n for n in ("base_link", "imported_base", "base_mount")
                           if not any(s.name == n for s in segments)), "imported_base")
         r0 = root_segs[0] if root_segs else None
+        _BASE_LEN = 0.05
         segments.insert(0, GeneSegment(
-            name=base_name, parent=None, shape="box", length_m=0.05, radius_m=0.04,
+            name=base_name, parent=None, shape="box", length_m=_BASE_LEN, radius_m=0.04,
             mass_kg=max((r0.mass_kg if r0 else 0.1), 0.05), joint_type=None, is_end_effector=False))
+        # A REPARENTED ROOT KEEPS THE POSE IT HAD IN THE SOURCE'S WORLD. A root body's `body_pos`/`body_quat` ARE
+        # its world pose (its parent is the world), and the loop above threw both away — every root got
+        # mount_offset (0,0,0) and mount_euler from S alone — because a gene root's mount is normally
+        # meaningless. Reparenting makes it meaningful, and for a MULTI-ROOT model it is the whole robot:
+        # measured on Menagerie's ALOHA, whose two arms sit at x = -0.469 and +0.469 with the right one yawed
+        # 180 degrees, both arms landed on the SAME point (0, 0, 0.075) and interpenetrated by 0.142 m
+        # (left/base_link vs right/upper_arm_link), which then diverged to a bad-QACC NaN at t=0.83 s under
+        # excitation. Same collapse on trossen_wxai (-0.100 m). Two conversions, matching the child branch above:
+        #   * ORIGIN vs TIP - the compiler places a child at (mo.x, mo.y, parent.length + mo.z), so the world z
+        #     has the synthesized base's own length taken back out of it;
+        #   * BODY vs LINK  - the world quat composes with this segment's own S, exactly as `_Sp.T @ Q @ _S` does
+        #     for a child (the base is synthesized with an identity rotation, so its S_p is the identity).
+        _id_of = {body_name[i]: i for i in range(1, mj.nbody)}
         for r in root_segs:
             r.parent = base_name
+            _bi = _id_of.get(r.name)
+            if _bi is None:                                     # synthesized/renamed - nothing to preserve
+                continue
+            _wp = _np.asarray(mj.body_pos[_bi], dtype=float)
+            r.mount_offset = (float(_wp[0]), float(_wp[1]), float(_wp[2]) - _BASE_LEN)
+            r.mount_euler = _mat_to_euler_xyz(_quat_mat(mj.body_quat[_bi]) @ _rot_by_id.get(_bi, _np.eye(3)))
         warnings.append(f"synthesized a welded base segment {base_name!r} as the gene root — the URDF's "
                         "fixed base was merged into the world by the parser (or the robot had multiple "
-                        "roots), leaving an actuated/ambiguous root that a RobotGene cannot use directly.")
+                        "roots), leaving an actuated/ambiguous root that a RobotGene cannot use directly. "
+                        f"The {len(root_segs)} reparented root(s) keep their source world pose.")
 
     # Exactly one end-effector. Priority: a body carrying an ee/tcp/tool SITE (robust, and round-trips
     # our own compiler's ee_site), then a name-hinted body, then any leaf.
+    # A SITE ON THE WORLD BODY IS NOT A SEGMENT. Attachment-style models park `tcp`/`attachment_site` on the
+    # worldbody so a parent scene can mount them; `body_name[0]` is then "world", which matches no segment, so
+    # `is_end_effector` was set on NOTHING and the gene failed validation ("exactly one segment must be the end
+    # effector, found 0") — i.e. the twin could not be compiled at all. Measured on Menagerie's shadow_dexee,
+    # whose first two sites are both on body 0. Only consider sites carried by a real segment.
+    _seg_names = {s.name for s in segments}
     ee_site_body = None
     for si in range(mj.nsite):
         if any(h in name_of(SITE, si).lower() for h in _EE_SITE_HINTS):
-            ee_site_body = body_name[int(mj.site_bodyid[si])]
-            break
+            _cand = body_name[int(mj.site_bodyid[si])]
+            if int(mj.site_bodyid[si]) != 0 and _cand in _seg_names:
+                ee_site_body = _cand
+                break
     ee_name = (ee_site_body
                or next((c for c in ee_candidates if any(h in c.lower() for h in _EE_NAME_HINTS)), None)
                or (body_name[max(leaves)] if leaves else (segments[-1].name if segments else None)))
@@ -781,6 +844,18 @@ def _import_robot_uncached(source: str, *, robot_id: str | None = None, species:
     gene_issues = gene.validate()
     warnings.extend(f"gene validation: {iss}" for iss in gene_issues)
 
+    # THE SIMULABILITY GATE. Everything downstream of an import — the verdict, the certificate, the BOM, the spec
+    # sheet, the calibration gap — is a number computed by STEPPING this twin. A twin that diverges produces those
+    # numbers anyway, off a model that cannot be simulated, and nothing noticed: the import returned `valid=True`
+    # because `RobotGene.validate()` is a SCHEMA check (one root, parents present, acyclic) and says nothing about
+    # whether the thing survives contact. Run it before anyone else does, and fail loudly if it does not.
+    sim = _simulability_probe(gene) if not gene_issues else {
+        "ok": False, "checked": False, "reason": "gene failed schema validation; not simulated"}
+    if not sim.get("ok"):
+        warnings.insert(0, f"IMPORT REJECTED — the editable twin is NOT SIMULABLE: {sim.get('reason')}. "
+                           "Every downstream number (verdict, certificate, BOM, spec sheet, calibration gap) is "
+                           "computed by stepping this model, so none of them can be produced. Use the faithful "
+                           "native lane for simulation, and see the warnings above for what the twin got wrong.")
     backend_support = _backend_support(segments)
     return {
         "gene": gene,
@@ -788,11 +863,138 @@ def _import_robot_uncached(source: str, *, robot_id: str | None = None, species:
         "backend_support": backend_support,
         "species": gene.species,
         "robot_class": robot_class,
-        "valid": not gene_issues,
+        # ``valid`` now means BOTH: the schema accepts it AND it survives a bounded settle+excitation without
+        # going non-finite. A caller that only ever looked at ``valid`` gets the gate for free; one that wants to
+        # tell the two apart reads ``simulable``/``simulation_check``.
+        "valid": bool(not gene_issues and sim.get("ok")),
+        "simulable": bool(sim.get("ok")),
+        "simulation_check": sim,
     }
 
 
 # --------------------------------------------------------------------------- helpers
+SETTLE_S = 0.5                 # passive settle, no control at all
+EXCITE_S = 1.5                 # then drive every actuator across its OWN declared ctrlrange
+EXCITE_HZ = 1.0
+
+
+def _simulability_probe(gene, *, settle_s: float = SETTLE_S, excite_s: float = EXCITE_S) -> dict:
+    """Can this twin actually be STEPPED? Compile it, settle it, excite it, and rule on finiteness.
+
+    Four things make this harder than ``np.isfinite(d.qpos)``, and the first is why nothing caught the ALOHA twin:
+
+    * **MuJoCo HIDES the divergence.** ``mj_checkAcc`` reacts to a non-finite/huge ``qacc`` by raising
+      ``mjWARN_BADQACC`` **and calling ``mj_resetData``** — so the step after the blow-up reads perfectly finite,
+      at qpos 0. A post-hoc finiteness check on the state is therefore VACUOUS for the exact failure it is meant
+      to detect; the authoritative signal is ``d.warning[...].number``. (``structural_hygiene.penetration_report``
+      has the same hole, and reports ``finite=True`` on a model that exploded.)
+    * **The start pose is not one pose.** The gene carries the source's rest keyframe and the compiler emits it,
+      but a bare ``MjData`` is qpos 0, and the two disagree: the collapsed ALOHA twin survives the whole probe
+      from ``neutral_pose`` and hits bad-QACC at t=0.106 s from zero. Both are run, and either failing fails.
+    * **A settle alone would be a coin flip.** Deep interpenetration is metastable — whether it explodes in
+      0.1 s or holds for 10 depends on the pose it starts in. So after the passive settle the probe also DRIVES
+      every actuator, bounded by the customer's OWN ``ctrlrange`` and never past it, so a twin that survives
+      commands the customer could legitimately send is never failed here.
+    * **It must not itself be a way to fail.** A compile error is a real failure and is reported as one; anything
+      else (no MuJoCo, no actuators) reports ``checked=False`` and passes, because "we could not look" is not
+      evidence of a broken twin. Measured across all 63 Menagerie packages: 62 pass, and the one rejection
+      (flybody, a zero-inertia link) genuinely cannot be compiled at all.
+    """
+    try:
+        import mujoco
+        import numpy as np
+
+        from virturoid.services.gene_compiler import compile_gene_to_mjcf, standing_spawn_z
+    except Exception as exc:  # noqa: BLE001 - no simulator here; not the twin's fault
+        return {"ok": True, "checked": False, "reason": f"simulator unavailable ({type(exc).__name__})"}
+
+    try:
+        xml = compile_gene_to_mjcf(gene, include_floor=True, spawn_z=standing_spawn_z(gene))
+        m = mujoco.MjModel.from_xml_string(xml)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "checked": True, "stage": "compile",
+                "reason": f"the twin does not compile in MuJoCo: {type(exc).__name__}: {exc}"[:400]}
+
+    bad = {"BADQACC": mujoco.mjtWarning.mjWARN_BADQACC, "BADQVEL": mujoco.mjtWarning.mjWARN_BADQVEL,
+           "BADQPOS": mujoco.mjtWarning.mjWARN_BADQPOS, "BADCTRL": mujoco.mjtWarning.mjWARN_BADCTRL}
+    floor = {g for g in range(m.ngeom) if int(m.geom_type[g]) == mujoco.mjtGeom.mjGEOM_PLANE}
+    dt = float(m.opt.timestep) or 0.002
+    n_settle, n_excite = int(settle_s / dt), int(excite_s / dt)
+    lo, hi = (m.actuator_ctrlrange[:, 0].copy(), m.actuator_ctrlrange[:, 1].copy()) if m.nu else (None, None)
+    if m.nu:                              # an unlimited actuator gets a modest symmetric swing, not infinity
+        free = m.actuator_ctrllimited[:] == 0
+        lo[free], hi[free] = -1.0, 1.0
+    mid = (lo + hi) / 2.0 if m.nu else None
+    amp = (hi - lo) / 2.0 if m.nu else None
+    d = mujoco.MjData(m)
+
+    def _run(from_keyframe: bool) -> dict:
+        if from_keyframe:
+            mujoco.mj_resetDataKeyframe(m, d, 0)
+        else:
+            mujoco.mj_resetData(m, d)
+        mujoco.mj_forward(m, d)
+        # Worst self-interpenetration at the start pose, floor contacts excluded. Not itself pass/fail (a capsule
+        # twin overlaps a little at every joint by construction) but it is the NUMBER that explains a NaN.
+        worst, pair = 0.0, None
+        for c in d.contact[:d.ncon]:
+            if int(c.geom1) in floor or int(c.geom2) in floor or c.dist >= 0:
+                continue
+            if float(-c.dist) > worst:
+                worst = float(-c.dist)
+                pair = tuple(mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_BODY, int(m.geom_bodyid[g])) or f"body{g}"
+                             for g in (int(c.geom1), int(c.geom2)))
+        first_bad, stage = None, None
+        for k in range(n_settle + n_excite):
+            if m.nu and k >= n_settle:
+                phase = 2.0 * np.pi * EXCITE_HZ * (k - n_settle) * dt
+                d.ctrl[:] = mid + amp * np.sin(phase + np.arange(m.nu) * (np.pi / max(1, m.nu)))
+            mujoco.mj_step(m, d)
+            if any(int(d.warning[w].number) for w in bad.values()) or not (
+                    np.isfinite(d.qpos).all() and np.isfinite(d.qvel).all()):
+                first_bad, stage = k, ("settle" if k < n_settle else "excitation")
+                break
+        return {"from": "rest_keyframe" if from_keyframe else "zero_pose", "ok": first_bad is None,
+                "max_self_penetration_m": round(worst, 5),
+                "deepest_penetrating_pair": list(pair) if pair else None,
+                "first_bad_step": first_bad, "stage": stage,
+                "mujoco_warnings": {n: int(d.warning[w].number) for n, w in bad.items() if d.warning[w].number}}
+
+    # BOTH START POSES, because both are reachable and they do not agree. The import carries the source's own
+    # rest keyframe onto the gene and the compiler emits it, but plenty of callers construct a bare ``MjData``
+    # and get qpos 0. Measured on the collapsed ALOHA twin: from `neutral_pose` it survives the full 2 s, from
+    # zero it hits bad-QACC at t=0.106 s -- so a probe that picked either one alone would have missed the
+    # reported failure half the time. Neither start is a way to fail on its own account: across all 63 Menagerie
+    # packages, every twin that passes one passes the other.
+    runs = [_run(True)] if m.nkey else []
+    runs.append(_run(False))
+    worst_run = next((r for r in runs if not r["ok"]), runs[0])
+    worst_pen = max((r["max_self_penetration_m"] for r in runs), default=0.0)
+    pen_run = max(runs, key=lambda r: r["max_self_penetration_m"])
+    out = {
+        "checked": True, "ok": all(r["ok"] for r in runs),
+        "settle_s": round(n_settle * dt, 4), "excite_s": round(n_excite * dt, 4),
+        "n_actuators": int(m.nu), "timestep_s": dt, "start_poses": [r["from"] for r in runs],
+        "max_self_penetration_m": worst_pen,
+        "deepest_penetrating_pair": pen_run["deepest_penetrating_pair"],
+        "mujoco_warnings": worst_run["mujoco_warnings"],
+        "runs": runs,
+    }
+    if not out["ok"]:
+        k, counts = worst_run["first_bad_step"], worst_run["mujoco_warnings"]
+        out["first_bad_step"] = int(k)
+        out["first_bad_time_s"] = round(k * dt, 4)
+        out["stage"] = worst_run["stage"]
+        _p = worst_run["deepest_penetrating_pair"]
+        _pair = f" (deepest overlap {worst_run['max_self_penetration_m']:.3f} m between " \
+                f"{_p[0]!r} and {_p[1]!r})" if _p else ""
+        out["reason"] = (f"state went non-finite at t={k * dt:.3f} s during {worst_run['stage']}, starting from "
+                         f"the {worst_run['from']} "
+                         f"[{', '.join(f'{n}x{v}' for n, v in counts.items()) or 'non-finite qpos/qvel'}]"
+                         f"{_pair}")
+    return out
+
+
 def _sanitize_urdf_meshes(text: str, base_dir: str | None) -> tuple[str, int]:
     """Neutralize ``<mesh filename=...>`` references whose file can't be found (the #1 enterprise-URDF problem:
     a robot description ships without its meshes, or with them at a different relative path). A missing mesh geom

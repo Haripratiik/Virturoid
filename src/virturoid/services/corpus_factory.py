@@ -94,6 +94,102 @@ def gait_search_verify(gene, *, max_evals: int = 6, steps: int = 500) -> dict:
         return base
 
 
+def gait_fit_verify_fn(memory_dir):
+    """VERIFY-BUILD that asks the question THE GAIT BANK actually cares about, and the one the two verifiers above
+    do not: *does this body have an operating point of its own that is still walking at the settling horizon, and
+    does a perturbed copy of that point walk too?*
+
+    ``_compiles_and_credible`` judges every legged body at the shipped ``freq 1.5 / kp 32``, which is one body's
+    hand-tuned numbers — so it admits bodies that need no gait learned and rejects bodies that walk perfectly well
+    under a controller of their own. ``gait_search_verify`` does search, but with a 6-evaluation CPG grid at 500
+    steps: 12x shorter than the horizon a walk is judged at today, and task #267 measured exactly what a short
+    horizon buys — the grounded authored cat reads CREDIBLE WALK at 1500 steps and is on the floor at 2014.
+
+    This runs the PRODUCT's fitter (``fit_gait_for_body``) against the night's OWN memory, and reports the
+    operating point the body would actually ship with plus the robustness margin that decides whether it may be
+    banked. Two properties are load-bearing:
+
+    * **The night's DB, never the product's.** ``fit_gait_for_body(db=None)`` falls back to opening
+      ``build/memory``, so a "clean rebuild" run that way would warm-start every fit from the very corpus it is
+      supposed to be replacing. The closure holds the night's memory directory so a fresh bank stays fresh.
+    * **A body whose SHIPPED DEFAULT already walks is still measured.** The fitter returns early in that case
+      (correctly — it must never churn a working controller), so the default's own margin is measured here
+      instead. A body+params pair that walks robustly is a legitimate corpus row whether or not the numbers were
+      searched for; what is NOT legitimate is banking it with the fragility question unasked.
+
+    COST: this is the honest, expensive verifier — measured 24-145 s per legged body for the fit, plus 4-12
+    settling-horizon rollouts for the margin. A non-legged candidate falls through to the fast scripted verdict.
+    """
+    def verify(gene) -> dict:
+        from virturoid.services.task_matched_eval import robot_kind
+        if robot_kind(gene) != "legged":
+            return _compiles_and_credible(gene)
+        base = _compiles_and_credible(gene)
+        if not base["schema_valid"] or not base["compiles"]:
+            return base
+        from virturoid.services.gait_flywheel import (_DEFAULT_GAIT, _SETTLE_STEPS, fit_gait_for_body,
+                                                      robustness_margin)
+        from virturoid.services.memory_db import MemoryDB
+        with MemoryDB(Path(memory_dir) / "virturoid_memory.db") as db:
+            fit = fit_gait_for_body(gene, db=db, bank=False)
+        if not fit.get("ok", True):
+            return {**base, "credible": False, "verdict": f"gait fit ERRORED: {fit.get('error')}",
+                    "fit_error": fit.get("error")}
+        if fit.get("adopted"):
+            params, rob = dict(fit["params"]), dict(fit.get("robustness") or {})
+            if "robustness_rel" not in rob:
+                rob = {"robustness_rel": fit.get("robustness_rel"), "probes": fit.get("robustness_probes") or {},
+                       "steps": _SETTLE_STEPS}
+            fwd, src = float(fit.get("confirm_forward_m") or fit.get("forward_m") or 0.0), "fitted"
+        elif fit.get("searched"):
+            return {**base, "credible": False, "kind": "legged", "source": "physics",
+                    "verdict": f"no operating point still walking at {_SETTLE_STEPS} steps ({fit.get('reason')})",
+                    "n_evals": fit.get("n_evals"), "gait_source": "none"}
+        else:
+            # The shipped default already walks it. Measure THAT point's margin — the row is only bankable if the
+            # walk survives a perturbation of itself, and nothing upstream has asked that question.
+            params, src = dict(_DEFAULT_GAIT), "default"
+            fwd = float(fit.get("default_forward_m") or 0.0)
+            rob = robustness_margin(gene, params, steps=_SETTLE_STEPS, per_param=False)
+        return {"schema_valid": True, "compiles": True, "credible": True, "fitness": abs(fwd), "kind": "legged",
+                "source": "physics", "gait_params": params, "gait_source": src,
+                "robustness": rob, "robustness_rel": rob.get("robustness_rel"),
+                "verdict": (f"CREDIBLE WALK at {_SETTLE_STEPS} steps ({fwd:+.3f} m, {src} op-point); "
+                            f"robustness_rel={rob.get('robustness_rel')}")}
+    return verify
+
+
+def gait_bank_fn(gene, result: dict, memory_dir) -> None:
+    """BANK THE ADMITTED BODY'S GAIT — the write the corpus factory never made.
+
+    MEASURED on this checkout: the one real factory night on record (``build/memory_factory_v7``, 2026-07-12,
+    30 proposals, 1 admitted) left ``skills`` EMPTY and ``provenance`` empty; its DB holds exactly one body
+    vector. ``default_bank_fn`` upserts a BODY into the vector sub-space and nothing else, so a night can admit
+    a body that walks and contribute ZERO rows to the gait bank the flywheel retrieves from. That is task #207's
+    "dead write path", and it means no amount of running the factory as shipped could ever grow the gait corpus.
+
+    Banking happens HERE, after the whole ordered gate stack, not inside the verifier — so a body rejected for
+    novelty or retention cannot leave a gait row behind. The params and the margin come from the verify result
+    (``gait_fit_verify_fn``), so nothing is re-searched and nothing is banked that was not measured: a candidate
+    with no ``robustness_rel`` is refused, exactly as ``learn_gait_flywheel`` refuses one.
+    """
+    if memory_dir is None:
+        return
+    params = result.get("gait_params")
+    rob = result.get("robustness") or {}
+    if not isinstance(params, dict) or rob.get("robustness_rel") is None:
+        return                                        # fragile, or never measured — a bank of controllers says no
+    from virturoid.services.gait_flywheel import _DeployResult, bank_gait
+    from virturoid.services.memory_db import MemoryDB
+    holder = _DeployResult(params, {"forward": float(result.get("fitness", 0.0)), "height_ratio": 1.0,
+                                    "survived": True, "credible": True})
+    with MemoryDB(Path(memory_dir) / "virturoid_memory.db") as db:
+        bank_gait(db, gene, holder, robustness=rob)
+    # ...and the body sub-space write too (novelty / nearest-bodies), on its OWN connection after the first has
+    # closed — two live connections to one SQLite file is how a night acquires a writer-lock stall.
+    default_bank_fn(gene, result, memory_dir)
+
+
 def _reject(gate: str, niche, detail=None) -> dict:
     return {"admitted": False, "gate": gate, "niche": niche, "detail": detail}
 

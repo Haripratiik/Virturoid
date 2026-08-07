@@ -7,6 +7,13 @@ hinge/slide joint -> a UsdPhysics Revolute/Prismatic joint with the model's axis
 USD encodes exactly what our sim runs. Every structural fact (articulation root, link count, DOF, joint limits) is
 then re-read back with pxr and returned in the manifest — the un-gameable proof the export is well-formed.
 
+CONSTRAINTS, per kind. ``loop_closures`` ARE exported: USD is a graph, not a tree, so a gantry's braced bridge
+becomes a ``UsdPhysics.FixedJoint`` (rigid where MuJoCo's ``connect`` is compliant — stated in the manifest).
+``coupled_joints`` are NOT: core UsdPhysics has no schema relating one joint's coordinate to another's, and the
+PhysX gear/mimic constraints that would are an Omniverse extension this pure-CPU wheel can neither author nor
+re-read. They are written into the file as prim customData + documentation and reported in the manifest with
+``coupled_joints_expressed: False`` — the URDF export states them natively as ``<mimic>``.
+
 Requires ``usd-core`` (pure-CPU OpenUSD, no GPU/Omniverse) and ``mujoco``. If usd-core is absent we raise a clear
 install hint rather than emitting USD text we can't validate.
 """
@@ -163,6 +170,7 @@ def export_usd(gene, path: str, *, kp: float = 32.0, kd: float = 1.5) -> dict:
 
     # --- one USD joint per hinge/slide; free joint = the floating base (not emitted) --------------------
     joints = []
+    joint_prim_of_body: dict[str, tuple] = {}           # body name -> (prim path, joint name, prim)
     for j in range(model.njnt):
         jt = int(model.jnt_type[j])
         if jt not in (_MJ_HINGE, _MJ_SLIDE):
@@ -209,8 +217,46 @@ def export_usd(gene, path: str, *, kp: float = 32.0, kd: float = 1.5) -> dict:
         drive.CreateStiffnessAttr(float(kp))
         drive.CreateDampingAttr(float(kd))
         rest = float(data.qpos[int(model.jnt_qposadr[j])])   # designed rest angle (rad) -> Isaac init joint_pos
+        joint_prim_of_body[bname(child)] = (jp, jname, joint.GetPrim())
         joints.append({"name": jname, "type": "revolute" if is_rev else "prismatic",
                        "lower": lo, "upper": hi, "child": bname(child), "rest": round(rest, 5)})
+
+    # --- coupled (mimic/slaved) DOF -> DISCLOSED, because core UsdPhysics cannot express them ----------------
+    #
+    # Established rather than assumed: the UsdPhysics schema in usd-core offers Revolute/Prismatic/Spherical/
+    # Distance/Fixed joints plus Drive/Limit/Mass/Collision/Articulation APIs, and NOTHING that relates one
+    # joint's coordinate to another's. The gear/rack-and-pinion and mimic-joint constraints that could carry
+    # this are PhysX EXTENSIONS (``PhysxSchema``), which ships with Omniverse/Isaac Sim and is not in the
+    # pure-CPU wheel we validate against -- so we cannot author them through a typed API and, more to the
+    # point, cannot RE-READ what we wrote to prove it is right. Guessing at the attribute names (PhysX's
+    # gearing sign convention is the negative of URDF's multiplier) and shipping it unverified would be a
+    # worse failure than saying so: an engineer would trust a constraint we never checked.
+    #
+    # So the relation is written into the file as prim customData + a docstring on the driven joint -- visible
+    # in usdview and in the .usda text, ignored by the physics runtime -- and re-read below into the manifest.
+    # The URDF lane emits these natively via <mimic>; that is the format to hand to a consumer that needs them.
+    couplings = []
+    for _cj in (getattr(gene, "coupled_joints", None) or []):
+        _a, _b = str((_cj or {}).get("a")), str((_cj or {}).get("b"))
+        try:
+            _ratio = float((_cj or {}).get("ratio", 1.0))
+            _off = float((_cj or {}).get("offset", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            continue
+        _pa, _pb = joint_prim_of_body.get(_safe(_a)), joint_prim_of_body.get(_safe(_b))
+        if _pa is None or _pb is None or _ratio == 0.0:
+            continue
+        _rec = {"driven_joint": _pa[1], "driver_joint": _pb[1], "multiplier": _ratio, "offset": _off,
+                "relation": f"q({_pa[1]}) = {_off:.8g} + {_ratio:.8g} * q({_pb[1]})"}
+        _pa[2].SetCustomDataByKey("virturoid_coupledJoint", {
+            "driverJoint": _pb[0], "multiplier": _ratio, "offset": _off,
+            "note": "NOT enforced by this USD: core UsdPhysics has no joint-coupling schema. Encode it with "
+                    "PhysX mimic/gear joints in Isaac (note PhysX's gearing is the NEGATIVE of this "
+                    "multiplier), or use the URDF export, which states it natively as <mimic>."})
+        _pa[2].SetDocumentation(
+            f"COUPLED DOF (not enforced here): {_rec['relation']}. This joint is not independently commandable "
+            f"on the real machine; driving it alone fights the transmission.")
+        couplings.append(_rec)
 
     # --- closed kinematic loops -> UsdPhysics.FixedJoint --------------------------------------------------
     #
@@ -225,6 +271,7 @@ def export_usd(gene, path: str, *, kp: float = 32.0, kd: float = 1.5) -> dict:
     # rather than papered over — an Isaac scene that is rigid where the MuJoCo one is compliant will not match
     # under load, and that is a real thing for a customer to know.
     loops = []
+    _loop_names: set[str] = set()
     for _lc in (getattr(gene, "loop_closures", None) or []):
         _a, _b = (_lc or {}).get("a"), (_lc or {}).get("b")
         _ia = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, str(_a))
@@ -239,7 +286,19 @@ def export_usd(gene, path: str, *, kp: float = 32.0, kd: float = 1.5) -> dict:
         _Ra, _Rb = _quat2mat(data.xquat[_ia]), _quat2mat(data.xquat[_ib])
         _world = np.array(data.xpos[_ia], float) + _Ra @ _anc
         _loc_b = _Rb.T @ (_world - np.array(data.xpos[_ib], float))
+        # ONE PRIM PER CONSTRAINT, and the name has to make that true. Two <connect>s between the SAME pair of
+        # bodies at different anchors is a real and common construction -- it is how a 2-point join pins a
+        # rotation as well as a position -- and ToddlerBot ships four of them (neck_rod and neck_rod_2, each
+        # joined to neck_yaw_link twice). Keyed on the body pair alone, `Define` returned the prim already at
+        # that path and the second anchor OVERWROTE the first: 4 loops declared, 2 authored, silently, and the
+        # survivor held the wrong anchor. Found by counting fixed joints in the re-read file against the gene.
         _name = _safe(f"loop_{_a}_{_b}")
+        if _name in _loop_names:
+            _n = 2
+            while f"{_name}_{_n}" in _loop_names:
+                _n += 1
+            _name = f"{_name}_{_n}"
+        _loop_names.add(_name)
         _fj = UsdPhysics.FixedJoint.Define(stage, f"/Robot/{_name}")
         _fj.CreateBody0Rel().SetTargets([body_path[_ia]] if _ia in body_path else [])
         _fj.CreateBody1Rel().SetTargets([body_path[_ib]] if _ib in body_path else [])
@@ -265,7 +324,21 @@ def export_usd(gene, path: str, *, kp: float = 32.0, kd: float = 1.5) -> dict:
                      # difference from the compliant MuJoCo original is stated rather than left to be discovered
                      # when an Isaac scene behaves differently under load.
                      "loop_closures": loops,
+                     # Couplings are NOT exported -- see the block that writes them. Reported per-format so a
+                     # caller can tell the two constraint kinds apart instead of reading silence as "none".
+                     "coupled_joints": couplings,
+                     "coupled_joints_expressed": False,
+                     "coupled_joints_note": (
+                         "core UsdPhysics has no joint-coupling schema (the PhysX mimic/gear constraints live in "
+                         "PhysxSchema, an Omniverse extension this exporter cannot author or re-read). The "
+                         "relations are written as customData + documentation on each driven joint prim and "
+                         "listed here; the URDF export states them natively as <mimic>."
+                         if couplings else "this design declares no coupled joints"),
                      "up_axis": "Z", "meters_per_unit": 1.0})
+    # The un-gameable half: what the FILE says, re-read with pxr, against what the writer above believed.
+    manifest["constraints_reread"] = {
+        "loop_fixed_joints": manifest.pop("_n_fixed_loop_joints", 0), "loop_closures_declared": len(loops),
+        "coupling_records": manifest.pop("_n_coupling_customdata", 0), "couplings_declared": len(couplings)}
     return manifest
 
 
@@ -313,6 +386,7 @@ def _read_back(path: str) -> dict:
 
     stage = Usd.Stage.Open(path)
     roots, links, revolute, prismatic = [], [], [], []
+    loop_fixed, coupling_records = 0, 0
     for p in stage.Traverse():
         if p.HasAPI(UsdPhysics.ArticulationRootAPI):
             roots.append(str(p.GetPath()))
@@ -322,7 +396,14 @@ def _read_back(path: str) -> dict:
             revolute.append(str(p.GetPath()))
         if p.IsA(UsdPhysics.PrismaticJoint):
             prismatic.append(str(p.GetPath()))
+        # Both constraint kinds counted from the FILE, not from the writer's own lists: a loop that failed to
+        # author and a coupling record that silently did not land both read as zero here, which is the point.
+        if p.IsA(UsdPhysics.FixedJoint) and p.GetName().startswith("loop_"):
+            loop_fixed += 1
+        if p.GetCustomDataByKey("virturoid_coupledJoint"):
+            coupling_records += 1
     dof = len(revolute) + len(prismatic)
     return {"validated": len(roots) == 1 and len(links) >= 1,
             "articulation_roots": len(roots), "n_links": len(links), "link_names": links,
-            "n_revolute": len(revolute), "n_prismatic": len(prismatic), "dof": dof}
+            "n_revolute": len(revolute), "n_prismatic": len(prismatic), "dof": dof,
+            "_n_fixed_loop_joints": loop_fixed, "_n_coupling_customdata": coupling_records}

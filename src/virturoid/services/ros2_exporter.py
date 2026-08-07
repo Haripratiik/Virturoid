@@ -87,6 +87,38 @@ def _copy_urdf_meshes(package_dir: Path, root: Path, package_name: str, urdf: st
     return urdf
 
 
+def _mimic_joints_from_urdf(urdf: str) -> dict:
+    """``{driven_joint: {"joint": driver, "multiplier": m, "offset": o}}`` read from the URDF's own ``<mimic>``.
+
+    Read from the shipped description rather than re-derived from the gene, so this package can only ever claim
+    a coupling the file it installs actually declares.
+
+    It matters here and not only in RViz: ``joint_trajectory_controller`` commands every joint in its ``joints``
+    list, and a mimic joint has no motor of its own — its position is a consequence of the driver's. Listing it
+    as commandable asks the hardware interface for an actuator that does not exist and, on a real machine,
+    drives two ends of one transmission against each other.
+    """
+    import xml.etree.ElementTree as ET
+
+    out: dict = {}
+    try:
+        root = ET.fromstring(urdf)
+    except ET.ParseError:
+        return out
+    for jnt in root.findall("joint"):
+        mim = jnt.find("mimic")
+        name = jnt.get("name")
+        if mim is None or not name or not mim.get("joint"):
+            continue
+        try:
+            mul = float(mim.get("multiplier", "1"))
+            off = float(mim.get("offset", "0"))
+        except (TypeError, ValueError):
+            continue
+        out[name] = {"joint": mim.get("joint"), "multiplier": mul, "offset": off}
+    return out
+
+
 def export_ros2_package(package_dir: Path, package_name: str = "virturoid_robot") -> Path:
     package_dir = Path(package_dir)
     genome = json.loads((package_dir / "robot" / "robot_genome.json").read_text(encoding="utf-8"))
@@ -104,11 +136,15 @@ def export_ros2_package(package_dir: Path, package_name: str = "virturoid_robot"
     # M7: ship the robot_description -- copy the package's URDF into urdf/ so the installed package can publish it
     # via robot_state_publisher (was absent -> a ROS 2 package with no robot to describe).
     _src_urdf = package_dir / "robot" / "robot.urdf"
+    mimic: dict = {}
     if _src_urdf.exists():
         (root / "urdf").mkdir(parents=True, exist_ok=True)
-        (root / "urdf" / "robot.urdf").write_text(
-            _copy_urdf_meshes(package_dir, root, package_name, _src_urdf.read_text(encoding="utf-8")),
-            encoding="utf-8")
+        _urdf_text = _copy_urdf_meshes(package_dir, root, package_name, _src_urdf.read_text(encoding="utf-8"))
+        (root / "urdf" / "robot.urdf").write_text(_urdf_text, encoding="utf-8")
+        mimic = _mimic_joints_from_urdf(_urdf_text)
+    # A mimic joint is DRIVEN, not commanded: its position follows the joint it mimics through a fixed gear.
+    # Everything below that names a motor or a command interface uses the commandable set.
+    commandable = [j for j in joints if j not in mimic]
 
     # Embed the exported controller (if the package has one) so the node runs the real policy.
     bundle_dir = package_dir / "software" / "controller"
@@ -136,16 +172,19 @@ def export_ros2_package(package_dir: Path, package_name: str = "virturoid_robot"
     (root / "launch" / "evaluate.launch.py").write_text(_LAUNCH_PY.format(name=package_name), encoding="utf-8")
     (root / "config" / "robot.yaml").write_text(
         json.dumps({"robot_genome_id": genome.get("id"), "joints": joints, "control_frequency_hz": 20.0,
-                    "has_controller": has_controller, "policy_type": policy_type, "target_positions": targets},
+                    "has_controller": has_controller, "policy_type": policy_type, "target_positions": targets,
+                    # `joints` stays the robot's full joint list (the node publishes a state for each); these two
+                    # say which of them a controller may actually command, and by what relation the rest follow.
+                    "commandable_joints": commandable, "mimic_joints": mimic},
                    indent=2),
         encoding="utf-8",
     )
     # ros2_control DEPLOY substrate (§4.7): a controller-manager config + a BOM-keyed hardware-interface map (the
     # bridge to the REAL motors you bought) + the safety filter the node applies before commanding a motor.
     actuator_map = _read_actuator_map(package_dir)
-    (root / "config" / "ros2_control.yaml").write_text(_ros2_control_yaml(joints), encoding="utf-8")
+    (root / "config" / "ros2_control.yaml").write_text(_ros2_control_yaml(commandable, mimic), encoding="utf-8")
     (root / "config" / "hardware_interface.yaml").write_text(
-        _hardware_interface_yaml(joints, actuator_map), encoding="utf-8")
+        _hardware_interface_yaml(commandable, actuator_map, mimic), encoding="utf-8")
     (root / package_name / "safety_filter.py").write_text(_SAFETY_FILTER_PY, encoding="utf-8")
     (root / "test" / "test_task_regression.py").write_text(_TEST_PY, encoding="utf-8")
     # AERIAL: a quadcopter has no actuated joints, so ros2_control joint trajectories are the wrong interface.
@@ -171,10 +210,21 @@ def export_ros2_package(package_dir: Path, package_name: str = "virturoid_robot"
         " — a quadcopter: flight deploys via the onboard autopilot (see below), not this joint node.\n\n" if aerial
         else (f" — runs the exported {'GaitController (trot gait)' if policy_type == 'trot_cpg_gait' else 'ReachController'}.\n\n"
               if has_controller else " (no controller bundle; node publishes a neutral pose).\n\n"))
+    _mimic_md = ""
+    if mimic:
+        _mimic_md = (
+            "\n## Coupled joints (URDF `<mimic>`)\n"
+            f"{len(mimic)} of this robot's {len(joints)} joints are DRIVEN through a fixed gear by another joint,\n"
+            "not commanded. `urdf/robot.urdf` declares each with `<mimic>`, so robot_state_publisher derives its\n"
+            "position; `config/ros2_control.yaml` therefore leaves them out of the trajectory controller and\n"
+            "`config/hardware_interface.yaml` lists them under `coupled_joints:` with no actuator. Commanding one\n"
+            "independently fights the transmission.\n\n"
+            + "".join(f"- `{d}` = {m['multiplier']:.10g} x `{m['joint']}`"
+                      + (f" + {m['offset']:.10g}" if m.get("offset") else "") + "\n" for d, m in mimic.items()))
     (root / "README.md").write_text(
         f"# {package_name}\n\nGenerated ROS2 package for `{genome.get('id')}`" + _ctrl_md
         + "```\ncolcon build --packages-select " + package_name + "\nros2 launch " + package_name
-        + " evaluate.launch.py\n```\n\n" + _deploy_md,
+        + " evaluate.launch.py\n```\n\n" + _deploy_md + _mimic_md,
         encoding="utf-8",
     )
     return root
@@ -209,9 +259,18 @@ def _read_actuator_map(package_dir: Path) -> dict:
     return {}
 
 
-def _ros2_control_yaml(joints: list) -> str:
+def _ros2_control_yaml(joints: list, mimic: dict | None = None) -> str:
     jl = "\n".join(f"      - {j}" for j in joints) or "      []"
-    return (
+    head = ""
+    if mimic:
+        head = ("# COUPLED DOF: the joint(s) below are driven through a fixed gear by another joint (URDF\n"
+                "# <mimic>) and are deliberately ABSENT from joints:. They have no motor of their own, and\n"
+                "# commanding them independently fights the transmission. robot_state_publisher derives their\n"
+                "# positions from the driver's.\n"
+                + "".join(f"#   {d} = {m['multiplier']:.10g} * {m['joint']}"
+                          + (f" + {m['offset']:.10g}" if m.get("offset") else "") + "\n"
+                          for d, m in mimic.items()))
+    return head + (
         "controller_manager:\n"
         "  ros__parameters:\n"
         "    update_rate: 100  # Hz\n"
@@ -226,18 +285,28 @@ def _ros2_control_yaml(joints: list) -> str:
         "    state_interfaces: [position, velocity]\n")
 
 
-def _hardware_interface_yaml(joints: list, actuator_map: dict) -> str:
+def _hardware_interface_yaml(joints: list, actuator_map: dict, mimic: dict | None = None) -> str:
     rows = []
     for j in joints:
         motor = actuator_map.get(j) or "GENERIC position actuator (set from the BOM)"
         rows.append(f'  {j}:\n    actuator: "{motor}"\n    command_interface: position\n'
                     f"    state_interfaces: [position, velocity]")
     body = "\n".join(rows) or "  {}"
+    tail = ""
+    if mimic:
+        # These have NO motor to buy or command: they are the far end of a transmission the driver joint turns.
+        # Given a command interface each, the export would name an actuator the machine does not have.
+        tail = ("# Coupled DOF: driven through a fixed gear by the joint named below, with no actuator and no\n"
+                "# command interface of their own. Read their state; never command them.\n"
+                "coupled_joints:\n"
+                + "".join(f'  {d}:\n    driven_by: "{m["joint"]}"\n    multiplier: {m["multiplier"]:.10g}\n'
+                          f'    offset: {m["offset"]:.10g}\n    state_interfaces: [position, velocity]\n'
+                          for d, m in mimic.items()))
     return (
         "# Maps each robot joint to the REAL actuator from the bill of materials and the ros2_control interface it\n"
         "# exposes. Set hardware_plugin to your bus driver (Dynamixel / ODrive / CAN / EtherCAT) before deploying.\n"
         'hardware:\n  hardware_plugin: "REPLACE_WITH_YOUR_DRIVER  # e.g. dynamixel_hardware/DynamixelHardware"\n'
-        "joints:\n" + body + "\n")
+        "joints:\n" + body + "\n" + tail)
 
 
 _SAFETY_FILTER_PY = '''"""Pure-stdlib safety gate (no ROS/numpy): clamp commanded joint-position targets to joint
@@ -381,7 +450,10 @@ class EvaluationNode(Node):
     def __init__(self):
         super().__init__("virturoid_evaluation_node")
         config = json.loads((_config_dir() / "robot.yaml").read_text())
-        self.joints = config["joints"]
+        # COMMANDABLE, not every joint: a mimic/coupled DOF has no motor -- it is the far end of a transmission
+        # the driver joint turns. Publishing a target for it commands two ends of one gear against each other.
+        # Falls back to the full list for a config written before that distinction existed.
+        self.joints = config.get("commandable_joints") or config["joints"]
         self.targets = config.get("target_positions") or [[0.4, 0.0]]
         self.policy_type = config.get("policy_type", "reach")
         self.i = 0

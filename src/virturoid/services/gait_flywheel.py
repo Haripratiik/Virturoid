@@ -26,6 +26,17 @@ _LOG = logging.getLogger(__name__)
 
 LOCOMOTION = "locomotion"
 _FWD_NORM = 1.5   # metres that maps to success_rate 1.0 (a strong learned quad walk ~1.85 m)
+
+#: THE IDENTITY OF THE GATE A BANKED ROW WAS ADMITTED UNDER, stamped into ``base_config['bank_gate']``.
+#:
+#: The fragility gate (``learn_gait_flywheel``: bank only an operating point whose perturbed copies also walk)
+#: landed 2026-08-04. EVERY row banked before it, and every row banked through a call site that does not measure
+#: a margin, is a row about which the fragility question was never asked. Those are not interchangeable with
+#: gated rows and must never be pooled with them silently — that is precisely how ``duty``, a coordinate the
+#: controller never read, came to be reported to operators as the bank's tightest-clustered parameter (#265/#266).
+#: A row with no stamp is PRE-GATE by construction; ``gate_of`` says so in one word, and ``mine_gait_hints``
+#: reports the split on every call so a thin gated corpus can never hide inside a fat ungated one.
+BANK_GATE = "fragility_v1"
 # A gait prior changes a controller's phase/amplitude targets.  Weak embedding
 # matches are not evidence that those targets fit the new kinematic tree.
 _MIN_GAIT_TRANSFER_SIMILARITY = 0.55
@@ -97,8 +108,15 @@ def _deploy_sim_config(gene) -> dict:
     return cfg
 
 
+def gate_of(base_config: dict | None) -> str:
+    """``'fragility_v1'`` if this banked row's operating point was measured for fragility before admission,
+    ``'ungated'`` otherwise. An absent stamp is ungated, never "assumed fine": a missing error bar defaulting to
+    "fine" is the failure mode the whole robustness measurement exists to remove."""
+    return str((base_config or {}).get("bank_gate") or "ungated")
+
+
 def bank_gait(db, gene, result, *, task: str = LOCOMOTION, cross_eval: bool = False,
-              reward_expr: str = "") -> str | None:
+              reward_expr: str = "", robustness: dict | None = None) -> str | None:
     """Bank a learned gait's PARAMS as a retrievable skill (keyed by class+task+species). Returns the skill_id.
 
     Only banks a DEPLOYABLE result (survived + real forward) — never a fall (honesty: the bank must stay a bank of
@@ -110,6 +128,15 @@ def bank_gait(db, gene, result, *, task: str = LOCOMOTION, cross_eval: bool = Fa
 
     ``reward_expr`` (R6): the LLM/template reward EXPRESSION that certified this gait, banked alongside the params
     so a future morphology-nearby body can seed its reward search with a reward already proven on a body like it.
+
+    ``robustness``: the ``robustness_margin`` reading the admitting caller measured for these exact params. IT IS
+    THE ROW'S PROVENANCE, not decoration — passing one stamps ``bank_gate=BANK_GATE`` and the margin itself, and
+    omitting one leaves the row marked ``ungated``. This function deliberately does NOT measure the margin
+    itself: at the settling horizon that is 4-12 extra rollouts, and ``bank_gait`` is called from the ordinary
+    verify path (``ai_native_tools._auto_bank_gait``) where that cost lands on every build. So the gate is
+    ENFORCED by the caller and RECORDED here — which means the bank currently holds both kinds, and any consumer
+    that pools them is mixing measured rows with unmeasured ones. ``gate_of`` and ``mine_gait_hints(gated_only=)``
+    exist so that pooling has to be an explicit choice.
     """
     if not getattr(result, "best_survived", False) or abs(getattr(result, "best_forward", 0.0)) < 0.15:
         return None
@@ -126,7 +153,13 @@ def bank_gait(db, gene, result, *, task: str = LOCOMOTION, cross_eval: bool = Fa
         base_config={"gait_params": result.best_params, "forward_m": round(result.best_forward, 4),
                      "height_ratio": round(result.best_height_ratio, 3), "controller": "crawl_gait",
                      "reward_expr": reward_expr or None, "structure_key": structure_key,
-                     "sim_config": _deploy_sim_config(gene)},
+                     "sim_config": _deploy_sim_config(gene),
+                     # WHICH GATE THIS ROW GOT IN UNDER, and the error bar that let it. A reader (or a miner)
+                     # can then tell a measured row from an unmeasured one without guessing from a timestamp.
+                     "bank_gate": (BANK_GATE if robustness else None),
+                     "robustness_rel": (robustness or {}).get("robustness_rel"),
+                     "robustness_probes": (robustness or {}).get("probes") or None,
+                     "robustness_steps": (robustness or {}).get("steps")},
         notes="learned deployable gait (gait_search); base_config.gait_params IS the deploy controller")
     # Index the skill into the vector memory by THIS BODY'S morphology embedding (the robotics tokenization), so a
     # future body recalls it by structural similarity — cross-body, not just an exact class-string match.
@@ -418,7 +451,10 @@ def learn_gait_flywheel(gene, db, *, generations: int = 10, pop: int = 20, steps
 
     skill_id = None
     if bank and beats_default and sturdy:
-        skill_id = bank_gait(db, gene, _DeployResult(res.best_params, learned))   # bank the DEPLOY metrics
+        # ...and the margin RIDES WITH IT. A gate that leaves no trace on the row it admitted cannot be audited
+        # afterwards, which is how a bank came to hold 97 rows nobody could sort into measured and unmeasured.
+        skill_id = bank_gait(db, gene, _DeployResult(res.best_params, learned),   # bank the DEPLOY metrics
+                             robustness=rob)
 
     compounding_delta = None
     prior_deploy_forward = None

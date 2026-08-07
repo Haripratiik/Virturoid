@@ -12,7 +12,12 @@ import json
 import time
 from pathlib import Path
 
-DEFAULT_MEMORY_DIR = Path("build") / "memory"
+from virturoid.services.memory_db import default_memory_dir
+
+#: One rule for where memory lives, owned by ``memory_db`` -- see the reasoning there.
+#: Duplicating the ``build/memory`` literal here is how the two would drift apart, and
+#: this module's JSON records sit in the same directory as that module's sqlite file.
+DEFAULT_MEMORY_DIR = default_memory_dir()
 
 
 def _key(robot_class: str, task_type: str) -> str:

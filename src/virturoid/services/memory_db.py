@@ -26,12 +26,40 @@ The AI agents use this two ways:
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
 import time
 from pathlib import Path
 
-DEFAULT_DB_PATH = Path("build") / "memory" / "virturoid_memory.db"
+
+def default_memory_dir() -> Path:
+    """Where the flywheel's memory lives, overridable via ``VIRTUROID_MEMORY_DIR``.
+
+    The override exists because this path used to be a constant, and a constant made the
+    TEST SUITE A WRITER TO THE DEVELOPER'S OWN BANK. The suite banks gaits through the
+    ordinary product path -- ``verify_robot`` -> ``_auto_bank_gait`` -> ``bank_gait`` --
+    so it was never doing anything the product does not do; it was doing it to the wrong
+    database. MEASURED 2026-08-07: one session grew ``build/memory`` from 97 to 101
+    locomotion rows, and four rows in the live bank carry the body class
+    ``totally_made_up_xyz``, traceable to ``tests/test_structural_dispatch.py``.
+
+    That is worse than untidy. The bank is the substrate we MEASURE against -- the
+    evidence gates, the fragility re-measurement, the mining runs all read it -- so a
+    suite that writes to it is a suite that edits its own evidence. Fixture rows were
+    being counted as observations in an analysis of whether the flywheel has signal.
+
+    Resolved per call rather than bound at import so that a test session, a corpus
+    factory night and the product can each point somewhere different in one process.
+    """
+    return Path(os.environ.get("VIRTUROID_MEMORY_DIR") or Path("build") / "memory")
+
+
+#: Module-level convenience for the many call sites that want the product default.
+#: Kept as a name so existing ``from ... import DEFAULT_DB_PATH`` sites keep working;
+#: conftest sets ``VIRTUROID_MEMORY_DIR`` before any virturoid module is imported, which
+#: is why binding here at import time is safe.
+DEFAULT_DB_PATH = default_memory_dir() / "virturoid_memory.db"
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (

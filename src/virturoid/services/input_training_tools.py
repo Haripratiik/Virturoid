@@ -446,7 +446,17 @@ def _ingest_project(args: dict) -> dict:
             gene = imp.get("gene")
             result["import"] = {"source": model_rel, "robot_class": imp.get("robot_class"),
                                 "species": imp.get("species"), "valid": imp.get("valid"),
+                                # A twin that cannot be STEPPED is a different failure from one whose schema is
+                                # off, and the ingesting agent has to be able to tell: everything it does next
+                                # (verify, certify, cost, calibrate) is computed by stepping this model.
+                                "simulable": imp.get("simulable", True),
+                                "simulation_check": imp.get("simulation_check") or {},
                                 "warnings": list(imp.get("warnings", []))[:8]}
+            if not imp.get("simulable", True):
+                result["warnings"].append(
+                    f"the editable twin inferred from {model_rel} is NOT SIMULABLE "
+                    f"({(imp.get('simulation_check') or {}).get('reason')}) — amend/verify/export on it would "
+                    f"report numbers off a model that cannot be stepped. The faithful lane below still stands.")
         except Exception as exc:  # noqa: BLE001
             result["warnings"].append(f"model import failed ({model_rel}): {exc}")
 

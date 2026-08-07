@@ -16,6 +16,11 @@ from virturoid.schemas.import_report import ImportLane, ImportWarning, RobotMode
 
 # substring (lowercased) -> (code, severity, fix_action). Ordered: first match wins.
 _WARNING_RULES: tuple[tuple[str, str, str, str], ...] = (
+    # FIRST, because it outranks everything else in the list: if the twin cannot be stepped, no number computed
+    # from it means anything, and the other warnings are describing a model nobody can run.
+    ("not simulable", "twin_not_simulable", "error",
+     "Do not train, verify, certify or cost this twin — every downstream number is computed by stepping it. "
+     "Simulate with the faithful native lane, and fix the link named in the reason before using the gene lane."),
     ("root bodies attach to the world", "multiple_roots", "error",
      "Select a single world-rooted base frame for simulation."),
     ("zero/negative mass", "missing_mass", "warning",
@@ -62,6 +67,8 @@ def _confidence(faithful: dict, gene: dict, warnings: list[ImportWarning], actua
     control = 1.0 if actuated > 0 else 0.3
     has_error = any(w.severity == "error" for w in warnings)
     training_readiness = round(min(parse_ok, kinematic, dynamics, control) - (0.3 if has_error else 0.0), 3)
+    if "twin_not_simulable" in codes:
+        training_readiness = 0.0        # you cannot train on a body that cannot be stepped; not "a bit less ready"
     return {
         "file_integrity_score": parse_ok,
         "model_parse_score": parse_ok,
@@ -99,13 +106,22 @@ def build_import_report(source: str, *, robot_id: str | None = None,
         warnings = [classify_warning(w) for w in gene.get("warnings", [])]
         backend_support = gene.get("backend_support", {}) or {}
         g = gene.get("gene")
+        sim = gene.get("simulation_check") or {}
+        simulable = bool(gene.get("simulable", True))
         gene_lane = ImportLane(
             name="inferred_robot_gene",
             ok=bool(gene.get("valid")),
+            # A twin that cannot be stepped must not read as "inferred a RobotGene, N warnings" -- that is the
+            # sentence a customer skims past. Say it in the lane's own headline.
             summary=(f"Inferred an editable RobotGene (class={gene.get('robot_class')}, "
-                     f"species={gene.get('species')}); {len(warnings)} warning(s), lossy where flagged."),
+                     f"species={gene.get('species')}); {len(warnings)} warning(s), lossy where flagged."
+                     if simulable else
+                     f"NOT SIMULABLE — the editable RobotGene compiles to a model that cannot be stepped: "
+                     f"{sim.get('reason')}. Use the faithful native lane; no verdict, certificate, BOM, spec "
+                     f"sheet or calibration number can be produced from this twin."),
             detail={"robot_class": gene.get("robot_class"), "species": gene.get("species"),
-                    "valid": gene.get("valid"), "gene_id": getattr(g, "id", None)},
+                    "valid": gene.get("valid"), "gene_id": getattr(g, "id", None),
+                    "simulable": simulable, "simulation_check": sim},
         )
     except Exception as exc:  # noqa: BLE001 - the gene lane is best-effort; the faithful lane still stands
         gene_lane = ImportLane(name="inferred_robot_gene", ok=False,

@@ -182,10 +182,16 @@ def _forward_of(bc: dict):
     return abs(float(f)) if isinstance(f, (int, float)) else None
 
 
-def _banked_gait_params(db, robot_class: str | None, *, min_success: float) -> list[tuple[dict, float | None]]:
-    """Every banked CREDIBLE gait (optionally for a class) as (params, forward_m) — the evidence hints are mined
-    from. NOTE the ``min_success`` filter selects on the very outcome the association gate tests, which truncates
-    its range and can only make that gate HARDER to pass — conservative, in the direction that matters."""
+def _gate_of(bc: dict) -> str:
+    from virturoid.services.gait_flywheel import gate_of
+    return gate_of(bc)
+
+
+def _banked_gait_params(db, robot_class: str | None, *,
+                        min_success: float) -> list[tuple[dict, float | None, str]]:
+    """Every banked CREDIBLE gait (optionally for a class) as (params, forward_m, bank_gate) — the evidence hints
+    are mined from. NOTE the ``min_success`` filter selects on the very outcome the association gate tests, which
+    truncates its range and can only make that gate HARDER to pass — conservative, in the direction that matters."""
     q = "SELECT robot_class, base_config, success_rate FROM skills WHERE task_type='locomotion'"
     out = []
     for row in db.conn.execute(q).fetchall():
@@ -196,11 +202,11 @@ def _banked_gait_params(db, robot_class: str | None, *, min_success: float) -> l
         bc = _base_config(row["base_config"])
         gp = bc.get("gait_params")
         if isinstance(gp, dict):
-            out.append((gp, _forward_of(bc)))
+            out.append((gp, _forward_of(bc), _gate_of(bc)))
     return out
 
 
-def _vector_nearest_gaits(db, gene, *, k: int, min_sim: float) -> list[tuple[dict, float, float | None]]:
+def _vector_nearest_gaits(db, gene, *, k: int, min_sim: float) -> list[tuple[dict, float, float | None, str]]:
     """The banked gaits of the EMBEDDING-NEAREST robots to ``gene`` (cross-body, cross-class), each with its
     cosine similarity and the distance it travelled. THIS is the moat: a brand-new morphology finds robots
     SHAPED like it in the robotics vector space (``embed_body``/GeneGNN latent) and borrows THEIR gait
@@ -216,14 +222,14 @@ def _vector_nearest_gaits(db, gene, *, k: int, min_sim: float) -> list[tuple[dic
             bc = _base_config(row["base_config"]) if row else {}
             gp = bc.get("gait_params")
             if isinstance(gp, dict):
-                out.append((gp, float(hit.get("similarity", 0.5)), _forward_of(bc)))
+                out.append((gp, float(hit.get("similarity", 0.5)), _forward_of(bc), _gate_of(bc)))
         return out
     except Exception:  # noqa: BLE001 - no vector index yet -> caller falls back to the class-string source
         return []
 
 
 def mine_gait_hints(db, gene=None, robot_class: str | None = None, *, min_success: float = 0.4,
-                    k: int = 8, min_sim: float = 0.2) -> dict:
+                    k: int = 8, min_sim: float = 0.2, gated_only: bool = False) -> dict:
     """AUTO-DISCOVER transferable gait hints, borrowed from the EMBEDDING-NEAREST robots. When a ``gene`` is
     given the source gaits are the vector-nearest banked robots (weighted by morphology similarity — a
     completely new body borrows from whatever it is SHAPED like, across class labels); otherwise it falls back
@@ -234,14 +240,26 @@ def mine_gait_hints(db, gene=None, robot_class: str | None = None, *, min_succes
     that do not are returned under ``suppressed`` WITH the reason, so "no hint" reads as a measurement rather
     than as silence. ``prior``/``bounds`` are unaffected by the gates in kind: the prior is an explicitly
     UN-TUNED warm-start seed that ``search_gait`` injects as one candidate among ``pop``, not a claim about
-    evidence — ``bounds``, which IS such a claim, is now populated only for regions that earned it."""
-    from virturoid.services.gait_flywheel import _DEFAULT_GAIT, _class_of
+    evidence — ``bounds``, which IS such a claim, is now populated only for regions that earned it.
+
+    ``gated_only`` restricts the source rows to those banked UNDER the fragility gate (``bank_gate`` stamped by
+    ``gait_flywheel.bank_gait``). The default is False so the live product keeps mining everything it holds — but
+    ``n_gated``/``n_ungated`` are ALWAYS returned and always named in the note, because pooling rows whose
+    operating point was measured for fragility with rows where the question was never asked is exactly how a
+    parameter the controller never read (``duty``) came to be shown to operators as the bank's tightest cluster.
+    An ungated row is not a bad row; it is a row with an unknown error bar, and that has to be visible."""
+    from virturoid.services.gait_flywheel import BANK_GATE, _DEFAULT_GAIT, _class_of
     src = "vector_nearest"
     pw = _vector_nearest_gaits(db, gene, k=k, min_sim=min_sim) if gene is not None else []
     if not pw:                                                    # no vector neighbors -> class-string source
         cls = robot_class or (_class_of(gene) if gene is not None else None)
-        pw = [(p, 1.0, f) for p, f in _banked_gait_params(db, cls, min_success=min_success)]
+        pw = [(p, 1.0, f, g) for p, f, g in _banked_gait_params(db, cls, min_success=min_success)]
         src = "class_match" if cls else "all_banked"
+    n_gated = sum(1 for _, _, _, g in pw if g == BANK_GATE)
+    n_ungated = len(pw) - n_gated
+    if gated_only:
+        pw = [t for t in pw if t[3] == BANK_GATE]
+    pw = [(p, w, f) for p, w, f, _ in pw]
     params = [p for p, _, _ in pw]
     hints: list[dict] = []
     suppressed: list[dict] = []
@@ -292,6 +310,10 @@ def mine_gait_hints(db, gene=None, robot_class: str | None = None, *, min_succes
         pass
     src_txt = ("VECTOR-similar robots (shaped like this one, across class)" if src == "vector_nearest"
                else src.replace("_", "-") + " walks")
+    # THE PROVENANCE SPLIT, said on every call. Two banks of the same size are not the same evidence when one
+    # was screened for fragility and the other was not, and a reader cannot tell from the hint text alone.
+    gate_txt = (f" [{n_gated} banked under the fragility gate, {n_ungated} with no measured margin"
+                + ("; only the gated rows were used]" if gated_only else "; both pooled]"))
     if len(pw) < 2:
         note = ("not enough banked walks near this body yet — using the shipped default as an un-tuned prior; "
                 "hints appear automatically once >=2 credible walks are banked near it in the robotics embedding")
@@ -307,7 +329,8 @@ def mine_gait_hints(db, gene=None, robot_class: str | None = None, *, min_succes
                 + (f"; {len(suppressed)} parameter(s) failed the evidence gates (see `suppressed`)"
                    if suppressed else ""))
     return {"n": len(pw), "source": src, "robot_class": robot_class, "hints": hints, "prior": prior,
-            "bounds": bounds, "suppressed": suppressed, "note": note}
+            "bounds": bounds, "suppressed": suppressed, "note": note + gate_txt,
+            "n_gated": n_gated, "n_ungated": n_ungated, "gated_only": bool(gated_only)}
 
 
 def hint_prior(hints: dict) -> dict:
