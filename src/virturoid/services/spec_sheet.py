@@ -47,6 +47,12 @@ _BOM_NAMES = ("bill_of_materials.json", "bom.json")
 _EVAL_NAMES = ("gene_evaluation_report.json",)
 _CERT_NAMES = ("verification_certificate.json",)
 _GENOME_NAMES = ("robot_genome.json",)
+#: written by ``export_gate.write_refusal_package`` when the exported twin cannot be stepped. A spec sheet is a
+#: physics summary; a package that has declared itself unsimulable has no physics to summarise, and this sheet
+#: is a pure aggregator, so it would happily print the mass and the peak torque anyway (measured on flybody:
+#: "66-DOF hexapod, 5.1 kg, ~$5,598 parts"). Enforced here as well as at the export door so that ANY package
+#: carrying the refusal is safe, whichever writer assembled it.
+_REFUSAL_NAMES = ("export_refusal.json",)
 
 # XML in a robot package is not necessarily a MuJoCo model: the ROS2/ament package manifest is XML too, and
 # sorts FIRST under ``export/``. Skip the known non-models so the bounding box is taken from the real model.
@@ -196,6 +202,15 @@ def _cert_checks(cert: dict) -> dict:
 def build_spec_sheet(output_dir) -> dict:
     """Aggregate genome + BOM + evaluation + verification certificate into a capability/cost spec dict."""
     output_dir = Path(output_dir)
+    refusal = _first(output_dir, *_REFUSAL_NAMES) or {}
+    if refusal.get("simulable") is False:
+        return {"name": None, "robot_class": None, "dof": None, "refused": True,
+                "summary": ("NO SPEC SHEET: this package declares its twin NOT SIMULABLE "
+                            f"({refusal.get('reason')}). Every headline a spec sheet prints — mass, peak "
+                            "torque, power draw, verdict — is a claim about physics, and no physics was run "
+                            "on this body. See NOT_SIMULABLE.md."),
+                "not_simulable": {"reason": refusal.get("reason"),
+                                  "simulation_check": refusal.get("simulation_check")}}
     genome = _first(output_dir, *_GENOME_NAMES) or {}
     bom = _first(output_dir, *_BOM_NAMES) or {}
     ev = _first(output_dir, *_EVAL_NAMES) or {}
@@ -309,9 +324,16 @@ def _performance(ev: dict, cert: dict, genome: dict, unavailable: dict) -> dict:
 
 
 def _mass_breakdown(totals: dict, facts: dict, cert: dict) -> dict:
-    """As-built parts mass vs the mass the physics verdict was actually measured at. See the module docstring."""
-    sim = ((cert.get("model_sanity") or {}) if isinstance(cert.get("model_sanity"), dict) else {}).get(
-        "total_mass_kg")
+    """As-built parts mass vs the mass the physics verdict was actually measured at. See the module docstring.
+
+    A MISSING certificate and a certificate that produced no simulated mass are different facts, and this used
+    to print the first sentence for both. Measured on an unsimulable flybody twin: the sheet said "no
+    verification certificate in this package" in ``mass_breakdown.note`` while ``sources.verification_certificate``
+    read ``true`` eight lines below it, in the same file — the certificate was there, VOID, and its
+    ``model_sanity`` had no mass because the model never compiled. Name the real reason instead.
+    """
+    sanity = cert.get("model_sanity") if isinstance(cert.get("model_sanity"), dict) else {}
+    sim = sanity.get("total_mass_kg")
     out: dict = {"as_built_parts_kg": totals.get("mass_kg"),
                  "structure_only_kg": facts["structure_mass_kg"],
                  "simulated_body_kg": sim}
@@ -321,9 +343,17 @@ def _mass_breakdown(totals: dict, facts: dict, cert: dict) -> dict:
                        f"({sim} kg = structure only); the robot you build weighs {totals['mass_kg']} kg once "
                        "motors, electronics and power are bolted on. Treat the verdict as a structural result "
                        "until the actuator masses are embodied.")
-    elif not sim:
+    elif not sim and not cert:
         out["note"] = ("no verification certificate in this package, so there is no simulated-body mass to "
                        "compare the as-built parts mass against")
+    elif not sim:
+        why = (cert.get("voided_reason") or "; ".join(str(i) for i in (sanity.get("issues") or []))
+               or "its model_sanity block carries no total_mass_kg")
+        out["certificate_valid"] = cert.get("valid")
+        out["note"] = (f"this package DOES carry a verification certificate, but it reports no simulated-body "
+                       f"mass ({str(why)[:220]}), so the as-built parts mass above cannot be compared against "
+                       f"one — and the certificate itself is "
+                       + ("VOID" if cert.get("valid") is False else "incomplete on this point") + ".")
     return out
 
 
@@ -511,7 +541,7 @@ def write_spec_sheet(output_dir) -> Path | None:
     """Write reports/spec_sheet.json + spec_sheet.md. Returns the json path, or None if there's nothing to spec."""
     output_dir = Path(output_dir)
     spec = build_spec_sheet(output_dir)
-    if not spec.get("robot_class") and not spec.get("dof"):
+    if spec.get("refused") or (not spec.get("robot_class") and not spec.get("dof")):
         return None
     out = output_dir / "reports"
     out.mkdir(parents=True, exist_ok=True)

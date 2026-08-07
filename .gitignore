@@ -104,3 +104,5 @@ src/*.egg-info/
 webapp.log
 out_humanoid/
 clone2_*.txt
+# junit report written by scripts/ci_gate.py; CI uploads it as an artifact instead of committing it.
+ci-gate-*.xml

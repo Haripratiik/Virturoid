@@ -2,7 +2,8 @@
 
 Two defects, one family. Measured on the real MuJoCo Menagerie corpus (2026-08-06), 4 of 63 packages declare more
 than one body under ``<worldbody>``: aloha, trossen_wxai (both bi-manual), shadow_dexee (a palm plus three
-fingers) and apptronik_apollo. All four produced a broken twin, and none of them said so.
+fingers) and apptronik_apollo. All four produced a broken twin, and none of them said so. (Two of the four are
+multi-root only on a first reading -- see ``MULTI_ROOT`` below.)
 
   * ``robot_import`` synthesizes a welded base and reparents the roots onto it, and it DISCARDED their world
     pose while doing so -- every root got ``mount_offset (0,0,0)``. ALOHA's two arms sit at x = -0.469 and
@@ -34,14 +35,26 @@ pytestmark = pytest.mark.skipif(not _MUJOCO, reason="importing a robot needs MuJ
 
 _MEN = Path(os.path.expanduser("~/.cache/robot_descriptions/mujoco_menagerie"))
 
-# (package/model, the roots the SOURCE declares under <worldbody>). The full 63-package sweep found exactly
-# these; a fifth package taking the same reparenting branch with ONE root (umi_gripper) is covered too, since
-# its root also carries a non-identity source pose.
+# (package/model, the roots the twin is expected to carry). The full 63-package sweep found exactly four
+# multi-root packages; a fifth taking the same reparenting branch with ONE root (umi_gripper) is covered too,
+# since its root also carries a non-identity source pose.
+#
+# Two of the four have fewer <worldbody> children than they look like they do, because some of those children
+# are COORDINATE FRAMES rather than links -- no mass, no geom, no joint (see `_frame_only_bodies`). Those are
+# folded into their children rather than emitted as segments, so the names here are the real links:
+#   * shadow_dexee declares `hand_base` plus `F0/ F1/ F2/`, and the three `Fn/` are the placement frames its
+#     three <attach>-ed fingers arrive with. The twin's roots are the palm and the three FINGER BASES, each
+#     carrying its frame's own offset and yaw -- which is the harder property, since the pose now has to
+#     survive a composition rather than a copy.
+#   * apptronik_apollo declares `base_link` plus `world_link`, and `world_link` is an empty datum at the
+#     origin with no children at all. Apollo is therefore NOT multi-root once the frame is folded; it keeps
+#     its own `base_link` as the gene root and no base is synthesized for it. Covered instead by
+#     tests/test_imported_mass_matches_source.py, which checks the fold leaves its body untouched.
 MULTI_ROOT = [
     ("aloha/aloha.xml", ["left/base_link", "right/base_link"]),
     ("trossen_wxai/trossen_ai_bimanual.xml", ["left/root", "right/root"]),
-    ("shadow_dexee/shadow_dexee.xml", ["hand_base", "F0/", "F1/", "F2/"]),
-    ("apptronik_apollo/apptronik_apollo.xml", ["base_link", "world_link"]),
+    ("shadow_dexee/shadow_dexee.xml",
+     ["hand_base", "F0/finger_base", "F1/finger_base", "F2/finger_base"]),
 ]
 
 

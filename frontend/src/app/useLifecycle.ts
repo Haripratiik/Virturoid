@@ -63,5 +63,10 @@ export function useLifecycle(): Record<WorkspaceId, StationStatus> {
     hint: `${packages.data?.packages.length ?? 0} robots in the library`,
   };
 
-  return { design, simulate, train, verify, library };
+  // Memory carries NO dot. Every other station's dot means "this stage produced verified output for this
+  // robot"; the bank is workspace-wide and its headline is currently unfavourable, so a green dot here would
+  // be decorative at best and a claim we cannot support at worst. The tab label alone.
+  const memory: StationStatus = { state: "neutral", hint: "The verified-morphology bank, measured" };
+
+  return { design, simulate, train, verify, library, memory };
 }

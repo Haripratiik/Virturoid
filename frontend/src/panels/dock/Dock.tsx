@@ -147,7 +147,11 @@ function ArtifactsView() {
   );
 }
 
-const DATA_ENDPOINTS = ["/api/packages", "/api/scorecard", "/api/flywheel", "/api/design_brain", "/api/tools", "/api/assistant/status", "/api/jobs"];
+const DATA_ENDPOINTS = ["/api/packages", "/api/scorecard", "/api/moat", "/api/flywheel", "/api/design_brain", "/api/tools", "/api/assistant/status", "/api/jobs"];
+
+/** Endpoints whose answer is scoped to the selected robot — the Data view must send the package or it shows
+ *  a workspace-wide number under a per-robot heading. */
+const PACKAGE_SCOPED = new Set(["/api/scorecard", "/api/moat"]);
 
 function DataView() {
   const activePackage = useAppStore((s) => s.activePackage);
@@ -155,7 +159,7 @@ function DataView() {
   const [content, setContent] = useState<string | null>(null);
 
   async function openEndpoint(ep: string) {
-    const url = ep === "/api/scorecard" && activePackage ? `${ep}?package=${encodeURIComponent(activePackage)}` : ep;
+    const url = PACKAGE_SCOPED.has(ep) && activePackage ? `${ep}?package=${encodeURIComponent(activePackage)}` : ep;
     setSelected(ep);
     setContent("Loading…");
     try {

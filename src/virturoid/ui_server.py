@@ -789,6 +789,9 @@ class _Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/design_brain":
             self._send_json(self._design_brain())
             return
+        if parsed.path == "/api/moat":                         # the verified-morphology memory, gates and all
+            self._send_json(self._moat(parsed))
+            return
         if parsed.path == "/api/tools":                        # agentic tool surface: DISCOVER the tools
             from virturoid.services.agent_tools import tool_specs
             self._send_json({"tools": tool_specs()})
@@ -897,6 +900,34 @@ class _Handler(BaseHTTPRequestHandler):
             return json.loads(p.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             return {"series": [], "n_cycles": 0, "compounding": False, "headline": f"unreadable: {exc}"}
+
+    def _moat(self, parsed) -> dict:
+        """GET /api/moat[?package=<id>] -> what the verified-morphology memory holds and what recall did.
+
+        The moat was the one part of the product with no surface: `/api/flywheel` reads a JSON file a demo
+        script writes, and `/api/design_brain` reports coverage and edge COUNTS. Neither could answer "how many
+        banked rows carry a measured error bar" (1 of 101) or "did recalling memory make the robot walk further"
+        (on the dominant kind: no -- -0.0336 m over 2163 deploys). Both are read straight from the bank here.
+
+        Memory-dir resolution matches `_design_brain`: the build root's own `memory/` first, then the root, then
+        its sibling -- so a demo build set and the developer's workspace each report their own bank.
+        """
+        from urllib.parse import parse_qs
+
+        from virturoid.services.moat_panel import moat_panel
+        name = (parse_qs(parsed.query).get("package") or [""])[0]
+        pkg = None
+        if name:
+            candidate = self.root / _safe_output_name(name)
+            pkg = candidate if candidate.exists() else None
+        for cand in (self.root / "memory", self.root, self.root.parent / "memory"):
+            try:
+                out = moat_panel(cand, package_dir=pkg)
+            except Exception as exc:  # noqa: BLE001 - a status panel must never take the server down
+                return {"error": str(exc), "db_present": False}
+            if out.get("db_present"):
+                return out
+        return moat_panel(self.root / "memory", package_dir=pkg)   # honest empty + the path it looked in
 
     def _design_brain(self) -> dict:
         """The Design Brain panel (the moat MEASURED): MAP-Elites coverage/QD-score + provenance compounding

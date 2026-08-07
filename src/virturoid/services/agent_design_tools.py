@@ -714,7 +714,12 @@ def export_held(args: dict) -> dict:
     cad (meshes) | urdf (ROS/Gazebo robot description) | ros2 (installable ament_python package) | bom (real
     sized bill-of-materials: motors/sensors/battery, json+md) | spec (a spec sheet) | usd (OpenUSD physics for
     NVIDIA Isaac Sim) | isaac_lab (a full Isaac Lab hand-off: USD + ArticulationCfg + spawn/train scaffolds).
-    B3: the whole buildable-robot bundle, not just sim files. usd/isaac_lab need the ``usd-core`` package."""
+    B3: the whole buildable-robot bundle, not just sim files. usd/isaac_lab need the ``usd-core`` package.
+
+    IF THE TWIN CANNOT BE STEPPED, ``bom``, ``spec`` and ``certificate`` are REFUSED (``ok: False``, a
+    ``refused`` block, and a ``*.REFUSED.json`` where each would have been) while the geometry formats still
+    ship, stamped with the refusal in their own comment syntax. See :mod:`export_gate` for the line and the
+    argument for it."""
     from virturoid.services import session_state as S
     gene = S.get_robot(args["robot_id"])
     if gene is None:
@@ -750,6 +755,25 @@ def export_held(args: dict) -> dict:
     from virturoid.services.agent_tools import safe_build_path  # H2: confine writes under build/
     out_dir = safe_build_path(args.get("out_dir"), "agent_exports") / args["robot_id"]
     out_dir.mkdir(parents=True, exist_ok=True)
+    # THE SIMULABILITY GATE, ENFORCED AT THE DOOR IT WAS PROMISED AT. ``robot_import`` has told the customer
+    # since 9fbdcdc that an unsteppable twin yields "no verdict, certificate, BOM, spec sheet or calibration
+    # number" — and this function never read the flag. Measured on Menagerie's flybody: a complete, confident
+    # package including a $5,598 / 5.146 kg / 213.6 W bill of materials for a body weighing 0.000985 kg.
+    #
+    # The probe runs ONLY when a gated format was actually requested, so a geometry-only export costs nothing;
+    # and it runs on the GROUNDED COPY above, i.e. the body this package ships, not the one that was imported.
+    # See export_gate for which formats sit on which side of the line and why.
+    from virturoid.services import export_gate
+    gated_asked = [f for f in fmts if f in export_gate.GATED_FORMATS]
+    sim_check = export_gate.check_simulable(gene) if gated_asked else {"ok": True, "checked": False,
+                                                                       "reason": "no physics-asserting format "
+                                                                                 "was requested"}
+    simulable = bool(sim_check.get("ok"))
+    requested = list(fmts)
+    refusal = None
+    if not simulable:
+        refusal = export_gate.build_refusal(sim_check, requested)
+        fmts = list(refusal["still_shipped"])
     task = str(args.get("task") or (S.robot_meta(args["robot_id"]) or {}).get("prompt", ""))
     artifacts: dict = {}
     if "mjcf" in fmts:
@@ -835,11 +859,19 @@ def export_held(args: dict) -> dict:
             # Say WHERE these numbers came from. They are a fresh rollout taken at export time on the shipped
             # body -- not a transcript of whatever `verify_robot` the customer ran earlier, which may have used
             # a different budget (full = 1500 steps vs quick = 800) and would legitimately read differently.
+            #
+            # ``same_as_held_body`` follows the certificate's own tri-state rather than the raw fingerprint:
+            # if no rollout ran there is nothing that was "measured on" anything, and a bare True here would
+            # reinstate the claim the certificate just stopped making.
+            _ran = bool((cert.get("verdict") or {}).get("rollout_ran"))
             cert["measured_on"] = {"body": "the body in this package", "when": "export",
-                                   "mode": "quick", "same_as_held_body": bool(body_parity.get("same")),
-                                   "note": "re-measured here so the verdict and the shipped model are one "
-                                           "robot; an earlier interactive verdict at a different rollout "
-                                           "budget can differ and is not what this certificate signs"}
+                                   "mode": "quick", "rollout_ran": _ran,
+                                   "same_as_held_body": (bool(body_parity.get("same")) if _ran else None),
+                                   "note": ("re-measured here so the verdict and the shipped model are one "
+                                            "robot; an earlier interactive verdict at a different rollout "
+                                            "budget can differ and is not what this certificate signs") if _ran
+                                   else ("NO ROLLOUT RAN, so nothing was measured on any body and this "
+                                         "certificate signs no numbers")}
             (out_dir / "verification_certificate.json").write_text(
                 json.dumps(cert, indent=2, default=str), encoding="utf-8")
             artifacts["certificate"] = str(out_dir / "verification_certificate.json")
@@ -858,6 +890,19 @@ def export_held(args: dict) -> dict:
                 artifacts["spec"] = str(sp)
         except Exception as exc:  # noqa: BLE001
             artifacts["spec_error"] = f"{type(exc).__name__}: {exc}"
+    if refusal is not None:
+        # THE REFUSAL TRAVELS IN THE ARTIFACTS, not only in this envelope. An MJCF handed to a colleague, or a
+        # URDF loaded into ROS, has left the envelope behind; each shipped file carries the sentence in its own
+        # comment syntax, and each withheld one leaves a *.REFUSED.json where it would have been.
+        try:
+            written = export_gate.write_refusal_package(
+                out_dir, refusal, extra_targets=[artifacts.get("usd")])
+            artifacts["refusal_notice"] = written["notice"]
+            for fmt, path in (written.get("refused_docs") or {}).items():
+                artifacts[f"{fmt}_refused"] = path
+            refusal["stamped_artifacts"] = written["stamped"]
+        except Exception as exc:  # noqa: BLE001 - a stamping failure must not turn a refusal into a silent pass
+            refusal["stamp_error"] = f"{type(exc).__name__}: {exc}"
     real = {k: v for k, v in artifacts.items() if not k.endswith("_error")}
     out = {"ok": bool(real), "artifacts": artifacts, "out_dir": str(out_dir),
            # The customer should not have to open a json to learn whether they were shipped the robot they
@@ -875,6 +920,19 @@ def export_held(args: dict) -> dict:
             f"{body_parity.get('delta_mass_kg')} kg). The certificate in this package was re-measured on the "
             "SHIPPED body and does not claim deploy==measure against your earlier verdict."]
         out["body_parity"]["changed"] = body_parity.get("changed")
+    out["simulable"] = simulable
+    if refusal is not None:
+        # ``ok`` is FALSE here on purpose. The caller asked for a package including a parts list / a spec sheet
+        # / a certificate and did not get one; a scripted caller whose next line is `if res["ok"]: order_parts()`
+        # must stop. The geometry that DID ship is still listed in ``artifacts`` and named in the error.
+        out["ok"] = False
+        out["refused"] = refusal
+        out["error"] = (
+            f"EXPORT REFUSED IN PART — this twin is NOT SIMULABLE: {sim_check.get('reason')}. Withheld: "
+            f"{', '.join(refusal['refused'])} (each asserts a number measured by stepping this body). Still "
+            f"written: {', '.join(refusal['still_shipped']) or 'nothing'} — your own geometry, transcribed, "
+            f"unverified. See {out_dir / 'NOT_SIMULABLE.md'}.")
+        out.setdefault("warnings", []).insert(0, out["error"])
     return out
 
 
@@ -1114,7 +1172,9 @@ AGENT_DESIGN_TOOLS: dict[str, dict] = {
                           "robot_id": {"type": "string"}}}},
     "export_held": {"description": "Export the HELD robot to real files. formats (default all): mjcf | cad | urdf | "
                     "ros2 | bom | spec | usd (OpenUSD physics for Isaac Sim) | isaac_lab (full Isaac Lab hand-off). "
-                    "Returns paths.", "heavy": True, "handler": export_held,
+                    "Returns paths. If the body cannot be STEPPED, bom/spec/certificate are refused (ok:false + a "
+                    "'refused' block) and only the customer's own geometry ships, stamped as unverified.",
+                    "heavy": True, "handler": export_held,
                     "parameters": {"type": "object", "required": ["robot_id"], "properties": {
                         "robot_id": {"type": "string"}, "formats": {"type": "array", "items": {"type": "string"}}}}},
     "export_isaac": {"description": "Package the HELD robot for NVIDIA Isaac Sim / Isaac Lab: a validated physics "

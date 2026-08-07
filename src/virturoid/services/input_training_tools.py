@@ -344,8 +344,9 @@ def _reconcile_mass_provenance(gene, before: dict, result: dict) -> dict:
                    "masses are Virturoid's estimate and must not be re-preserved as the manufacturer's",
         }
         prov["corrected_to"] = "virturoid_estimate"
-        result["warnings"].append(
-            f"the manufacturer's per-link masses ({round(src_total, 3)} kg over {len(before)} links) were "
+        _finding(result, _WARN,
+            f"MASSES REPLACED - the manufacturer's per-link masses "
+            f"({round(src_total, 3)} kg over {len(before)} links) were "
             f"REPLACED during ingest by Virturoid's derived masses ({round(now_total, 3)} kg, "
             f"{len(changed)} link(s) changed) -- metadata['mass_source'] is now 'virturoid_estimate', not "
             f"'source_model', so nothing downstream cites your manufacturer for our number")
@@ -367,13 +368,116 @@ def _reconcile_mass_provenance(gene, before: dict, result: dict) -> dict:
         prov["material_masses_derived_at"] = mat
         prov["material_requested_by_customer"] = bool(mat and mat in asked)
         if mat and mat not in asked and meta.get("imported_from"):
-            result["warnings"].append(
-                f"the held masses were derived at '{mat}' — Virturoid's default for this step, NOT a material "
-                f"you specified"
+            _finding(result, _WARN,
+                f"MATERIAL NOT YOURS - the held masses were derived at '{mat}' — Virturoid's default for this "
+                f"step, NOT a material you specified"
                 + (f" (your material request was skipped: {result['skipped_ops'][0].get('reason')})"
                    if result.get("skipped_ops") else "")
                 + "; set it explicitly with the set_material edit op if that is wrong")
     return prov
+
+
+# ---------------------------------------------------------------------------------------------------------
+# INGEST FINDINGS -> the one line an agent actually relays.
+#
+# This is the SECOND time the same defect shape has been found in this function. 60d452d closed it for the
+# substitution gate ("substitution can no longer report success"); the simulability gate added in 9fbdcdc
+# reintroduced it verbatim, because the honesty lived IN THE GATE instead of in the summary. The measured
+# symptom, on the one genuinely-unsimulable Menagerie package:
+#
+#     ok=True   "Ingested -> adv_flybody_ingest: lane=faithful, 0 material(s) applied, payload=None kg,
+#                1 warning(s). Ready to edit/verify."
+#
+# ...for a twin that does not compile in MuJoCo. A COUNT hides its contents: "1 warning(s)" reads the same
+# whether the warning is "your CAD file had an odd unit" or "this robot cannot be stepped at all".
+#
+# So the summary is no longer written by the gates. It is DERIVED, and the derivation makes the honest
+# outcome the DEFAULT rather than something each new gate has to remember:
+#
+#   * ``result['warnings']`` IS the findings ledger. A future gate that only appends a string -- which is
+#     what every gate here already does, so it is what the next one will do -- still cannot produce a clean
+#     summary: an unclassified warning is treated as ``warn`` and its TEXT reaches the line.
+#   * ``_finding(result, _ERROR, ...)`` additionally flips ``ok`` to False and makes that finding LEAD the
+#     summary. Refusing is a SEVERITY on a finding, not a bespoke branch a gate author has to write.
+#   * "Ready to edit/verify" is emitted by exactly ONE branch: the one with no findings at all.
+#
+# _ERROR means the caller cannot proceed as asked with the robot we are handing back -- it is not their
+# robot, or it cannot be stepped, or there is none. _WARN means the ingest stands but something the caller
+# must know was dropped, replaced or guessed. A bad VERDICT (a body that does not walk) is neither: that is
+# ``imported_verdict``, and it correctly leaves ``ok`` True.
+# ---------------------------------------------------------------------------------------------------------
+_ERROR, _WARN = "error", "warn"
+
+
+def _finding(result: dict, severity: str, message: str, *, lead: bool = False) -> None:
+    """Record one ingest finding at a severity the summary is structurally required to honour.
+
+    Writes BOTH ``findings`` (typed) and ``warnings`` (the flat list every existing consumer already reads,
+    including ``_ingestion_report``'s ``dropped`` ledger), so severity is additive and nothing downstream
+    has to change to keep working. ``lead=True`` puts it first -- for the case where two errors are true at
+    once and one of them is the more specific account of the other.
+    """
+    entry = {"severity": severity, "message": message}
+    findings = result.setdefault("findings", [])
+    warnings = result.setdefault("warnings", [])
+    if lead:
+        findings.insert(0, entry)
+        warnings.insert(0, message)
+    else:
+        findings.append(entry)
+        warnings.append(message)
+
+
+def _finalize_ingest(result: dict) -> dict:
+    """Derive ``ok``, ``error`` and ``summary`` from the findings ledger.
+
+    The ONLY place any of the three is written, and every ``return`` of a built result goes through it, so a
+    gate cannot report a success it did not earn -- nor a refusal with no message, which is what the two
+    early ``return`` paths used to produce (``ok=False``, no ``summary`` at all, and an envelope reading
+    "ingest_project reported failure without a reason").
+    """
+    typed = {}
+    for f in result.get("findings") or []:
+        typed.setdefault(f["message"], f)
+    # Rebuild in warning order, promoting any bare `warnings.append` a gate made without a severity.
+    ordered = [typed.get(w) or {"severity": _WARN, "message": w} for w in (result.get("warnings") or [])]
+    for f in result.get("findings") or []:                     # a finding with no warning line (shouldn't happen)
+        if f not in ordered:
+            ordered.append(f)
+    result["findings"] = ordered
+
+    errors = [f for f in ordered if f.get("severity") == _ERROR]
+    rid = result.get("robot_id")
+    lane = result.get("lane_used") or "none"
+    # The twin importer's own notes are NOT ingest findings -- they describe how the editable approximation
+    # was derived (unsupported joint types, multi-joint bodies) and every real model carries a few. But they
+    # are not nothing either, and they were invisible: "0 warning(s)" was the line for a Go2 whose import
+    # raised 3. Counted separately so neither number can stand in for the other.
+    approximations = len(((result.get("import") or {}).get("warnings")) or [])
+    tail = (f" [robot={rid}; lane={lane}; {len(ordered)} finding(s)"
+            + (f"; {approximations} twin-approximation note(s) in result['import']['warnings']"
+               if approximations else "")
+            + "; full list in result['findings']]")
+
+    if errors:
+        result["ok"] = False
+        result["error"] = errors[0]["message"]
+        result["summary"] = errors[0]["message"] + tail
+    elif ordered:
+        result["ok"] = True                                    # the ingest stands -- but it is not clean
+        result["summary"] = (f"Ingested -> {rid}: lane={lane}, "
+                             f"{len(result.get('materials_applied') or [])} material(s) applied, "
+                             f"payload={result.get('payload_kg')} kg. NOT CLEAN - {ordered[0]['message']}"
+                             + tail)
+    else:
+        result["ok"] = True
+        result["summary"] = (f"Ingested -> {rid}: lane={lane}, "
+                             f"{len(result.get('materials_applied') or [])} material(s) applied, "
+                             f"payload={result.get('payload_kg')} kg, no findings"
+                             + (f" ({approximations} twin-approximation note(s) in "
+                                f"result['import']['warnings'])" if approximations else "")
+                             + ". Ready to edit/verify.")
+    return result
 
 
 def _ingest_project(args: dict) -> dict:
@@ -390,8 +494,8 @@ def _ingest_project(args: dict) -> dict:
     if not path and not description:
         return {"error": "provide project_path (a folder or .zip of the robot's files) and/or description (NLP)"}
 
-    result: dict = {"robot_id": None, "materials_applied": [], "payload_kg": None,
-                    "applied_ops": [], "skipped_ops": [], "warnings": [], "notes": []}
+    result: dict = {"robot_id": None, "materials_applied": [], "payload_kg": None, "applied_ops": [],
+                    "skipped_ops": [], "warnings": [], "findings": [], "notes": []}
     workdir: str | None = None
     scan_root: str | None = None
     bundle = None
@@ -433,7 +537,8 @@ def _ingest_project(args: dict) -> dict:
                 except OSError:
                     pass
         except Exception as exc:  # noqa: BLE001
-            result["warnings"].append(f"project scan failed: {exc}")
+            _finding(result, _ERROR, f"PROJECT NOT READ - scanning {path} failed ({exc}), so NONE of the files "
+                                     f"you handed us were opened; anything held below came from the description")
 
     # 2) import the robot model -> the inferred, EDITABLE RobotGene (the twin we amend)
     gene = None
@@ -453,12 +558,22 @@ def _ingest_project(args: dict) -> dict:
                                 "simulation_check": imp.get("simulation_check") or {},
                                 "warnings": list(imp.get("warnings", []))[:8]}
             if not imp.get("simulable", True):
-                result["warnings"].append(
-                    f"the editable twin inferred from {model_rel} is NOT SIMULABLE "
-                    f"({(imp.get('simulation_check') or {}).get('reason')}) — amend/verify/export on it would "
-                    f"report numbers off a model that cannot be stepped. The faithful lane below still stands.")
+                # AN ERROR, NOT A WARNING. The twin recorded here IS the held robot -- `S.put_robot(gene)`
+                # below holds this object, and verify/certify/BOM/cost/calibrate all produce their numbers by
+                # STEPPING it. A model that does not step cannot produce any of them, so "Ready to edit/verify"
+                # is false about the only robot this call hands back. (The faithful MJCF, when it loaded, is
+                # returned in the payload for native simulation -- but it is not what is held.)
+                _why = " ".join(str((imp.get("simulation_check") or {}).get("reason") or "").split())[:220]
+                _finding(result, _ERROR,
+                         f"NOT SIMULABLE - the editable twin inferred from {model_rel} cannot be stepped in "
+                         f"MuJoCo ({_why}). It is the HELD robot, and every number downstream (verdict, "
+                         f"certificate, BOM, spec sheet, calibration gap) comes from stepping it, so it is NOT "
+                         f"ready to edit or verify; result['faithful']['mjcf'] holds your model as-is for "
+                         f"native simulation.")
         except Exception as exc:  # noqa: BLE001
-            result["warnings"].append(f"model import failed ({model_rel}): {exc}")
+            # No twin at all from the customer's model. Whatever is held below came from somewhere else.
+            _finding(result, _ERROR, f"MODEL NOT IMPORTED - {model_rel} could not be turned into an editable "
+                                     f"robot ({exc})")
 
     # 2-faithful) FAITHFUL LANE (P0, plan §P0.2): before we touch the lossy gene twin, load the customer's model
     # AS-IS through the repair pass and keep it. This is the body with THEIR link names + dimensions (FL_hip,
@@ -491,8 +606,16 @@ def _ingest_project(args: dict) -> dict:
                                            "— added a free base so it can locomote; original geometry unchanged")
             else:
                 result["faithful"] = {"ok": False, "note": fm.get("note"), "repairs": fm.get("repairs", [])}
+                # A CLEAN refusal by the faithful lane raised nothing at all before this: it reached only
+                # `_ingestion_report`'s `dropped` list, which the summary counts nothing from, so a customer
+                # whose model we could not load as-is still read "0 warning(s). Ready to edit/verify."
+                _finding(result, _WARN,
+                         f"YOUR MODEL DID NOT LOAD AS-IS - the faithful lane refused {model_rel} "
+                         f"({fm.get('note')}), so the only body here is our re-derived approximation of it, "
+                         f"not your geometry or your link names")
         except Exception as exc:  # noqa: BLE001 - faithful lane is additive; the gene twin still stands
-            result["warnings"].append(f"faithful lane unavailable: {exc}")
+            _finding(result, _WARN, f"YOUR MODEL DID NOT LOAD AS-IS - the faithful lane failed on {model_rel} "
+                                    f"({exc}); the held body is our re-derived approximation, not your geometry")
 
     # 2b) a legged import that can't stand on its own stance gets the SAME walkable-stance treatment a composed
     # body gets (a wide fanned stance) so it can actually be SIMULATED and its controller improved. A well-formed
@@ -576,6 +699,13 @@ def _ingest_project(args: dict) -> dict:
     props = extract_properties(description)
     result["nlp"] = props.to_dict()
     result["notes"].extend(props.notes)
+    # EVERY note `nlp_properties` emits is of one shape: "we read this requirement and did NOT act on it"
+    # (a payload above the safe amend range, an unlabelled mass we refused to treat as a load, a stated DOF
+    # count). They landed in `notes`, which the summary counts nothing from -- so a customer who wrote
+    # "carries a 60 kg payload" read `payload=None kg ... Ready to edit/verify` with their requirement
+    # nowhere in the line. Unapplied is a finding, not a footnote.
+    for _n in props.notes:
+        _finding(result, _WARN, f"STATED BUT NOT APPLIED - {_n}")
 
     # fallback: no importable model but a description -> compose an editable robot from the words (still ingest-able)
     composed_from_description = False
@@ -586,13 +716,17 @@ def _ingest_project(args: dict) -> dict:
             composed_from_description = True
             result["notes"].append("no importable robot model found -> composed an editable robot from the description")
         except Exception as exc:  # noqa: BLE001
-            result["warnings"].append(f"could not compose a robot from the description: {exc}")
+            _finding(result, _ERROR, f"NOTHING COMPOSED - the description could not be turned into a robot "
+                                     f"either ({exc})")
     if gene is None:
-        result["ok"] = False
-        result["warnings"].append("no robot could be produced (no importable model and no usable description)")
+        # This exit used to set ok=False and return with NO `summary` key at all, so the one line an agent
+        # relays did not exist and the envelope read "ingest_project reported failure without a reason".
+        # It goes through the same finalizer as every other exit now.
+        _finding(result, _ERROR, "NO ROBOT INGESTED - no importable model and no usable description, so this "
+                                 "call is holding nothing")
         if workdir:
             shutil.rmtree(workdir, ignore_errors=True)
-        return result
+        return _finalize_ingest(result)
 
     # 4) apply the stated materials (only to parts that EXIST -- no fabrication) + payload, one gate per op
     from virturoid.services.edit_operators import apply_op, segments_for_group
@@ -661,7 +795,10 @@ def _ingest_project(args: dict) -> dict:
             elif name == "set_payload":
                 result["payload_kg"] = a.get("payload_kg")
                 if diff.get("warning"):
-                    result["warnings"].append(diff["warning"])
+                    # The summary quotes `payload=N kg` as an accomplished fact. When the actuator catalog
+                    # cannot actually reach that load the number is an aspiration, so the qualification has
+                    # to travel with it rather than sitting behind a count.
+                    _finding(result, _WARN, f"PAYLOAD OVER THE ACTUATOR ENVELOPE - {diff['warning']}")
         except Exception as exc:  # noqa: BLE001 - a bad op (incl. EditError) is skipped + noted, never aborts ingest
             result["skipped_ops"].append({**op, "reason": str(exc)})
 
@@ -712,7 +849,10 @@ def _ingest_project(args: dict) -> dict:
                 result["bom"] = {"source": bom_ref, "line_items": b.get("line_item_count") or len(b.get("items", [])),
                                  "total_mass_kg": b.get("total_mass_kg")}
             except Exception as exc:  # noqa: BLE001
-                result["warnings"].append(f"BOM import failed ({bom_ref}): {exc}")
+                # Their BOM is the cost/actuator ground truth. Dropping it silently means every downstream
+                # cost and mass figure comes from OUR catalog while the customer believes theirs was read.
+                _finding(result, _WARN, f"YOUR BOM WAS NOT READ - {bom_ref} could not be parsed ({exc}); cost, "
+                                        f"part and mass figures below come from Virturoid's catalog, not yours")
         if cad_ref and scan_root:
             try:
                 from virturoid.services.cad_importer import import_cad
@@ -723,7 +863,8 @@ def _ingest_project(args: dict) -> dict:
                 result["cad"] = {"source": cad_ref, "dimensions_m": c.get("dimensions_m") or c.get("bbox_m"),
                                  "est_mass_kg": c.get("est_mass_kg") or c.get("mass_kg")}
             except Exception as exc:  # noqa: BLE001
-                result["warnings"].append(f"CAD import failed ({cad_ref}): {exc}")
+                _finding(result, _WARN, f"YOUR CAD WAS NOT READ - {cad_ref} could not be imported ({exc}); no "
+                                        f"dimension or mass evidence from it reached the held robot")
 
     # 6b) SUBSTITUTION GATE. A GENERATED body must never be presentable as the customer's own robot.
     #
@@ -733,18 +874,17 @@ def _ingest_project(args: dict) -> dict:
     # scene wrapper we happened to compile, not of the body we held -- the summary conflated the two -- and the
     # only trace of the swap was a line in `notes`, which the customer-facing summary counts nothing from.
     #
-    # We do NOT return an error, because composing from words is a documented, legitimate mode (description-only
-    # ingest asks for exactly that). What must be impossible is MISTAKING one for the other, so:
+    # We do NOT raise, because composing from words is a documented, legitimate mode (description-only ingest
+    # asks for exactly that). What must be impossible is MISTAKING one for the other, so:
     #   * `lane_used` describes the HELD ROBOT, and can never read "faithful" for a body we generated;
-    #   * a compose that happened *after the customer handed us files* is a SUBSTITUTION -- it sets ok=False, a
-    #     top-level `substituted` block, and a warning (so the "N warning(s)" count can never be 0);
-    #   * `summary` -- the one line an agent relays -- leads with it.
+    #   * a compose that happened *after the customer handed us files* is a SUBSTITUTION -- an _ERROR finding,
+    #     which is what flips ok=False and puts the refusal at the FRONT of the summary. This gate is now
+    #     spelled the same way every other gate is; see `_finding` / `_finalize_ingest`.
     _design_source = str(getattr(gene, "design_source", "") or "").lower()
     if composed_from_description or (result.get("lane_used") == "faithful"
                                      and _design_source.startswith("anatomy")):
         result["lane_used"] = "composed_from_description"
     result["held_robot_design_source"] = _design_source or "unknown"
-    result["ok"] = True
     if composed_from_description and path:
         _pg = result.get("project_graph") or {}
         seen = list(_pg.get("robot_models") or [])
@@ -761,7 +901,6 @@ def _ingest_project(args: dict) -> dict:
                    f"({', '.join(sorted(_unsupported)[:3])}) — it reads URDF and MJCF")
         else:
             why = "the project contained no robot description file (URDF/MJCF)"
-        result["ok"] = False
         result["substituted"] = True
         result["substitution"] = {
             "held_robot_is": "a robot GENERATED from the text description — NOT the robot in your project",
@@ -769,33 +908,28 @@ def _ingest_project(args: dict) -> dict:
             "project_path": str(path),
             "model_files_seen": seen[:8],
             "unsupported_model_files": _unsupported[:8],
-            "import_errors": [w for w in result["warnings"] if "import failed" in w][:4],
+            "import_errors": [f["message"] for f in (result.get("findings") or [])
+                              if f["message"].startswith(("MODEL NOT IMPORTED", "PROJECT NOT READ"))][:4],
             "how_to_fix": ("; ".join(_guidance) if _guidance else
                            "point ingest_project directly at the model file, or fix the import errors above; "
                            "inspect_project_bundle shows every candidate and why each was ranked where it was"),
         }
-        result["warnings"].insert(0, f"SUBSTITUTED ROBOT: {why}, so the held robot {result['robot_id']} was "
-                                     f"GENERATED from your description and is NOT your robot.")
+        # LEADS the summary: when the model also failed to import (an _ERROR of its own) this is the more
+        # specific account of the same event, and it is the one the customer has to see first.
+        _finding(result, _ERROR,
+                 f"SUBSTITUTED - {result['robot_id']} IS NOT YOUR ROBOT: {why}, so this body was GENERATED "
+                 f"from your description. Your model was not ingested; see result['substitution'] for how to "
+                 f"fix it.", lead=True)
 
-    # 7) INGESTION REPORT (P0, plan §P0.7): the honest three-ledger account of what the folder yielded —
-    # what we UNDERSTOOD, what we GUESSED, what we DROPPED — the same honesty contract as composition_notes.
+    # 7) VERDICT + INGESTION REPORT. The summary/ok/error come first so the report -- and the JSON it persists
+    # next to the customer's project -- carries the same severities the caller was handed, not a flat list.
+    _finalize_ingest(result)
     report = _ingestion_report(result)
     result["ingestion_report"] = report
     _persist_ingestion_report(report, scan_root if (path and not str(path).lower().endswith(".zip")) else path)
 
     if workdir:
         shutil.rmtree(workdir, ignore_errors=True)
-    lane = result.get("lane_used") or "none"
-    if result.get("substituted"):
-        result["summary"] = (
-            f"SUBSTITUTED - {result['robot_id']} IS NOT YOUR ROBOT: {result['substitution']['reason']}, so this "
-            f"body was GENERATED from your description (lane={lane}). Your model was not ingested. "
-            f"{len(result['warnings'])} warning(s); see result['substitution'] for how to fix it.")
-    else:
-        result["summary"] = (f"Ingested -> {result['robot_id']}: lane={lane}, "
-                             f"{len(result['materials_applied'])} material(s) applied, "
-                             f"payload={result['payload_kg']} kg, {len(result['warnings'])} warning(s). "
-                             f"Ready to edit/verify.")
     return result
 
 
@@ -831,7 +965,12 @@ def _ingestion_report(result: dict) -> dict:
     if result.get("control_scripts"):
         guessed.append(f"{len(result['control_scripts'])} control/policy file(s) found — not yet run "
                        "(call adopt_control_script)")
+    # `dropped` is a flat list of strings, so the JSON persisted next to the customer's project could not say
+    # which of its lines was "we could not parse your CSV" and which was "this robot cannot be stepped".
+    # The typed ledger travels with it.
     return {"understood": understood, "guessed": guessed, "dropped": dropped,
+            "findings": list(result.get("findings") or []), "ok": result.get("ok"),
+            "summary": result.get("summary"),
             "lane_used": result.get("lane_used"), "lanes_attempted": result.get("lanes_attempted", [])}
 
 

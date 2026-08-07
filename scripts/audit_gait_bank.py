@@ -33,7 +33,9 @@ from __future__ import annotations
 import argparse
 import collections
 import json
+import os
 import sqlite3
+import tempfile
 import time
 from pathlib import Path
 
@@ -213,6 +215,15 @@ def main() -> None:
                          "any number that was computed while the test suite was writing into this bank")
     ap.add_argument("--json", default=None, help="write the full report here")
     args = ap.parse_args()
+
+    # THIS SCRIPT IS A READER, AND IT SHOULD BE INCAPABLE OF BEING ANYTHING ELSE. ``_rows`` already opens
+    # ``--memory`` with ``mode=ro``, but the census/remeasure/gate code below imports ``gait_flywheel`` and
+    # ``gait_hints``, and several product paths under those open a bank from a DEFAULT they compute themselves
+    # (measured: ``fit_gait_for_body(db=None)`` -> ``safe_build_path(None, "memory")`` -> ``<cwd>/build/memory``,
+    # with ``bank=True``). An audit that banked a row into the corpus it is auditing would be the same
+    # measuring-your-own-evidence problem as the test suite's. So point every DEFAULT at a throwaway directory:
+    # the bank we READ is still exactly the one named on the command line, and nothing here can write anything.
+    os.environ["VIRTUROID_MEMORY_DIR"] = tempfile.mkdtemp(prefix="virturoid-audit-scratch-")
 
     rows = _rows(Path(args.memory) / "virturoid_memory.db")
     if args.exclude_suite:

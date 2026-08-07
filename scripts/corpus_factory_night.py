@@ -1,16 +1,36 @@
 """Run one corpus-factory night (master_plan_v6 WS-C.2).
 
-    PYTHONPATH=src python scripts/corpus_factory_night.py [--bodies 20] [--memory build/memory] [--grow-ledger]
+    PYTHONPATH=src python scripts/corpus_factory_night.py --memory build/memory [--bodies 20] [--grow-ledger]
 
 Proposer: OFFLINE by default (heuristic composition over a diverse prompt bank + verified-design jitter — zero
 tokens). In production the proposer is an offline batch LLM agent (explicit dev tokens, never the customer hot
 path); pass --strict-llm to route composition through the live design model. The night runs the ordered gate
 stack, checkpoints after every admit, banks admitted bodies into the retrievable corpus, and ratchets the metric.
+
+``--memory`` IS REQUIRED AND IT IS NOT A FORMALITY. This script is a DELIBERATE WRITER: growing the bank is the
+whole point of running it, so it is the one entry point that must never guess. It used to default to
+``build/memory``, which meant ``python scripts/corpus_factory_night.py`` — the obvious thing to type when
+experimenting — grew the developer's real corpus.
+
+AND IT DID NOT ACTUALLY HONOUR THE FLAG END TO END. Measured 2026-08-07 with the redirect pointed at an empty
+directory: the PROPOSER's own ``compose_robot(ensure_walkable=True)`` reaches ``ensure_walkable_quad`` ->
+``fit_gait_for_body(db=None)`` -> ``gait_flywheel._open_db_and_learn``, which resolves its destination with
+``agent_tools.safe_build_path(None, "memory")`` — a second default rule that reads ``<cwd>/build/memory`` and has
+never read ``VIRTUROID_MEMORY_DIR``. It created a 122 KB database there while the night's own directory stayed
+empty, and it does that with ``bank=True``. So a night aimed at a fresh corpus was warm-starting AND banking
+against the very bank it was supposed to be replacing.
+
+The fix is to say the destination ONCE, in the environment, BEFORE any virturoid module is imported — the same
+mechanism ``tests/conftest.py`` uses, and the reason ``memory_db`` now rewrites the conventional path when a
+redirect is in force. Passing ``memory_dir=`` down the call chain cannot work: the leaking call sites are three
+levels below this file and take no destination argument at all.
 """
 from __future__ import annotations
 
 import argparse
 import json
+import os
+import sys
 from pathlib import Path
 
 # A diverse prompt bank spanning structural families (breadth, not depth — GenBot-1K). The proposer biases toward
@@ -68,10 +88,30 @@ def _offline_proposer(strict_llm: bool, classes: tuple[str, ...] | None = None):
     return propose
 
 
+def claim_destination(memory: str) -> Path:
+    """Make ``--memory`` the destination for EVERY default in this process, before virturoid is imported.
+
+    Returns the resolved directory. Refuses if a conflicting ``VIRTUROID_MEMORY_DIR`` is already exported, because
+    silently preferring either one is how a night lands somewhere nobody asked for — the exact failure this whole
+    change exists to prevent, just with the two sides swapped.
+    """
+    target = Path(memory).resolve()
+    already = os.environ.get("VIRTUROID_MEMORY_DIR")
+    if already and Path(already).resolve() != target:
+        raise SystemExit(f"refusing to run: --memory says {target} but VIRTUROID_MEMORY_DIR says "
+                         f"{Path(already).resolve()}. Pick one.")
+    target.mkdir(parents=True, exist_ok=True)
+    os.environ["VIRTUROID_MEMORY_DIR"] = str(target)
+    return target
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--bodies", type=int, default=20)
-    ap.add_argument("--memory", default="build/memory")
+    ap.add_argument("--memory", required=True,
+                    help="REQUIRED destination for this night's corpus. Pass build/memory to grow the real bank; "
+                         "pass anything else to build a fresh one. Exported as VIRTUROID_MEMORY_DIR before any "
+                         "virturoid import, so nested defaults land here too.")
     ap.add_argument("--manifest", default=None)
     ap.add_argument("--grow-ledger", action="store_true")
     ap.add_argument("--strict-llm", action="store_true")
@@ -85,11 +125,14 @@ def main() -> None:
                     help="comma-separated prompt families to propose from (default: all)")
     args = ap.parse_args()
 
+    # BEFORE the import below, not after: ``memory_db`` binds DEFAULT_DB_PATH at import time and
+    # ``memory_store``/``autonomous_build`` bind their default arguments at def time.
+    mem = claim_destination(args.memory)
+    print(f"corpus-factory night writing to {mem} (VIRTUROID_MEMORY_DIR)", file=sys.stderr)
+
     from virturoid.services.corpus_factory import (FactoryConfig, default_bank_fn, gait_bank_fn,
                                                    gait_fit_verify_fn, gait_search_verify, held_out_aware,
                                                    run_factory_night)
-    mem = Path(args.memory)
-    mem.mkdir(parents=True, exist_ok=True)
     cfg = FactoryConfig(max_bodies=args.bodies, grow_ledger=args.grow_ledger)
     classes = tuple(c.strip() for c in args.classes.split(",")) if args.classes else \
         (("legged",) if args.gait_corpus else None)

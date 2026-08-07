@@ -35,6 +35,10 @@ _GEOM = {2: "sphere", 3: "capsule", 5: "cylinder", 6: "box"}
 _EE_NAME_HINTS = ("gripper", "hand", "finger", "effector", "tcp", "grasp")
 # Site names are deliberate (ee_site, tcp, tool0), so a short "ee" hint is safe there.
 _EE_SITE_HINTS = ("ee", "tcp", "tool", "grasp", "effector", "tip")
+# The nominal mass of a SYNTHESIZED base — a mounting frame with no counterpart in the customer's model, so
+# it should weigh nothing. `RobotGene.validate()` rejects mass <= 0, so this is instead the smallest value
+# that survives the coarsest mass rounding downstream (3 dp in `grounded_physics`). Always disclosed.
+_SYNTH_BASE_MASS_KG = 0.001
 
 
 def _quat_to_euler_xyz(quat) -> tuple[float, float, float]:
@@ -99,20 +103,26 @@ def _rot_z_to(v):
     return np.eye(3) + K + K @ K * (1.0 / (1.0 + c))
 
 
-def _link_vector(mj, body_id: int, children: dict):
+def _link_vector(mj, body_id: int, children: dict, pos_of: dict | None = None):
     """The link's own AXIS in its body frame: origin -> next joint (or, for a leaf, -> its farthest geom).
 
     A RobotGene segment spans [0, length] along its local +z, but a real robot's links point wherever the design
     puts them -- a Go2's thigh and calf both run DOWN (-z) from their joints. Importing without this, every link
     was extruded along +z and came out MIRRORED ABOUT ITS OWN JOINT: joints in the right places, link bodies on
     the wrong side of them, which rendered an imported Go2 as a bundle of pipes standing through its own chassis.
+
+    ``pos_of`` supplies each child's placement in THIS body's frame; it is ``_fold_frames``' composed table,
+    so a child reached through a dropped coordinate frame is measured to where it actually is, not to the
+    frame-local offset that would put it in the wrong place. Defaults to the raw ``body_pos``.
     """
     import numpy as np
 
     kids = children.get(body_id, [])
+    _pos = (lambda c: np.asarray(pos_of[c], dtype=float)) if pos_of is not None \
+        else (lambda c: np.asarray(mj.body_pos[c], dtype=float))
     if kids:
-        best = max(kids, key=lambda c: float(np.linalg.norm(mj.body_pos[c])))
-        return np.asarray(mj.body_pos[best], dtype=float)
+        best = max(kids, key=lambda c: float(np.linalg.norm(_pos(c))))
+        return _pos(best)
     far, best_n = np.zeros(3), 0.0
     for g in range(mj.ngeom):
         if int(mj.geom_bodyid[g]) != body_id:
@@ -125,6 +135,122 @@ def _link_vector(mj, body_id: int, children: dict):
         if reach > best_n:
             best_n, far = reach, (p * (reach / nrm) if nrm > 1e-9 else np.array([0.0, 0.0, reach]))
     return far
+
+
+def _urdf_world_fused_links(text: str) -> tuple[dict[str, float], float]:
+    """``({link: kg} MuJoCo welds into the WORLD, the URDF's total declared mass)``.
+
+    MuJoCo's URDF loader defaults to ``fusestatic="true"``: the root link, plus everything joined to it by
+    ``fixed`` joints, is merged into the worldbody and its ``<inertial>`` is DISCARDED. A link merged into a
+    MOVING parent is different -- its mass is added to the parent and nothing is lost. Measured on a 3-link
+    chain declaring 3.5 kg (static root 2.0, hinged middle 1.0, fixed-jointed leaf 0.5): MuJoCo compiles it to
+    ``nbody == 2`` totalling 1.5 kg, so exactly the static root's 2.0 kg is gone and the leaf's 0.5 kg is not.
+
+    This is a real, unavoidable-at-this-layer difference between the customer's file and every model built
+    from it -- including their own MuJoCo run -- and it is large: a fixed-base URDF quadruped declaring
+    5.2 kg imports as 3.2 kg, 38% light, because its 2.0 kg trunk is the static root. It used to be masked:
+    the synthesized base was handed a COPY of the first root's mass (0.8 kg here, a leg's), which covered
+    part of the hole with a number that meant nothing. It is now reported with its own figure instead.
+
+    Text-scanned rather than recompiled with ``fusestatic="false"``: reading the file the customer gave us
+    costs microseconds and cannot fail in a way that blocks an import, and the caller cross-checks the result
+    against the compiled total before saying anything (see the call site).
+    """
+    links: dict[str, float] = {}
+    starts = list(re.finditer(r"<link\b([^>]*)>", text, re.I))
+    for k, m in enumerate(starts):
+        nm = re.search(r"\bname\s*=\s*[\"']([^\"']+)[\"']", m.group(1), re.I)
+        if not nm:
+            continue
+        end = starts[k + 1].start() if k + 1 < len(starts) else len(text)
+        close = text.find("</link", m.end())
+        if close != -1:
+            end = min(end, close)
+        mv = re.search(r"<mass\b[^>]*\bvalue\s*=\s*[\"']([^\"']+)[\"']", text[m.end():end], re.I)
+        try:
+            links[nm.group(1)] = float(mv.group(1)) if mv else 0.0
+        except (TypeError, ValueError):
+            links[nm.group(1)] = 0.0
+
+    edges: list[tuple[str, str, str]] = []              # (parent, child, joint type)
+    for jm in re.finditer(r"<joint\b([^>]*)>(.*?)</joint\s*>", text, re.I | re.S):
+        jt = re.search(r"\btype\s*=\s*[\"']([^\"']+)[\"']", jm.group(1), re.I)
+        p = re.search(r"<parent\b[^>]*\blink\s*=\s*[\"']([^\"']+)[\"']", jm.group(2), re.I)
+        c = re.search(r"<child\b[^>]*\blink\s*=\s*[\"']([^\"']+)[\"']", jm.group(2), re.I)
+        if p and c:
+            edges.append((p.group(1), c.group(1), (jt.group(1) if jt else "").strip().lower()))
+
+    kids: dict[str, list[tuple[str, str]]] = {}
+    for p, c, t in edges:
+        kids.setdefault(p, []).append((c, t))
+    children = {c for _, c, _ in edges}
+    frontier = [n for n in links if n not in children]  # the URDF's root link(s)
+    static, seen = [], set()
+    while frontier:                                     # ... and everything FIXED to them
+        n = frontier.pop()
+        if n in seen:
+            continue
+        seen.add(n)
+        static.append(n)
+        frontier.extend(c for c, t in kids.get(n, []) if t == "fixed")
+    return ({n: links.get(n, 0.0) for n in static if links.get(n, 0.0) > 0.0}, float(sum(links.values())))
+
+
+def _frame_only_bodies(mj) -> set[int]:
+    """Source bodies that are COORDINATE FRAMES, not links: no mass, no geom, no joint.
+
+    Real models park empty bodies in the tree purely to name a pose — a sensor mount (``realsense``,
+    ``base_imu``, ``head_nav_cam``, ``oak/``), a mounting datum (``attachment``, ``link_grasp_center``,
+    ``world_link``), or the placement frame an ``<attach>``-ed submodel arrives with (shadow_dexee's
+    ``F0/ F1/ F2/``). They carry no matter and no surface; the source's own dynamics are identical with
+    them deleted.
+
+    Turning one into a segment invents a robot part: the importer's zero-mass floor gives it 0.01 kg, and
+    the compiler gives every segment a COLLISION PRIMITIVE, so a naked frame becomes a stub with mass and a
+    contact surface that the customer never built. Measured over MuJoCo Menagerie (100 models): 18 zero-mass
+    bodies exist and ALL 18 are of exactly this kind — none has a geom, none has a joint — so there is no
+    "massless but real link" case to weigh against dropping them. They are folded into their children
+    instead (``_fold_frames``), which preserves every surviving link's pose exactly.
+    """
+    return {i for i in range(1, mj.nbody)
+            if float(mj.body_mass[i]) <= 0.0
+            and int(mj.body_geomnum[i]) == 0
+            and int(mj.body_jntnum[i]) == 0}
+
+
+def _fold_frames(mj, frames: set[int]):
+    """Collapse the frame-only bodies out of the tree, composing their transforms into their children.
+
+    Returns ``(eff_parent, eff_pos, eff_rot, eff_body)``:
+      * ``eff_parent[i]`` — the nearest ancestor of ``i`` that is a real link (0 = world);
+      * ``eff_pos[i]`` / ``eff_rot[i]`` — where ``i`` sits IN THAT ancestor's frame, with every removed
+        frame's own translation and rotation composed in. Dropping a frame without this would silently
+        MOVE its subtree by the frame's transform: shadow_dexee's three fingers hang off ``F0/ F1/ F2/``,
+        which carry the entire finger placement (0.052 m of offset each, and 161.3 deg of yaw on two of the
+        three), so the three fingers would land on one point facing one way.
+      * ``eff_body[i]`` — the real link body ``i`` is rigidly part of (itself, unless it IS a frame). A
+        frame has no joint, so anything attached to it — a site especially — is welded to that link; this
+        re-homes such sites instead of losing them with the frame.
+
+    MuJoCo orders body ids parent-before-child, so one forward pass suffices.
+    """
+    import numpy as np
+
+    eff_parent: dict[int, int] = {}
+    eff_pos: dict[int, object] = {}
+    eff_rot: dict[int, object] = {}
+    eff_body: dict[int, int] = {0: 0}
+    for i in range(1, mj.nbody):
+        p = int(mj.body_parentid[i])
+        pos = np.asarray(mj.body_pos[i], dtype=float)
+        rot = _quat_mat(mj.body_quat[i])
+        while p in frames:
+            pos = eff_pos[p] + eff_rot[p] @ pos
+            rot = eff_rot[p] @ rot
+            p = eff_parent[p]
+        eff_parent[i], eff_pos[i], eff_rot[i] = p, pos, rot
+        eff_body[i] = p if i in frames else i
+    return eff_parent, eff_pos, eff_rot, eff_body
 
 
 def _root_own_span(mj, body_id: int):
@@ -535,12 +661,72 @@ def _import_robot_uncached(source: str, *, robot_id: str | None = None, species:
     BODY, JNT, GEOM, SITE = (mujoco.mjtObj.mjOBJ_BODY, mujoco.mjtObj.mjOBJ_JOINT,
                              mujoco.mjtObj.mjOBJ_GEOM, mujoco.mjtObj.mjOBJ_SITE)
 
+    # THE ONE MASS DIFFERENCE WE CANNOT REMOVE, REPORTED WITH ITS NUMBER. MuJoCo's URDF loader welds the
+    # static base into the world and discards its `<inertial>` (see `_urdf_world_fused_links`), so the model
+    # every twin is built from is already lighter than the file the customer wrote -- as is their own MuJoCo
+    # run of it. We cannot recover it here without rebuilding the whole body tree on `fusestatic="false"`,
+    # which is a different change; what we can do is stop hiding it. It USED to be hidden, badly: the
+    # synthesized base was handed a copy of the first root's mass, which papered over part of the hole with an
+    # unrelated number. The text scan is CROSS-CHECKED against the compiled total before it says anything --
+    # if the two do not reconcile, the parse is not trusted and nothing is claimed.
+    if "<robot" in _text:
+        try:
+            _fused, _declared = _urdf_world_fused_links(_text)
+            _lost = sum(_fused.values())
+            _compiled = float(sum(float(mj.body_mass[i]) for i in range(1, mj.nbody)))
+            # The cross-check: the text scan is only believed when declared == compiled + fused. Anything
+            # else means the scan misread the file (or MuJoCo did something else with the mass), and a
+            # number we cannot reconcile is worse than no number.
+            _ok = abs(_declared - (_compiled + _lost)) <= max(1e-4, 0.005 * max(_declared, 1e-9))
+            if _lost > 1e-6 and _ok:
+                warnings.append(
+                    f"{_lost:.3f} kg of the {_declared:.3f} kg your URDF declares "
+                    f"({100.0 * _lost / max(_declared, 1e-9):.1f}%) is NOT in the imported twin: MuJoCo's URDF "
+                    f"loader welds the static base into the world and drops its <inertial>. The link(s) "
+                    f"affected: {', '.join(f'{n} ({kg:g} kg)' for n, kg in sorted(_fused.items()))}. The same "
+                    f"is true of the model your own MuJoCo compiles from this file, so the twin matches your "
+                    f"simulator at {_compiled:.3f} kg — it does not match your BOM. Re-export with the base "
+                    f"link jointed to a dummy root, or state the base mass when you ground the design.")
+        except Exception:  # noqa: BLE001 - a disclosure may never be the thing that fails an import
+            pass
+
     # Map each non-world body to a segment. Body 0 is the world; geoms on it (floor/table) are scenery.
+    #
+    # A COORDINATE FRAME IS NOT A LINK. Bodies with no mass, no geom and no joint exist only to name a pose
+    # (see `_frame_only_bodies`); emitted as segments they became physical stubs — 0.01 kg from the zero-mass
+    # floor below plus a collision primitive from the compiler — parts of the robot the customer never built.
+    # They are folded into their children here, transforms composed, so every real link keeps its exact pose.
+    _frames = _frame_only_bodies(mj)
+    eff_parent, eff_pos, eff_rot, eff_body = _fold_frames(mj, _frames)
     body_name = {i: (name_of(BODY, i) or f"body{i}") for i in range(mj.nbody)}
+    if mj.nbody > 1 and len(_frames) == mj.nbody - 1:
+        # EVERY body is a frame: there is no robot here, only a skeleton of poses. Refuse, the way an
+        # <include> fragment is refused. Emitting the frames as stubs invented a body; folding them all away
+        # and letting the base synthesis run invented a DIFFERENT one — a single 0.05 m box reported
+        # valid=True, simulable=True, which is worse because it looks healthy.
+        return {
+            "gene": None, "backend_support": {}, "species": None, "robot_class": None, "valid": False,
+            "simulable": False,
+            "simulation_check": {"ok": False, "checked": False, "reason": "no gene was produced"},
+            "warnings": [f"every body in this model ({', '.join(sorted(body_name[i] for i in _frames)[:8])}) "
+                         "is a COORDINATE FRAME — no mass, no geometry, no joint. There is no link to build a "
+                         "robot from. This is usually a mount/datum file or the frame half of a model whose "
+                         "links live in a separate file; import the file that declares the links."],
+        }
     children: dict[int, list[int]] = {}
     for i in range(1, mj.nbody):
-        children.setdefault(int(mj.body_parentid[i]), []).append(i)
-    leaves = {i for i in range(1, mj.nbody) if i not in children}
+        if i in _frames:
+            continue
+        children.setdefault(eff_parent[i], []).append(i)
+    leaves = {i for i in range(1, mj.nbody) if i not in _frames and i not in children}
+    if _frames:
+        warnings.append(
+            f"{len(_frames)} source body/bodies are COORDINATE FRAMES, not links — no mass, no geometry, no "
+            f"joint ({', '.join(sorted(body_name[i] for i in _frames)[:6])}"
+            f"{'...' if len(_frames) > 6 else ''}) — and were folded into their children rather than emitted "
+            "as segments. A gene segment always has mass and a collision surface, so emitting them would have "
+            "added parts the source does not have; their transforms are composed into the links below them, so "
+            "no link moves.")
 
     # Joints per body (a tree robot has one joint to its parent; flag anything else).
     jnts_of: dict[int, list[int]] = {}
@@ -549,7 +735,7 @@ def _import_robot_uncached(source: str, *, robot_id: str | None = None, species:
     # THE CUSTOMER'S OWN TORQUE LIMITS, from all three places a real model puts them (see the helper).
     jnt_force = _declared_joint_torque(mj, mujoco)
 
-    roots = [i for i in range(1, mj.nbody) if int(mj.body_parentid[i]) == 0]
+    roots = [i for i in range(1, mj.nbody) if i not in _frames and eff_parent[i] == 0]
     if len(roots) > 1:
         warnings.append(f"{len(roots)} root bodies attach to the world ({', '.join(body_name[r] for r in roots)}); "
                         "a RobotGene needs a single root. Imported as a multi-root tree — pick a base or split.")
@@ -572,8 +758,10 @@ def _import_robot_uncached(source: str, *, robot_id: str | None = None, species:
     src_dynamics: dict[str, dict] = {}
     undeclared_torque: list[str] = []
     for i in range(1, mj.nbody):
+        if i in _frames:                     # a pose, not a part — folded into its children above
+            continue
         bname = body_name[i]
-        parent = None if int(mj.body_parentid[i]) == 0 else body_name[int(mj.body_parentid[i])]
+        parent = None if eff_parent[i] == 0 else body_name[eff_parent[i]]
         shape, length_m, radius_m = _primary_geom(mj, i, GEOM, name_of, warnings)
         mass = float(mj.body_mass[i])
         if mass <= 0:
@@ -590,7 +778,7 @@ def _import_robot_uncached(source: str, *, robot_id: str | None = None, species:
         # 39.9 kg for a 15.2 kg robot. The old condition (`span > length_m * 1.8`) meant the exact span was
         # DISCARDED exactly when the mesh was big, i.e. on every real mesh-based robot.
         import numpy as _np
-        _v = _link_vector(mj, i, children)
+        _v = _link_vector(mj, i, children, eff_pos)
         _span = float(_np.linalg.norm(_v))
         # THE ROOT measures its own body, not the reach to one child. `_link_vector` picks the farthest child,
         # which is right for a serial link (the Go2's thigh comes out at 0.2130 m against a real 0.213) and close
@@ -665,11 +853,11 @@ def _import_robot_uncached(source: str, *, robot_id: str | None = None, species:
         # Skipping the second conversion left joints correctly placed but every link body mirrored onto the
         # wrong side of its joint (a Go2 rendered as pipes standing up through its own chassis).
         if parent:
-            _Sp = _rot_by_id.get(int(mj.body_parentid[i]), _np.eye(3))
+            _Sp = _rot_by_id.get(eff_parent[i], _np.eye(3))
             _p_len = float(seg_len_by_name.get(parent, 0.0))
-            _local = _Sp.T @ _np.asarray(mj.body_pos[i], dtype=float)      # parent body frame -> parent link frame
+            _local = _Sp.T @ _np.asarray(eff_pos[i], dtype=float)          # parent body frame -> parent link frame
             mount_offset = (float(_local[0]), float(_local[1]), float(_local[2]) - _p_len)
-            mount_euler = _mat_to_euler_xyz(_Sp.T @ _quat_mat(mj.body_quat[i]) @ _S)
+            mount_euler = _mat_to_euler_xyz(_Sp.T @ _np.asarray(eff_rot[i], dtype=float) @ _S)
         else:
             mount_offset, mount_euler = (0.0, 0.0, 0.0), _mat_to_euler_xyz(_S)
         seg_len_by_name[bname] = length_m
@@ -700,11 +888,24 @@ def _import_robot_uncached(source: str, *, robot_id: str | None = None, species:
 
         base_name = next((n for n in ("base_link", "imported_base", "base_mount")
                           if not any(s.name == n for s in segments)), "imported_base")
-        r0 = root_segs[0] if root_segs else None
         _BASE_LEN = 0.05
+        # THE SYNTHESIZED BASE IS A MOUNTING FRAME, NOT A PART OF THE CUSTOMER'S ROBOT, so it must weigh
+        # (as near as the schema allows) NOTHING. It used to be given `max(root_segs[0].mass_kg, 0.05)` —
+        # a COPY of the first root's mass — which made the twin heavier than the machine it claims to be:
+        # aloha 8.517 -> 9.486 kg (+11.4%), shadow_dexee 4.139 -> 4.679 (+13.0%), apptronik_apollo
+        # 80.898 -> 88.344 (+9.2%), trossen_wxai 7.823 -> 8.080 (+3.3%). Nothing was being recovered by it:
+        # a fixed base link that MuJoCo fuses into the world loses its inertia there too (measured: a URDF
+        # base link of 3.5 kg compiles to nbody=2 with world mass 0.000), so the source's own total does not
+        # contain it either, and duplicating a DIFFERENT link's mass is not a reconstruction of it. That real
+        # loss is now reported on its own terms, with its own kilograms — see `_urdf_world_fused_links`.
+        #
+        # `RobotGene.validate()` requires a strictly positive mass on every segment, so the honest floor is
+        # the smallest mass that survives this repo's coarsest mass rounding (3 dp, `grounded_physics`)
+        # rather than zero. That residual is DISCLOSED in the warning below with its number, because a
+        # 1 g bookkeeping mass the customer can see beats a tuned one they cannot.
         segments.insert(0, GeneSegment(
             name=base_name, parent=None, shape="box", length_m=_BASE_LEN, radius_m=0.04,
-            mass_kg=max((r0.mass_kg if r0 else 0.1), 0.05), joint_type=None, is_end_effector=False))
+            mass_kg=_SYNTH_BASE_MASS_KG, joint_type=None, is_end_effector=False))
         # A REPARENTED ROOT KEEPS THE POSE IT HAD IN THE SOURCE'S WORLD. A root body's `body_pos`/`body_quat` ARE
         # its world pose (its parent is the world), and the loop above threw both away — every root got
         # mount_offset (0,0,0) and mount_euler from S alone — because a gene root's mount is normally
@@ -723,13 +924,17 @@ def _import_robot_uncached(source: str, *, robot_id: str | None = None, species:
             _bi = _id_of.get(r.name)
             if _bi is None:                                     # synthesized/renamed - nothing to preserve
                 continue
-            _wp = _np.asarray(mj.body_pos[_bi], dtype=float)
+            _wp = _np.asarray(eff_pos[_bi], dtype=float)
             r.mount_offset = (float(_wp[0]), float(_wp[1]), float(_wp[2]) - _BASE_LEN)
-            r.mount_euler = _mat_to_euler_xyz(_quat_mat(mj.body_quat[_bi]) @ _rot_by_id.get(_bi, _np.eye(3)))
+            r.mount_euler = _mat_to_euler_xyz(_np.asarray(eff_rot[_bi], dtype=float)
+                                              @ _rot_by_id.get(_bi, _np.eye(3)))
         warnings.append(f"synthesized a welded base segment {base_name!r} as the gene root — the URDF's "
                         "fixed base was merged into the world by the parser (or the robot had multiple "
                         "roots), leaving an actuated/ambiguous root that a RobotGene cannot use directly. "
-                        f"The {len(root_segs)} reparented root(s) keep their source world pose.")
+                        f"The {len(root_segs)} reparented root(s) keep their source world pose. It is a "
+                        f"MOUNTING FRAME, not a link of your robot: it carries {_SYNTH_BASE_MASS_KG:g} kg "
+                        "(the schema forbids a zero-mass segment), so the twin's total mass is that much "
+                        "above the source's.")
 
     # Exactly one end-effector. Priority: a body carrying an ee/tcp/tool SITE (robust, and round-trips
     # our own compiler's ee_site), then a name-hinted body, then any leaf.
@@ -742,8 +947,12 @@ def _import_robot_uncached(source: str, *, robot_id: str | None = None, species:
     ee_site_body = None
     for si in range(mj.nsite):
         if any(h in name_of(SITE, si).lower() for h in _EE_SITE_HINTS):
-            _cand = body_name[int(mj.site_bodyid[si])]
-            if int(mj.site_bodyid[si]) != 0 and _cand in _seg_names:
+            # A site parked on a folded COORDINATE FRAME is welded to the link that frame hangs off (a frame
+            # has no joint), so read it there rather than losing the hint with the frame. Menagerie's
+            # panda_nohand puts `attachment_site` on exactly such a body.
+            _cid = eff_body[int(mj.site_bodyid[si])]
+            _cand = body_name[_cid]
+            if _cid != 0 and _cand in _seg_names:
                 ee_site_body = _cand
                 break
     ee_name = (ee_site_body
@@ -762,7 +971,7 @@ def _import_robot_uncached(source: str, *, robot_id: str | None = None, species:
     # THE CONSTRAINTS ARE PART OF THE MACHINE (see _source_equalities). Read before the gene is built so they
     # are on it from the start and `validate()` below rules on them like any other field.
     loop_closures, coupled_joints = _source_equalities(
-        mj, mujoco, body_name, _rot_by_id, segments, warnings)
+        mj, mujoco, body_name, _rot_by_id, segments, warnings, eff_body=eff_body, eff_parent=eff_parent)
     gene = RobotGene(
         id=robot_id or "imported_robot",
         species=species or f"{robot_class}.imported",
@@ -1240,7 +1449,8 @@ def _source_solver_ref(mj, e: int) -> dict:
 
 
 def _source_equalities(mj, mujoco, body_name: dict, rot_by_id: dict, segments: list,
-                       warnings: list[str]) -> tuple[list[dict], list[dict]]:
+                       warnings: list[str], *, eff_body: dict | None = None,
+                       eff_parent: dict | None = None) -> tuple[list[dict], list[dict]]:
     """The source model's ``<equality>`` block, as far as a RobotGene can carry it: ``(loops, couplings)``.
 
     A CLOSED-LOOP ROBOT WITHOUT ITS LOOPS IS A DIFFERENT MACHINE. Agility's Cassie declares four
@@ -1283,6 +1493,26 @@ def _source_equalities(mj, mujoco, body_name: dict, rot_by_id: dict, segments: l
     active0 = getattr(mj, "eq_active0", None)
     if active0 is None:
         active0 = getattr(mj, "eq_active", None)
+
+    # A constraint may name a body that is only a COORDINATE FRAME (see `_frame_only_bodies`), which is not a
+    # segment. It has no joint, so it is welded to the link above it — resolve to that link instead of
+    # reporting the constraint as naming something that "did not survive".
+    _eb = (lambda b: int(eff_body.get(int(b), int(b)))) if eff_body else (lambda b: int(b))
+    _ep = (lambda b: int(eff_parent.get(int(b), int(mj.body_parentid[b])))) if eff_parent \
+        else (lambda b: int(mj.body_parentid[b]))
+
+    def _up(frm: int, to: int, p):
+        """A point given in body ``frm``'s frame, re-expressed in ancestor ``to``'s frame.
+
+        The anchor of a ``<connect>`` is stated in body1's own frame; when body1 was a folded coordinate
+        frame, ``to`` is the link it hung off, and the frame's own offset/rotation has to travel with the
+        anchor or the loop would close at the wrong point. A no-op when nothing was folded.
+        """
+        b, q = int(frm), np.asarray(p, dtype=float)
+        while b != int(to) and b > 0:
+            q = np.asarray(mj.body_pos[b], dtype=float) + _quat_mat(mj.body_quat[b]) @ q
+            b = int(mj.body_parentid[b])
+        return q
 
     first_joint_of: dict[int, int] = {}
     for j in range(int(getattr(mj, "njnt", 0))):
@@ -1336,11 +1566,12 @@ def _source_equalities(mj, mujoco, body_name: dict, rot_by_id: dict, segments: l
         objtype = int(mj.eq_objtype[e]) if hasattr(mj, "eq_objtype") else -1
         o1, o2 = int(mj.eq_obj1id[e]), int(mj.eq_obj2id[e])
         if objtype == SITE:
-            b1, b2 = int(mj.site_bodyid[o1]), int(mj.site_bodyid[o2])
-            anchor = np.asarray(mj.site_pos[o1], dtype=float)
+            _s1 = int(mj.site_bodyid[o1])
+            b1, b2 = _eb(_s1), _eb(mj.site_bodyid[o2])
+            anchor = _up(_s1, b1, mj.site_pos[o1])
         else:
-            b1, b2 = o1, o2
-            anchor = np.asarray(mj.eq_data[e][:3], dtype=float)
+            b1, b2 = _eb(o1), _eb(o2)
+            anchor = _up(int(o1), b1, mj.eq_data[e][:3])
         a, b = body_name.get(b1), body_name.get(b2)
         if b1 <= 0 or b2 <= 0 or not a or not b:
             skipped.append("a <connect> anchors a body to the WORLD; a RobotGene loop joins two segments")
@@ -1348,7 +1579,7 @@ def _source_equalities(mj, mujoco, body_name: dict, rot_by_id: dict, segments: l
         if a == b:
             skipped.append(f"a <connect> joins {a!r} to itself")
             continue
-        if int(mj.body_parentid[b2]) == b1 or int(mj.body_parentid[b1]) == b2:
+        if _ep(b2) == b1 or _ep(b1) == b2:
             # `validate()` rejects this on purpose: a parent and child are already rigidly related through
             # their joint, so restating the edge as a loop is a contradiction rather than a second path.
             skipped.append(f"a <connect> joins {a!r} and {b!r}, which are already parent and child")

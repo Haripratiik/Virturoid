@@ -113,6 +113,70 @@ export interface DesignBrainResponse {
   [key: string]: unknown;
 }
 
+// ---- The verified-morphology memory (/api/moat) ----
+// Mirrors services/moat_panel.py. Losses and ties are first-class fields, not derived from wins, because the
+// panel's whole job is to be able to render a memory that is currently NOT paying off.
+
+export interface MoatRecallKind {
+  kind: string;
+  means: string;
+  edges: number;
+  mean_delta_m: number | null;
+  wins: number;
+  losses: number;
+  ties: number;
+  decided_win_rate: number | null;
+  direction: "helps" | "hurts" | "neutral";
+}
+
+export interface MoatRecallEvent {
+  when: string | null;
+  kind: string;
+  gene_id: string;
+  region: string | null;
+  delta_m: number | null;
+  source?: string | null;
+  selected?: string | null;
+  hint_forward_m?: number | null;
+  default_forward_m?: number | null;
+  hint_credible?: boolean | null;
+  default_credible?: boolean | null;
+}
+
+export interface MoatResponse {
+  memory_dir?: string;
+  db_present?: boolean;
+  error?: string;
+  bank?: {
+    task: string;
+    rows: number;
+    by_task: Record<string, number>;
+    by_gate: Record<string, number>;
+    gated_rows: number;
+    gated_fraction: number;
+    by_door: Record<string, number>;
+    by_source: Record<string, number>;
+    by_class: Record<string, number>;
+    bodies: {
+      distinct: number;
+      largest_share_body: string | null;
+      largest_share_rows: number;
+      largest_share_fraction: number;
+    };
+  };
+  recall?: { kinds: MoatRecallKind[]; dominant_kind: string | null; headline: string };
+  this_build?: {
+    matched: boolean;
+    gene_ids: string[];
+    events: MoatRecallEvent[];
+    event_count?: number;
+    kept?: number;
+    mean_delta_m?: number | null;
+    summary: string;
+  };
+  notes?: string[];
+}
+
 export interface EpisodeGeom {
   type: string;
   size?: number[];

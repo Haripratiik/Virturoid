@@ -529,8 +529,10 @@ def build_certificate_v2(gene, verdict: dict, *, gait_params=None, task: str = "
         "identity": {"robot_id": robot_id, "species": getattr(gene, "species", None),
                      "robot_class": getattr(gene, "robot_class", None), "kind": base.get("kind"),
                      "n_segments": len(gene.segments), "dof": len(gene.actuated_joints())},
+        # ``rollout_ran`` travels with the rest: without it a reader has to infer "never measured" from a null
+        # ``deploy_is_measure``, and the null is exactly what used to be a confident ``true``.
         "verdict": {k: base.get(k) for k in ("verdict", "credible", "checks", "gait_source", "verified_with",
-                                             "deploy_is_measure", "body_parity")},
+                                             "deploy_is_measure", "rollout_ran", "body_parity")},
         "model_sanity": sanity,
         "actuator_fidelity_level": act,
         "flywheel_provenance": base.get("flywheel_provenance"),

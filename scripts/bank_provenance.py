@@ -1,7 +1,7 @@
-"""Decide, for every banked skill, whether the SUITE wrote it or a real run did -- and stamp the answer in place.
+"""Decide, for every banked row, whether the SUITE wrote it or a real run did -- and stamp the answer in place.
 
     PYTHONPATH=src python scripts/bank_provenance.py [--memory build/memory]
-        [--repro-db DIR_OR_DB ...] [--apply] [--json OUT]
+        [--repro-db DIR_OR_DB ...] [--tables skills,runs,designs,species,provenance] [--apply] [--json OUT]
 
 WHY THIS EXISTS. Until 2026-08-07 the test suite banked into the developer's own database: ``verify_robot``
 -> ``_auto_bank_gait`` -> ``bank_gait`` is the ORDINARY product path and ``DEFAULT_DB_PATH`` was a constant
@@ -44,6 +44,27 @@ THE FOUR EVIDENCE CHANNELS, strongest first. Each verdict records which ones fir
      The same rows change bucket with an arbitrary parameter, so this script reports the nearest fixture-run
      distance as CONTEXT and never lets it decide. Reporting it as though it decided is how a fixture census
      would acquire false precision.
+
+THE SAME POLLUTION, ONE TABLE OVER (task #278). ``skills`` is the gait flywheel's store; the DESIGN flywheel,
+species memory and warm-start read ``runs``, ``designs`` and ``species``, and the compounding ledger reads
+``provenance``. Those tables carry the same fixture rows, in bulk -- the suite submits the shipped worked
+examples thousands of times, so ``[agent] agent_lynx`` alone is over half of ``runs``. All four are stamped
+here, by the SAME channels, with one addition ``skills`` could not use: ``runs``/``designs`` store the PROMPT
+VERBATIM, so the phrase channel reads a literal request instead of a slug recovered from a gene id. That is
+strictly stronger evidence, and it is what lets a free-text prompt reach ``suite`` at all.
+
+WHERE THE STAMP GOES. ``skills`` has a JSON ``base_config`` to add a key to. The other four do not, and
+widening their schema -- or stuffing provenance into ``converged_design``, which ``best_design`` hands to the
+co-design search as a warm start -- would put audit metadata inside a payload the product consumes. So those
+rows are stamped in a SIDE TABLE, ``row_provenance``, keyed by (table, row key). Additive in the strongest
+available sense: the audited rows are never written at all, only read. It also survives writes that would
+erase an in-row stamp -- ``species`` is UPSERTed on every run, which would strip a stamp kept in the row the
+way ``record_skill`` strips one from ``base_config`` (see ``gait_flywheel._carry_provenance``).
+
+SUITE IS A FLOOR, NEVER A TOTAL. Every count printed here is the number of rows some channel could PROVE the
+suite wrote. A row lands in ``unattributed`` when the channels say nothing or disagree -- a prompt that
+appears in ``tests/`` AND ``scripts/`` genuinely is unknowable from the text. Those rows are not "probably
+real", they are unjudged, and some are certainly the suite's. Read every ``suite=N`` as "at least N".
 """
 from __future__ import annotations
 
@@ -217,6 +238,24 @@ def _recheck_name_lists(corpus: "_Corpus") -> list[str]:
     return out
 
 
+def _gene_id_bucket(gene_id: str | None) -> tuple[str | None, list[str]]:
+    """The verdict a gene id carries on its own, if any. ``(bucket|None, evidence)``.
+
+    ``anatomy_agent_lynx_9debd7b5`` names a shipped worked example that only ``tests/`` submits;
+    ``anatomy_trex_...`` names a body an operator typed once. The two name sets are disjoint and the match is
+    anchored, so at most one fires. Precedence against the OTHER channels stays with the caller -- a repro hit
+    must not be demoted by an operator-probe name.
+    """
+    gid = gene_id or ""
+    for name in sorted(TEST_ONLY_DESIGN_NAMES, key=len, reverse=True):
+        if re.match(rf"^anatomy_{re.escape(name)}(_[0-9a-f]{{8}})?$", gid):
+            return SUITE, [f"fixture-body:{name}"]
+    for name in sorted(AD_HOC_PROBE_NAMES, key=len, reverse=True):
+        if re.match(rf"^anatomy_{re.escape(name)}(_[0-9a-f]{{8}})?$", gid):
+            return REAL, [f"operator-probe:{name}"]
+    return None, []
+
+
 # ------------------------------------------------------------------------------------------- the verdict
 def classify(rows: list[dict], *, reproduced: dict[str, list[str]], prompts: dict[str, collections.Counter],
              repo_root: Path, fixture_times: list[dt.datetime]) -> list[dict]:
@@ -247,17 +286,12 @@ def classify(rows: list[dict], *, reproduced: dict[str, list[str]], prompts: dic
                 bucket = SUITE
 
         gid = row["gene_id"] or ""
-        for name in sorted(TEST_ONLY_DESIGN_NAMES, key=len, reverse=True):
-            if re.match(rf"^anatomy_{re.escape(name)}(_[0-9a-f]{{8}})?$", gid):
-                ev.append(f"fixture-body:{name}")
-                bucket = SUITE
-                break
-        for name in sorted(AD_HOC_PROBE_NAMES, key=len, reverse=True):
-            if re.match(rf"^anatomy_{re.escape(name)}(_[0-9a-f]{{8}})?$", gid):
-                ev.append(f"operator-probe:{name}")
-                if bucket == UNATTRIBUTED:
-                    bucket = REAL
-                break
+        gene_bucket, gene_ev = _gene_id_bucket(gid)
+        ev.extend(gene_ev)
+        if gene_bucket == SUITE:
+            bucket = SUITE
+        elif gene_bucket == REAL and bucket == UNATTRIBUTED:
+            bucket = REAL
 
         # The prompts that produced a design with this body id. Only decisive when EVERY one of them is a
         # fixture submission -- a body the suite and a real run both reach says nothing on its own.
@@ -336,6 +370,342 @@ def stamp(db_path: Path, verdicts: list[dict], *, apply: bool) -> int:
     return n
 
 
+# ====================================================================== the design side: runs/designs/species
+#
+# ``runs`` and ``designs`` are what the DESIGN flywheel reads (``best_design`` -> the co-design warm start,
+# ``similar_runs`` -> retrieval, ``training_dataset`` -> the distillation corpus); ``species`` aggregates them
+# into per-species bests; ``provenance`` is the compounding ledger. Same three buckets, same additive
+# contract, one extra channel: these rows carry the PROMPT, so the phrase lookup reads a literal request.
+
+#: The prompt shape ``submit_design`` / ``train_held`` write (``agent_design_tools`` L558/L973).
+_AGENT_PROMPT = re.compile(r"^\[agent(?:-trained)?\]\s+(?P<name>.+)$")
+#: Submission names that are a fallback or a robot CLASS rather than a design anybody named -- ``submit_design``
+#: writes ``graph.get("name", "design")`` and ``train_held`` writes the robot class. They identify nobody, so
+#: like ``anatomy_creature`` they carry no evidence and must not be rounded into either decided bucket.
+GENERIC_AGENT_NAMES = {"design", "robot", "quadruped", "biped", "humanoid", "legged", "manipulator",
+                       "mobile base", "mobile manipulator", "fixed arm", "creature"}
+#: Below this many words a free-text prompt is too generic for the corpus lookup to decide. "a robot dog"
+#: appears in 25 test files, 1 script and 4 source files; a phrase that common proves nothing about a writer.
+MIN_DECISIVE_PROMPT_WORDS = 4
+
+_TEST_ONLY_NORM = {_norm(n) for n in TEST_ONLY_DESIGN_NAMES}
+_AD_HOC_NORM = {_norm(n) for n in AD_HOC_PROBE_NAMES}
+
+
+def _prompt_bucket(prompt: str | None, corpus: "_Corpus", cache: dict) -> tuple[str | None, list[str]]:
+    """The verdict a recorded prompt carries. ``(bucket|None, evidence)``.
+
+    Two shapes. ``[agent] <name>`` is an agent submission and ``<name>`` is the design's own name, so the
+    test-only / ad-hoc name lists apply directly -- no slug recovery, no guessing. Anything else is the
+    request as the operator (or the test) typed it, and is looked up verbatim in the tree.
+
+    The free-text rule is deliberately asymmetric. tests-only decides ``suite``; tests AND scripts decides
+    NOTHING, because a phrase both a fixture and a demo script use cannot say which one ran. That asymmetry is
+    why ``suite`` is a floor: a prompt a script builds by concatenation would read as tests-only here, and a
+    prompt shared with a script reads as unjudged even when the suite wrote every row of it.
+    """
+    text = (prompt or "").strip()
+    if not text:
+        return None, ["no-prompt-recorded"]
+    m = _AGENT_PROMPT.match(text)
+    if m:
+        raw = m.group("name").strip()
+        # Matched on the NORMALISED form (``agent_lynx`` and "agent lynx" are the same submission) but
+        # reported with the name as recorded, so the evidence string greps back to the row that produced it.
+        name = _norm(raw)
+        if name in _TEST_ONLY_NORM:
+            return SUITE, [f"fixture-design-name:{raw}"]
+        if name in _AD_HOC_NORM:
+            return REAL, [f"operator-probe-name:{raw}"]
+        if name in GENERIC_AGENT_NAMES:
+            return None, [f"generic-submission-name:{raw!r} (names no design)"]
+        return None, [f"unlisted-submission-name:{raw!r}"]
+
+    words = _norm(text).split()
+    if len(words) < MIN_DECISIVE_PROMPT_WORDS:
+        return None, [f"prompt-too-generic-to-decide:{text[:40]!r} ({len(words)} words)"]
+    if text not in cache:
+        cache[text] = corpus.where(text)
+    hits = cache[text]
+    in_tests, in_scripts, in_src = bool(hits["tests"]), bool(hits["scripts"]), bool(hits["src"])
+    if in_tests and in_scripts:
+        return None, [f"prompt-verbatim-in-tests-AND-scripts:{len(hits['tests'])}+{len(hits['scripts'])} files"]
+    if in_tests:
+        return SUITE, [f"prompt-verbatim-only-in-tests:{len(hits['tests'])} files"]
+    if in_scripts:
+        return REAL, [f"prompt-verbatim-only-in-scripts:{Path(hits['scripts'][0]).name}"]
+    if in_src:
+        return None, ["prompt-verbatim-in-src (a phrase the product ships, not a request)"]
+    return REAL, ["prompt-verbatim-nowhere-in-repo"]
+
+
+def _combine(bucket: str, new: str | None, ev: list[str], new_ev: list[str], *, strong: bool = False) -> str:
+    """Fold one channel's answer into the running verdict. ``suite`` is sticky; ``real`` only fills a gap.
+
+    Sticky ``suite`` is the floor rule in code: once a channel has PROVEN the suite wrote a row, a weaker
+    channel that merely fails to see the suite must not talk it back out again.
+    """
+    ev.extend(new_ev)
+    if new == SUITE or (strong and new):
+        return new
+    if new == REAL and bucket == UNATTRIBUTED:
+        return REAL
+    return bucket
+
+
+# ------------------------------------------------------------------------------------------------- readers
+def _rows(db_path: Path, sql: str) -> list[dict]:
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    out = [dict(r) for r in conn.execute(sql)]
+    conn.close()
+    return out
+
+
+def _gene_id_of(payload) -> str | None:
+    """The body id inside a stored ``converged_design`` / ``design`` JSON blob."""
+    if not payload:
+        return None
+    try:
+        d = json.loads(payload) if isinstance(payload, str) else payload
+    except Exception:  # noqa: BLE001 - a malformed payload is not worth aborting a census over
+        return None
+    return (d or {}).get("id") if isinstance(d, dict) else None
+
+
+def read_runs(db_path: Path) -> list[dict]:
+    out = []
+    for r in _rows(db_path, "SELECT id, prompt, robot_class, species, task_type, converged_design, "
+                            "success_rate, design_source, created_at FROM runs ORDER BY id"):
+        out.append({"key": str(r["id"]), "prompt": r["prompt"], "robot_class": r["robot_class"],
+                    "species": r["species"], "task_type": r["task_type"],
+                    "gene_id": _gene_id_of(r["converged_design"]), "success_rate": r["success_rate"],
+                    "design_source": r["design_source"], "created_at": r["created_at"]})
+    return out
+
+
+def read_designs(db_path: Path) -> list[dict]:
+    out = []
+    for r in _rows(db_path, "SELECT id, run_id, prompt, robot_class, task_type, design, success_rate, "
+                            "source, created_at FROM designs ORDER BY id"):
+        out.append({"key": str(r["id"]), "run_id": r["run_id"], "prompt": r["prompt"],
+                    "robot_class": r["robot_class"], "species": None, "task_type": r["task_type"],
+                    "gene_id": _gene_id_of(r["design"]), "success_rate": r["success_rate"],
+                    "source": r["source"], "created_at": r["created_at"]})
+    return out
+
+
+def read_species(db_path: Path) -> list[dict]:
+    out = []
+    for r in _rows(db_path, "SELECT name, robot_class, best_success_rate, best_design, runs, updated_at "
+                            "FROM species ORDER BY runs DESC"):
+        out.append({"key": r["name"], "name": r["name"], "robot_class": r["robot_class"],
+                    "best_success_rate": r["best_success_rate"], "best_gene_id": _gene_id_of(r["best_design"]),
+                    "runs": r["runs"], "created_at": r["updated_at"]})
+    return out
+
+
+def read_provenance(db_path: Path) -> list[dict]:
+    out = []
+    for r in _rows(db_path, "SELECT id, child_type, child_id, parent_type, parent_id, kind, delta, meta, "
+                            "created_at FROM provenance ORDER BY id"):
+        try:
+            meta = json.loads(r["meta"]) if r["meta"] else {}
+        except Exception:  # noqa: BLE001
+            meta = {}
+        out.append({"key": str(r["id"]), "child_type": r["child_type"], "child_id": r["child_id"],
+                    "parent_type": r["parent_type"], "parent_id": r["parent_id"], "kind": r["kind"],
+                    "delta": r["delta"], "prompt": (meta or {}).get("prompt"),
+                    "robot_class": (meta or {}).get("robot_class"), "species": None,
+                    "gene_id": r["child_id"] if r["child_type"] == "gene" else None,
+                    "created_at": r["created_at"]})
+    return out
+
+
+def skill_sources(db_path: Path) -> dict[str, str]:
+    """``skill_id -> stamped bucket``, for rows that already carry the ``skills`` stamp. Unstamped reads
+    ``unattributed``, so a skill this pass has not judged never lends ``real`` to anything downstream."""
+    out = {}
+    try:
+        rows = _rows(db_path, "SELECT skill_id, base_config FROM skills")
+    except sqlite3.OperationalError:
+        return {}                    # no skills table: no parent evidence, which lends nothing either way
+    for r in rows:
+        try:
+            bc = json.loads(r["base_config"]) if r["base_config"] else {}
+        except Exception:  # noqa: BLE001
+            bc = {}
+        out[r["skill_id"]] = source_of(bc)
+    return out
+
+
+# --------------------------------------------------------------------------------------------- classifiers
+def classify_prompt_rows(rows: list[dict], *, corpus: "_Corpus", parent_sources: dict[str, str] | None = None,
+                         reproduced_prompts: set[str] | None = None) -> list[dict]:
+    """One verdict per prompt-bearing row (``runs``, ``designs``, ``provenance``).
+
+    Channel order mirrors the skills pass: reproduction, then fixture class token, then the body id, then the
+    prompt, then (``provenance`` only) the stamped provenance of the parent skill the edge points at.
+    """
+    cache: dict[str, dict] = {}
+    out = []
+    for row in rows:
+        ev: list[str] = []
+        bucket = UNATTRIBUTED
+
+        if reproduced_prompts and (row.get("prompt") or "") in reproduced_prompts:
+            bucket = _combine(bucket, SUITE, ev, [f"repro-prompt:{row['prompt']}"])
+
+        blob = f"{row.get('robot_class')} {row.get('species')} {row.get('gene_id')} {row.get('child_id')}"
+        for tok in TEST_ONLY_CLASS_TOKENS:
+            if tok in blob:
+                bucket = _combine(bucket, SUITE, ev, [f"fixture-class:{tok}"])
+
+        gene_bucket, gene_ev = _gene_id_bucket(row.get("gene_id"))
+        bucket = _combine(bucket, gene_bucket, ev, gene_ev)
+
+        p_bucket, p_ev = _prompt_bucket(row.get("prompt"), corpus, cache)
+        bucket = _combine(bucket, p_bucket, ev, p_ev)
+
+        if parent_sources and row.get("parent_id") in parent_sources:
+            parent = parent_sources[row["parent_id"]]
+            if parent != UNATTRIBUTED:
+                bucket = _combine(bucket, parent, ev, [f"parent-{row.get('parent_type')}-is-{parent}"])
+
+        out.append({**row, "bucket": bucket, "evidence": ev})
+    return out
+
+
+def classify_species_rows(rows: list[dict], run_verdicts: list[dict]) -> list[dict]:
+    """A species is judged by the runs that reference it -- it has no prompt of its own.
+
+    ``species.runs`` is a counter bumped once per ``record_run``, and ``best_design``/``best_success_rate`` are
+    whichever run scored highest, so a species IS its runs. Decided only when the referencing runs agree:
+    every judged run ``suite`` and none ``real`` -> ``suite``, and vice versa. Anything mixed stays
+    ``unattributed`` and carries the split in its evidence, because "62% of this species' runs are the
+    suite's" is the honest statement and "this species is a fixture" is not.
+    """
+    by_species: dict[str, collections.Counter] = collections.defaultdict(collections.Counter)
+    for v in run_verdicts:
+        by_species[str(v.get("species"))][v["bucket"]] += 1
+    out = []
+    for row in rows:
+        ev: list[str] = []
+        bucket = UNATTRIBUTED
+        for tok in TEST_ONLY_CLASS_TOKENS:
+            if tok in f"{row['name']} {row['robot_class']}":
+                bucket = _combine(bucket, SUITE, ev, [f"fixture-class:{tok}"])
+        gene_bucket, gene_ev = _gene_id_bucket(row.get("best_gene_id"))
+        if gene_bucket:
+            ev.append(f"best_design-{gene_ev[0]}")
+            if gene_bucket == SUITE:
+                bucket = SUITE                       # the species' own headline design is a fixture body
+        c = by_species.get(row["name"], collections.Counter())
+        total = sum(c.values())
+        ev.append(f"runs-referencing: suite={c[SUITE]} real={c[REAL]} unattributed={c[UNATTRIBUTED]}")
+        if total and bucket == UNATTRIBUTED:
+            if c[SUITE] and not c[REAL]:
+                bucket = SUITE
+            elif c[REAL] and not c[SUITE]:
+                bucket = REAL
+        if not total:
+            ev.append("no runs reference this species")
+        out.append({**row, "bucket": bucket, "evidence": ev,
+                    "suite_run_fraction": round(c[SUITE] / total, 4) if total else None})
+    return out
+
+
+# ------------------------------------------------------------------------------------ the side-table stamp
+ROW_PROVENANCE_TABLE = "row_provenance"
+DESIGN_SIDE_TABLES = ("runs", "designs", "species", "provenance")
+
+
+def ensure_row_provenance(conn: sqlite3.Connection) -> None:
+    conn.execute(f"""CREATE TABLE IF NOT EXISTS {ROW_PROVENANCE_TABLE} (
+        table_name TEXT NOT NULL,
+        row_key    TEXT NOT NULL,
+        row_source TEXT NOT NULL,
+        row_source_stamp TEXT NOT NULL,
+        row_source_evidence TEXT NOT NULL,
+        row_source_stamped_at TEXT NOT NULL,
+        row_source_first_stamped_at TEXT NOT NULL,
+        PRIMARY KEY (table_name, row_key))""")
+
+
+def stamp_table(db_path: Path, table: str, verdicts: list[dict], *, apply: bool) -> dict:
+    """Write the verdicts for one table into ``row_provenance``. The audited table is never written.
+
+    Re-running is expected (new evidence, e.g. a fresh repro bank). A re-stamp refreshes the verdict, with one
+    guard: a row already stamped ``suite`` is never downgraded to ``unattributed``. Losing a proof because a
+    later pass ran without the repro db that produced it is exactly how a quarantine would leak.
+    """
+    counts = collections.Counter(v["bucket"] for v in verdicts)
+    if not apply:
+        return {"table": table, "written": 0, "buckets": dict(counts)}
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    ensure_row_provenance(conn)
+    now = dt.datetime.now().isoformat(timespec="seconds")
+    prior = {r["row_key"]: r for r in conn.execute(
+        f"SELECT * FROM {ROW_PROVENANCE_TABLE} WHERE table_name=?", (table,))}
+    written = retained = 0
+    for v in verdicts:
+        key, bucket, ev = str(v["key"]), v["bucket"], list(v["evidence"])
+        was = prior.get(key)
+        if was is not None and was["row_source"] == SUITE and bucket == UNATTRIBUTED:
+            bucket, retained = SUITE, retained + 1
+            ev.append("retained-prior-suite-verdict (a stamp is never downgraded to unattributed)")
+        first = was["row_source_first_stamped_at"] if was is not None else now
+        conn.execute(f"INSERT OR REPLACE INTO {ROW_PROVENANCE_TABLE} VALUES (?,?,?,?,?,?,?)",
+                     (table, key, bucket, ROW_SOURCE_STAMP, json.dumps(ev), now, first))
+        written += 1
+    conn.commit()
+    conn.close()
+    return {"table": table, "written": written, "retained_suite": retained, "buckets": dict(counts)}
+
+
+def row_sources(db_path: Path, table: str) -> dict[str, str]:
+    """``row key -> bucket`` for one stamped table. A key with no stamp is simply absent; callers must read
+    an absent key as ``unattributed`` (``source_of_key`` does), never as ``real``."""
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        rows = conn.execute(f"SELECT row_key, row_source FROM {ROW_PROVENANCE_TABLE} WHERE table_name=?",
+                            (table,)).fetchall()
+    except sqlite3.OperationalError:
+        rows = []                                     # never stamped: every row is an open question
+    conn.close()
+    return {str(k): str(v) for k, v in rows}
+
+
+def source_of_key(stamps: dict[str, str], key) -> str:
+    """Same contract as ``source_of``: absence is an unanswered question, not innocence."""
+    return stamps.get(str(key), UNATTRIBUTED)
+
+
+def census(verdicts: list[dict], by: str | None = None) -> dict:
+    """Bucket counts, optionally split by a field. ``suite`` is a FLOOR in every cell."""
+    if by is None:
+        return dict(collections.Counter(v["bucket"] for v in verdicts))
+    grouped: dict[str, collections.Counter] = collections.defaultdict(collections.Counter)
+    for v in verdicts:
+        grouped[str(v.get(by))][v["bucket"]] += 1
+    return {k: dict(c) for k, c in sorted(grouped.items(), key=lambda kv: -sum(kv[1].values()))}
+
+
+def classify_design_side(db_path: Path, repo_root: Path) -> dict[str, list[dict]]:
+    """Every design-side table, classified in dependency order (species needs the run verdicts)."""
+    corpus = _Corpus({"tests": repo_root / "tests", "scripts": repo_root / "scripts", "src": repo_root / "src"},
+                     exclude={Path(__file__).resolve(),
+                              (repo_root / "tests" / "test_bank_provenance.py").resolve(),
+                              (repo_root / "scripts" / "audit_design_memory.py").resolve()})
+    runs = classify_prompt_rows(read_runs(db_path), corpus=corpus)
+    designs = classify_prompt_rows(read_designs(db_path), corpus=corpus)
+    species = classify_species_rows(read_species(db_path), runs)
+    prov = classify_prompt_rows(read_provenance(db_path), corpus=corpus,
+                                parent_sources=skill_sources(db_path))
+    return {"runs": runs, "designs": designs, "species": species, "provenance": prov}
+
+
 def _reproduced(paths: list[str]) -> dict[str, list[str]]:
     """skill_id -> which controlled pytest bank(s) produced it."""
     out: dict[str, list[str]] = collections.defaultdict(list)
@@ -358,12 +728,45 @@ def main() -> None:
     ap.add_argument("--repro-db", action="append", default=[],
                     help="a bank produced by pytest under VIRTUROID_MEMORY_DIR (dir or .db). Repeatable.")
     ap.add_argument("--task-type", default=None, help="restrict to one task_type (default: every skill)")
+    ap.add_argument("--tables", default="skills",
+                    help="comma-separated: skills,runs,designs,species,provenance (default: skills)")
     ap.add_argument("--apply", action="store_true", help="write the stamp (default: dry run, report only)")
     ap.add_argument("--json", default=None)
     args = ap.parse_args()
 
     db = Path(args.memory) / "virturoid_memory.db"
     repo_root = Path(__file__).resolve().parent.parent
+    tables = [t.strip() for t in args.tables.split(",") if t.strip()]
+    unknown = [t for t in tables if t not in ("skills", *DESIGN_SIDE_TABLES)]
+    if unknown:
+        raise SystemExit(f"unknown table(s): {unknown}")
+
+    design_side = {}
+    if any(t in DESIGN_SIDE_TABLES for t in tables):
+        print("=== design side (runs / designs / species / provenance) — 'suite' is a FLOOR in every cell\n")
+        design_side = classify_design_side(db, repo_root)
+        for name in DESIGN_SIDE_TABLES:
+            if name not in tables:
+                continue
+            v = design_side[name]
+            print(f"  {name}: {len(v)} rows | " + " ".join(f"{b}={census(v).get(b, 0)}"
+                                                           for b in (SUITE, REAL, UNATTRIBUTED)))
+            res = stamp_table(db, name, v, apply=args.apply)
+            if args.apply:
+                print(f"    stamped {res['written']} rows into {ROW_PROVENANCE_TABLE} "
+                      f"(retained prior suite: {res.get('retained_suite', 0)}); nothing in {name} was written")
+        print()
+
+    if "skills" not in tables:
+        if args.json:
+            Path(args.json).parent.mkdir(parents=True, exist_ok=True)
+            Path(args.json).write_text(json.dumps({k: v for k, v in design_side.items() if k in tables},
+                                                  indent=2, default=str), encoding="utf-8")
+            print(f"wrote {args.json}")
+        if not args.apply:
+            print("DRY RUN - no write. Pass --apply to stamp.")
+        return
+
     rows = _skills(db, args.task_type)
     verdicts = classify(rows, reproduced=_reproduced(args.repro_db), prompts=_designs_prompts(db),
                         repo_root=repo_root, fixture_times=_fixture_run_times(db))

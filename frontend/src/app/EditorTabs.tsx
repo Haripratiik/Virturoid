@@ -1,4 +1,4 @@
-import { PencilRuler, Orbit, GraduationCap, ShieldCheck, LibraryBig } from "lucide-react";
+import { PencilRuler, Orbit, GraduationCap, ShieldCheck, LibraryBig, Brain } from "lucide-react";
 import { useAppStore, WORKSPACES, type WorkspaceId } from "@/state/app";
 import { useLifecycle } from "./useLifecycle";
 import { Tip } from "@/components/Explain";
@@ -13,6 +13,7 @@ const TAB_ICONS: Record<WorkspaceId, typeof PencilRuler> = {
   train: GraduationCap,
   verify: ShieldCheck,
   library: LibraryBig,
+  memory: Brain,
 };
 
 export function EditorTabs() {

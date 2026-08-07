@@ -14,10 +14,26 @@ from pathlib import Path
 
 from virturoid.services.memory_db import default_memory_dir
 
-#: One rule for where memory lives, owned by ``memory_db`` -- see the reasoning there.
-#: Duplicating the ``build/memory`` literal here is how the two would drift apart, and
-#: this module's JSON records sit in the same directory as that module's sqlite file.
-DEFAULT_MEMORY_DIR = default_memory_dir()
+# One rule for where memory lives, owned by ``memory_db`` -- see the reasoning there. Duplicating the
+# ``build/memory`` literal here is how the two would drift apart, and this module's JSON records sit in the same
+# directory as that module's sqlite file.
+#
+# RESOLVED PER CALL, NOT BOUND AT IMPORT. ``DEFAULT_MEMORY_DIR = default_memory_dir()`` at module scope froze the
+# answer at whatever ``VIRTUROID_MEMORY_DIR`` said the instant ``memory_store`` was first imported -- and then every
+# function below froze it a second time by using it as a DEFAULT ARGUMENT, which Python evaluates once at def time.
+# That is the same class of bug the sqlite side had: a rule that looks overridable and is not. A process that
+# imports the product and then chooses a destination (a corpus night, a probe) now gets the destination it chose.
+# The module attribute survives for ``from ... import DEFAULT_MEMORY_DIR`` callers, served fresh by __getattr__.
+
+
+def __getattr__(name: str):
+    if name == "DEFAULT_MEMORY_DIR":
+        return default_memory_dir()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def _dir(memory_dir) -> Path:
+    return Path(memory_dir) if memory_dir is not None else default_memory_dir()
 
 
 def _key(robot_class: str, task_type: str) -> str:
@@ -30,9 +46,9 @@ def save_build_record(
     converged_design: dict,
     success_rate: float,
     prompt: str,
-    memory_dir: Path = DEFAULT_MEMORY_DIR,
+    memory_dir: Path | None = None,
 ) -> Path:
-    memory_dir = Path(memory_dir)
+    memory_dir = _dir(memory_dir)
     memory_dir.mkdir(parents=True, exist_ok=True)
     path = memory_dir / f"{_key(robot_class, task_type)}.json"
     existing = _read(path)
@@ -58,7 +74,7 @@ def append_design_record(
     design: dict,
     success_rate: float,
     source: str,
-    memory_dir: Path = DEFAULT_MEMORY_DIR,
+    memory_dir: Path | None = None,
 ) -> Path:
     """Append one (prompt -> physics-optimized design -> success) row to the design dataset.
 
@@ -67,7 +83,7 @@ def append_design_record(
     near-optimal designs directly. ``source`` records what produced the design
     (e.g. "physics_codesign", "ai_designer+codesign").
     """
-    memory_dir = Path(memory_dir)
+    memory_dir = _dir(memory_dir)
     memory_dir.mkdir(parents=True, exist_ok=True)
     path = memory_dir / "design_dataset.jsonl"
     row = {
@@ -84,8 +100,9 @@ def append_design_record(
     return path
 
 
-def find_similar_design(robot_class: str, task_type: str, memory_dir: Path = DEFAULT_MEMORY_DIR) -> dict | None:
+def find_similar_design(robot_class: str, task_type: str, memory_dir: Path | None = None) -> dict | None:
     """Return a prior converged design for the same robot class and task, if any."""
+    memory_dir = _dir(memory_dir)
     path = Path(memory_dir) / f"{_key(robot_class, task_type)}.json"
     record = _read(path)
     if record and record.get("converged_design"):
