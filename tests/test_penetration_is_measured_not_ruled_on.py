@@ -1,57 +1,90 @@
-"""The simulability gate MEASURES self-penetration and RULES ON NOTHING. This is the spec for the rule it owes.
+"""The gate MEASURED self-penetration and RULED ON NOTHING. This was the spec for the rule it owed; it is now met.
 
-``robot_import._simulability_probe`` (9fbdcdc) compiles the editable twin, settles it, drives every actuator
-across its own ``ctrlrange``, and fails the import if MuJoCo raises BADQACC/BADQVEL/BADQPOS/BADCTRL. That is a
+WHAT SHIPPED (2026-08-07): NOT a penetration threshold. ``robot_import._source_link_placement`` records where
+the customer's own model puts every link, ``_placement_fidelity`` checks the compiled twin reproduces those
+pairwise distances, and ``_simulability_probe`` fails the import when it does not. All four re-broken twins are
+now rejected. All 63 packages were driven through ``agent_tools.call_tool('ingest_project')``: ZERO false
+rejections, and the tightest of the 59 that reach the check sits 385x under its own budget. The measurement
+that ruled the obvious fix out is preserved below, because it is the argument for the rule that did ship.
+
+
+--------------------------------------------------------------------------- WHAT THE GATE WAS, AND WHY
+
+``robot_import._simulability_probe`` (9fbdcdc) compiled the editable twin, settled it, drove every actuator
+across its own ``ctrlrange``, and failed the import if MuJoCo raised BADQACC/BADQVEL/BADQPOS/BADCTRL. That is a
 COMPILE-AND-DIVERGENCE detector, and it is a good one. It is not a geometry-correctness detector, and it was
-described as though it were.
+described as though it were. It is still there -- it is rule 2 -- and this is what it alone could do.
 
 MEASURED 2026-08-07 by re-breaking each of the four multi-root twins the way the multi-root bug broke them
-(every reparented root's ``mount_offset`` forced to (0,0,0)) and re-running the probe:
+(every reparented root's ``mount_offset`` forced to (0,0,0)) and re-running the probe as it then was:
 
-    package            correct pen.   re-broken pen.   probe rejects the broken twin?
+    package            correct pen.   re-broken pen.   divergence alone rejects the broken twin?
     aloha                 0.05464          0.14172      YES
     trossen_wxai          0.03132          0.10000      no
     shadow_dexee          0.04894          0.07468      no
-    apptronik_apollo      0.06844          0.09959      no
+    apptronik_apollo      0.06844          0.23964      no      (0.09959 as first written; see MULTI_ROOT)
 
 One of four. ALOHA is caught because stacking two 0.94 m-apart arms drives the solver to a NaN; the other three
-stack into a geometry that is wrong but numerically survivable, and the probe has nothing to say about wrong.
-The number that would say it -- ``max_self_penetration_m`` -- is computed on every run, reported in the payload,
-and compared to nothing anywhere in the codebase.
+stack into a geometry that is wrong but numerically survivable, and a divergence detector has nothing to say
+about wrong. The number that looked like it would say it -- ``max_self_penetration_m`` -- was computed on every
+run, reported in the payload, and compared to nothing anywhere in the codebase. It still is: see below for the
+measurement that says it never can be.
 
 WHY WE DID NOT SIMPLY ADD A THRESHOLD. A capsule twin overlaps a little at every joint by construction, so some
 penetration is normal and a naive budget rejects good robots. Measured across all 63 MuJoCo Menagerie packages
 (62 twins; flybody does not compile at all):
 
-    correct twins   34/62 penetrate ZERO   p50 0.00000   p75 0.03017   p90 0.05418   p95 0.05712   max 0.06844
-    re-broken (4)   0.07468 / 0.09959 / 0.10000 / 0.14172
+    correct twins   32/62 penetrate ZERO   p50 0.00000   p75 0.03017   p90 0.05418   p95 0.05712   max 0.06844
+    re-broken (4)   0.07468 / 0.10000 / 0.14172 / 0.23964
+
+(The zero count read 34 when this was first written and measures 32 on the re-sweep. Every percentile and the
+max reproduce to the digit on the same 62 models, so that is a counting convention -- these numbers are the
+probe's own, i.e. the worst over BOTH start poses -- and not a corpus that moved.)
 
 A global threshold must therefore live in (0.06844, 0.07468] -- a 9.1% window, with a single observation at
-each edge, on a corpus of 62 robots. Two things make that worse, not better:
+each edge, on a corpus of 62 robots. THE HYPOTHESIS WORTH TESTING FIRST -- "penetration between bodies that
+share no kinematic path, normalised by link size" -- was swept over the whole corpus on 2026-08-07 in every
+combination, and not one of them separates the populations. Each row is worst-correct -> weakest-broken:
 
-  * NORMALISING BY LINK RADIUS SHRINKS THE WINDOW. depth / thinnest-half-extent-of-the-thinner-geom gives
-    worst-correct 3.2627 (shadow_dexee, CORRECT) against weakest-broken 3.4227 (trossen_wxai): a 4.9% window.
-  * "PENETRATION BETWEEN BODIES THAT SHARE NO KINEMATIC PATH" DOES NOT SEPARATE THEM EITHER, because in a
-    correct twin it already happens. ``gene_compiler._self_collision_excludes_xml`` excludes every
-    ancestor/descendant pair, so ALL 62 twins report exactly 0.0 m of lineal penetration and every contact that
-    survives is already cross-branch. The deepest contact in the CORRECT Apollo twin is
-    ``l_wrist_pitch_link`` inside ``l_hip_fe_link`` -- 13 hops apart, lowest common ancestor ``base_link``,
-    0.06844 m. That is "two limbs inside each other" by any structural definition, on a twin that is right.
-    Restricting to hops >= 6 makes correct Apollo and BROKEN Apollo tie at 0.06844 exactly.
+    statistic                                       window    correct twins at/above the weakest broken
+    max depth                          0.0684 -> 0.0747  1.091x   0 / 62
+    depth, >= 2 hops apart             0.0684 -> 0.0747  1.091x   0 / 62   (identical -- see below)
+    depth, >= 4 hops apart             0.0684 -> 0.0696  1.017x   0 / 62
+    depth, >= 6 hops apart             0.0684 -> 0.0300  0.438x   4 / 62   INVERTED
+    depth / thinner geom half-extent   3.2627 -> 3.4227  1.049x   0 / 62
+    same, >= 2 hops                    3.2627 -> 3.4227  1.049x   0 / 62
+    same, >= 4 hops                    3.2627 -> 3.4227  1.049x   0 / 62
+    same, >= 6 hops                    2.4046 -> 2.0000  0.832x   2 / 62   INVERTED
+
+Normalising buys 4.9% instead of 9.1%. Requiring the bodies to be structurally distant buys NOTHING (the >= 2
+column is identical to the raw one) and then INVERTS: at >= 6 hops a correct ``iit_softfoot`` out-penetrates a
+broken ``shadow_dexee`` and no threshold exists in either direction. The reason the >= 2 column is identical is
+the load-bearing one: ``gene_compiler._self_collision_excludes_xml`` already excludes every ancestor/descendant
+pair, so ALL 62 twins report exactly 0.0 m of lineal penetration and EVERY contact that survives is already
+cross-branch. The deepest contact in the CORRECT Apollo twin is ``l_wrist_pitch_link`` inside ``l_hip_fe_link``
+-- 13 hops apart, lowest common ancestor ``base_link``, 0.06844 m. That is "two limbs inside each other" by any
+structural definition, on a twin that is right.
 
 The repo's one existing penetration rule, ``structural_hygiene.DEFAULT_PENETRATION_BUDGET_M = 0.02`` (zero
 production callers), would reject 22 of the 62 correct twins -- a Franka Panda, a PAL Talos, an Agility Cassie --
-and 4 of the 63 CUSTOMERS' OWN UNMODIFIED MODELS, which self-penetrate up to 0.07026 m (Talos) as shipped.
+and 4 of the 63 CUSTOMERS' OWN UNMODIFIED MODELS, which self-penetrate up to 0.07026 m (Talos, a right gripper
+motor inside the right leg) as shipped. Both counts re-measured 2026-08-07 and both reproduce exactly.
 
 WHAT DOES SEPARATE THEM is not a penetration threshold at all: it is whether the twin PUT THE CUSTOMER'S LINKS
 WHERE THE CUSTOMER PUT THEM. Penetration has two causes -- our collider approximation (legitimate, unbounded by
 any constant) and a placement error (a defect) -- and only the second is our bug. The discriminator is measured
 in ``test_the_signal_that_separates_them_is_placement_not_a_threshold`` below: a correct twin reproduces every
-pairwise body-origin distance in the source to ~1e-5 m; a re-broken one is off by half a metre. That is five
-orders of magnitude of margin instead of nine percent -- and the information it needs (the source model) is in
-``import_robot``'s hand and is never passed to the probe, which sees only a gene.
+pairwise body-origin distance in the source to ~1e-5 m; a re-broken one is off by half a metre.
 
-See docs/what_the_simulability_gate_does_not_catch.md.
+That is what shipped. The information it needs -- the source model -- was in ``import_robot``'s hand and was
+dropped there; it is now recorded ONTO THE GENE at import (``metadata['source_link_placement']``), so the probe
+still takes a gene and a gene alone. Measured over all 63 packages through ``call_tool('ingest_project')``:
+worst correct twin 0.000017 m (pal_tiago_dual), tightest against its own budget 0.26% of it (385x margin,
+tetheria_aero_hand_open); weakest defect 0.0881 m against a 0.0059 m budget (14.9x over). The rule is NOT a
+fitted constant -- it is "an imported twin may not move the customer's links" -- and it expires the moment a
+link is resized, so an amend is never failed by it.
+
+See docs/what_the_simulability_gate_does_not_catch.md for what it still does not catch.
 """
 from __future__ import annotations
 
@@ -71,11 +104,19 @@ _MEN = Path(os.path.expanduser("~/.cache/robot_descriptions/mujoco_menagerie"))
 
 # The four packages that declare more than one body under <worldbody>, and the penetration each one's twin
 # reaches when correct / when re-broken. Measured 2026-08-07; quoted in the asserts so a drift is legible.
+# apptronik_apollo's re-broken figure was written here as 0.09959 and IS NOT REPRODUCIBLE on this checkout; the
+# assert below caught it and it is corrected to the measured 0.23964. Apollo is the one of the four that is NOT
+# multi-root once its empty `world_link` datum is folded away (see test_multiroot_twin_is_simulable), so it keeps
+# its OWN `base_link` as the gene root and `_collapse_roots` flattens five real children onto it -- both torso
+# cameras, the torso roll and both hips -- rather than the two mounting frames the multi-root bug moved. That is
+# a harsher break than the bug, and it makes the "no threshold separates them" conclusion STRONGER, not weaker:
+# the broken population moves further from the correct one. Nothing else in this file rests on it (the window is
+# set by shadow_dexee at 0.07468, which reproduces exactly).
 MULTI_ROOT = [
     ("aloha", "aloha/aloha.xml", 0.05464, 0.14172),
     ("trossen_wxai", "trossen_wxai/trossen_ai_bimanual.xml", 0.03132, 0.10000),
     ("shadow_dexee", "shadow_dexee/shadow_dexee.xml", 0.04894, 0.07468),
-    ("apptronik_apollo", "apptronik_apollo/apptronik_apollo.xml", 0.06844, 0.09959),
+    ("apptronik_apollo", "apptronik_apollo/apptronik_apollo.xml", 0.06844, 0.23964),
 ]
 
 WORST_CORRECT_M = 0.06844      # apptronik_apollo, the deepest self-penetration in any of the 62 correct twins
@@ -148,16 +189,13 @@ def _model_extent(pos):
 
 
 # --------------------------------------------------------------------------- the spec
-@pytest.mark.xfail(reason="THE RULE THE GATE OWES, NOT YET WRITTEN. ``_simulability_probe`` rules only on "
-                          "MuJoCo's divergence warnings, so it rejects 1 of the 4 stacked twins (aloha, which "
-                          "NaNs) and passes the other 3, which are geometrically wrong but numerically "
-                          "survivable. It already computes ``max_self_penetration_m`` and compares it to "
-                          "nothing. Landing this needs a rule that separates OUR placement error from OUR "
-                          "collider approximation -- see the module docstring: no global threshold does, the "
-                          "window is (0.06844, 0.07468], and the discriminator that works needs the SOURCE "
-                          "model, which import_robot has and never hands to the probe.", strict=True)
 def test_a_twin_whose_limbs_have_been_stacked_on_one_point_is_rejected():
-    """Re-break each multi-root twin the way the bug broke it; every one of them must fail the gate."""
+    """Re-break each multi-root twin the way the bug broke it; every one of them must fail the gate.
+
+    Was a strict xfail until 2026-08-07: the gate rejected only ALOHA, the one of the four that NaNs. The three
+    that survive numerically are now rejected on PLACEMENT, not on any number measured from a rollout -- so the
+    ``stage`` is asserted too, or a future divergence-only pass would read as this rule working.
+    """
     from virturoid.services.robot_import import _simulability_probe
 
     accepted, evidence = [], []
@@ -168,12 +206,20 @@ def test_a_twin_whose_limbs_have_been_stacked_on_one_point_is_rejected():
         assert out["gene"] is not None, f"{pkg} did not import: {out.get('warnings')}"
         res = _simulability_probe(_collapse_roots(out["gene"]))
         pen = res.get("max_self_penetration_m")
-        evidence.append(f"{pkg}: ok={res.get('ok')} pen={pen}")
+        evidence.append(f"{pkg}: ok={res.get('ok')} stage={res.get('stage')} pen={pen}")
         assert pen == pytest.approx(want_pen, abs=5e-4), (
             f"{pkg}: the re-broken twin's penetration moved from the measured {want_pen} to {pen}; "
             f"re-derive the window in the module docstring before trusting any threshold built on it")
         if res.get("ok"):
             accepted.append(pkg)
+        else:
+            place = res.get("placement_check") or {}
+            assert res.get("stage") == "placement" and place.get("checked") and not place.get("ok"), (
+                f"{pkg} was rejected, but not by the placement rule ({res.get('stage')!r}). Three of these four "
+                f"twins step perfectly well; a gate that only sees divergence passes them.")
+            assert place["max_link_displacement_m"] > 10.0 * place["tolerance_m"], (
+                f"{pkg}: the defect is only {place['max_link_displacement_m'] / place['tolerance_m']:.1f}x the "
+                f"budget. This rule is worth having because that ratio is large; if it is not, re-measure.")
     assert not accepted, (
         "the gate ACCEPTED these stacked twins: " + ", ".join(accepted) + ". Every downstream number "
         "(verdict, certificate, BOM, spec sheet, calibration gap) is computed by stepping a body whose limbs "
@@ -279,10 +325,10 @@ def test_every_penetration_a_twin_reports_is_already_cross_branch():
 def test_the_signal_that_separates_them_is_placement_not_a_threshold(pkg, rel, _ok, _bad):
     """Penetration has two causes and only one of them is a bug. The one that IS a bug -- our twin moving the
     customer's links -- is measurable against the customer's own model, with a margin four orders of magnitude
-    wider than the 9% a penetration threshold gets. This is evidence, not a proposal: it is measured here.
-
-    Note what it costs: the SOURCE model. ``_simulability_probe`` takes a gene and cannot do this;
-    ``import_robot`` is holding the source when it calls the probe and does not pass it.
+    wider than the 9% a penetration threshold gets. This is the evidence the shipped rule rests on, and it is
+    measured HERE, independently: it re-reads the source file itself rather than the record the import wrote,
+    so it would still fail if ``_source_link_placement`` recorded the twin's own positions instead of the
+    customer's.
     """
     import mujoco
 
@@ -317,3 +363,44 @@ def test_the_signal_that_separates_them_is_placement_not_a_threshold(pkg, rel, _
     assert bad_dev / max(good_dev, 1e-9) > 1000.0, (
         f"{pkg}: placement separates the two populations by {bad_dev / max(good_dev, 1e-9):.0f}x "
         f"({good_dev:.6f} m correct vs {bad_dev:.4f} m broken), against the 1.09x a penetration threshold gets")
+
+
+# --------------------------------------------------------------------------- the rule must not fire elsewhere
+# An overfitted gate that rejects a customer's working robot is worse than a gate with known limits. These two
+# are the cases where "the twin does not match the source" is not a defect at all, and the rule has to KNOW that
+# rather than be tuned around it: there is no source, or the customer moved the links themselves.
+def test_a_body_we_composed_here_is_not_ruled_on_at_all():
+    """No source model, no claim. A gene we generated has nothing it is supposed to reproduce, and a rule that
+    guessed at one would fail bodies that are correct by construction."""
+    from virturoid.services.morphology_composer import compose_from_spec, morphology_from_requirements
+    from virturoid.services.robot_import import _placement_fidelity, _simulability_probe
+
+    gene = compose_from_spec(morphology_from_requirements(
+        0.65, 0.25, prompt="a small four-legged walking robot", robot_class="quadruped"))
+    res = _simulability_probe(gene)
+    place = res.get("placement_check") or {}
+    assert place.get("checked") is False, f"a composed body was ruled on against a source it never had: {place}"
+    assert "no record" in str(place.get("reason", "")).lower()
+    assert res.get("stage") != "placement"
+    # and the helper says the same thing when called directly on a gene with no record at all
+    gene.metadata = {}
+    assert _placement_fidelity(gene, None, None)["checked"] is False
+
+
+def test_an_amend_that_resizes_a_link_retires_the_rule_instead_of_failing_the_customer():
+    """A child hangs off its parent's TIP, so lengthening a link MOVES everything below it -- correctly. The
+    record is stamped with the link lengths it was measured at and expires when they change, which is why an
+    ordinary amend cannot be turned into an import rejection."""
+    from virturoid.services.edit_operators import apply_op
+    from virturoid.services.robot_import import _simulability_probe
+
+    out = _import("unitree_go2/go2.xml", "amend")
+    assert out["gene"] is not None
+    assert (_simulability_probe(out["gene"])["placement_check"] or {}).get("ok") is True
+
+    longer, _diff = apply_op(out["gene"], "scale_group", {"group": "legs", "dims": "length", "factor": 1.4})
+    place = _simulability_probe(longer).get("placement_check") or {}
+    assert place.get("checked") is False, (
+        "a 1.4x leg-scale amend was still ruled on against the ORIGINAL placement, so a legitimate edit reads "
+        f"as an import defect: {place}")
+    assert place.get("n_edited_links"), place

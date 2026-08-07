@@ -1,8 +1,14 @@
-"""WS-A.2 — the design cassette records/replays deterministically (master_plan_v6 §8.1)."""
+"""WS-A.2 — the design cassette records/replays deterministically (master_plan_v6 §8.1).
+
+Plus #208: every recorded design carries the provenance of the generator that authored it, and the committed
+fixture's own provenance is pinned here — because the number CI gates on is only meaningful if you can tell
+which generator produced it.
+"""
 from __future__ import annotations
 
+from virturoid.schemas.gene import GeneSegment, RobotGene
 from virturoid.services import design_battery as B
-from virturoid.services.design_cassette import DesignCassette, design_from_prompt
+from virturoid.services.design_cassette import (DesignCassette, authored_by_model, design_from_prompt)
 from virturoid.services.heldout_set import body_key
 
 
@@ -53,6 +59,99 @@ def test_record_roundtrips_including_failures(tmp_path):
     assert reloaded.has(B.prompt_id(rec)) and reloaded.get_gene(B.prompt_id(rec)) is not None
     assert reloaded.has("broken__x") and reloaded.get_gene("broken__x") is None    # a recorded failure
     assert reloaded.summary()["n_failures"] == 1
+
+
+# ---------------------------------------------------------------- provenance (#208)
+def test_committed_fixture_was_produced_offline_and_the_artifact_says_so():
+    """THE FINDING, pinned as a test. Every number Design-Bench publishes today is scored on these 20 rows,
+    and NOT ONE of them was authored by a model: 14 ``heuristic`` + 6 ``anatomy_generic``, both deterministic
+    builders. The bench's headline was therefore a measurement of the offline fallback, not of the LLM-first
+    product a customer gets.
+
+    This test is not a wish. If someone re-records the fixture live, it FAILS -- and it should, because the
+    committed regression floor and the baseline's declared mode must move together (see the baseline gate in
+    test_design_bench.py). Promote deliberately; never let the floor drift generators silently."""
+    prov = DesignCassette().provenance()
+    assert prov["mode"] == "offline"
+    assert prov["n_authored_by_model"] == 0
+    assert prov["n_authored_by_builder"] == prov["n_rows"] == len(B.battery())
+    assert set(prov["design_sources"]) <= {"heuristic", "anatomy_generic"}
+
+
+def test_authored_by_model_reads_the_design_source_not_a_flag():
+    """The classification has to be decidable from a recorded row alone -- that is what makes the LEGACY
+    fixture classifiable without re-recording it. Sources assigned only inside ``llm is not None`` branches
+    count as model-authored; the deterministic builders do not, even though a live model may have been CALLED
+    before its proposal failed grounding and landed there."""
+    for src in ("llm", "llm_anatomy_graph", "anatomy"):
+        assert authored_by_model(src), src
+    for src in ("heuristic", "anatomy_generic", "archetype", "anthropometric", None, "", "unknown"):
+        assert not authored_by_model(src), src
+
+
+def _stub_gene(design_source: str) -> RobotGene:
+    g = RobotGene(id="g", species="x", robot_class="quadruped",
+                  segments=[GeneSegment(name="torso", parent=None)])
+    g.design_source = design_source
+    return g
+
+
+def test_recorded_provenance_round_trips_and_drives_the_mode(tmp_path):
+    p = tmp_path / "cass.json"
+    cas = DesignCassette(p)
+    cas.record("a__x", prompt="p", gene=_stub_gene("llm_anatomy_graph"), source="llm_anatomy_graph",
+               llm_calls=3, backend="openai", model="gpt-5.5", strict_llm=True)
+    cas.save(battery_version=B.BATTERY_VERSION)
+    prov = DesignCassette(p).provenance()
+    assert prov["mode"] == "live"
+    assert prov["llm_calls_total"] == 3 and prov["n_rows_with_measured_calls"] == 1
+    assert prov["backends"] == ["openai"] and prov["models"] == ["gpt-5.5"]
+
+
+def test_a_refused_live_design_does_not_relabel_the_run_as_offline(tmp_path):
+    """MEASURED 2026-08-07: the 5-prompt live arm produced 3 designs and 2 hard refusals
+    (``LLMDesignUnavailable`` on mobile_manip and starfish). Refusal is the CORRECT strict-mode behaviour --
+    production would rather return nothing than substitute a template -- so counting those rows as evidence of
+    the offline generator would have mislabelled a live measurement. Failures are counted, not voted."""
+    p = tmp_path / "refused.json"
+    cas = DesignCassette(p)
+    cas.record("a__x", prompt="p", gene=_stub_gene("llm_anatomy_graph"), source="llm_anatomy_graph", llm_calls=4)
+    cas.record("b__x", prompt="q", gene=None, source="error", error="LLMDesignUnavailable: ...", llm_calls=6)
+    assert cas.mode() == "live"
+    prov = cas.provenance()
+    assert (prov["n_rows"], prov["n_built"], prov["n_failed"]) == (2, 1, 1)
+    assert prov["design_sources"]["(design failed)"] == 1
+    assert prov["llm_calls_total"] == 10          # the refusal still cost tokens, and the artifact says so
+
+
+def test_a_cassette_holding_both_generators_reports_mixed_not_live(tmp_path):
+    """The dangerous middle case: a live re-record where some prompts fell back to a deterministic builder.
+    Calling that 'live' would credit the model with bodies it did not design, so it reads ``mixed`` and the
+    bench's label check (design_bench.check_label) refuses a live label for it."""
+    p = tmp_path / "mixed.json"
+    cas = DesignCassette(p)
+    cas.record("a__x", prompt="p", gene=_stub_gene("llm_anatomy_graph"), source="llm_anatomy_graph", llm_calls=2)
+    cas.record("b__x", prompt="q", gene=_stub_gene("heuristic"), source="heuristic", llm_calls=2)
+    assert cas.mode() == "mixed"
+    prov = cas.provenance()
+    # tokens WERE spent on the fallback row -- spend does not equal authorship, and the artifact keeps both.
+    assert prov["llm_calls_total"] == 4 and prov["n_authored_by_model"] == 1
+
+
+def test_recording_measures_llm_calls_rather_than_trusting_the_caller(tmp_path, monkeypatch):
+    """``design_from_prompt`` reads the spend ledger around the compose. With no backend the honest answer is
+    zero -- which is exactly how the committed fixture came to be offline while nobody noticed."""
+    monkeypatch.setenv("VIRTUROID_NO_INTERNAL_LLM", "1")
+    p = tmp_path / "c.json"
+    cas = DesignCassette(p)
+    rec = B.battery()[0]
+    gene, _ = design_from_prompt(rec["prompt"], prompt_id=B.prompt_id(rec), cassette=cas,
+                                 allow_generate=True, record=True)
+    assert gene is not None
+    row = cas.entry_provenance(B.prompt_id(rec))
+    assert row["llm_calls"] == 0
+    assert row["authored_by_model"] is False
+    assert cas.mode() == "offline"
 
 
 def test_battery_is_disjoint_from_heldout():

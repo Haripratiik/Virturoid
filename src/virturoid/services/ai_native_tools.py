@@ -532,10 +532,23 @@ def _record_gait_lesson(gene, failure_code: str, operator: str, *, improvement: 
 
 def _record_gait_hint_outcome(gene, hint_rollout: dict, default_rollout: dict, *, selected_default: bool,
                               source: str) -> None:
-    """Record every attempted hint deployment, including wins, losses and ties.
+    """Record every attempted recall deployment, including wins, losses and ties.
 
     Lessons remain useful diagnosis for losses; this provenance event is the unbiased denominator needed to tell
     whether reuse helps at all. The measured delta is like-for-like absolute forward travel at one horizon.
+
+    ``delta`` IS THE COUNTERFACTUAL AND HAS ALWAYS BEEN ONE: it is (recalled - default), i.e. what WOULD have
+    happened had the recalled gait been deployed blind. It is NOT what the robot shipped with, because the
+    deploy-select above keeps the winner. Those two numbers have opposite signs on the live bank and the gap is
+    not small -- the flywheel-hint arm counterfactuals to -0.1288 m and SHIPS +0.0949 m -- so a reader who takes
+    ``delta`` for an outcome concludes the product makes robots worse when measurably it does not. That reading
+    cost a day. ``shipped_delta`` is therefore recorded next to it and the counterfactual is kept, because the
+    only reason we can see any of this is that someone recorded both arms.
+
+    THE KIND NAMES THE MECHANISM. ``flywheel_hint`` (a mined cross-body region) and ``tuned_for_this_body``
+    (this body's OWN fitted op-point) are different claims and were being pooled under ``gait_hint_deploy``,
+    where 1598 rows of the latter diluted the former's mean by roughly 4x. They are banked apart now; both are
+    still recorded, so no series is lost, only separated.
     """
     try:
         from virturoid.services.gait_flywheel import structural_gait_key
@@ -545,16 +558,22 @@ def _record_gait_hint_outcome(gene, hint_rollout: dict, default_rollout: dict, *
         DEFAULT_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
         hint_forward = abs(float(hint_rollout.get("forward", 0.0)))
         default_forward = abs(float(default_rollout.get("forward", 0.0)))
+        shipped_forward = default_forward if selected_default else hint_forward
         structure_key = structural_gait_key(gene)
+        kind = "gait_hint_deploy" if source == "flywheel_hint" else "gait_own_point_deploy"
         with MemoryDB(DEFAULT_DB_PATH) as db:
             RoboticsVectorMemory(db).record_provenance(
                 "gene", getattr(gene, "id", "") or structure_key,
-                parent_type="gait_hint_region", parent_id=structure_key, kind="gait_hint_deploy",
+                parent_type="gait_hint_region", parent_id=structure_key, kind=kind,
                 delta=round(hint_forward - default_forward, 6),
                 meta={"source": source, "selected": "default" if selected_default else "hint",
                       "hint_forward_m": hint_forward, "default_forward_m": default_forward,
                       "hint_credible": classify(hint_rollout).startswith("CREDIBLE"),
-                      "default_credible": classify(default_rollout).startswith("CREDIBLE")},
+                      "default_credible": classify(default_rollout).startswith("CREDIBLE"),
+                      # what the robot ACTUALLY walked away with, vs the same body's shipped default
+                      "shipped_forward_m": shipped_forward,
+                      "shipped_delta": round(shipped_forward - default_forward, 6),
+                      "delta_is_counterfactual": True},
             )
     except Exception:  # noqa: BLE001 - measurement must never break a deploy verdict
         pass
@@ -686,6 +705,7 @@ def _honest_gait(gene, *, steps: int = 1200, render: bool = False, tag: str = "g
     render — the extra cost is simulation only.
     """
     from virturoid.services.morph_policy import crawl_gait_rollout
+    from virturoid.services.gait_flywheel import _DEFAULT_GAIT
     from virturoid.services.gait_quality import classify, orientation_summary, settling
     frame_every = max(5, int(steps) // 300)
     # A LIMBLESS serial spine (a snake) has no legs for the crawl gait — drive it as a land SERPENTINE undulator
@@ -751,7 +771,16 @@ def _honest_gait(gene, *, steps: int = 1200, render: bool = False, tag: str = "g
     # run the default and keep whichever is CREDIBLE (tie-break: further) — so a mismatched banked SLIDE can never
     # beat a credible default. The flywheel only ever helps.
     if gait_params:
-        r_def = crawl_gait_rollout(gene, steps=steps, record_qpos=True, frame_every=frame_every)
+        # THE DEFAULT ARM HAS TO ACTUALLY BE THE DEFAULT. ``crawl_gait_rollout`` falls back to
+        # ``gene.metadata['gait_params']`` for every gait kwarg it is not handed (morph_policy.py:1285-1299), so
+        # calling it bare on a body that carries a tuned cache RE-RUNS THE SAME GAIT. The safety net then
+        # compared the tuned op-point against itself. Measured 2026-08-07 against the live bank: all 1598
+        # ``tuned_for_this_body`` provenance rows carry delta EXACTLY 0.000 — one wasted full-length rollout
+        # each, and the guard this block advertises ("never worse than the shipped default") could not fire even
+        # once on those 11 bodies. Naming the constants makes the baseline real at no extra rollout cost, and
+        # turns 1598 vacuous zeros into a real measurement of what the per-body tune is worth.
+        r_def = crawl_gait_rollout(gene, steps=steps, record_qpos=True, frame_every=frame_every,
+                                   **_DEFAULT_GAIT)
         cred_r = classify(r).startswith("CREDIBLE")
         cred_def = classify(r_def).startswith("CREDIBLE")
         better_def = (cred_def and not cred_r) or (

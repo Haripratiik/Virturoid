@@ -1,6 +1,6 @@
 """Run one corpus-factory night (master_plan_v6 WS-C.2).
 
-    PYTHONPATH=src python scripts/corpus_factory_night.py --memory build/memory [--bodies 20] [--grow-ledger]
+    python scripts/corpus_factory_night.py --memory build/memory [--bodies 20] [--grow-ledger]
 
 Proposer: OFFLINE by default (heuristic composition over a diverse prompt bank + verified-design jitter — zero
 tokens). In production the proposer is an offline batch LLM agent (explicit dev tokens, never the customer hot
@@ -32,6 +32,12 @@ import json
 import os
 import sys
 from pathlib import Path
+
+# Runnable as `python scripts/corpus_factory_night.py` from the repo root, which is how the docstring above and
+# every task note describe it. 57 of the 67 scripts here already do this; this one did not, so the documented
+# invocation died on ModuleNotFoundError before it reached a single robot. A long overnight run that fails in the
+# first second is a cheap failure, but it fails at the exact moment nobody is watching.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 # A diverse prompt bank spanning structural families (breadth, not depth — GenBot-1K). The proposer biases toward
 # the thinnest classes reported in the night context. NONE overlaps the held-out set (the guard also enforces it).

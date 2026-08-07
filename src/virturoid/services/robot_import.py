@@ -1050,21 +1050,35 @@ def _import_robot_uncached(source: str, *, robot_id: str | None = None, species:
         # place the customer actually looks.
         warnings.append(f"could not read the source's rest keyframe ({type(_exc).__name__}: {_exc}); the body "
                         f"will spawn at its zero pose, which for a legged robot means straight legs.")
+    # WHERE THE CUSTOMER PUT THEIR OWN LINKS, carried onto the gene so the gate can check we did not move them.
+    # See `_source_link_placement` for why this is recorded rather than re-read, and `_placement_fidelity` for
+    # what rules on it.
+    _placement = _source_link_placement(mj, mujoco, body_name, segments)
+    if _placement:
+        gene.metadata["source_link_placement"] = _placement
+
     gene_issues = gene.validate()
     warnings.extend(f"gene validation: {iss}" for iss in gene_issues)
 
-    # THE SIMULABILITY GATE. Everything downstream of an import — the verdict, the certificate, the BOM, the spec
-    # sheet, the calibration gap — is a number computed by STEPPING this twin. A twin that diverges produces those
-    # numbers anyway, off a model that cannot be simulated, and nothing noticed: the import returned `valid=True`
-    # because `RobotGene.validate()` is a SCHEMA check (one root, parents present, acyclic) and says nothing about
-    # whether the thing survives contact. Run it before anyone else does, and fail loudly if it does not.
+    # THE GATE. Everything downstream of an import — the verdict, the certificate, the BOM, the spec sheet, the
+    # calibration gap — is a number computed by STEPPING this twin. A twin that diverges produces those numbers
+    # anyway, off a model that cannot be simulated, and nothing noticed: the import returned `valid=True` because
+    # `RobotGene.validate()` is a SCHEMA check (one root, parents present, acyclic) and says nothing about whether
+    # the thing survives contact. A twin whose links are in the WRONG PLACE produces them too, off a body that
+    # steps perfectly well and is not the customer's robot. Rule on both before anyone else does.
     sim = _simulability_probe(gene) if not gene_issues else {
         "ok": False, "checked": False, "reason": "gene failed schema validation; not simulated"}
     if not sim.get("ok"):
-        warnings.insert(0, f"IMPORT REJECTED — the editable twin is NOT SIMULABLE: {sim.get('reason')}. "
-                           "Every downstream number (verdict, certificate, BOM, spec sheet, calibration gap) is "
-                           "computed by stepping this model, so none of them can be produced. Use the faithful "
-                           "native lane for simulation, and see the warnings above for what the twin got wrong.")
+        _misplaced = bool(sim.get("placement_failed"))
+        warnings.insert(0, ("IMPORT REJECTED — the editable twin IS NOT YOUR ROBOT: " if _misplaced else
+                            "IMPORT REJECTED — the editable twin is NOT SIMULABLE: ")
+                        + f"{sim.get('reason')}. Every downstream number (verdict, certificate, BOM, spec sheet, "
+                        "calibration gap) is computed from this model, so none of them can be produced"
+                        + (" — they would describe a machine you do not own. " if _misplaced
+                           else ". Use the faithful native lane for simulation, and see the warnings above for "
+                                "what the twin got wrong.")
+                        + ("This is OUR reconstruction failing, not a defect in your file: the faithful native "
+                           "lane runs your model as-is and is unaffected." if _misplaced else ""))
     backend_support = _backend_support(segments)
     return {
         "gene": gene,
@@ -1086,11 +1100,159 @@ SETTLE_S = 0.5                 # passive settle, no control at all
 EXCITE_S = 1.5                 # then drive every actuator across its OWN declared ctrlrange
 EXCITE_HZ = 1.0
 
+#: How far a link may sit from where the customer put it, as a fraction of THEIR OWN model's longest
+#: link-to-link span, and an absolute floor under it. See ``_placement_fidelity`` for the measured margin.
+PLACEMENT_TOL_FRAC = 0.02
+PLACEMENT_TOL_FLOOR_M = 0.005
+
+
+def _source_link_placement(mj, mujoco, body_name: dict, segments) -> dict | None:
+    """Where the CUSTOMER's own model puts each link, recorded onto the gene at import.
+
+    THE GATE CANNOT CHECK OUR GEOMETRY AGAINST NOTHING. ``_simulability_probe`` takes a gene and a gene alone,
+    and a gene is only ever self-consistent: a twin whose limbs have been stacked on one point is a perfectly
+    well-formed gene, and the only thing that says otherwise is the model the customer handed us. That model is
+    in ``import_robot``'s hand for a few hundred lines and is then dropped. This carries the one fact from it
+    that a placement defect has to violate -- the pose of every link -- forward with the robot.
+
+    Recorded as WORLD POSITIONS AT THE ZERO CONFIGURATION, which is exactly the static tree ``body_pos`` /
+    ``body_quat`` define (MuJoCo's ``qpos0`` IS the configuration in which every body sits at its declared pose,
+    so this reads geometry and nothing about joint angles, keyframes or spawn height). The comparison built on
+    them is PAIRWISE DISTANCE, so an import may legitimately re-datum the whole robot -- weld a free base, hang
+    it off a synthesized mount, drop it at a standing height -- and only a link that actually MOVED is visible.
+
+    Only bodies that became segments are recorded: a folded coordinate frame (see ``_frame_only_bodies``) is not
+    a link of the twin and has nothing to be compared against. ``link_dims_m`` is not decoration -- it is the
+    record's own expiry date; see ``_placement_fidelity``.
+    """
+    try:
+        import numpy as np
+
+        seg_dims = {s.name: (float(s.length_m), float(s.radius_m)) for s in segments}
+        d = mujoco.MjData(mj)
+        mujoco.mj_resetData(mj, d)
+        mujoco.mj_forward(mj, d)
+        pos = {body_name[i]: [round(float(v), 6) for v in d.xpos[i]]
+               for i in range(1, mj.nbody) if body_name.get(i) in seg_dims}
+        if not pos:
+            return None
+        # A one-link model is recorded anyway, with an extent of 0. It cannot be CHECKED (a pairwise distance
+        # needs two points) and `_placement_fidelity` says exactly that -- which is a different sentence from
+        # "this robot was composed here", and three real packages depend on the difference.
+        P = np.asarray([pos[n] for n in sorted(pos)], dtype=float)
+        extent = float(np.linalg.norm(P[:, None] - P[None], axis=-1).max()) if len(pos) >= 2 else 0.0
+        return {
+            "frame": ("world positions of the customer's own links, at their model's zero configuration, in "
+                      "metres; compared PAIRWISE so a re-datum is invisible and a moved link is not"),
+            "positions": pos,
+            "link_dims_m": {n: [round(seg_dims[n][0], 6), round(seg_dims[n][1], 6)] for n in pos},
+            "extent_m": round(extent, 6),
+            "source": "read from the customer's compiled model at import",
+        }
+    except Exception:  # noqa: BLE001 - a provenance record may never be the reason an import fails
+        return None
+
+
+def _placement_fidelity(gene, m, mujoco) -> dict:
+    """Did the twin put the customer's links where the customer put them? The rule the penetration number owed.
+
+    WHY THIS AND NOT A PENETRATION BUDGET. The gate has always MEASURED ``max_self_penetration_m`` and compared
+    it to nothing, and the obvious fix -- a threshold on it -- cannot be written honestly. Measured across all
+    63 Menagerie packages (62 twins; flybody does not compile), the deepest overlap in a CORRECT twin is
+    0.06844 m (Apollo, a wrist 13 hops inside a hip) and the shallowest in a genuinely BROKEN one is 0.07468 m
+    (shadow_dexee with its roots stacked): a 9.1% window with one observation at each edge. Normalising by link
+    radius shrinks it to 4.9%. Restricting to bodies that SHARE NO KINEMATIC PATH -- the idea most worth trying,
+    since two arms inside each other is categorically unlike a thigh overlapping its own hip -- buys exactly
+    nothing: the compiler already excludes every ancestor/descendant pair, so all 62 twins report 0.0 m of
+    lineal penetration and the >= 2-hop statistic is IDENTICAL to the raw one. Push it to >= 6 hops and the two
+    populations INVERT (0.0684 correct against 0.0300 broken; 4 correct twins sit above the weakest defect). A
+    capsule twin overlaps at its joints BY CONSTRUCTION, and no constant tells that apart from a defect.
+
+    Penetration has two causes and only one of them is a bug: our collider approximation (legitimate, bounded
+    by nothing) and our own placement error (ours, and never acceptable). This measures the second directly.
+    Against the source model the two populations sit at 0.0000174 m (worst of 62 correct twins) and 0.0881 m
+    (weakest of the 4 defects) -- a 5000x window, not nine percent -- so the threshold below could move by a
+    factor of ten in either direction without changing a verdict. It is a statement about the product rather
+    than a constant fitted to four examples: *an imported twin may not move the customer's links*.
+
+    THE RECORD EXPIRES THE MOMENT THE ROBOT IS EDITED, which is what ``link_dims_m`` is for. A child sits at its
+    parent's TIP and at the parent's own lateral offsets, so changing a link's LENGTH or its GIRTH legitimately
+    moves things: ``scale_group`` scales a child's z-offset with length and its x/y with girth, and every amend
+    that resizes anything (``set_height``, ``scale_robot``, ``set_leg_count``, ``add_limb``, ``set_payload``,
+    the walkable-template swap) goes through one of those. Any change to a recorded link's length OR radius
+    retires the rule, and it says so rather than failing a customer's own edit. What it still rules on is the
+    export door: measured on Go2 / Panda / Talos, ``ground_and_repair`` changes neither dimension on any link,
+    so the body a package ships is still checked against the body the customer handed us.
+
+    Returns ``{"checked": bool, "ok": bool, ...}``; ``checked: False`` never fails anything.
+    """
+    rec = (getattr(gene, "metadata", None) or {}).get("source_link_placement")
+    if not isinstance(rec, dict) or not (rec.get("positions") or {}):
+        return {"checked": False, "reason": "this gene carries no record of a source model's link placement "
+                                            "(it was composed here, or imported before the record existed)"}
+    if len(rec["positions"]) < 2:
+        return {"checked": False, "n_recorded_links": len(rec["positions"]),
+                "reason": "the source model has only one link that became a segment; a pairwise-distance check "
+                          "needs two, so there is nothing here this rule can say"}
+    try:
+        import numpy as np
+
+        src = {str(k): [float(v) for v in vs] for k, vs in (rec.get("positions") or {}).items()}
+        want_dim = {str(k): [float(v) for v in vs] for k, vs in (rec.get("link_dims_m") or {}).items()}
+        have_dim = {s.name: (float(s.length_m), float(s.radius_m)) for s in gene.segments}
+        edited = [n for n, d0 in want_dim.items()
+                  if n not in have_dim or any(abs(have_dim[n][k] - d0[k]) > max(1e-6, 1e-4 * abs(d0[k]))
+                                              for k in (0, 1))]
+        if edited:
+            return {"checked": False, "n_edited_links": len(edited), "edited_links": sorted(edited)[:6],
+                    "reason": f"{len(edited)} link(s) have been resized since import "
+                              f"({', '.join(sorted(edited)[:4])}); a link's children hang off its TIP and its "
+                              f"own lateral offsets, so the import-time placement record no longer describes "
+                              f"where they belong"}
+        d = mujoco.MjData(m)
+        mujoco.mj_resetData(m, d)
+        mujoco.mj_forward(m, d)
+        twin = {mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_BODY, b): d.xpos[b] for b in range(1, m.nbody)}
+        shared = sorted(set(src) & set(twin))
+        if len(shared) < 2:
+            return {"checked": False, "reason": f"only {len(shared)} of the recorded links are in the compiled "
+                                                f"twin; there is nothing to compare"}
+        A = np.asarray([src[n] for n in shared], dtype=float)
+        B = np.asarray([twin[n] for n in shared], dtype=float)
+        dev = np.abs(np.linalg.norm(A[:, None] - A[None], axis=-1)
+                     - np.linalg.norm(B[:, None] - B[None], axis=-1))
+        i, j = np.unravel_index(int(dev.argmax()), dev.shape)
+        worst = float(dev[i, j])
+        extent = float(rec.get("extent_m") or 0.0)
+        tol = max(PLACEMENT_TOL_FLOOR_M, PLACEMENT_TOL_FRAC * extent)
+        out = {"checked": True, "ok": worst <= tol, "max_link_displacement_m": round(worst, 6),
+               "tolerance_m": round(tol, 6), "source_extent_m": round(extent, 6),
+               "n_links_compared": len(shared), "worst_pair": [shared[i], shared[j]]}
+        if not out["ok"]:
+            out["reason"] = (
+                f"the twin does not place your links where your model places them: {shared[i]!r} and "
+                f"{shared[j]!r} are {worst:.4f} m further apart (or closer) in the twin than in your file — "
+                f"{100.0 * worst / max(extent, 1e-9):.1f}% of the robot's own {extent:.3f} m span, against a "
+                f"{tol:.4f} m budget. This is OUR reconstruction being wrong, not your model")
+        return out
+    except Exception as exc:  # noqa: BLE001 - a check that crashes is not evidence of a broken twin
+        return {"checked": False, "reason": f"the placement check could not run ({type(exc).__name__}: {exc})"[:200]}
+
 
 def _simulability_probe(gene, *, settle_s: float = SETTLE_S, excite_s: float = EXCITE_S) -> dict:
-    """Can this twin actually be STEPPED? Compile it, settle it, excite it, and rule on finiteness.
+    """Is this twin fit to compute numbers from? TWO rules, and they fail for different reasons.
 
-    Four things make this harder than ``np.isfinite(d.qpos)``, and the first is why nothing caught the ALOHA twin:
+    1. **Is it the customer's robot?** ``_placement_fidelity`` — the twin must put their links where their own
+       model puts them. Skipped, loudly, on a gene that was composed here or has been edited since import.
+    2. **Can it be STEPPED?** Compile it, settle it, excite it, and rule on finiteness — below.
+
+    Rule 2 alone was the whole gate until 2026-08-07, and it catches ONE of the four twins the multi-root bug
+    (9fbdcdc) broke: ALOHA, whose two stacked arms drive the solver to a NaN. The other three stack into a
+    geometry that is wrong but numerically survivable, and a divergence detector has nothing to say about
+    wrong. The number that looked like it should say it — ``max_self_penetration_m``, computed here since the
+    beginning — cannot: see ``_placement_fidelity`` for the measured 9.1% window that killed it.
+
+    Four things make rule 2 harder than ``np.isfinite(d.qpos)``, and the first is why nothing caught ALOHA:
 
     * **MuJoCo HIDES the divergence.** ``mj_checkAcc`` reacts to a non-finite/huge ``qacc`` by raising
       ``mjWARN_BADQACC`` **and calling ``mj_resetData``** — so the step after the blow-up reads perfectly finite,
@@ -1169,27 +1331,34 @@ def _simulability_probe(gene, *, settle_s: float = SETTLE_S, excite_s: float = E
                 "first_bad_step": first_bad, "stage": stage,
                 "mujoco_warnings": {n: int(d.warning[w].number) for n, w in bad.items() if d.warning[w].number}}
 
-    # BOTH START POSES, because both are reachable and they do not agree. The import carries the source's own
-    # rest keyframe onto the gene and the compiler emits it, but plenty of callers construct a bare ``MjData``
-    # and get qpos 0. Measured on the collapsed ALOHA twin: from `neutral_pose` it survives the full 2 s, from
-    # zero it hits bad-QACC at t=0.106 s -- so a probe that picked either one alone would have missed the
-    # reported failure half the time. Neither start is a way to fail on its own account: across all 63 Menagerie
-    # packages, every twin that passes one passes the other.
+    # RULE 1, and the one the penetration number could never be. A statement about the MODEL rather than about a
+    # trajectory: a twin whose links are in the wrong place is wrong whether or not it survives two seconds of
+    # excitation, and three of the four known-broken twins do survive. See ``_placement_fidelity``.
+    place = _placement_fidelity(gene, m, mujoco)
+
+    # RULE 2, from BOTH START POSES, because both are reachable and they do not agree. The import carries the
+    # source's own rest keyframe onto the gene and the compiler emits it, but plenty of callers construct a bare
+    # ``MjData`` and get qpos 0. Measured on the collapsed ALOHA twin: from `neutral_pose` it survives the full
+    # 2 s, from zero it hits bad-QACC at t=0.106 s -- so a probe that picked either one alone would have missed
+    # the reported failure half the time. Neither start is a way to fail on its own account: across all 63
+    # Menagerie packages, every twin that passes one passes the other.
     runs = [_run(True)] if m.nkey else []
     runs.append(_run(False))
     worst_run = next((r for r in runs if not r["ok"]), runs[0])
     worst_pen = max((r["max_self_penetration_m"] for r in runs), default=0.0)
     pen_run = max(runs, key=lambda r: r["max_self_penetration_m"])
     out = {
-        "checked": True, "ok": all(r["ok"] for r in runs),
+        "checked": True, "ok": all(r["ok"] for r in runs) and place.get("ok", True),
         "settle_s": round(n_settle * dt, 4), "excite_s": round(n_excite * dt, 4),
         "n_actuators": int(m.nu), "timestep_s": dt, "start_poses": [r["from"] for r in runs],
         "max_self_penetration_m": worst_pen,
         "deepest_penetrating_pair": pen_run["deepest_penetrating_pair"],
         "mujoco_warnings": worst_run["mujoco_warnings"],
+        "placement_check": place,
         "runs": runs,
     }
-    if not out["ok"]:
+    diverged = not all(r["ok"] for r in runs)
+    if diverged:
         k, counts = worst_run["first_bad_step"], worst_run["mujoco_warnings"]
         out["first_bad_step"] = int(k)
         out["first_bad_time_s"] = round(k * dt, 4)
@@ -1201,6 +1370,16 @@ def _simulability_probe(gene, *, settle_s: float = SETTLE_S, excite_s: float = E
                          f"the {worst_run['from']} "
                          f"[{', '.join(f'{n}x{v}' for n, v in counts.items()) or 'non-finite qpos/qvel'}]"
                          f"{_pair}")
+    if place.get("checked") and not place.get("ok"):
+        # A PLACEMENT FAILURE IS NOT A DIVERGENCE FAILURE, and when both are true the placement one LEADS: the
+        # body may step perfectly well and still not be the customer's body, and where a twin does both (ALOHA's
+        # stacked arms) the misplacement is the cause and the NaN is the symptom. The divergence detail is kept
+        # alongside rather than replaced -- ``first_bad_time_s``, ``mujoco_warnings`` and ``runs`` are all still
+        # populated, because a caller diagnosing the NaN needs them either way.
+        out["placement_failed"] = True
+        out["stage"] = "placement"
+        out["reason"] = str(place.get("reason")) + (
+            "  IT ALSO DIVERGED: " + out["reason"] if diverged else "")
     return out
 
 

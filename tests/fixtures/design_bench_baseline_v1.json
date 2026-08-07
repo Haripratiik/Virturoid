@@ -2,6 +2,8 @@
   "note": "Design-Bench v1 baseline (offline heuristic cassette). Re-recorded 2026-07-22 from 0.65: the novel family (starfish/inchworm) dropped 1.0 -> 0.25 because the 2026-07 ANATOMICAL joint ranges replaced the ±3.14 catch-all — the old credible verdicts rode on hyperextension the honest ranges forbid. The gate is now HERMETIC (gait-hint recall disabled during the bench), so this number no longer floats with session DB state. Re-record via scripts/design_bench.py --record when the battery/composer changes.",
   "battery_version": "v1",
   "model": "offline_heuristic_v1",
+  "mode": "offline",
+  "provenance_note": "#208 (2026-08-07): MEASURED, not assumed. All 20 rows of the committed cassette were authored by the DETERMINISTIC builders -- 14 heuristic, 6 anatomy_generic -- so every number in this file is a measurement of the offline fallback path, NOT of the LLM-first product. 'mode' must equal DesignCassette().mode(); test_baseline_declares_the_generator_it_was_measured_on enforces it, so a live re-record cannot be compared against this floor without also re-declaring the mode.",
   "schema_valid@1": 1.0,
   "compile@1": 1.0,
   "verdict@1": 0.55,

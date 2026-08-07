@@ -610,15 +610,27 @@ def learn_gait_flywheel(gene, db, *, generations: int = 10, pop: int = 20, steps
                      "prior_search_transfer_forward": res.prior_transfer_forward,
                      "prior_deploy_forward": prior_deploy_forward,
                      "deploy_forward": learned["forward"]}
+            # NEITHER OF THESE IS A CONTROL ARM, and the ``_no_bank`` suffix has been read as one (2026-08-07:
+            # "the CONTROL arm, bank withheld ... the control BEATS the treatment"). It means no NEW skill was
+            # banked FROM this run. Both branches are the SAME code path with the SAME prior read from the bank,
+            # split on the OUTCOME -- so ``gait_warm_start`` is the winners' bucket (+0.3753 m on the live bank)
+            # and ``gait_warm_start_no_bank`` the losers' (+0.0020 m). Comparing them measures the split, not the
+            # bank; the honest pooled figure is +0.0786 m over 594 edges. They are also not comparable with
+            # ``gait_hint_deploy``, whose delta is (recall - default) on one body; this delta is (search result -
+            # its own starting point), which has no default in it at all.
+            _arm = {"is_control_arm": False,
+                    "delta_means": "deploy_forward - prior_deploy_forward (the SEARCH's gain over its own seed)",
+                    "bank_was_read": True}
             if skill_id is not None:
                 vm.record_provenance("skill", skill_id, parent_type="skill", parent_id=prior_skill_id,
-                                     kind="gait_warm_start", delta=compounding_delta, meta=_meta)
+                                     kind="gait_warm_start", delta=compounding_delta, meta={**_meta, **_arm})
             else:
                 vm.record_provenance("gene", getattr(gene, "id", "") or "gene",
                                      parent_type="skill", parent_id=prior_skill_id,
                                      kind="gait_warm_start_no_bank", delta=compounding_delta,
-                                     meta={**_meta, "banked": False,
-                                           "why": "warm start did not beat the shipped default"})
+                                     meta={**_meta, **_arm, "banked": False,
+                                           "why": "this run banked no new skill (it did not beat the shipped "
+                                                  "default); the bank was still READ for the prior"})
         except Exception:  # noqa: BLE001 - provenance is best-effort; never fail the learn
             pass
 

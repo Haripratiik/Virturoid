@@ -237,7 +237,12 @@ def run_bench(designs: list[dict], *, model: str = "cassette", verify: bool = Tr
     concept?, constraints?, gene}``. Rates are over ``n_attempts`` (the single absolute denominator, §8.1).
 
     Also reports conditional pass-rates (clearly labelled) for diagnosis, per-family and per-phrasing breakdowns,
-    the diversity guard, spec-faithfulness, and quality-per-physics-eval. ``model`` labels the row for the matrix.
+    the diversity guard, spec-faithfulness, and quality-per-physics-eval.
+
+    ``model`` labels the row for the matrix and is taken on trust HERE, because this function grades a bare
+    list of genes and has no provenance to check it against. The provenance gate lives one level up, in
+    :func:`bench_from_cassette`, which reads the label off the cassette's own rows (#208) — so prefer that
+    entry point for anything whose number will be published or gated.
     """
     rows = []
     for d in designs:
@@ -306,21 +311,64 @@ def run_bench(designs: list[dict], *, model: str = "cassette", verify: bool = Tr
     return funnel
 
 
-def bench_from_cassette(cassette=None, *, verify: bool = True, fragility: bool = False, model: str = "cassette"):
+class ProvenanceMismatch(ValueError):
+    """A run label claims a generator the scored rows do not support (#208). Raised instead of printed."""
+
+
+def label_for_mode(mode: str) -> str:
+    """The canonical run label for a measured cassette mode. The label is a FUNCTION OF THE DATA, never of a
+    CLI flag — ``scripts/design_bench.py`` used to derive it from ``--strict-llm`` on the *current* run, so
+    ``--strict-llm`` without ``--record`` printed ``live_llm_v1`` over a replay of the offline fixture."""
+    return {"live": "live_llm_v1", "offline": "offline_heuristic_v1",
+            "mixed": "mixed_provenance_v1", "empty": "empty_cassette"}.get(mode, f"unknown_{mode}")
+
+
+def check_label(label: str, mode: str) -> None:
+    """Reject a label whose claim outruns the evidence. ``live`` in the label requires every scored design to
+    have been authored by a model; a label without it must not sit on a fully-live cassette either — a live
+    measurement quietly filed as the offline baseline is the same defect facing the other way."""
+    claims_live = "live" in label.lower()
+    if claims_live and mode != "live":
+        raise ProvenanceMismatch(
+            f"label {label!r} claims a live model but the cassette measured mode={mode!r}. "
+            f"Only {label_for_mode(mode)!r} (or an explicit non-live label) is honest for these rows.")
+    if mode == "live" and not claims_live:
+        raise ProvenanceMismatch(
+            f"label {label!r} does not say it is live, but every scored design was authored by a model "
+            f"(mode={mode!r}). Use {label_for_mode(mode)!r} so the number cannot be read as the offline floor.")
+
+
+def bench_from_cassette(cassette=None, *, verify: bool = True, fragility: bool = False,
+                        model: str | None = None, only_recorded: bool = False):
     """Run Design-Bench over the committed cassette + battery — the deterministic CI entry point.
 
     HERMETIC by construction: gait-hint recall is disabled for the duration (VIRTUROID_DISABLE_GAIT_HINTS), so
     the gate measures the composer+compiler alone. Before this, verdict@1 floated with whatever gaits the
     session DB happened to contain (measured 0.50 empty vs 0.55 banked, 2026-07-22) and the regression gate
     flickered at its floor depending on test order. The product path keeps hints on; only the bench opts out.
+
+    PROVENANCE (#208): ``model`` now defaults to the label the cassette's own rows justify, and an explicit
+    label that contradicts them raises :class:`ProvenanceMismatch`. The funnel carries a ``provenance`` block
+    so a reader of the JSON can tell a replay of the deterministic builders from a live-model measurement
+    without having to know which flags the run was invoked with.
     """
     import os
     from virturoid.services import design_battery as B
     from virturoid.services.design_cassette import DesignCassette
     cas = cassette or DesignCassette()
+    prov = cas.provenance()
+    if model is None:
+        model = label_for_mode(prov["mode"])
+    else:
+        check_label(model, prov["mode"])
     designs = []
     for rec in B.battery():
         pid = B.prompt_id(rec)
+        # A SUBSET cassette (the small live arm, #208) holds only some prompts. Scoring the absent ones would
+        # book 15 phantom schema failures and make the live verdict@1 uncomparable with the full replay, so
+        # ``only_recorded`` narrows the denominator instead -- and the funnel says so, loudly, below.
+        if only_recorded and not cas.has(pid):
+            continue
         designs.append({"prompt_id": pid, "family": rec["family"], "phrasing": rec["phrasing"],
                         "concept": rec["concept"], "constraints": rec.get("constraints"),
                         "gene": cas.get_gene(pid)})
@@ -335,4 +383,43 @@ def bench_from_cassette(cassette=None, *, verify: bool = True, fragility: bool =
             os.environ["VIRTUROID_DISABLE_GAIT_HINTS"] = prev
     out["battery_version"] = B.BATTERY_VERSION
     out["cassette"] = cas.summary()
+    # The provenance of the NUMBER, not of the run: which generator authored the designs that were scored.
+    n_battery = len(B.battery())
+    out["provenance"] = dict(prov, scored_prompt_ids=sorted(d["prompt_id"] for d in designs),
+                             n_battery=n_battery, is_subset=len(designs) < n_battery,
+                             coverage=round(len(designs) / n_battery, 4) if n_battery else None)
+    out["mode"] = prov["mode"]
+    if out["provenance"]["is_subset"]:
+        out["subset_warning"] = (f"SUBSET: {len(designs)}/{n_battery} battery prompts scored. verdict@1 here is "
+                                 f"NOT comparable with a full-battery number -- use diff_funnels, which "
+                                 f"restricts to the prompts both runs scored.")
     return out
+
+
+# ---------------------------------------------------------------- cassette-vs-live diff (#208)
+def diff_funnels(baseline: dict, candidate: dict) -> dict:
+    """Compare two funnels case by case. Built for the cassette-vs-live question specifically: the aggregate
+    cannot answer it (20 prompts, 0.05 per case, see ``per_case``'s note), and the two runs may not even cover
+    the same prompt set when the live arm is a small sample. So the comparison is restricted to the prompts
+    BOTH scored, and the restricted rates are reported next to the full ones."""
+    a, b = baseline.get("per_case") or {}, candidate.get("per_case") or {}
+    shared = sorted(set(a) & set(b))
+    gained = sorted(k for k in shared if b[k] and not a[k])
+    lost = sorted(k for k in shared if a[k] and not b[k])
+
+    def _rate(m, keys):
+        return round(sum(1 for k in keys if m.get(k)) / len(keys), 4) if keys else None
+    return {
+        "baseline_mode": baseline.get("mode"), "candidate_mode": candidate.get("mode"),
+        "baseline_model": baseline.get("model"), "candidate_model": candidate.get("model"),
+        "n_shared": len(shared), "shared_prompt_ids": shared,
+        "only_in_baseline": sorted(set(a) - set(b)), "only_in_candidate": sorted(set(b) - set(a)),
+        # on the SHARED subset only -- the sole apples-to-apples comparison available
+        "verdict@1_baseline_shared": _rate(a, shared),
+        "verdict@1_candidate_shared": _rate(b, shared),
+        "delta_verdict@1_shared": (None if not shared else
+                                   round(_rate(b, shared) - _rate(a, shared), 4)),
+        "gained": gained, "lost": lost, "n_changed": len(gained) + len(lost),
+        # full-battery rates, kept ONLY as context; they are not comparable when the sets differ
+        "verdict@1_baseline_full": baseline.get("verdict@1"), "verdict@1_candidate_full": candidate.get("verdict@1"),
+    }
