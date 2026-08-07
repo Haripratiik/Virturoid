@@ -221,10 +221,22 @@ def run_intelligent_reward_loop(gene, task: str = "walk forward", *, llm=None, n
 
         if bank and v["credible"]:
             try:
-                from virturoid.services.gait_flywheel import bank_gait
+                from virturoid.services.gait_flywheel import bank_gait, margin_sentence, robustness_margin
                 from virturoid.services.memory_db import MemoryDB
                 _db = db or MemoryDB()
-                bank_gait(_db, gene, r["final"], reward_expr=r["reward_expr"] or "")   # bank gait + its reward (R6)
+                # THE ERROR BAR, MEASURED HERE, because this door can afford it and because "credible" alone has
+                # shipped both a controller and one lucky float under the same word. The loop above already spent
+                # n_rewards screening searches plus a final one — hundreds of rollouts — so the 4-12 rollout
+                # fragility ladder at the SAME horizon the verdict was taken at is a few percent on top.
+                # ``per_param=False``: the per-axis breakdown costs 3-5x and does not enter the bank decision.
+                rob = robustness_margin(gene, r["final"].best_params, steps=steps, per_param=False)
+                out["robustness_rel"] = rob["robustness_rel"]
+                out["robustness_note"] = margin_sentence(rob)
+                # A FRAGILE POINT IS STILL BANKED, stamped ``fragility_v1_fragile``: the row's value here is the
+                # reward EXPRESSION that certified it (R6 recall), which is a fact about the reward and not about
+                # this operating point's sturdiness. The stamp keeps it out of gated-only gait mining.
+                bank_gait(_db, gene, r["final"], reward_expr=r["reward_expr"] or "",   # bank gait + its reward (R6)
+                          robustness=rob, door="reward_loop")
                 out["banked"] = True
                 if db is None:
                     _db.close()

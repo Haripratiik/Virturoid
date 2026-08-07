@@ -43,19 +43,24 @@ class GaitHintsMiningTests(unittest.TestCase):
         cold = mine_gait_hints(db, robot_class="quadruped")
         self.assertEqual(cold["n"], 0)
         self.assertIn("not enough", cold["note"])
-        # bank a few CREDIBLE walks whose freq clusters ~2.0 (deliberately NOT the 1.5 default) -> the mined region
+        # bank CREDIBLE walks whose freq clusters ~2.0 (deliberately NOT the 1.5 default) -> the mined region
         # must follow the DATA to ~2.0, proving it isn't a hardcoded constant
-        for i, f in enumerate((1.9, 2.0, 2.1)):
+        freqs = (1.9, 2.0, 2.1, 1.95, 2.05, 1.92, 2.08, 2.0, 1.98, 2.02)
+        for i, f in enumerate(freqs):
             _bank(db, "quadruped", f"b{i}", {"freq": f, "hip_amp": 0.8, "knee_amp": 1.1, "duty": 0.3,
                                              "kp": 30.0, "kd": 1.4}, 0.9)
         h = mine_gait_hints(db, robot_class="quadruped")
-        self.assertEqual(h["n"], 3)
+        self.assertEqual(h["n"], len(freqs))
         self.assertAlmostEqual(h["prior"]["freq"], 2.0, delta=0.15)   # region tracked the data, not the 1.5 default
-        # ...but 3 walks with no recorded travel CANNOT establish a param region, so none is CLAIMED (#266).
+        # ...but walks with no recorded travel CANNOT establish a param region, so none is CLAIMED (#266).
         # The prior stays available as an explicitly un-tuned warm-start seed; a hint is a claim about evidence.
         self.assertFalse([x for x in h["hints"] if x.get("kind") == "param_region"], h["hints"])
-        # the relational hint is DISCOVERED (all 3 have knee_amp > hip_amp)
-        self.assertTrue(any(hint.get("kind") == "relation" for hint in h["hints"]))
+        # the relational hint is DISCOVERED (all of them have knee_amp > hip_amp), and its support is counted in
+        # DISTINCT BODIES — these rows carry no inline body, so each counts as one of its own (#274)
+        rel = [x for x in h["hints"] if x.get("kind") == "relation"]
+        self.assertTrue(rel, h["hints"])
+        self.assertEqual(rel[0]["support"], len(freqs))
+        self.assertEqual((h["n_bodies"], h["n_rows_without_body"]), (len(freqs), len(freqs)))
 
     def test_new_body_borrows_hints_from_its_VECTOR_nearest_robot(self):
         """THE moat the user asked for: a brand-new body, with NOTHING banked under its own class string, still
@@ -166,6 +171,177 @@ class MinedRegionsMustBeEarnedTests(unittest.TestCase):
         h = mine_gait_hints(db, robot_class="quadruped")
         self.assertNotIn("kd", self._regions(h),
                          f"tight is not the same as earned — nothing links kd to travel: {h['hints']}")
+
+
+class PseudoReplicationCannotCarryAGateTests(unittest.TestCase):
+    """#274 — the gates count DISTINCT BODIES, so a bank that re-fits one machine cannot manufacture evidence.
+
+    All three gates are counting arguments over observations assumed independent, and banked rows are not: the
+    bank is keyed by ``structural_gait_key`` (exact kinematics), so re-fitting ONE robot at a dozen slightly
+    different masses writes a dozen rows that any honest reading of "how many robots is this advice based on"
+    calls one. MEASURED on the live 101-row bank: 28 distinct bodies, largest supplying 24 rows; on the 55 that
+    also survive the fragility gate, 21 bodies with one supplying 18 — and there ``freq`` cleared the association
+    gate at rank-corr -0.39, p=0.0075, while one row per body inverted it to +0.12, the wrong sign entirely.
+
+    This pins the property DIRECTLY rather than hoping the real bank keeps it, and it pins it BOTH ways: the same
+    planted numbers must be refused when they come from one body and accepted when they come from many. A gate
+    that only ever says "no" would satisfy the negative half while being useless.
+    """
+    N = 40
+
+    def _db(self):
+        from virturoid.services.memory_db import MemoryDB
+        return MemoryDB(db_path=Path(tempfile.mkdtemp(prefix="hints_pseudo_")) / "m.db")
+
+    @classmethod
+    def _planted(cls, i: int) -> tuple[float, float]:
+        """A STRONG, genuine freq<->travel association: inside a tight band the robot walks far, outside it the
+        robot barely moves. Identical numbers are fed to both arms, so the ONLY thing that differs is how many
+        robots produced them."""
+        t = i / (cls.N - 1)
+        return (1.45 + 0.30 * t, 2.0 + 0.5 * t) if i % 2 == 0 else (0.8 + 2.4 * t, 0.4 + 0.2 * t)
+
+    @staticmethod
+    def _params(freq: float) -> dict:
+        return {"freq": freq, "hip_amp": 0.9, "knee_amp": 1.0, "kp": 32.0, "kd": 1.5}
+
+    def test_N_rows_from_ONE_body_cannot_pass_a_gate_while_the_same_numbers_from_N_bodies_can(self):
+        from virturoid.services.gait_flywheel import bank_gait
+        from virturoid.services.gait_hints import _MIN_REGION_SUPPORT, mine_gait_hints
+        from virturoid.services.heldout_set import body_key
+        from virturoid.services.morphology_composer import compose_robot
+        import copy
+        import types
+
+        # ---- ARM A: N banked rows, ONE robot. Mass is in ``structural_gait_key`` (so each variant banks its own
+        # row, exactly as a re-fit of the same machine does) and NOT in ``body_key`` (so they are one body).
+        db = self._db()
+        base = compose_robot("a small quadruped robot dog")
+        keys = set()
+        for i in range(self.N):
+            g = copy.deepcopy(base)
+            for s in g.segments:
+                s.mass_kg = round(float(s.mass_kg) * (1.0 + 0.013 * i), 6)
+            g.id = f"{base.id}_m{i}"
+            freq, fwd = self._planted(i)
+            keys.add(body_key(g))
+            self.assertIsNotNone(
+                bank_gait(db, g, types.SimpleNamespace(best_survived=True, best_credible=True,
+                                                       best_forward=fwd, best_height_ratio=0.8,
+                                                       best_params=self._params(freq))),
+                f"row {i} must actually bank, or the arm proves nothing")
+        self.assertEqual(len(keys), 1, "the N variants must be ONE body by the structural key, else no pseudo-"
+                                       "replication is being simulated")
+        one = mine_gait_hints(db, robot_class="quadruped", min_success=0.0)
+        self.assertEqual(one["n"], self.N, one["note"])            # N ROWS reached the miner...
+        self.assertEqual(one["n_bodies"], 1, one["note"])          # ...from ONE robot
+        self.assertEqual(one["n_rows_without_body"], 0)            # every row carried its body inline
+
+        # THE REGRESSION: not one gate may pass. No param_region, and no relational rule either — a proportion
+        # over a single observation is not a proportion.
+        self.assertEqual([x for x in one["hints"] if x.get("kind") in ("param_region", "relation")], [],
+                         f"a corpus of {self.N} rows from ONE body passed a gate: {one['hints']}")
+        self.assertEqual(one["bounds"], {}, one["bounds"])
+        freq_sup = [s for s in one["suppressed"] if s["param"] == "freq"]
+        self.assertTrue(freq_sup, one["suppressed"])
+        # and the operator is told the REAL sample size, not the row count that flattered it
+        self.assertEqual((freq_sup[0]["support"], freq_sup[0]["rows"]), (1, self.N), freq_sup[0])
+        self.assertIn("distinct bodies", freq_sup[0]["reason"])
+        self.assertIn("DISTINCT bodies", one["note"])
+        db.close()
+
+        # ---- ARM B (the control): the SAME planted numbers, one per distinct bank identity. The signal is real,
+        # so it must survive — otherwise the negative half above is satisfied by a gate that refuses everything.
+        db2 = self._db()
+        for i in range(self.N):
+            freq, fwd = self._planted(i)
+            _bank(db2, "quadruped", f"body{i}", self._params(freq), 0.9, forward=fwd)
+        many = mine_gait_hints(db2, robot_class="quadruped", min_success=0.0)
+        self.assertEqual((many["n"], many["n_bodies"]), (self.N, self.N), many["note"])
+        regions = {x["param"]: x for x in many["hints"] if x.get("kind") == "param_region"}
+        self.assertIn("freq", regions, f"the same association from {self.N} bodies must still be minable: {many}")
+        self.assertEqual((regions["freq"]["support"], regions["freq"]["rows"]), (self.N, self.N))
+        self.assertGreaterEqual(regions["freq"]["range"][0], 1.40, regions["freq"])
+        self.assertLessEqual(regions["freq"]["range"][1], 1.80, regions["freq"])
+        self.assertGreaterEqual(self.N, _MIN_REGION_SUPPORT)
+        db2.close()
+
+    def test_the_representative_of_a_body_is_its_MEDIAN_walk_deterministically(self):
+        """The dedup rule itself. ``best`` re-introduces the very bias being removed — a body searched 24 times
+        wins on max-of-n effort, measured at rank-corr +0.44 between a family's row count and its
+        representative's distance on the live bank (median: +0.10) — and ``random`` is not reproducible. So the
+        shipped rule is the median-PERFORMING ROW: a real (value, distance) pair that was actually run, never a
+        synthesised row of independent per-parameter medians."""
+        from virturoid.services.gait_hints import _DEDUP_RULE, representative_rows
+        self.assertEqual(_DEDUP_RULE, "median")
+        bodies = ["a", "a", "a", "b", "a", "b"]
+        fwd = [0.1, 9.0, 0.5, 2.0, 0.3, 7.0]
+        keep = representative_rows(bodies, fwd)
+        self.assertEqual(len(keep), 2)                             # one row per distinct body
+        # a: lower median of {0.1, 0.3, 0.5, 9.0} -> 0.3;  b: lower median of {2.0, 7.0} -> 2.0
+        self.assertEqual(sorted(fwd[i] for i in keep), [0.3, 2.0])
+        self.assertNotIn(9.0, [fwd[i] for i in keep], "the body's BEST row must not represent it")
+        # deterministic, and independent of the order the rows arrive in
+        self.assertEqual(keep, representative_rows(bodies, fwd))
+        rb, rf = list(reversed(bodies)), list(reversed(fwd))
+        self.assertEqual(sorted(rf[i] for i in representative_rows(rb, rf)), [0.3, 2.0])
+        # ties cannot make it wobble, and a single-row body represents itself
+        self.assertEqual(representative_rows(["x", "x", "x"], [1.0, 1.0, 1.0]), [1])
+        self.assertEqual(representative_rows(["x"], [4.0]), [0])
+        self.assertEqual(representative_rows([], []), [])
+
+    def test_a_region_that_depends_on_WHICH_walk_represents_a_body_is_refused(self):
+        """Collapsing to one row per body raises a question row-counting never had to answer, and on the live
+        bank the answer decides the result: of the 21 gate-surviving bodies, ``median`` passed knee_amp/kp/kd,
+        ``best`` passed nothing, and ``random`` passed ``freq`` under one seed of four. No parameter passed under
+        more than one selection — noise at n=21, not four findings. So the gate requires the verdict to hold
+        under EVERY selection in its panel.
+
+        Constructed directly: each body banks one walk that lands on a tight planted band and one that does not,
+        with the band member always the further-travelling of the two. ``best`` therefore sees a clean signal and
+        ``median``/``random`` see a coin flip — the verdict is selection-dependent, so no region may be claimed.
+        """
+        from virturoid.services.gait_hints import _region_evidence, representative_rows
+        n = 24
+        vals, fwd, bodies = [], [], []
+        for i in range(n):
+            t = i / (n - 1)
+            # an in-band walk, plus a far-flung one whose value and travel are scrambled INDEPENDENTLY of each
+            # other, so the second walk carries no band of its own — otherwise the arm plants a second signal
+            v2, f2 = ((i * 7) % n) / (n - 1), ((i * 11) % n) / (n - 1)
+            vals += [1.50 + 0.05 * t, 0.85 + 2.30 * v2]
+            fwd += [2.0 + 0.5 * t, 0.30 + 0.2 * f2]                # the in-band walk always travels further
+            bodies += [f"body{i}", f"body{i}"]
+        # the panel disagrees by construction: `best` takes the in-band walk from every body...
+        best = representative_rows(bodies, fwd, rule="best")
+        self.assertTrue(_region_evidence([vals[i] for i in best], [fwd[i] for i in best], 0.8, 3.2)["ok"])
+        # ...`median` (lower median of two) takes the OTHER one, which carries no band at all
+        med = representative_rows(bodies, fwd)
+        self.assertFalse(_region_evidence([vals[i] for i in med], [fwd[i] for i in med], 0.8, 3.2)["ok"])
+        # so the gate, asked with the bodies, must refuse and SAY it was the choice that decided it
+        ev = _region_evidence(vals, fwd, 0.8, 3.2, bodies=bodies)
+        self.assertFalse(ev["ok"], ev)
+        self.assertEqual((ev["support"], ev["rows"]), (n, 2 * n))
+        self.assertIn("flips with which of a body's banked walks", ev["why"])
+        self.assertNotEqual(ev["selections_ok"], "5/5", ev)
+        # and a corpus where every body has ONE walk has no such choice to make -> the panel cannot veto it
+        solo = _region_evidence(vals[::2], fwd[::2], 0.8, 3.2, bodies=[f"b{i}" for i in range(n)])
+        self.assertTrue(solo["ok"], solo)
+        self.assertIsNone(solo["selections_ok"], "a one-row-per-body corpus has nothing to choose between")
+
+    def test_the_gate_reports_the_same_reading_on_rows_that_it_refuses_on_bodies(self):
+        """The audit's side-by-side arm, pinned: ``bodies=None`` is the OLD row-counting behaviour and it is what
+        the live bank's ``freq`` cleared the association gate on. Same inputs, one argument apart."""
+        from virturoid.services.gait_hints import _region_evidence
+        vals = [self._planted(i)[0] for i in range(self.N)]
+        fwd = [self._planted(i)[1] for i in range(self.N)]
+        rows_arm = _region_evidence(vals, fwd, 0.8, 3.2)
+        body_arm = _region_evidence(vals, fwd, 0.8, 3.2, bodies=["one"] * self.N)
+        self.assertTrue(rows_arm["ok"] and rows_arm["support"] == self.N, rows_arm)
+        self.assertFalse(body_arm["ok"], body_arm)
+        self.assertEqual((body_arm["support"], body_arm["rows"]), (1, self.N))
+        self.assertFalse(rows_arm["deduped_by_body"])
+        self.assertTrue(body_arm["deduped_by_body"])
 
 
 @unittest.skipUnless(_MUJOCO, "adaptation runs a short gait search in MuJoCo")

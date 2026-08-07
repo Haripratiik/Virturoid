@@ -433,16 +433,68 @@ def _honest_fly(gene, *, target=(1.5, 0.0, 1.2), steps: int = 2000) -> dict:
                     "geometric flight controller, inertia-normalized attitude"}
 
 
+def _fit_margin_for(gene, params: dict) -> dict | None:
+    """The robustness margin ALREADY MEASURED for exactly ``params`` on this body, or ``None``.
+
+    THE ONLY FREE MARGIN ON THE VERIFY PATH. ``gait_flywheel.fit_gait_for_body`` runs before verify on a body the
+    shipped default cannot walk; when it adopts an operating point it measures that point's fragility margin and
+    stashes it on ``metadata['gait_fit']``. Verify then deploys exactly those parameters, so the margin already in
+    hand describes exactly the row about to be banked — no extra rollout buys it.
+
+    IDENTITY IS EXACT, not approximate. A banked row inherits a margin only if every fitted parameter is bit-equal
+    to the one being deployed: measured on the grounded authored cat, a 2.4e-5 relative change in ``freq`` flips
+    +0.958 m CREDIBLE WALK to +0.500 m FELL, so "close enough" would attach an error bar to a different
+    controller. A body that walks on the shipped default never searched and has no margin at all — that is the
+    common case, and it banks explicitly ungated rather than borrowing one.
+    """
+    from virturoid.services.gait_flywheel import _FIT_PARAMS
+    fit = (getattr(gene, "metadata", None) or {}).get("gait_fit") or {}
+    fitted = fit.get("params") if isinstance(fit.get("params"), dict) else None
+    if not (fit.get("adopted") and fitted and "robustness_rel" in fit):
+        return None
+    for k in _FIT_PARAMS:
+        if float(fitted.get(k, float("nan"))) != float(params.get(k, float("nan"))):
+            return None                                   # a different controller: its error bar is not this one's
+    return {"robustness_rel": fit.get("robustness_rel"), "probes": fit.get("robustness_probes") or {},
+            "steps": fit.get("horizon_steps"), "per_param_rel": fit.get("robustness_per_param")}
+
+
+#: Why the ordinary build path banks without an error bar, recorded ON the row (``bank_gate_reason``) so a later
+#: mining run can exclude it by fact rather than by inference. Measuring here is not a rounding error: the
+#: fragility ladder is 4-12 rollouts at the settling horizon (~10-60 s), on EVERY verify_robot call.
+_VERIFY_UNGATED_REASON = ("ordinary verify path: no fragility margin was measured for these parameters and none "
+                          "was inherited from a per-body fit; measuring one here would put 4-12 settling-horizon "
+                          "rollouts on every build")
+
+
 def _auto_bank_gait(gene, r, base_params) -> str | None:
     """FLYWHEEL SELF-UPDATE: bank the working gait a CREDIBLE walk just demonstrated, so the flywheel COMPOUNDS on
     ordinary build+verify — not only under explicit training or a manual GPU night run (the reason the bank sat
     empty: nothing on the ordinary path ever wrote to it). bank_gait is keep-best + keyed by morphology, so
-    re-verifying the same body updates ONE skill (a stronger later gait replaces a weaker one), never floods."""
+    re-verifying the same body updates ONE skill (a stronger later gait replaces a weaker one), never floods.
+
+    THE PROVENANCE IS PART OF THE WRITE. This is the widest door into the bank and it cannot afford to measure a
+    fragility margin (see ``_VERIFY_UNGATED_REASON``), so it passes the one the per-body fit already paid for when
+    there is one and declares itself ungated when there is not. What it must never do is bank silently: a row with
+    no stamp is indistinguishable from a row that predates the gate entirely.
+
+    AND WHEN THAT INHERITED MARGIN SAYS FRAGILE, NOTHING IS BANKED. Measured 2026-08-07 on the composed
+    ``a robot dog``: the fitter searched, adopted freq 2.6189 / kp 59.57, measured it 0/4 at every rung of the
+    ladder, and ``learn_gait_flywheel`` correctly refused it — the DB held zero rows. Verify then deployed the
+    same operating point, got CREDIBLE WALK at its 800-step horizon, and banked it. So the one op-point the
+    product had explicitly measured as one lucky float was the one the flywheel would serve as a warm start, and
+    ``fit_gait_for_body``'s own disclosure ("it is NOT banked for reuse", ``gait_flywheel.py:954``) and verify's
+    own ``robustness_note`` ("the gait is not banked for reuse") were both false about it. Declining here costs
+    zero rollouts, matches what every other gate-aware caller already does, and makes those two sentences true.
+    """
     from virturoid.services.gait_flywheel import _DEFAULT_GAIT, _DeployResult, bank_gait
     from virturoid.services.gait_quality import classify
     from virturoid.services.memory_db import DEFAULT_DB_PATH, MemoryDB
     DEFAULT_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     params = {**_DEFAULT_GAIT, **{k: float(v) for k, v in (base_params or {}).items()}}
+    rob = _fit_margin_for(gene, params)
+    if rob is not None and rob.get("robustness_rel") is None:
+        return None                       # measured, and it is one lucky float — the bank holds controllers
     # Self-validate credibility from the rollout itself (defense in depth): bank_gait rejects a non-credible slide,
     # so the flywheel self-update never banks a body that merely SLID forward even if a caller forgot to gate on it.
     holder = _DeployResult(params, {"forward": float(r.get("forward", 0.0)),
@@ -455,7 +507,8 @@ def _auto_bank_gait(gene, r, base_params) -> str | None:
         # metric learns from accrues from ordinary builds. Off by default (keeps quick verify fast); a batch/night
         # run or deliberate build sets VIRTUROID_GROW_TRANSFER_LEDGER=1 so the moat compounds without slowing iteration.
         import os
-        return bank_gait(db, gene, holder,
+        return bank_gait(db, gene, holder, door="verify_robot",
+                         robustness=rob, ungated_reason=(None if rob else _VERIFY_UNGATED_REASON),
                          cross_eval=os.environ.get("VIRTUROID_GROW_TRANSFER_LEDGER", "0") == "1")
 
 
@@ -689,6 +742,10 @@ def _honest_gait(gene, *, steps: int = 1200, render: bool = False, tag: str = "g
         if gait_source != "tuned_for_this_body":                 # never discard THIS body's own measured op-point
             gait_params = {}
     r = crawl_gait_rollout(gene, steps=steps, record_qpos=True, frame_every=frame_every, **gait_params)
+    # EXACTLY THE KWARGS THAT PRODUCED ``r``, tracked separately from the SELECTION variable above because the
+    # deploy-select below can swap the rollout without swapping the parameters. It is what the flywheel banks:
+    # a row whose ``gait_params`` did not produce its own ``forward_m`` is evidence about nothing.
+    deployed_params = dict(gait_params)
     # DEPLOY-SELECT safety net: a recalled gait must never make THIS body walk worse than the shipped default
     # (gene-construction paths differ, so a banked gait may not fit every body). When a gait was recalled, ALSO
     # run the default and keep whichever is CREDIBLE (tie-break: further) — so a mismatched banked SLIDE can never
@@ -707,6 +764,7 @@ def _honest_gait(gene, *, steps: int = 1200, render: bool = False, tag: str = "g
                                 improvement=abs(float(r_def.get("forward", 0))) - abs(float(r.get("forward", 0))),
                                 root_cause=f"recalled '{gait_source}' gait slid/underperformed the shipped default")
             r, gait_source = r_def, "default_crawl"
+            deployed_params = {}       # the SHIPPED DEFAULT produced this rollout — bank ITS params, not the loser's
     o = orientation_summary(r.get("qpos_frames") or [])
     out = {"kind": "legged", "verdict": classify(r), "survived": bool(r.get("survived")),
            "gait_source": gait_source,
@@ -748,8 +806,10 @@ def _honest_gait(gene, *, steps: int = 1200, render: bool = False, tag: str = "g
     # crawl-gait params would poison the gait corpus with params that never produced that rollout (v7-F1).
     if str(out["verdict"]).startswith("CREDIBLE") and out["survived"] and out.get("gait_source") != "learned_policy":
         try:
-            _base = gait_params or (getattr(gene, "metadata", None) or {}).get("gait_params") or {}
-            banked = _auto_bank_gait(gene, r, _base)
+            # ...with the parameters that produced THIS rollout. It used to be `gait_params or metadata`, which
+            # after a deploy-select swap banked the LOSING recalled parameters under the winning DEFAULT run's
+            # distance and credibility — a row whose controller never produced its own evidence.
+            banked = _auto_bank_gait(gene, r, deployed_params)
             if banked:
                 out["flywheel_banked"] = banked
         except Exception:  # noqa: BLE001 - self-update is an accelerant; never let it break a verdict

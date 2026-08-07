@@ -11,12 +11,22 @@ gated ones, and pooling them is how a coordinate the controller never read (``du
 operators as the bank's tightest-clustered parameter (#265/#266). ``bank_gate`` now stamps the distinction; this
 script reads it, and ``--remeasure`` re-derives it from physics for the rows that predate the stamp.
 
+WHO WROTE THESE ROWS. Until 2026-08-07 the test suite banked into this same database — ``verify_robot`` ->
+``_auto_bank_gait`` -> ``bank_gait`` is the ordinary product path and the DB path was a constant — so the
+corpus contains fixture bodies that every previous measurement counted as observations. Four rows carry the
+body class ``totally_made_up_xyz`` outright. ``scripts/bank_provenance.py`` attributes each row and stamps
+``base_config['row_source']``; the census below reports the split so the next reader gets provenance without
+redoing the attribution. ``unattributed`` is a real third answer, not a synonym for "real": it means no
+channel spoke to that row, and on the live bank it is the LARGEST bucket.
+
     (default)     STATIC census — rows, provenance, gate split, junk, duplicate operating points. Seconds.
     --remeasure   re-run every banked operating point at the settling horizon and re-run the joint robustness
                   ladder on the ones still walking. THIS IS THE HONEST NUMBER and it costs physics: ~1 rollout
                   per row plus up to 12 for the ladder (measured ~3 s/row on a quadruped bank, 5 min for 97).
-    --gates       run gait_hints' three evidence gates over the whole bank AND over the surviving subset — the
-                  falsifiable test of whether a cleaner corpus reveals structure the pooled one hides.
+    --gates       run gait_hints' three evidence gates over the whole bank AND over the surviving subset, each
+                  arm counted BOTH ways (rows as observations / one row per distinct body) — the falsifiable
+                  test of whether a cleaner corpus reveals structure the pooled one hides, and of how much of
+                  any apparent structure is one well-sampled body counted many times (#274).
 """
 from __future__ import annotations
 
@@ -58,22 +68,37 @@ def body_families(rows: list[dict]) -> collections.Counter:
 
     THE NUMBER THAT DECIDES WHETHER A GATE RESULT MEANS ANYTHING, and the one the bank's row count hides.
     MEASURED 2026-08-07 on the live bank: the 55 rows that survive the fragility gate cover 21 body families,
-    and ONE family supplies 18 of them. Run the evidence gates on those 55 rows and ``freq`` looks like it has a
-    real association with distance (rank-corr -0.39, p=0.008); take one row per family and the association
-    disappears (rank-corr +0.12, wrong sign). The gates treat each row as an independent observation, so a bank
-    that re-fits a handful of near-identical bodies can pass gate 2 on pseudo-replication alone.
+    and ONE family supplies 18 of them. Run the evidence gates on those 55 rows counting ROWS and ``freq`` clears
+    the association gate (rank-corr -0.39, p=0.0075); take one row per family and the association disappears
+    (rank-corr +0.12, wrong sign). That is why ``gait_hints`` now counts bodies — this Counter is the census that
+    made it visible, and it uses the SAME identity function the gate does, so the two cannot disagree.
     """
-    from virturoid.schemas.gene import RobotGene
-    from virturoid.services.heldout_set import body_key
-    out = collections.Counter()
-    for r in rows:
-        if r["gene"] is None:
-            continue
-        try:
-            out[body_key(RobotGene.from_dict(r["gene"]))] += 1
-        except Exception:  # noqa: BLE001 - an unreadable body just does not count toward coverage
-            continue
-    return out
+    return collections.Counter(_body_of(r) for r in rows)
+
+
+def row_sources(rows: list[dict]) -> collections.Counter:
+    """WHO WROTE EACH ROW — suite fixture, real run, or nobody can say. THREE buckets, and the third is real.
+
+    Reads the stamp ``scripts/bank_provenance.py`` writes into ``base_config['row_source']``. It is deliberately
+    a read of a recorded verdict rather than a re-derivation: the attribution needs the ``designs`` table, the
+    repo's own text and (for the only channel that is proof rather than inference) a controlled pytest run
+    banking into an empty database, none of which belong in a census that is supposed to take seconds.
+
+    ``unattributed`` is NOT a polite word for ``real``. An unstamped or unattributable row is one where the
+    fixture question was asked and came back "no evidence either way", and on the live bank that is the
+    majority: the generic bodies ``anatomy_creature_*`` / ``built_quadruped_18seg`` carry no trace of who
+    asked for them, because the compiler names them after itself and not after the request.
+    """
+    return collections.Counter(_source_of()(r["base_config"]) for r in rows)
+
+
+def _source_of():
+    """``bank_provenance.source_of``, imported however this script was invoked. One definition of the stamp key
+    lives in ``bank_provenance``; copying the literal here is how the writer and the reader drift apart."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from bank_provenance import source_of  # noqa: PLC0415 - sibling script, resolved at call time
+    return source_of
 
 
 def census(rows: list[dict]) -> dict:
@@ -81,7 +106,10 @@ def census(rows: list[dict]) -> dict:
     gates = collections.Counter(gate_of(r["base_config"]) for r in rows)
     uniq = {tuple(sorted((k, round(float(v), 6)) for k, v in r["params"].items())) for r in rows}
     fam = body_families(rows)
+    src = row_sources(rows)
     return {"rows": len(rows),
+            "by_row_source": dict(src),
+            "suite_authored_fraction": round(src.get("suite", 0) / max(1, len(rows)), 3),
             "distinct_body_families": len(fam),
             "rows_in_largest_family": (fam.most_common(1)[0][1] if fam else 0),
             "by_class": dict(collections.Counter(r["robot_class"] for r in rows)),
@@ -129,8 +157,19 @@ def remeasure(rows: list[dict], *, verbose: bool = True) -> list[dict]:
     return out
 
 
+def _body_of(row: dict) -> str:
+    """The row's DISTINCT-BODY identity, exactly as ``gait_hints`` computes it (one implementation, no drift)."""
+    from virturoid.services.gait_hints import _body_of
+    return _body_of(row["gene"], row["skill_id"])
+
+
 def gates(rows: list[dict], measured: list[dict] | None) -> dict:
-    """gait_hints' three evidence gates, per parameter, over the whole bank and over the surviving subset.
+    """gait_hints' three evidence gates, per parameter, over the whole bank and over the surviving subset —
+    each arm run BOTH ways: counting rows as independent observations (the pre-#274 behaviour, kept only as the
+    comparison) and counting DISTINCT BODIES (what the shipped gate now does).
+
+    The dedup itself is not reimplemented here: ``_region_evidence(bodies=...)`` collapses to one row per body
+    through ``gait_hints.representative_rows``, so this script and the product can never drift apart on the rule.
 
     The outcome is the RE-MEASURED distance when ``--remeasure`` ran, otherwise the distance recorded at bank
     time. Prefer the re-measured one: a banked ``forward_m`` from a 1500-step horizon is a claim about a horizon
@@ -139,41 +178,28 @@ def gates(rows: list[dict], measured: list[dict] | None) -> dict:
     from virturoid.services.gait_hints import _PARAM_KEYS, _region_evidence, _search_range
     by_id = {m["skill_id"]: m for m in (measured or [])}
     arms = {"whole bank": [(r["params"], (by_id.get(r["skill_id"], {}).get("settle_forward_m")
-                                          if measured else r["base_config"].get("forward_m")))
-                           for r in rows]}
+                                          if measured else r["base_config"].get("forward_m")),
+                            _body_of(r)) for r in rows]}
     if measured:
         ok = {m["skill_id"] for m in measured if m.get("survives_gate")}
-        arms["survives the fragility gate"] = [(m["params"], m.get("settle_forward_m"))
+        body = {r["skill_id"]: _body_of(r) for r in rows}
+        arms["survives the fragility gate"] = [(m["params"], m.get("settle_forward_m"),
+                                                body.get(m["skill_id"], "row:" + m["skill_id"]))
                                                for m in measured if m["skill_id"] in ok]
-        # ONE ROW PER DISTINCT BODY — the same gates with pseudo-replication removed. See ``body_families``:
-        # on the live bank this arm is where the surviving arm's apparent ``freq`` association evaporates.
-        by_id = {m["skill_id"]: m for m in measured}
-        fam: dict = {}
-        from virturoid.schemas.gene import RobotGene
-        from virturoid.services.heldout_set import body_key
-        for r in rows:
-            m = by_id.get(r["skill_id"])
-            if r["gene"] is None or m is None or r["skill_id"] not in ok:
-                continue
-            try:
-                k = body_key(RobotGene.from_dict(r["gene"]))
-            except Exception:  # noqa: BLE001
-                continue
-            if k not in fam or abs(m["settle_forward_m"]) > abs(fam[k]["settle_forward_m"]):
-                fam[k] = m                                    # the family's furthest-travelling walk represents it
-        arms["survives the gate, ONE ROW PER DISTINCT BODY"] = [(m["params"], m["settle_forward_m"])
-                                                                for m in fam.values()]
     out = {}
-    for arm, pairs in arms.items():
-        res = {}
-        for key in _PARAM_KEYS:
-            vals = [(float(p[key]), abs(float(f))) for p, f in pairs
-                    if isinstance(p.get(key), (int, float)) and isinstance(f, (int, float))]
-            lo, hi = _search_range(key)
-            ev = _region_evidence([v for v, _ in vals], [f for _, f in vals], lo, hi)
-            res[key] = {k: ev[k] for k in ("ok", "support", "spread_vs_prior", "rho_center_distance",
-                                           "p_association", "p_vs_winner_null", "why")}
-        out[arm] = res
+    for arm, triples in arms.items():
+        for dedup in (False, True):
+            res = {}
+            for key in _PARAM_KEYS:
+                vals = [(float(p[key]), abs(float(f)), b) for p, f, b in triples
+                        if isinstance(p.get(key), (int, float)) and isinstance(f, (int, float))]
+                lo, hi = _search_range(key)
+                ev = _region_evidence([v for v, _, _ in vals], [f for _, f, _ in vals], lo, hi,
+                                      bodies=([b for _, _, b in vals] if dedup else None))
+                res[key] = {k: ev[k] for k in ("ok", "support", "rows", "spread_vs_prior",
+                                               "rho_center_distance", "p_association", "p_vs_winner_null",
+                                               "why")}
+            out[arm + (", ONE ROW PER DISTINCT BODY" if dedup else ", rows as observations")] = res
     return out
 
 
@@ -182,11 +208,19 @@ def main() -> None:
     ap.add_argument("--memory", default="build/memory")
     ap.add_argument("--remeasure", action="store_true", help="re-run every operating point (costs physics)")
     ap.add_argument("--gates", action="store_true", help="run the three evidence gates per parameter")
+    ap.add_argument("--exclude-suite", action="store_true",
+                    help="drop rows stamped row_source=suite before measuring anything — the honest re-run of "
+                         "any number that was computed while the test suite was writing into this bank")
     ap.add_argument("--json", default=None, help="write the full report here")
     args = ap.parse_args()
 
     rows = _rows(Path(args.memory) / "virturoid_memory.db")
-    report = {"memory": args.memory, "census": census(rows)}
+    if args.exclude_suite:
+        src = _source_of()
+        keep = [r for r in rows if src(r["base_config"]) != "suite"]
+        print(f"excluding {len(rows) - len(keep)} suite-authored rows; {len(keep)} remain\n")
+        rows = keep
+    report = {"memory": args.memory, "excluded_suite_rows": bool(args.exclude_suite), "census": census(rows)}
     print(json.dumps(report["census"], indent=2))
     measured = None
     if args.remeasure:
@@ -204,9 +238,9 @@ def main() -> None:
         for arm, res in report["gates"].items():
             print(f"\n=== evidence gates — {arm} ===")
             for key, ev in res.items():
-                print(f"  {key:9s} {'PASS' if ev['ok'] else 'fail'}  n={ev['support']} "
-                      f"spread/prior={ev['spread_vs_prior']} p_assoc={ev['p_association']} "
-                      f"p_winner_null={ev['p_vs_winner_null']}")
+                print(f"  {key:9s} {'PASS' if ev['ok'] else 'fail'}  n={ev['support']}/{ev['rows']} rows "
+                      f"spread/prior={ev['spread_vs_prior']} rho={ev['rho_center_distance']} "
+                      f"p_assoc={ev['p_association']} p_winner_null={ev['p_vs_winner_null']}")
                 if not ev["ok"]:
                     print(f"            {ev['why']}")
     if args.json:

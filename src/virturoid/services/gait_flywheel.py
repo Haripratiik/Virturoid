@@ -37,6 +37,24 @@ _FWD_NORM = 1.5   # metres that maps to success_rate 1.0 (a strong learned quad 
 #: A row with no stamp is PRE-GATE by construction; ``gate_of`` says so in one word, and ``mine_gait_hints``
 #: reports the split on every call so a thin gated corpus can never hide inside a fat ungated one.
 BANK_GATE = "fragility_v1"
+
+#: MEASURED AND FAILED. The fragility question WAS asked of this operating point and the answer was "no perturbed
+#: copy of it walks". That is strictly more information than never asking, and it is not the same information, so
+#: it gets its own word: pooling it with ``BANK_GATE`` would put a known-fragile point into the mined evidence,
+#: and pooling it with ``ungated`` would throw away a measurement we paid rollouts for. Only a caller that has a
+#: reason to keep a fragile precedent (``r2prime.seed_corpus`` measures the corpus mechanism; ``reward_loop``
+#: carries the reward expression that certified it) ever writes one.
+BANK_GATE_FRAGILE = "fragility_v1_fragile"
+
+#: NOT MEASURED, AND THE CALLER SAYS SO. Distinct from a missing stamp, which means the row predates the gate
+#: entirely. This one means: code that knows about the gate ran, had no margin in hand, and declined to buy one —
+#: with the reason recorded in ``base_config['bank_gate_reason']``. The ordinary verify path is the only door that
+#: writes it, because measuring there would put 4-12 settling-horizon rollouts on every single build.
+BANK_UNGATED = "ungated_declared"
+
+#: How much is KNOWN about a row's operating point, most-known first. Used only to refuse a DOWNGRADE: see the
+#: keep-best note in ``bank_gait``. A missing stamp ranks lowest because it carries no measurement at all.
+_GATE_RANK = {BANK_GATE: 3, BANK_GATE_FRAGILE: 2, BANK_UNGATED: 1, "ungated": 0}
 # A gait prior changes a controller's phase/amplitude targets.  Weak embedding
 # matches are not evidence that those targets fit the new kinematic tree.
 _MIN_GAIT_TRANSFER_SIMILARITY = 0.55
@@ -109,14 +127,69 @@ def _deploy_sim_config(gene) -> dict:
 
 
 def gate_of(base_config: dict | None) -> str:
-    """``'fragility_v1'`` if this banked row's operating point was measured for fragility before admission,
-    ``'ungated'`` otherwise. An absent stamp is ungated, never "assumed fine": a missing error bar defaulting to
-    "fine" is the failure mode the whole robustness measurement exists to remove."""
+    """WHAT IS KNOWN about this banked row's operating point, in one word.
+
+    ``'fragility_v1'``          measured, and every perturbed copy still walked.
+    ``'fragility_v1_fragile'``  measured, and it failed — a known-fragile point, kept deliberately.
+    ``'ungated_declared'``      not measured; the caller had no margin and said so (reason on the row).
+    ``'ungated'``               no stamp at all — the row predates the gate.
+
+    An absent stamp is ungated, never "assumed fine": a missing error bar defaulting to "fine" is the failure
+    mode the whole robustness measurement exists to remove. Consumers that pool must do so explicitly —
+    ``mine_gait_hints(gated_only=True)`` keeps ONLY ``'fragility_v1'``, which is the point of the other words.
+    """
     return str((base_config or {}).get("bank_gate") or "ungated")
 
 
+#: Keys that describe WHERE A ROW CAME FROM rather than what it measured. They are established by a separate
+#: audit pass (``scripts/bank_provenance.py``), not by the write that banks the gait, so a bank must carry them
+#: forward instead of overwriting them.
+_PROVENANCE_KEYS = ("row_source", "row_source_stamp", "row_source_evidence", "row_source_stamped_at")
+
+
+def _banked_base_config(db, skill_id: str) -> dict | None:
+    """The ``base_config`` already on ``skill_id``, or ``None`` when nothing is banked under it yet."""
+    try:
+        row = db.conn.execute("SELECT base_config FROM skills WHERE skill_id=?", (skill_id,)).fetchone()
+    except Exception:  # noqa: BLE001 - a store without a queryable handle just has no prior row to protect
+        return None
+    if not row or not row["base_config"]:
+        return None
+    try:
+        bc = json.loads(row["base_config"]) if isinstance(row["base_config"], str) else row["base_config"]
+    except json.JSONDecodeError:
+        return None
+    return bc if isinstance(bc, dict) else None
+
+
+def _banked_gate(db, skill_id: str) -> str | None:
+    """The gate stamp already on ``skill_id``, or ``None`` when nothing is banked under it yet."""
+    return gate_of(_banked_base_config(db, skill_id))
+
+
+def _carry_provenance(prior_bc: dict | None, fresh: dict) -> dict:
+    """Carry a prior row's PROVENANCE stamp onto a fresh write.
+
+    ``MemoryDB.record_skill`` REPLACES ``base_config``, so without this a perfectly legitimate re-bank silently
+    erases the quarantine stamp -- and an absent ``row_source`` reads as ``unattributed``, which is exactly the
+    bucket a suite-authored row would launder itself into. OBSERVED live 2026-08-07: a row stamped by the audit
+    pass was re-banked minutes later and came back unstamped.
+
+    The gate guard above protects the row from a write that knows LESS about robustness. It cannot protect this,
+    because a re-bank that knows strictly MORE is allowed through and still carries no provenance -- provenance
+    is not something a banking call can know. So it is copied rather than defended.
+    """
+    if not prior_bc:
+        return fresh
+    for key in _PROVENANCE_KEYS:
+        if fresh.get(key) is None and prior_bc.get(key) is not None:
+            fresh[key] = prior_bc[key]
+    return fresh
+
+
 def bank_gait(db, gene, result, *, task: str = LOCOMOTION, cross_eval: bool = False,
-              reward_expr: str = "", robustness: dict | None = None) -> str | None:
+              reward_expr: str = "", robustness: dict | None = None, ungated_reason: str | None = None,
+              door: str | None = None) -> str | None:
     """Bank a learned gait's PARAMS as a retrievable skill (keyed by class+task+species). Returns the skill_id.
 
     Only banks a DEPLOYABLE result (survived + real forward) — never a fall (honesty: the bank must stay a bank of
@@ -130,13 +203,22 @@ def bank_gait(db, gene, result, *, task: str = LOCOMOTION, cross_eval: bool = Fa
     so a future morphology-nearby body can seed its reward search with a reward already proven on a body like it.
 
     ``robustness``: the ``robustness_margin`` reading the admitting caller measured for these exact params. IT IS
-    THE ROW'S PROVENANCE, not decoration — passing one stamps ``bank_gate=BANK_GATE`` and the margin itself, and
-    omitting one leaves the row marked ``ungated``. This function deliberately does NOT measure the margin
-    itself: at the settling horizon that is 4-12 extra rollouts, and ``bank_gait`` is called from the ordinary
-    verify path (``ai_native_tools._auto_bank_gait``) where that cost lands on every build. So the gate is
-    ENFORCED by the caller and RECORDED here — which means the bank currently holds both kinds, and any consumer
-    that pools them is mixing measured rows with unmeasured ones. ``gate_of`` and ``mine_gait_hints(gated_only=)``
-    exist so that pooling has to be an explicit choice.
+    THE ROW'S PROVENANCE, not decoration — a margin that PASSED stamps ``BANK_GATE``, one that FAILED stamps
+    ``BANK_GATE_FRAGILE``, and a caller with no margin at all must say so via ``ungated_reason`` (``BANK_UNGATED``).
+    This function deliberately does NOT measure the margin itself: at the settling horizon that is 4-12 extra
+    rollouts, and ``bank_gait`` is called from the ordinary verify path (``ai_native_tools._auto_bank_gait``)
+    where that cost would land on every build. So the gate is ENFORCED by the caller and RECORDED here.
+
+    ``door`` names the call site, stamped as ``bank_door``. The census "what fraction of rows carry a real
+    measured margin" is only answerable per-door if the row remembers which door it came through; with four
+    doors and different budgets behind each, the pooled fraction alone tells you nothing about where to look.
+
+    A WRITE MAY NEVER DOWNGRADE WHAT IS KNOWN. ``record_skill`` is keep-best on ``success_rate`` with ``>=``, so
+    an unmeasured re-bank of a body whose row was already gated used to overwrite the stamp and the margin with
+    nulls — and since an absent stamp reads as "predates the gate", the erasure was indistinguishable from
+    history. Two rows both travelling >= _FWD_NORM both score 1.0, so ``>=`` makes that collision ordinary rather
+    than exotic. A write whose gate knows strictly LESS than the banked row's is therefore declined (the skill_id
+    is still returned: the bank does hold this body's gait, it just did not take this weaker provenance).
     """
     if not getattr(result, "best_survived", False) or abs(getattr(result, "best_forward", 0.0)) < 0.15:
         return None
@@ -148,18 +230,33 @@ def bank_gait(db, gene, result, *, task: str = LOCOMOTION, cross_eval: bool = Fa
     structure_key = structural_gait_key(gene)
     skill_id = f"gait::{cls}::{structure_key}"[:96]
     success = min(1.0, abs(result.best_forward) / _FWD_NORM)
+    # WHICH GATE THIS ROW GOT IN UNDER. Three distinguishable answers, because "measured and fragile" and "never
+    # measured" are different facts and only one of them cost rollouts to learn.
+    if robustness:
+        gate = BANK_GATE if (robustness or {}).get("robustness_rel") is not None else BANK_GATE_FRAGILE
+    else:
+        gate = BANK_UNGATED if ungated_reason else None
+    prior_bc = _banked_base_config(db, skill_id)
+    prior = gate_of(prior_bc)
+    if prior is not None and _GATE_RANK.get(gate or "ungated", 0) < _GATE_RANK.get(prior, 0):
+        _LOG.debug("bank_gait: kept the %s row for %s; this write only knows %s", prior, skill_id, gate)
+        return skill_id                       # never trade a measured row for an unmeasured one
     db.record_skill(
         skill_id, cls, task, success_rate=success, species=species, gene_id=gene_id,
-        base_config={"gait_params": result.best_params, "forward_m": round(result.best_forward, 4),
+        base_config=_carry_provenance(prior_bc, {"gait_params": result.best_params,
+                     "forward_m": round(result.best_forward, 4),
                      "height_ratio": round(result.best_height_ratio, 3), "controller": "crawl_gait",
                      "reward_expr": reward_expr or None, "structure_key": structure_key,
                      "sim_config": _deploy_sim_config(gene),
-                     # WHICH GATE THIS ROW GOT IN UNDER, and the error bar that let it. A reader (or a miner)
-                     # can then tell a measured row from an unmeasured one without guessing from a timestamp.
-                     "bank_gate": (BANK_GATE if robustness else None),
+                     # ...and the error bar that let it in, plus WHICH DOOR it came through. A reader (or a
+                     # miner) can then tell a measured row from an unmeasured one without guessing from a
+                     # timestamp, and can tell which call site is producing the unmeasured ones.
+                     "bank_gate": gate,
+                     "bank_gate_reason": (ungated_reason if gate == BANK_UNGATED else None),
+                     "bank_door": door,
                      "robustness_rel": (robustness or {}).get("robustness_rel"),
                      "robustness_probes": (robustness or {}).get("probes") or None,
-                     "robustness_steps": (robustness or {}).get("steps")},
+                     "robustness_steps": (robustness or {}).get("steps")}),
         notes="learned deployable gait (gait_search); base_config.gait_params IS the deploy controller")
     # Index the skill into the vector memory by THIS BODY'S morphology embedding (the robotics tokenization), so a
     # future body recalls it by structural similarity — cross-body, not just an exact class-string match.
@@ -181,6 +278,35 @@ def bank_gait(db, gene, result, *, task: str = LOCOMOTION, cross_eval: bool = Fa
         from virturoid.services.transfer_ledger import cross_evaluate_on_bank
         cross_evaluate_on_bank(db, gene, result.best_params, skill_id=skill_id)
     return skill_id
+
+
+def gate_census(db, *, task: str = LOCOMOTION) -> dict:
+    """The bank's provenance split — rows per gate, rows per door, and the gated fraction of each door.
+
+    THE QUESTION THIS ANSWERS is "what fraction of what we hold has a real measured error bar, and which call
+    site is producing the rest". A single pooled fraction cannot answer the second half, and the second half is
+    the actionable one: three of the four doors used to pass no margin, and until the row remembered its door
+    there was no way to see that from the bank itself. ``door=None`` counts rows banked before doors were named.
+    """
+    import collections
+    rows = db.conn.execute("SELECT base_config FROM skills WHERE task_type=?", (task,)).fetchall()
+    gates: collections.Counter = collections.Counter()
+    per_door: dict[str, collections.Counter] = {}
+    for r in rows:
+        try:
+            bc = json.loads(r["base_config"]) if isinstance(r["base_config"], str) else (r["base_config"] or {})
+        except json.JSONDecodeError:
+            bc = {}
+        bc = bc if isinstance(bc, dict) else {}
+        g = gate_of(bc)
+        gates[g] += 1
+        per_door.setdefault(str(bc.get("bank_door") or "unnamed"), collections.Counter())[g] += 1
+    n = sum(gates.values())
+    return {"rows": n, "by_gate": dict(gates),
+            "gated_fraction": round(gates.get(BANK_GATE, 0) / n, 3) if n else 0.0,
+            "by_door": {d: {"rows": sum(c.values()), "by_gate": dict(c),
+                            "gated_fraction": round(c.get(BANK_GATE, 0) / sum(c.values()), 3)}
+                        for d, c in sorted(per_door.items())}}
 
 
 def _gait_params_for_skill(db, skill_id: str) -> dict | None:
@@ -454,7 +580,7 @@ def learn_gait_flywheel(gene, db, *, generations: int = 10, pop: int = 20, steps
         # ...and the margin RIDES WITH IT. A gate that leaves no trace on the row it admitted cannot be audited
         # afterwards, which is how a bank came to hold 97 rows nobody could sort into measured and unmeasured.
         skill_id = bank_gait(db, gene, _DeployResult(res.best_params, learned),   # bank the DEPLOY metrics
-                             robustness=rob)
+                             robustness=rob, door="learn_gait_flywheel")
 
     compounding_delta = None
     prior_deploy_forward = None

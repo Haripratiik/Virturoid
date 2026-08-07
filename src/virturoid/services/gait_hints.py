@@ -11,7 +11,9 @@ is freshly fitted.
 
 A hint is shown to an operator as EVIDENCE, so it must be able to be WRONG: every ``param_region`` has to clear
 the three gates documented at ``_region_evidence`` before it is claimed, and one that does not is returned under
-``suppressed`` with the measurement that sank it. Zero honest hints beat six invented ones (#266).
+``suppressed`` with the measurement that sank it. Zero honest hints beat six invented ones (#266). Every gate
+counts DISTINCT BODIES, never banked rows — see ``_DEDUP_RULE`` for why, and for the measurement showing that a
+single well-sampled body (18 of the 55 gate-surviving rows) could carry a gate by itself (#274).
 
   * mine_gait_hints  — scan the banked CREDIBLE walks + the lesson store, derive transferable hints + a search
                        prior. Sharpens automatically as more walks are banked (thin at first, honest about it).
@@ -56,10 +58,85 @@ _PARAM_KEYS = ("freq", "hip_amp", "knee_amp", "kp", "kd")
 #      the elite-set variance selection alone produces, and the cleanest estimate of it needs no guessed
 #      hyper-parameters: resample random same-size groups from the banked winners themselves. Both arms then
 #      carry the identical selection shrinkage and it cancels.
-_MIN_REGION_SUPPORT = 8      # observations carrying BOTH a value and a banked distance; 3 walks is not a region
+_MIN_REGION_SUPPORT = 8      # DISTINCT BODIES carrying both a value and a banked distance; see ``_DEDUP_RULE``
 _MAX_SPREAD_VS_PRIOR = 0.5   # gate 1: at least twice as tight as a uniform draw over the search range
 _ALPHA = 0.05                # gates 2 and 3
 _PERMUTATIONS = 400          # p resolution 1/401; gates short-circuit, so this stays off the deploy hot path
+
+# ── THE UNIT OF EVIDENCE IS A BODY, NOT A ROW (#274) ─────────────────────────────────────────────────────────
+# All three gates above are counting arguments: a spread ratio, a rank correlation and two permutation nulls,
+# every one of which treats its inputs as INDEPENDENT observations. Banked rows are not. The bank is keyed by
+# ``structural_gait_key`` (exact kinematics), so re-fitting one body at a dozen slightly different sizes writes a
+# dozen rows that the coarse structural key ``heldout_set.body_key`` — and any honest reading of "how many robots
+# is this advice based on" — calls ONE body. MEASURED on the live 101-row bank: 28 distinct bodies, and the
+# largest supplies 24 rows. On the 55 rows that also survive the fragility gate: 21 bodies, one supplying 18 —
+# and there ``freq`` PASSES the association gate at rank-corr -0.39, p=0.0075, while one row per body inverts it
+# to +0.12, the wrong sign entirely. A single well-sampled body can carry a gate by itself. That is a FALSE-HINT
+# generator, latent only because today's pooled bank happens to pass nothing; it arms itself as the corpus grows.
+#
+# So every gate collapses its input to ONE ROW PER DISTINCT BODY first. WHICH row, measured on the live bank:
+#
+#   rule    rank-corr(rows in that body, representative's distance)      deterministic?
+#   best     +0.442   <- a body searched 24 times wins on EFFORT, not merit: max-of-n is a selection bias, and
+#                        re-introducing it at body granularity is the same defect one level up
+#   random   +0.216   <- unbiased in expectation but SEED-DEPENDENT (freq's rank-corr moved between None and
+#                        +0.16 across 8 seeds); a product surface may not roll dice for its evidence
+#   median   +0.103   <- the median of n draws estimates a body's central operating point regardless of n
+#
+# ``median`` therefore wins on both counts, and it is the MEDIAN-PERFORMING ROW, not a per-parameter median: a
+# synthesised row of independent per-parameter medians is an operating point that was never actually run, and the
+# association gate needs a real (value, distance) pair. Ties break on value then index, so it is byte-stable.
+# The cost is honest and worth naming: collapsing discards the extra rows' information, and a body's median walk
+# is weaker than its best (median travelled distance over the live bank drops 1.148 -> 0.968 m). A hint claims
+# "robots LIKE THIS put the parameter here", so it must be supported by robots, and n is how many robots there
+# were — not how many times we searched one of them.
+_DEDUP_RULE = "median"
+
+# ── AND THE VERDICT MAY NOT DEPEND ON WHICH WALK REPRESENTS A BODY ───────────────────────────────────────────
+# Collapsing to one row per body raises a question row-counting never had to answer, and MEASURED 2026-08-07 on
+# the live bank the answer decides the result. On the 55 gate-surviving rows -> 21 bodies:
+#
+#   median  -> knee_amp, kp, kd PASS       best -> nothing passes       random(seed 1) -> freq PASSES
+#   random(seed 0, 2, 3) -> nothing passes
+#
+# Five parameters, six selections, and NO parameter passes under more than one of them. That is not four
+# findings, it is noise at n=21 — and every one of them dissolves under a third check too: collapse rows that
+# share an OPERATING POINT instead and knee_amp's band goes 0.098 -> 0.438 of the prior with the correlation
+# flipping sign (+0.10), because 5 of the 21 "distinct bodies" sit on the byte-identical shipped default
+# (1.5/0.9/1.0/32/1.5) and 4 more on one warm-start clone point (~1.31/1.01/0.975/57/3.26). Body dedup is
+# NECESSARY and it is not SUFFICIENT: it removes replication of the BODY and leaves replication of the
+# OPERATING POINT, which the same handful of rows then carries into every parameter at once.
+#
+# So a claim has to survive the choice. The gate runs over a fixed, deterministic PANEL of representative
+# selections and passes only if EVERY one of them passes. A body with a single banked row is unaffected (all
+# selections are the same row); a body with many is exactly where the question bites. ``best`` stays in the
+# panel despite its max-of-n bias precisely because a real region must survive a biased selection too — that
+# cuts toward refusing, which is the direction a false-hint suppressor should err in.
+_SELECTION_PANEL = (("median", 0), ("best", 0), ("random", 1), ("random", 2), ("random", 3))
+
+
+def representative_rows(bodies: list[str], fwd: list[float], *, rule: str = _DEDUP_RULE,
+                        seed: int = 0) -> list[int]:
+    """Indices of the ONE row that represents each distinct body — the single implementation of the dedup rule.
+
+    ``bodies``/``fwd`` are aligned per-row. Returns ascending indices, one per distinct entry in ``bodies``,
+    deterministic for ``rule`` in {"median", "best"} (``"random"`` is offered only so the choice stays
+    falsifiable in an audit; it is never the shipped rule). See ``_DEDUP_RULE`` for why median.
+    """
+    groups: dict[str, list[int]] = {}
+    for i, b in enumerate(bodies):
+        groups.setdefault(b, []).append(i)
+    rng = random.Random(seed)
+    out = []
+    for b in sorted(groups):
+        g = sorted(groups[b], key=lambda i: (fwd[i], i))       # value-then-index -> stable under equal distances
+        if rule == "best":
+            out.append(g[-1])
+        elif rule == "random":
+            out.append(rng.choice(g))
+        else:
+            out.append(g[(len(g) - 1) // 2])                   # lower median: the body's central walk
+    return sorted(out)
 
 
 def _search_range(key: str) -> tuple[float, float]:
@@ -90,11 +167,18 @@ def _corr(a: list[float], b: list[float]) -> float:
     return num / (da * db) if da > 0 and db > 0 else 0.0
 
 
-def _region_evidence(vals: list[float], fwd: list[float], lo: float, hi: float, *, seed: int = 0) -> dict:
+def _region_evidence(vals: list[float], fwd: list[float], lo: float, hi: float, *, seed: int = 0,
+                     bodies: list[str] | None = None) -> dict:
     """Run the three gates for ONE parameter. Returns the readings + ``ok`` (all three passed).
 
     ``vals``/``fwd`` are aligned: one banked walk each, its parameter value and the distance it actually
     travelled. Deterministic (fixed-seed permutations) — this is a product surface, not a notebook.
+
+    ``bodies`` is aligned too, and is WHICH ROBOT each row came from. It is collapsed to one row per distinct
+    body before a single gate runs, so ``support`` is a count of ROBOTS and the permutation nulls are shuffling
+    independent observations rather than repeated fits of the same machine (#274 — see ``_DEDUP_RULE`` for the
+    rule and the measurement behind it). Passing ``None`` runs the gates the OLD way, on rows; that exists for
+    the audit's side-by-side arm and must never be how the product mines a hint.
 
     HONESTY about what the association can and cannot see: ``forward_m`` is compared ACROSS BODIES, so a big
     body's longer stride is a confound this test does not remove. That cuts the right way — it can only make a
@@ -102,9 +186,39 @@ def _region_evidence(vals: list[float], fwd: list[float], lo: float, hi: float, 
     being made, because a ``param_region`` hint is advice offered to every body regardless of size. A parameter
     whose good band is body-specific should not be advertised as a universal region in the first place.
     """
+    rows = len(vals)
+    if bodies is not None:
+        panel = [representative_rows(list(bodies), list(fwd), rule=r, seed=s) for r, s in _SELECTION_PANEL]
+        n_bodies = len(panel[0])
+        if n_bodies < _MIN_REGION_SUPPORT:
+            # short-circuit before the panel: no choice of representative can rescue an under-supported region,
+            # and this is the branch that has to say "bodies", not "walks", or the number reads as a row count.
+            extra = f" (from {rows} banked rows)" if rows != n_bodies else ""
+            return {"support": n_bodies, "rows": rows, "deduped_by_body": True, "n_top": max(3, n_bodies // 2),
+                    "selections_ok": None, "center": None, "band": None, "spread_vs_prior": None,
+                    "spread_vs_banked": None, "rho_center_distance": None, "p_association": None,
+                    "p_vs_winner_null": None, "ok": False,
+                    "why": f"only {n_bodies} distinct bodies{extra} carry both a value and a travelled distance "
+                           f"(need {_MIN_REGION_SUPPORT}) — too few to establish a region"}
+        if len({tuple(k) for k in panel}) > 1:
+            # some body banked more than one walk -> the verdict must not depend on WHICH one represents it
+            evs = [_region_evidence([vals[i] for i in k], [fwd[i] for i in k], lo, hi, seed=seed) for k in panel]
+            n_ok = sum(1 for e in evs if e["ok"])
+            head = {**evs[0], "rows": rows, "deduped_by_body": True,
+                    "selections_ok": f"{n_ok}/{len(evs)}"}
+            if 0 < n_ok < len(evs):
+                # split either way — the median selection passing while others do not, or failing while others
+                # do. Both mean the same thing, so both get the same answer and the same reason.
+                return {**head, "ok": False,
+                        "why": f"the verdict flips with which of a body's banked walks represents it — it holds "
+                               f"for {head['selections_ok']} of the representative selections tried. A region "
+                               f"that depends on that choice is sampling noise, not a property of the robots"}
+            return head                                            # unanimous: pass, or fail with head's reason
+        vals, fwd = [vals[i] for i in panel[0]], [fwd[i] for i in panel[0]]
     n = len(vals)
     n_top = max(3, n // 2)
-    blank = {"support": n, "n_top": n_top, "center": None, "band": None, "spread_vs_prior": None,
+    blank = {"support": n, "rows": rows, "deduped_by_body": bodies is not None, "n_top": n_top,
+             "selections_ok": None, "center": None, "band": None, "spread_vs_prior": None,
              "spread_vs_banked": None, "rho_center_distance": None, "p_association": None,
              "p_vs_winner_null": None, "ok": False}
     if n < _MIN_REGION_SUPPORT:
@@ -187,12 +301,50 @@ def _gate_of(bc: dict) -> str:
     return gate_of(bc)
 
 
+def _body_of(gene_dict, skill_id: str) -> str:
+    """WHICH ROBOT a banked row came from — the unit every gate counts in (#274).
+
+    ``heldout_set.body_key`` is the coarse structural signature already used to dedup the corpus and to guard the
+    held-out split, so a body that was re-fitted at a dozen sizes collapses to one key exactly as it does there.
+    The body rides inline in the skill's vector meta (``gait_flywheel.bank_gait`` puts it there); a row without
+    one falls back to its own ``skill_id``, i.e. it counts as ONE body of its own. That fallback is deliberately
+    the permissive direction and it is a real hole — a bank of un-indexed rows would over-count bodies exactly
+    the way row-counting does — so ``mine_gait_hints`` reports ``n_rows_without_body`` rather than hiding it.
+    Skill ids are ``gait::{class}::{structural_gait_key}`` and UNIQUE, so the fallback never MERGES two genuinely
+    different structures; it only fails to merge near-identical ones.
+    """
+    if isinstance(gene_dict, dict):
+        try:
+            from virturoid.schemas.gene import RobotGene
+            from virturoid.services.heldout_set import body_key
+            return body_key(RobotGene.from_dict(gene_dict))
+        except Exception:  # noqa: BLE001 - an unreadable body counts as its own, never as somebody else's
+            pass
+    return f"row:{skill_id}"
+
+
+def _inline_bodies(db) -> dict[str, dict]:
+    """``skill_id -> the body that earned it``, read from the skill vectors' inline gene meta."""
+    try:
+        rows = db.conn.execute("SELECT obj_id, meta FROM vectors WHERE obj_type='skill'").fetchall()
+    except Exception:  # noqa: BLE001 - no vector table yet -> every row falls back to its own identity
+        return {}
+    out = {}
+    for r in rows:
+        meta = _base_config(r["meta"])
+        if isinstance(meta.get("gene"), dict):
+            out[str(r["obj_id"])] = meta["gene"]
+    return out
+
+
 def _banked_gait_params(db, robot_class: str | None, *,
-                        min_success: float) -> list[tuple[dict, float | None, str]]:
-    """Every banked CREDIBLE gait (optionally for a class) as (params, forward_m, bank_gate) — the evidence hints
-    are mined from. NOTE the ``min_success`` filter selects on the very outcome the association gate tests, which
-    truncates its range and can only make that gate HARDER to pass — conservative, in the direction that matters."""
-    q = "SELECT robot_class, base_config, success_rate FROM skills WHERE task_type='locomotion'"
+                        min_success: float) -> list[tuple[dict, float | None, str, str]]:
+    """Every banked CREDIBLE gait (optionally for a class) as (params, forward_m, bank_gate, body) — the evidence
+    hints are mined from. NOTE the ``min_success`` filter selects on the very outcome the association gate tests,
+    which truncates its range and can only make that gate HARDER to pass — conservative, in the direction that
+    matters."""
+    q = "SELECT skill_id, robot_class, base_config, success_rate FROM skills WHERE task_type='locomotion'"
+    genes = _inline_bodies(db)
     out = []
     for row in db.conn.execute(q).fetchall():
         if float(row["success_rate"] or 0.0) < min_success:
@@ -202,27 +354,30 @@ def _banked_gait_params(db, robot_class: str | None, *,
         bc = _base_config(row["base_config"])
         gp = bc.get("gait_params")
         if isinstance(gp, dict):
-            out.append((gp, _forward_of(bc), _gate_of(bc)))
+            sid = str(row["skill_id"] or "")
+            out.append((gp, _forward_of(bc), _gate_of(bc), _body_of(genes.get(sid), sid)))
     return out
 
 
-def _vector_nearest_gaits(db, gene, *, k: int, min_sim: float) -> list[tuple[dict, float, float | None, str]]:
+def _vector_nearest_gaits(db, gene, *, k: int,
+                          min_sim: float) -> list[tuple[dict, float, float | None, str, str]]:
     """The banked gaits of the EMBEDDING-NEAREST robots to ``gene`` (cross-body, cross-class), each with its
-    cosine similarity and the distance it travelled. THIS is the moat: a brand-new morphology finds robots
-    SHAPED like it in the robotics vector space (``embed_body``/GeneGNN latent) and borrows THEIR gait
-    principles — real transfer through a learned/structural embedding, not a class-string match. Empty when
-    nothing is indexed near it."""
+    cosine similarity, the distance it travelled and WHICH BODY earned it. THIS is the moat: a brand-new
+    morphology finds robots SHAPED like it in the robotics vector space (``embed_body``/GeneGNN latent) and
+    borrows THEIR gait principles — real transfer through a learned/structural embedding, not a class-string
+    match. Empty when nothing is indexed near it."""
     try:
         from virturoid.services.gait_flywheel import LOCOMOTION
         from virturoid.services.robotics_vector_memory import RoboticsVectorMemory
         out = []
         for hit in RoboticsVectorMemory(db).nearest_skills(gene, LOCOMOTION, k=k, min_sim=min_sim):
-            row = db.conn.execute("SELECT base_config FROM skills WHERE skill_id=?",
-                                  (str(hit.get("obj_id", "")),)).fetchone()
+            sid = str(hit.get("obj_id", ""))
+            row = db.conn.execute("SELECT base_config FROM skills WHERE skill_id=?", (sid,)).fetchone()
             bc = _base_config(row["base_config"]) if row else {}
             gp = bc.get("gait_params")
             if isinstance(gp, dict):
-                out.append((gp, float(hit.get("similarity", 0.5)), _forward_of(bc), _gate_of(bc)))
+                out.append((gp, float(hit.get("similarity", 0.5)), _forward_of(bc), _gate_of(bc),
+                            _body_of((hit.get("meta") or {}).get("gene"), sid)))
         return out
     except Exception:  # noqa: BLE001 - no vector index yet -> caller falls back to the class-string source
         return []
@@ -253,14 +408,16 @@ def mine_gait_hints(db, gene=None, robot_class: str | None = None, *, min_succes
     pw = _vector_nearest_gaits(db, gene, k=k, min_sim=min_sim) if gene is not None else []
     if not pw:                                                    # no vector neighbors -> class-string source
         cls = robot_class or (_class_of(gene) if gene is not None else None)
-        pw = [(p, 1.0, f, g) for p, f, g in _banked_gait_params(db, cls, min_success=min_success)]
+        pw = [(p, 1.0, f, g, b) for p, f, g, b in _banked_gait_params(db, cls, min_success=min_success)]
         src = "class_match" if cls else "all_banked"
-    n_gated = sum(1 for _, _, _, g in pw if g == BANK_GATE)
+    n_gated = sum(1 for _, _, _, g, _ in pw if g == BANK_GATE)
     n_ungated = len(pw) - n_gated
     if gated_only:
         pw = [t for t in pw if t[3] == BANK_GATE]
-    pw = [(p, w, f) for p, w, f, _ in pw]
-    params = [p for p, _, _ in pw]
+    pw = [(p, w, f, b) for p, w, f, _, b in pw]
+    params = [p for p, _, _, _ in pw]
+    n_bodies = len({b for _, _, _, b in pw})
+    n_no_body = sum(1 for _, _, _, b in pw if b.startswith("row:"))
     hints: list[dict] = []
     suppressed: list[dict] = []
     prior = dict(_DEFAULT_GAIT)
@@ -268,37 +425,51 @@ def mine_gait_hints(db, gene=None, robot_class: str | None = None, *, min_succes
     if len(pw) >= 2:
         # per-param region as a SIMILARITY-WEIGHTED center (nearer robots pull the prior harder) + observed range
         for key in _PARAM_KEYS:
-            vw = [(float(p[key]), w, f) for p, w, f in pw if key in p and isinstance(p[key], (int, float))]
+            vw = [(float(p[key]), w, f, b) for p, w, f, b in pw if key in p and isinstance(p[key], (int, float))]
             if len(vw) < 2:
                 continue
-            tot = sum(max(0.05, w) for _, w, _ in vw) or 1.0
-            center = sum(v * max(0.05, w) for v, w, _ in vw) / tot
+            tot = sum(max(0.05, w) for _, w, _, _ in vw) or 1.0
+            center = sum(v * max(0.05, w) for v, w, _, _ in vw) / tot
             prior[key] = round(center, 4)                         # the warm-start seed: always available
             lo, hi = _search_range(key)
-            judged = [(v, f) for v, _, f in vw if f is not None]
-            ev = _region_evidence([v for v, _ in judged], [f for _, f in judged], lo, hi)
+            judged = [(v, f, b) for v, _, f, b in vw if f is not None]
+            ev = _region_evidence([v for v, _, _ in judged], [f for _, f, _ in judged], lo, hi,
+                                  bodies=[b for _, _, b in judged])   # one row per ROBOT, never per fit (#274)
             if not ev["ok"]:
                 suppressed.append({"param": key, "reason": ev["why"], "support": ev["support"],
-                                   "spread_vs_prior": ev["spread_vs_prior"],
+                                   "rows": ev["rows"], "spread_vs_prior": ev["spread_vs_prior"],
                                    "p_association": ev["p_association"],
                                    "p_vs_winner_null": ev["p_vs_winner_null"]})
                 continue
-            band, n_j = ev["band"], len(judged)
+            band = ev["band"]
             bounds[key] = (band[0], band[1])
             hints.append({"kind": "param_region", "param": key, "center": ev["center"], "range": band,
-                          "support": ev["support"], "spread_vs_prior": ev["spread_vs_prior"],
+                          "support": ev["support"], "rows": ev["rows"],
+                          "spread_vs_prior": ev["spread_vs_prior"],
                           "p_association": ev["p_association"], "p_vs_winner_null": ev["p_vs_winner_null"],
-                          "note": f"the {ev['n_top']} furthest-travelling of {n_j} nearby "
-                                  f"walkers put {key} in [{band[0]:g}, {band[1]:g}] — "
+                          "note": f"the {ev['n_top']} furthest-travelling of {ev['support']} nearby "
+                                  f"ROBOTS ({ev['rows']} banked walks, one per body) put {key} in "
+                                  f"[{band[0]:g}, {band[1]:g}] — "
                                   f"{ev['spread_vs_prior']:.0%} as wide as a uniform search over "
                                   f"[{lo:g}, {hi:g}]; the further a walker sat from {ev['center']:g} the less it "
                                   f"travelled (rank-corr {ev['rho_center_distance']:+.2f}, p="
                                   f"{ev['p_association']:.3f}), and random same-size groups of banked winners "
                                   f"are this tight only p={ev['p_vs_winner_null']:.3f} of the time"})
-        rel = [1 for p in params if float(p.get("knee_amp", 0)) > float(p.get("hip_amp", 0))]
-        if params and len(rel) / len(params) >= 0.7:
-            hints.append({"kind": "relation", "rule": "knee_amp > hip_amp", "support": len(params),
-                          "note": f"{len(rel) / len(params):.0%} of nearby walkers lift the knee MORE than the "
+        # THE RELATION GATE counts bodies too. "70% of nearby walkers" over rows is the same pseudo-replication:
+        # one body re-fitted 24 times with knee_amp>hip_amp carries the threshold on its own, and 24/24 reads to
+        # an operator as 24 robots agreeing. It also gets the same support floor as a region, for the reason the
+        # floor exists at all: a proportion over one observation is not a proportion. (It still has NO null model
+        # — unlike a param_region nothing here asks how often 70% arises by chance from the sampler alone. That
+        # is a weaker standard than the three gates above and is called out as such, not quietly relied on.)
+        rep = representative_rows([b for _, _, _, b in pw], [abs(f) if f is not None else 0.0
+                                                             for _, _, f, _ in pw])
+        rparams = [params[i] for i in rep]
+        rel = [1 for p in rparams if float(p.get("knee_amp", 0)) > float(p.get("hip_amp", 0))]
+        if len(rparams) >= _MIN_REGION_SUPPORT and len(rel) / len(rparams) >= 0.7:
+            hints.append({"kind": "relation", "rule": "knee_amp > hip_amp", "support": len(rparams),
+                          "rows": len(params),
+                          "note": f"{len(rel) / len(rparams):.0%} of the {len(rparams)} nearby ROBOTS "
+                                  f"({len(params)} banked walks, one per body) lift the knee MORE than the "
                                   f"hip swings — a stepping (not sliding) gait; keep knee_amp above hip_amp"})
     # STRUCTURAL lessons for the class (the existing failure->fix hint store, auto-written on repair)
     try:
@@ -314,9 +485,14 @@ def mine_gait_hints(db, gene=None, robot_class: str | None = None, *, min_succes
     # was screened for fragility and the other was not, and a reader cannot tell from the hint text alone.
     gate_txt = (f" [{n_gated} banked under the fragility gate, {n_ungated} with no measured margin"
                 + ("; only the gated rows were used]" if gated_only else "; both pooled]"))
+    # THE SAMPLE SIZE THAT COUNTS, said on every call for the same reason as the gate split above: 55 rows and
+    # 55 robots are not the same evidence, and a reader cannot tell them apart from the row count alone.
+    body_txt = (f" [{len(pw)} banked walks from {n_bodies} DISTINCT bodies; every gate counts bodies"
+                + (f", {n_no_body} row(s) carry no inline body and each counts as its own]" if n_no_body else "]"))
     if len(pw) < 2:
         note = ("not enough banked walks near this body yet — using the shipped default as an un-tuned prior; "
                 "hints appear automatically once >=2 credible walks are banked near it in the robotics embedding")
+        body_txt = ""
     elif suppressed and not bounds:
         # The honest reading, and the one worth acting on: the bank holds walks but no MINABLE STRUCTURE. Saying
         # so beats six confident regions that the same data refutes.
@@ -328,8 +504,9 @@ def mine_gait_hints(db, gene=None, robot_class: str | None = None, *, min_succes
         note = (f"hints borrowed from {len(pw)} {src_txt} — they sharpen as more sims run"
                 + (f"; {len(suppressed)} parameter(s) failed the evidence gates (see `suppressed`)"
                    if suppressed else ""))
-    return {"n": len(pw), "source": src, "robot_class": robot_class, "hints": hints, "prior": prior,
-            "bounds": bounds, "suppressed": suppressed, "note": note + gate_txt,
+    return {"n": len(pw), "n_bodies": n_bodies, "n_rows_without_body": n_no_body, "source": src,
+            "robot_class": robot_class, "hints": hints, "prior": prior,
+            "bounds": bounds, "suppressed": suppressed, "note": note + gate_txt + body_txt,
             "n_gated": n_gated, "n_ungated": n_ungated, "gated_only": bool(gated_only)}
 
 
