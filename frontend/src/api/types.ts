@@ -44,9 +44,20 @@ export interface PackageMeta {
   honesty: PackageHonesty | null;
 }
 
+/** Present only when `packages` is empty: which directory was scanned, and how to fill it.
+ *  An empty library is a legitimate first-run state; the panel must be able to say so
+ *  rather than leave a newcomer guessing whether the app is broken. */
+export interface PackagesEmpty {
+  scanned: string;
+  exists: boolean;
+  reason: string;
+  next_steps: string[];
+}
+
 export interface PackagesResponse {
   build_root: string;
   packages: PackageMeta[];
+  empty?: PackagesEmpty;
 }
 
 export interface AssistantStatus {

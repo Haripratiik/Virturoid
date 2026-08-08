@@ -726,11 +726,22 @@ def _honest_gait(gene, *, steps: int = 1200, render: bool = False, tag: str = "g
     # CREDIBLE WALK at 1.26 m and then verified as "LURCHES (pitch 31 / roll 44)", because the verdict came from
     # a gait fitted to a different body. Params measured ON THIS BODY beat both the generic default and a mined
     # cross-body hint region, and the deploy-select comparison below still guards it against the default.
+    gait_provenance = None
     try:
-        _own = (getattr(gene, "metadata", None) or {}).get("gait_params") or {}
+        _md = getattr(gene, "metadata", None) or {}
+        _own = _md.get("gait_params") or {}
         _own = {k: float(_own[k]) for k in ("freq", "hip_amp", "knee_amp", "kp", "kd") if k in _own}
         if _own:
             gait_params, gait_source = _own, "tuned_for_this_body"
+            # NAME THE DOOR. "tuned_for_this_body" stands for four different origins — the build-path fitter, and
+            # (since 2026-08-08) each of the three training tools, whose results now LAND here instead of being
+            # discarded. An engineer who trains and re-verifies has to be able to tell from the verdict alone
+            # whether the thing that was measured is the thing they trained; ``trained_controller`` writes the
+            # provenance, and this is where it becomes visible.
+            _prov = _md.get("gait_provenance")
+            if isinstance(_prov, dict) and _prov.get("door"):
+                gait_provenance = dict(_prov)
+                gait_source = f"tuned_for_this_body::{_prov['door']}"
     except Exception:  # noqa: BLE001 - a malformed cache must never block the verdict
         gait_params = {}
     try:
@@ -759,7 +770,12 @@ def _honest_gait(gene, *, steps: int = 1200, render: bool = False, tag: str = "g
                                if k in _p}
                 gait_source = "flywheel_hint"                    # a data-driven hint region, not a copied policy
     except Exception:  # noqa: BLE001 - the flywheel is an accelerant; a miss just uses the default gait
-        if gait_source != "tuned_for_this_body":                 # never discard THIS body's own measured op-point
+        # ``startswith``, not ``==``: a controller landed by a training door carries the door as a ``::`` suffix,
+        # and this guard is reached on EVERY body that has its own op-point (the ``raise LookupError`` above is
+        # how that case exits). Under exact equality a trained body fell through and had ``gait_params`` wiped —
+        # which does not change the rollout (``crawl_gait_rollout`` re-reads the same dict off the metadata) but
+        # silently skips the deploy-select safety net below and banks the walk under an EMPTY parameter set.
+        if not gait_source.startswith("tuned_for_this_body"):    # never discard THIS body's own measured op-point
             gait_params = {}
     r = crawl_gait_rollout(gene, steps=steps, record_qpos=True, frame_every=frame_every, **gait_params)
     # EXACTLY THE KWARGS THAT PRODUCED ``r``, tracked separately from the SELECTION variable above because the
@@ -801,6 +817,8 @@ def _honest_gait(gene, *, steps: int = 1200, render: bool = False, tag: str = "g
            "speed_mps": round(float(r.get("speed", 0)), 3), "cadence": round(float(r.get("cadence", 0)), 1),
            "support_frac": round(float(r.get("support_frac", 0)), 2), "height_ratio": r.get("height_ratio"),
            "roll_max_deg": o.get("roll_max"), "pitch_max_deg": o.get("pitch_max")}
+    if gait_provenance is not None and gait_source.startswith("tuned_for_this_body"):
+        out["gait_provenance"] = gait_provenance   # which training run produced the controller just measured
     # v7-F1 LEARNED-CONTROL DEPLOY: when the scripted gait is NOT credible, this body may still walk with a banked
     # LEARNED policy — the product verdict must use the robot's BEST controller, not only the scripted prior.
     # Never-regress by construction: the learned rollout must itself be classify()-CREDIBLE (same bar, roll/pitch
@@ -857,7 +875,7 @@ def _honest_gait(gene, *, steps: int = 1200, render: bool = False, tag: str = "g
         out["travel_rate_m_per_1000"] = {int(k): round(v, 3) for k, v in _s["rates"].items()}
         out["holds_rate"] = bool(_s["holds_rate"])
     _fit = (getattr(gene, "metadata", None) or {}).get("gait_fit") or {}
-    if out.get("gait_source") == "tuned_for_this_body" and "robustness_rel" in _fit:
+    if str(out.get("gait_source") or "").startswith("tuned_for_this_body") and "robustness_rel" in _fit:
         out["robustness_rel"] = _fit["robustness_rel"]
         out["robustness_probes"] = _fit.get("robustness_probes")
         # PER PARAMETER, because that is the half a reader can act on. The joint scalar says "how far can
@@ -1379,13 +1397,29 @@ def edit_robot(args: dict) -> dict:
     except EO.EditError as exc:
         return {"ok": False, "error": str(exc)}                # teaching error (how to fix), not a crash
     if bool(args.get("gate_non_regression", True)):
-        before = _design_non_regression_signature(gene)
-        after = _design_non_regression_signature(new_gene)
+        # NAME WHAT MOVED, ON WHAT PART, AND THE WAY OUT. This compared two integers and printed them:
+        # `before {high_or_fatal: 0, weighted_findings: 0} / after {0, 2}` — zero fatal findings on either
+        # side, the edit refused, and nothing in the payload said which check moved, which part it was about,
+        # or that `gate_non_regression: false` exists (it was discoverable only by dumping the tool schema).
+        # An engineer who has just been told "no" by a number they cannot look up closes the tab.
+        explained = EO.explain_findings(gene, new_gene, ops=ops)
+        before, after = tuple(explained["score_before"]), tuple(explained["score_after"])
         if after > before:
+            names = ", ".join(sorted({f"{f['check']}({f['severity']})" for f in explained["blocking"]})) or "none"
             return {
                 "ok": False,
-                "error": "edit auto-reverted because deterministic design findings regressed",
+                "error": (f"edit NOT applied: it introduces {len(explained['blocking'])} new design finding(s) "
+                          f"— {names}:\n{explained['message']}\n"
+                          "Ways forward: (1) if this is the design you want, re-send the same call with "
+                          "gate_non_regression: false and it will be applied as-is; (2) change the op so the "
+                          "finding does not arise (the detail above names the measurement and its threshold); "
+                          "(3) fix the finding in the same call by adding a second op. Nothing was changed."),
                 "reverted": True,
+                "new_findings": explained["new"],
+                "blocking_findings": explained["blocking"],
+                "expected_findings_ignored": explained["expected_checks"],
+                "override": {"arg": "gate_non_regression", "value": False,
+                             "effect": "apply this edit even though the findings above appear"},
                 "before": {"high_or_fatal": before[0], "weighted_findings": before[1]},
                 "after": {"high_or_fatal": after[0], "weighted_findings": after[1]},
                 "proposed_diffs": diffs,
@@ -1466,26 +1500,13 @@ def _design_non_regression_signature(gene) -> tuple[int, int]:
 
     High/fatal findings dominate, then a weighted total. If a verifier is unavailable, it contributes no
     finding rather than inventing evidence; the normal schema gate in ``apply_ops`` still applies.
+
+    Delegates to ``edit_operators`` so the number that DECIDES and the findings that get NAMED in the refusal
+    are the same measurement -- an explanation derived from a second, parallel scan is an explanation that can
+    disagree with the verdict it is explaining.
     """
-    severities: list[str] = []
-    try:
-        from virturoid.services.gene_validation import validate_gene_design
-        severities += [f["severity"] for f in validate_gene_design(gene)["risk_flags"]]
-    except Exception:  # noqa: BLE001
-        pass
-    try:
-        from virturoid.services.anatomy_critic import critique_gene
-        severities += [f["severity"] for f in critique_gene(gene)["issues"]]
-    except Exception:  # noqa: BLE001
-        pass
-    try:
-        from virturoid.services.visual_physics_gate import audit_gene
-        severities += ["high" for _ in audit_gene(gene).issues]
-    except Exception:  # noqa: BLE001
-        pass
-    weight = {"fatal": 8, "high": 5, "med": 2, "low": 1}
-    hard = sum(severity in ("fatal", "high") for severity in severities)
-    return hard, sum(weight.get(severity, 0) for severity in severities)
+    from virturoid.services import edit_operators as EO
+    return EO.findings_score(EO.design_findings(gene))
 
 
 def undo_robot(args: dict) -> dict:
@@ -1695,6 +1716,18 @@ def render_parity(gene) -> dict:
 _FITTED_TO_THIS_BODY = ("tuned_for_this_body", "learned_policy", "biped_learned")
 
 
+def _is_fitted_to_this_body(src: str) -> bool:
+    """Does this ``gait_source`` name a controller WE produced FOR THIS BODY?
+
+    Matched on the part before ``::`` because a controller landed by a training door carries the door as a
+    suffix (``tuned_for_this_body::train_reward`` — see ``trained_controller``). Exact-equality here was the
+    difference between telling an imported-robot customer "your body under the controller we trained for it"
+    and telling them "NO LOCOMOTION VERDICT — we do not have your robot's controller" about a controller we had
+    just trained for them.
+    """
+    return str(src or "").split("::", 1)[0] in _FITTED_TO_THIS_BODY
+
+
 def _import_provenance(gene) -> dict | None:
     """``{...}`` when this body came in through the import path, else ``None`` (we composed it ourselves).
 
@@ -1902,7 +1935,7 @@ def _reframe_for_imported_body(res: dict, gene, kind: str) -> None:
     if prov is None:
         return
     src = str(res.get("gait_source") or "")
-    if src in _FITTED_TO_THIS_BODY:                              # our controller, fitted to THEIR body -> a fair claim
+    if _is_fitted_to_this_body(src):                             # our controller, fitted to THEIR body -> a fair claim
         res["controller_provenance"] = {
             "whose": "ours, fitted to this body",
             "what": src,

@@ -169,11 +169,34 @@ def _capabilities(_args: dict) -> dict:
     """The task types + skills the platform can build/evaluate (the capability registry)."""
     try:
         from virturoid.services.capability_registry import capability_summary
-        return capability_summary()
+        out = capability_summary()
     except Exception:  # noqa: BLE001 - registry shape varies; fall back to the known task types
-        return {"tasks": ["pick_place_sort", "pick_place", "stack", "shelf", "push", "transport",
-                          "grasp", "locomotion", "navigation", "spray_coverage"],
-                "morphologies": ["manipulator", "quadruped", "legged", "mobile_base", "humanoid", "spray"]}
+        out = {"tasks": ["pick_place_sort", "pick_place", "stack", "shelf", "push", "transport",
+                         "grasp", "locomotion", "navigation", "spray_coverage"],
+               "morphologies": ["manipulator", "quadruped", "legged", "mobile_base", "humanoid", "spray"]}
+    # An engineer looking for the sim-to-real gap searched exactly this tool and found nothing, because
+    # `capability_summary` enumerates TASKS a body can be scored on and system identification is not one. It is
+    # a capability all the same, and the answer to "can this product tell me how far its sim is from my robot?"
+    # cannot be silence. Derived from the live registry so it disappears if the tools ever do.
+    if isinstance(out, dict):
+        try:
+            from virturoid.services.sysid.tools import JOURNEY
+            steps = [dict(s) for s in JOURNEY if s["tool"] in TOOLS]
+        except Exception:  # noqa: BLE001
+            steps = []
+        if steps:
+            out["sim_to_real"] = {
+                "what": "measure how far this simulator is from a PHYSICAL robot, per joint, in rad / ms / N.m "
+                        "-- then fit the actuator parameters that close it and apply them, reversibly",
+                "journey": steps,
+                "needs": "a log from a short bench experiment run on the real machine. Without hardware, "
+                         "simulate_bench_log produces one off a perturbed copy of the model and labels every "
+                         "downstream result as a simulation rather than a measurement",
+                "does_not_cover": "contact, terrain and payload: the experiment is deliberately run with the "
+                                  "robot on a stand so the residual is actuator dynamics and control-signal "
+                                  "delay, which is where the literature puts the dominant term",
+            }
+    return out
 
 
 # ---------------------------------------------------------------- the registry
@@ -302,6 +325,18 @@ try:
     from virturoid.services.reward_loop import REWARD_LOOP_TOOLS
     TOOLS.update(REWARD_LOOP_TOOLS)                          # R1: LLM-authored-reward training from an NLP task
 except Exception:  # noqa: BLE001
+    pass
+
+# THE SIM-TO-REAL GAP -- our headline differentiator, and until this line it had no door. Four engineers used the
+# product, searched `list_tools` (67 tools), `capabilities`, the README and the Studio for it, and found nothing:
+# 3,156 lines under `services/sysid/` plus `services/sim2real.py` were reachable only by importing the package.
+# `grep -rn "import sim2real" src/` returned nothing, and the one README mention sat under "## Roadmap", telling
+# a prospect the feature did not exist. Their verdict once they got in by importing internals was "the gap report
+# is the best artifact in the product" -- which is what makes good-and-unreachable the worst combination there is.
+try:
+    from virturoid.services.sysid.tools import SYSID_TOOLS
+    TOOLS.update(SYSID_TOOLS)
+except Exception:  # noqa: BLE001 - the rest of the surface stays available if sysid has an issue
     pass
 
 
@@ -480,6 +515,14 @@ _PARAM_DOCS: dict[str, dict[str, dict]] = {
         "workers": {"type": "integer", "default": 1, "description": "parallel rollout workers"},
         "db_path": {"type": "string", "description": "explicit memory DB path (default the shared memory dir)"},
     },
+    "apply_gait": {
+        "apply": {"type": "string", "enum": ["always", "never"], "default": "always",
+                  "description": "'always' (default) commits the parameters — that is what this tool is for; "
+                                 "'never' validates them and reports what WOULD land, changing nothing"},
+    },
+    "adapt_gait": {
+        "steps": {"type": "integer", "default": 600, "description": "physics steps per candidate rollout"},
+    },
     "plan_training": {"scene_set_refs": {"type": "array", "items": {"type": "string"},
                                          "description": "scene sets the ladder should plan against"}},
     "check_perception_leakage": {
@@ -521,6 +564,33 @@ def _derive_registry_backed_docs() -> None:
     """
     _derive_operator_catalog()
     _derive_export_formats()
+    _derive_reward_vocabulary()
+
+
+def _derive_reward_vocabulary() -> None:
+    """``train_reward``'s ``reward`` parameter must SHOW the DSL, from ``reward_dsl`` itself.
+
+    A third instance of the same defect, and the worst-shaped one: the MCP ``instructions`` told every connected
+    agent that ``train_reward`` is where "you author a reward-as-code objective", and until 2026-08-08 the tool
+    had no ``reward`` parameter to author into — while ``reward_dsl.REWARD_FEATURES``, the ten-term vocabulary
+    the whole DSL is built on, was exposed by NO tool in the registry. An agent could not have written a legal
+    expression if it wanted to. The parameter exists now, and the vocabulary rides on it derived rather than
+    restated, so adding an eleventh feature cannot leave the contract describing ten.
+    """
+    spec = TOOLS.get("train_reward")
+    if spec is None:
+        return
+    try:
+        from virturoid.services.reward_dsl import _SAFE_FUNCS, REWARD_FEATURES
+    except Exception:  # noqa: BLE001 - enrichment is never worth breaking the registry for
+        return
+    prop = spec["parameters"]["properties"].get("reward")
+    if not isinstance(prop, dict):
+        return
+    prop["description"] = (prop.get("description", "").rstrip()
+                           + " FEATURES (the only names allowed): " + ", ".join(REWARD_FEATURES)
+                           + ". FUNCTIONS: " + ", ".join(sorted(_SAFE_FUNCS))
+                           + ". Example: 'max(0.0, forward_vel)*alive + 0.3*upright - 0.2*slip'.")
 
 
 def _derive_export_formats() -> None:
@@ -600,6 +670,14 @@ MCP_TOOL_VIEW: tuple[str, ...] = (
 # ingestion siblings, they are advertised by name in the anchor tool's description so an MCP client can discover
 # and call them without bloating tools/list.
 _ADVANCED_SIBLINGS: tuple[str, ...] = ("train_reward", "generate_fusion", "generate_control_scripts")
+
+# THE PER-BODY CONTROLLER FITTERS, which were on NO wire at all (2026-08-08). ``learn_gait`` and ``adapt_gait``
+# are the only two tools that fit a gait to a SPECIFIC body — the thing a customer with their own robot most
+# wants — and they were absent from ``tools/list``, absent from the server ``instructions``, and absent from
+# every sibling list, so a connected agent could only find them by grepping our source. They dispatch fine
+# through ``call_tool``; they were simply undiscoverable, which for an agent-driven product is the same as not
+# existing. ``apply_gait`` joins them because a fitted controller you cannot attach is a number, not a result.
+_GAIT_SIBLINGS: tuple[str, ...] = ("learn_gait", "adapt_gait", "apply_gait", "flywheel_hints")
 _DESIGN_SIBLINGS: tuple[str, ...] = ("create_robot", "evaluate_held")
 _SCENE_SIBLINGS: tuple[str, ...] = ("edit_scene", "submit_scene_spec")
 
@@ -622,6 +700,18 @@ _INGEST_SIBLINGS: tuple[str, ...] = (
     "import_robot_model", "import_bom", "import_onnx_policy", "import_dataset",
     "import_cad", "adopt_control_script", "sandbox_policy",
 )
+
+# THE SIM-TO-REAL GAP, hung on the honesty anchor. `verify_robot` is where a customer asks "is this verdict
+# true?"; the next question anyone with a physical robot asks is "true of MY machine?", and until 2026-08-08
+# nothing on any wire answered it. Advertised here rather than added to MCP_TOOL_VIEW for the usual reason —
+# the view is at its documented cap of 15 and test_agent_first asserts it — and ORDERED as the journey runs, so
+# a client reading tools/list gets the sequence and not a bag of names. The synthetic entry is called out
+# separately on purpose: the one mistake this surface must never permit is reading a sim2sim result as a
+# measurement of somebody's hardware.
+_SIM_TO_REAL_SIBLINGS: tuple[str, ...] = (
+    "plan_bench_experiment", "measure_sim_to_real_gap", "fit_actuators", "calibration_status",
+)
+_SIM_TO_REAL_NO_HARDWARE: tuple[str, ...] = ("simulate_bench_log", "sim_to_real_transfer")
 
 
 def tool_specs(view: str | None = None) -> list[dict]:
@@ -653,11 +743,35 @@ def tool_specs(view: str | None = None) -> list[dict]:
                 if avail:
                     desc = (desc + " Callable companion: " + ", ".join(avail)
                             + " — DRY-RUN the same ops first (blast radius + what it invalidates, nothing edited).")
+            if n == "verify_robot":                            # SIM-TO-REAL: is this verdict true of MY machine?
+                s2r = [s for s in _SIM_TO_REAL_SIBLINGS if s in TOOLS]
+                if s2r:
+                    desc = (desc + " SIM-TO-REAL, the same question about a PHYSICAL robot — callable by name "
+                            "via a tools/call, in this order: " + " -> ".join(s2r)
+                            + ". They author a short, safe bench experiment bounded by the robot's own joint "
+                              "limits and its motors' datasheets, measure how far our simulator is from the log "
+                              "that comes back (per joint, in rad/ms/N.m, never a scalar score), fit each "
+                              "joint's damping/reflected-inertia/dry-friction with an interval, and apply only "
+                              "what the identifiability and tracking gates allow — reversibly.")
+                    no_hw = [s for s in _SIM_TO_REAL_NO_HARDWARE if s in TOOLS]
+                    if no_hw:
+                        desc = (desc + " NO HARDWARE: " + ", ".join(no_hw) + " stay in simulation and label "
+                                "themselves as such — a result from either is about our estimator or a policy's "
+                                "robustness, never a measurement of a physical machine.")
             if n == "create_scene":
                 avail = [s for s in _SCENE_SIBLINGS if s in TOOLS]
                 if avail:
                     desc = desc + " Callable companions: " + ", ".join(avail) + "."
             if n == "train_held":                              # M5: advertise the advanced authoring compilers
+                gait = [s for s in _GAIT_SIBLINGS if s in TOOLS]
+                if gait:
+                    desc = (desc + " PER-BODY CONTROLLER FITTERS, each callable by name via a tools/call: "
+                            + ", ".join(gait) + " — learn_gait (full budget) and adapt_gait (short, warm-started "
+                            "from the flywheel's mined hints) FIT a gait to this exact body and COMMIT it to the "
+                            "held robot, so the next verify_robot measures what you trained and reports "
+                            "gait_source 'tuned_for_this_body::<tool>'; apply_gait lands parameters you already "
+                            "have; flywheel_hints shows what the corpus has learned. Every apply is undoable "
+                            "(edit_robot op:'undo') and skippable (apply:'never').")
                 adv = [s for s in _ADVANCED_SIBLINGS if s in TOOLS]
                 if adv:
                     desc = (desc + " Advanced authoring companions, each callable by name via a tools/call: "

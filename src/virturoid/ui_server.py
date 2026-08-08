@@ -44,22 +44,73 @@ _ASSISTANT_SYSTEM_PROMPT = (
 )
 
 
+def checkout_root() -> Path | None:
+    """The source checkout this module was imported from, or None when it is an installed wheel.
+
+    Everything about the build root used to be resolved against the PROCESS's working directory, which is only
+    the checkout when you happen to launch from the checkout. Measured: launching the same command one directory
+    up gave a build root of ``<that dir>/build/ui_workbench``, no demo-set fallback (``build/ui_verify`` is also
+    CWD-relative), and a Robot Library that renders EMPTY on a machine whose clone contains four tracked demo
+    packages. Anchoring to the checkout makes 'which robots do I see' a property of the install, not of the
+    shell's pwd."""
+    here = Path(__file__).resolve()
+    for parent in here.parents:                       # .../src/virturoid -> .../src -> <checkout>
+        if (parent / "pyproject.toml").exists() and (parent / "src" / "virturoid").is_dir():
+            return parent
+    return None
+
+
+def default_build_root() -> Path:
+    """Where console-triggered builds are written when ``--build-root`` is not given."""
+    root = checkout_root()
+    return (root / "build" / "ui_workbench") if root else (Path("build") / "ui_workbench")
+
+
+def _has_packages(d: Path) -> bool:
+    """Does this directory hold anything the library would LIST?
+
+    Deliberately ``has_robot_package`` -- the same predicate ``_list_packages`` uses -- and not the looser
+    "has a robot/ or simulation/ subdirectory" rule this used to carry. With two different rules, a root
+    holding a half-written package satisfied the resolver, suppressed the demo-set fallback, and then listed
+    zero robots: an empty library served from a root the server had just declared non-empty."""
+    from virturoid.services.package_status import has_robot_package
+    try:
+        return d.exists() and any(has_robot_package(c) for c in d.iterdir() if c.is_dir())
+    except OSError:
+        return False
+
+
 def _resolve_build_root(build_root: Path) -> Path:
     """If the chosen build root has no built packages but the curated demo set (build/ui_verify) does, use the
     demo set -- so `python -m virturoid.ui_server` shows the demo instead of an empty studio (the demo foot-gun:
     the auto-demo references package IDs that only exist under build/ui_verify). Once the user builds into their
-    own root, that root has packages and is used as-is."""
-    def _has_packages(d: Path) -> bool:
-        return d.exists() and any((c / "robot").exists() or (c / "simulation").exists()
-                                  for c in d.iterdir() if c.is_dir())
-    if not _has_packages(build_root):
-        demo = Path("build") / "ui_verify"
+    own root, that root has packages and is used as-is.
+
+    The demo set is looked for in the CHECKOUT, and ONLY there. Those four packages are tracked in git, so a
+    fresh clone has them and an installed wheel does not -- which means "no checkout" and "no demo set" are the
+    same fact, and there is nothing to fall back to.
+
+    It used to also try a bare relative ``build/ui_verify``, which resolves against the PROCESS'S CWD. That is
+    the same defect as the memory bank's second default rule: a path that looks like a constant and is actually
+    a function of where you happened to be standing. It added nothing when a checkout existed (the anchored
+    candidate already covers it) and, with no checkout, silently retargeted the library at whatever
+    ``./build/ui_verify`` happened to be -- so the same install showed different robots from different
+    directories. Anchored or absent; not "wherever I am"."""
+    if _has_packages(build_root):
+        return build_root
+    root = checkout_root()
+    candidates = [root / "build" / "ui_verify"] if root else []
+    for demo in candidates:
         try:
             if demo.resolve() != build_root.resolve() and _has_packages(demo):
                 print(f"[ui] build root {build_root} has no packages; serving the demo set at {demo}")
                 return demo
         except OSError:
-            pass
+            continue
+    # Nothing anywhere -- say so HERE rather than let the user read an empty grid as a broken app.
+    print(f"[ui] no robot packages under {build_root} (and no demo set found). The Robot Library will be empty "
+          f"until you build one: describe a robot in the Agent rail, or run "
+          f"`python scripts/run_mvp_demo.py --mini`.")
     return build_root
 
 
@@ -90,8 +141,9 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8765, help="Port for the local server.")
     parser.add_argument(
         "--build-root",
-        default=str(Path("build") / "ui_workbench"),
-        help="Directory where builds triggered from the console are written.",
+        default=str(default_build_root()),
+        help="Directory where builds triggered from the console are written "
+             "(default: <checkout>/build/ui_workbench, so it does not move with your shell's pwd).",
     )
     parser.add_argument(
         "--web",
@@ -135,10 +187,10 @@ def _run_web(host: str, port: int, build_root: Path, ui: str = "legacy") -> None
     """Serve in the browser. ``ui`` selects which URL is printed -- Studio lives at /studio/, and
     printing only the root sent every reader of the README's headline command to the LEGACY console
     (which also brands itself 'Virturoid Studio', so the mistake was invisible)."""
-    server = create_server(host, port, build_root)
+    server = create_server(host, port, build_root, ui=ui)
     if ui == "studio":
         print(f"Virturoid Studio running at http://{host}:{port}/studio/")
-        print(f"Legacy build console at     http://{host}:{port}/")
+        print(f"  (http://{host}:{port}/ redirects here; the legacy build console is at /legacy)")
     else:
         print(f"Virturoid build console running at http://{host}:{port}/")
         print(f"Virturoid Studio (React app) at    http://{host}:{port}/studio/")
@@ -158,7 +210,7 @@ def run_desktop(host: str, port: int, build_root: Path, ui: str = "legacy") -> N
 
     import webview  # noqa: PLC0415  (optional desktop dependency)
 
-    server = create_server(host, port, build_root)
+    server = create_server(host, port, build_root, ui=ui)
     threading.Thread(target=server.serve_forever, daemon=True).start()
 
     studio = ui == "studio"
@@ -219,11 +271,14 @@ class _DesktopApi:
             self._window.destroy()
 
 
-def create_server(host: str, port: int, build_root: Path) -> ThreadingHTTPServer:
+def create_server(host: str, port: int, build_root: Path, ui: str = "legacy") -> ThreadingHTTPServer:
+    """``ui`` decides what ``/`` is. Default "legacy" keeps the historical behaviour byte-for-byte."""
     build_root = Path(build_root)
+    home_ui = ui
 
     class VirturoidRequestHandler(_Handler):
         root = build_root
+        home = home_ui
 
     return ThreadingHTTPServer((host, port), VirturoidRequestHandler)
 
@@ -758,10 +813,25 @@ def _summarize_build(build: dict, used_model: bool) -> str:
 
 class _Handler(BaseHTTPRequestHandler):
     root: Path = Path("build") / "ui_workbench"
+    #: Which frontend ``/`` belongs to. "legacy" (default) keeps the original console at the root;
+    #: "studio" redirects the root to /studio/ and leaves the console at /legacy.
+    home: str = "legacy"
 
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         if parsed.path == "/":
+            # WHOEVER STARTED THE SERVER ASKED FOR A FRONTEND; the root should be that frontend. Launching with
+            # --ui studio and then serving the LEGACY console at / is how a first-run evaluator ends up looking
+            # at a Build Workbench viewport that reads "Unknown package." and concludes the product is broken --
+            # Studio was running the whole time, one path segment away, with no sign anywhere that said so.
+            if self.home == "studio" and (FRONTEND_DIST / "index.html").exists():
+                self.send_response(HTTPStatus.FOUND)
+                self.send_header("Location", "/studio/")
+                self.end_headers()
+                return
+            self._send_text(build_ui_html(), "text/html; charset=utf-8")
+            return
+        if parsed.path in ("/legacy", "/legacy/"):     # the console keeps an address of its own under --ui studio
             self._send_text(build_ui_html(), "text/html; charset=utf-8")
             return
         if parsed.path == "/app" or parsed.path.startswith("/app/"):
@@ -1147,7 +1217,26 @@ class _Handler(BaseHTTPRequestHandler):
                         "honesty": honesty,
                     }
                 )
-        return {"build_root": str(root), "packages": packages}
+        out: dict = {"build_root": str(root), "packages": packages}
+        if not packages:
+            # AN EMPTY LIBRARY IS A STATE, NOT A BUG -- but only if the app says which of the two it is. A
+            # first-run evaluator who sees an empty grid cannot tell "you have not built anything yet" from
+            # "this is pointed at the wrong folder", so hand the panel both facts: the directory that was
+            # actually scanned, and the two commands that fill it.
+            out["empty"] = {
+                "scanned": str(root),
+                "exists": root.exists(),
+                "reason": ("nothing in this directory looks like a robot package"
+                           if root.exists() else "this directory does not exist yet"),
+                "next_steps": [
+                    "Describe a robot in the Agent rail — the build lands here and appears in this list.",
+                    "Or run `python scripts/run_mvp_demo.py --mini` for a self-contained gallery "
+                    "(a few minutes on CPU).",
+                    "Or point the server at an existing build root: "
+                    "`python scripts/run_ui.py --ui studio --web --build-root <dir>`",
+                ],
+            }
+        return out
 
     def _send_json(self, payload: dict, status: HTTPStatus = HTTPStatus.OK) -> None:
         self._send_text(json.dumps(payload, indent=2), "application/json; charset=utf-8", status=status)

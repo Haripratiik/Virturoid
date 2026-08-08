@@ -100,10 +100,33 @@ export function LibraryWorkspace() {
 
       {/* Robot grid */}
       {filtered.length === 0 ? (
-        <EmptyState
-          title={all.length ? "No robots match the filter" : "No robots yet"}
-          sub={all.length ? "Try a different search." : "Build your first robot from the Agent Rail — it will appear here."}
-        />
+        all.length ? (
+          <EmptyState title="No robots match the filter" sub="Try a different search." />
+        ) : (
+          // FIRST-RUN STATE, NOT AN ERROR — and the difference has to be visible. "Build your first robot
+          // from the Agent Rail" was true but unfalsifiable: it never said WHICH directory came back empty,
+          // so a newcomer could not tell an unused install from a server pointed at the wrong folder. The
+          // backend now reports the scanned path and the ways to fill it; render both.
+          <div className="mx-auto max-w-xl rounded-card border border-hairline bg-panel p-5">
+            <div className="text-sm font-medium text-secondary">No robots here yet</div>
+            <div className="mt-1 text-xs text-muted">
+              {packages.data?.empty?.reason ?? "Nothing in this build root looks like a robot package."}
+            </div>
+            <div className="mt-2 break-all rounded-ctl border border-hairline bg-canvas px-2 py-1.5 font-mono text-2xs text-muted">
+              scanned: {packages.data?.empty?.scanned ?? packages.data?.build_root ?? "unknown"}
+            </div>
+            <ul className="mt-3 space-y-1.5 text-xs text-secondary">
+              {(packages.data?.empty?.next_steps ?? [
+                "Describe a robot in the Agent rail — the build lands here and appears in this list.",
+              ]).map((step) => (
+                <li key={step} className="flex gap-2">
+                  <span className="text-muted">·</span>
+                  <span>{step}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )
       ) : (
         <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
           {filtered.map((p) => (

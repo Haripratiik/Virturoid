@@ -206,9 +206,12 @@ def build_calibration(gene, fit: dict, *, log: dict | None = None, plan: dict | 
         "trajectory": fit.get("trajectory"),
         "evidence": evidence,
         "note": note,
-        "how_to_undo": "sysid.revert_calibration(gene) returns a gene with this block removed and every "
-                       "joint back on the compiler's prior. Nothing else on the gene is touched, so the "
-                       "reverted gene compiles byte-identically to the pre-calibration one.",
+        # The UNDO an engineer can actually perform. It named a Python function until `sysid.tools` gave the
+        # package a door; a customer driving this over MCP could not call that, so the record's own undo
+        # instruction was unusable by the only person who would ever need it.
+        "how_to_undo": "calibration_status {robot_id, revert: true} removes this block and puts every joint "
+                       "back on the compiler's prior. Nothing else on the gene is touched, so the reverted "
+                       "robot compiles byte-identically to the pre-calibration one.",
         "how_it_is_applied": "gene_compiler._joint_dynamics reads this block and emits the fitted ABSOLUTE "
                              "value for each listed joint/parameter instead of its structural prior. The "
                              "prior it replaced is recorded as 'from', so a prior that later moves is "
@@ -643,7 +646,7 @@ def engineer_brief(gene, fit: dict, *, gap: dict | None = None, log: dict | None
             f"allow_provisional=True at the call site: applying them moves your simulator "
             f"{gate.get('improvement_x')}x toward this log against a required {gate.get('threshold_x')}x. "
             f"Your model now carries them. Read them as a hypothesis, not a measurement, and "
-            f"sysid.revert_calibration(gene) takes them back out.")
+            f"calibration_status {{robot_id, revert: true}} takes them back out.")
     if withheld:
         # The headline sentence has to CHANGE, not gain a footnote. "0.993x closer" read as an improvement to
         # anyone skimming, and it is the sentence an engineer quotes to their team.
@@ -695,6 +698,11 @@ def engineer_brief(gene, fit: dict, *, gap: dict | None = None, log: dict | None
         + (" This fit has not been validated against any physical robot." if prov["class"] != "hardware"
            else ""))
 
+    # Terminate every clause before joining. Several of the explanations quoted above are written to be
+    # embedded and do not end in a full stop, so the paragraph ran two findings together -- measured on a Go2:
+    # "...Close the parameter gap first, then re-run 28 of 36 (joint, parameter) pairs are pinned". This is the
+    # sentence an engineer quotes to their team; it has to read as sentences.
+    lines = [ln if (not ln or ln.rstrip()[-1] in ".!?") else ln.rstrip() + "." for ln in lines]
     return {
         "ok": True,
         "robot": fit.get("robot"),

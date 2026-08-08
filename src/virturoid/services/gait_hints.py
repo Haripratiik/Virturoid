@@ -28,6 +28,9 @@ import json
 import random
 import statistics as st
 
+from virturoid.services.trained_controller import APPLY_MODES as _APPLY_MODES
+from virturoid.services.trained_controller import GAIT_KEYS as _GAIT_KEYS
+
 # The parameters worth mining a hint region FROM. ``duty`` was removed here with the search dimension
 # (2026-08-01, task #265): it never reached the controller, so its banked spread was CEM variance-collapse on a
 # null coordinate — and this module then reported it as "nearby walkers cluster duty near 0.25 (65 robots)", the
@@ -555,15 +558,48 @@ def _flywheel_hints(args: dict) -> dict:
 def _adapt_gait(args: dict) -> dict:
     from virturoid.services import session_state as S
     from virturoid.services.memory_db import DEFAULT_DB_PATH, MemoryDB
-    held = S.get_robot(args.get("robot_id", "")) if hasattr(S, "get_robot") else None
+    from virturoid.services.trained_controller import apply_trained_gait
+    rid = str(args.get("robot_id", ""))
+    held = S.get_robot(rid) if hasattr(S, "get_robot") else None
     gene = held.get("gene") if isinstance(held, dict) else (getattr(held, "gene", None) or held)
     if gene is None:
-        return {"ok": False, "error": f"no robot '{args.get('robot_id')}'; create_robot/submit_design first"}
+        return {"ok": False, "error": f"no robot '{rid}'; create_robot/submit_design first"}
     with MemoryDB(DEFAULT_DB_PATH) as db:
         out = adapt_gait_from_hints(gene, db, generations=int(args.get("generations", 4)),
                                     pop=int(args.get("pop", 10)), steps=int(args.get("steps", 600)))
+    # ...AND PUT IT ON THE ROBOT. This tool fitted a gait to a specific body and then returned it into the void:
+    # nothing wrote the held gene, so the very next verify_robot re-measured the untuned controller. See
+    # ``trained_controller`` for the contract and for why it is credible-gated and undoable.
+    out["applied_to_robot"] = apply_trained_gait(
+        rid, out.get("params") or {}, door="adapt_gait", apply=str(args.get("apply") or "auto").lower(),
+        credible=bool(out.get("walked")), verdict=str(out.get("verdict") or ""),
+        evidence={"forward_m": out.get("forward_m"), "adapted_from_prior_by": out.get("adapted_from_prior_by"),
+                  "n_hints_from": out.get("n_hints_from")})
     return {"ok": True, **out,
             "note": "gait FITTED to this body, warm-started from the flywheel's mined hints — not a copied policy"}
+
+
+def _apply_gait(args: dict) -> dict:
+    """The EXPLICIT apply verb: hand five CPG scalars to a held robot and make them its deployed controller.
+
+    Before this, no tool anywhere in the surface accepted gait parameters as INPUT — training produced numbers
+    an engineer could read and had no way to attach. It is also the other half of ``apply:'never'``: run a
+    training tool as a dry run, look at the parameters, then land them here."""
+    from virturoid.services.trained_controller import apply_trained_gait
+    rid = str(args.get("robot_id", ""))
+    if not rid:
+        return {"ok": False, "error": "robot_id is required (the held robot to apply the controller to)"}
+    params = args.get("params")
+    if params is None:                                            # accept the five scalars inline too
+        params = {k: args[k] for k in ("freq", "hip_amp", "knee_amp", "kp", "kd") if k in args}
+    rep = apply_trained_gait(rid, params, door=str(args.get("door") or "apply_gait"),
+                             apply=("never" if str(args.get("apply") or "").lower() == "never" else "always"),
+                             credible=None, verdict="not measured here (apply_gait does not run physics)",
+                             evidence={"applied_by": "agent, explicitly"})
+    if not rep.get("applied") and str(args.get("apply") or "").lower() != "never":
+        return {"ok": False, "error": rep.get("reason") or "the controller was not applied", **rep}
+    return {"ok": True, **rep,
+            "next": f"verify_robot {{robot_id:'{rid}', mode:'full'}} now measures THESE parameters"}
 
 
 GAIT_HINT_TOOLS = {
@@ -579,9 +615,32 @@ GAIT_HINT_TOOLS = {
     "adapt_gait": {
         "description": "Fit a NEW gait to a held robot by WARM-STARTING a short search from the flywheel's mined "
                        "hints (never a copy-pasted policy). Two different bodies get two different fitted gaits. "
-                       "Returns the adapted params + whether it walked + how far it drifted from the hint prior.",
+                       "Returns the adapted params + whether it walked + how far it drifted from the hint prior "
+                       "-- and COMMITS the fitted gait to the held robot (undo with edit_robot op:'undo'), so "
+                       "the next verify_robot measures it and reports gait_source "
+                       "'tuned_for_this_body::adapt_gait'. Pass apply:'never' for a dry run. Cheaper than "
+                       "learn_gait (a short warm-started search, not the full flywheel budget).",
         "parameters": {"type": "object", "required": ["robot_id"], "properties": {
-            "robot_id": {"type": "string"}, "generations": {"type": "integer"}, "pop": {"type": "integer"}}},
+            "robot_id": {"type": "string"}, "generations": {"type": "integer"}, "pop": {"type": "integer"},
+            "apply": {"type": "string", "enum": list(_APPLY_MODES), "default": "auto",
+                      "description": "'auto' commits the fitted gait when it walked; 'never' returns it without "
+                                     "touching the robot; 'always' commits it regardless and says so"}}},
         "handler": _adapt_gait, "heavy": True,
+    },
+    "apply_gait": {
+        "description": "Make explicit CPG gait parameters a held robot's DEPLOYED controller: "
+                       "{robot_id, params:{freq, hip_amp, knee_amp, kp, kd}}. The apply verb for an artifact you "
+                       "already have -- from train_reward/learn_gait/adapt_gait run with apply:'never', from a "
+                       "prior session, or hand-picked. Runs no physics and makes no claim: it lands the numbers "
+                       "and verify_robot then measures them (gait_source 'tuned_for_this_body::apply_gait'). "
+                       "Out-of-range or partial parameters are REFUSED, not silently repaired. Undo with "
+                       "edit_robot op:'undo'.",
+        "parameters": {"type": "object", "required": ["robot_id"], "properties": {
+            "robot_id": {"type": "string"},
+            "params": {"type": "object", "description": "all five of freq, hip_amp, knee_amp, kp, kd",
+                       "properties": {k: {"type": "number"} for k in _GAIT_KEYS}},
+            "door": {"type": "string", "description": "provenance label recorded on the robot (default "
+                                                      "'apply_gait'); it becomes the gait_source suffix"}}},
+        "handler": _apply_gait, "heavy": False,
     },
 }

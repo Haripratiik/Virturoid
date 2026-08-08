@@ -24,6 +24,7 @@ from __future__ import annotations
 
 from virturoid.services.gait_search import evaluate_gait, search_gait
 from virturoid.services.reward_dsl import propose_rewards, select_reward
+from virturoid.services.trained_controller import APPLY_MODES as _APPLY_MODES
 
 
 def _steered_rollout_fn(gene, *, generations: int, pop: int, steps: int, seed: int):
@@ -41,15 +42,66 @@ def _steered_rollout_fn(gene, *, generations: int, pop: int, steps: int, seed: i
     return rollout_fn
 
 
+def compile_authored_rewards(exprs) -> tuple[list, str]:
+    """``(candidates, "")`` for AGENT-AUTHORED reward expressions, or ``([], why_not)``.
+
+    The server ``instructions`` told every connected agent that ``train_reward`` is where "you author a
+    reward-as-code objective". Until 2026-08-08 you could not: the tool took ``task`` (English) only, there was
+    no ``reward`` parameter, and ``reward_dsl.REWARD_FEATURES`` — the 10-term vocabulary the whole DSL is built
+    on — was exposed by no tool at all. This is the parameter that makes the claim true. Expressions go through
+    exactly the same ``compile_reward`` AST allowlist an LLM-proposed one does (no attributes, no calls outside
+    the whitelisted math, bounded exponents), so "authored by the customer" buys no extra trust; a rejection
+    comes back naming the feature vocabulary, because an agent that cannot see the vocabulary cannot fix its
+    expression.
+    """
+    from virturoid.services.reward_dsl import _SAFE_FUNCS, REWARD_FEATURES, RewardCandidate, compile_reward
+    if isinstance(exprs, str):
+        exprs = [exprs]
+    if not isinstance(exprs, (list, tuple)) or not exprs:
+        return [], "reward must be an expression string, or a list of them"
+    out = []
+    for i, raw in enumerate(exprs):
+        expr = str(raw or "").strip()
+        if not expr:
+            return [], f"reward[{i}] is empty"
+        try:
+            out.append(RewardCandidate(name=f"authored_{i}", expr=expr, compiled=compile_reward(expr)))
+        except Exception as exc:  # noqa: BLE001 - a syntax error is the agent's to fix; hand back the vocabulary
+            return [], (f"reward[{i}] {expr!r} did not compile: {exc}. A reward is ONE arithmetic expression "
+                        f"over these per-step features: {', '.join(REWARD_FEATURES)}; callable functions are "
+                        f"{', '.join(sorted(_SAFE_FUNCS))}. No attributes, no imports, no subscripting.")
+    return out, ""
+
+
 def _one_round(gene, task, *, llm, reflection, n_rewards, screen_generations, screen_pop,
-               final_generations, final_pop, steps, seed, seed_candidates=None):
+               final_generations, final_pop, steps, seed, seed_candidates=None, authored=None):
     """One propose → screen → select → train pass. Returns the trained result + the verdict + selection stats.
     ``seed_candidates`` (R6 flywheel hints: rewards proven on morphology-nearby bodies) are prepended to the
-    proposed pool and compete in the same honest screen — a hint that doesn't win on THIS body is dropped."""
-    cands = propose_rewards(task, n=n_rewards, llm=llm, reflection=reflection)
-    if seed_candidates:
-        have = {c.expr for c in cands}
-        cands = [c for c in seed_candidates if c.expr not in have] + cands
+    proposed pool and compete in the same honest screen — a hint that doesn't win on THIS body is dropped.
+
+    ``authored`` (the agent's OWN reward expressions) REPLACES the proposal step: the customer asked for their
+    objective, not for four guesses at it. A single authored expression also skips the screen — screening exists
+    to CHOOSE between candidates, and there is nothing to choose — so it steers the final search directly and
+    is still judged by the same un-gameable ``classify`` verdict. Several authored expressions compete in the
+    ordinary screen, gaming detector included."""
+    if authored:
+        if len(authored) == 1:
+            best = authored[0]
+            final = search_gait(gene, generations=final_generations, pop=final_pop, steps=steps, seed=seed,
+                                reward_fn=best.compiled)
+            v = evaluate_gait(gene, final.best_params, steps=steps)
+            return {"reward_source": "authored", "reward_name": best.name, "reward_expr": best.expr,
+                    "final": final, "v": v, "n_gamed": 0, "n_candidates": 1,
+                    "ranked": [{"name": best.name, "expr": best.expr, "trusted_success": None,
+                                "reward_return": None, "gamed": False,
+                                "note": "the only candidate — nothing to select between, so it steered the "
+                                        "final search directly and the verdict below judges the RESULT"}]}
+        cands = list(authored)
+    else:
+        cands = propose_rewards(task, n=n_rewards, llm=llm, reflection=reflection)
+        if seed_candidates:
+            have = {c.expr for c in cands}
+            cands = [c for c in seed_candidates if c.expr not in have] + cands
     rollout_fn = _steered_rollout_fn(gene, generations=screen_generations, pop=screen_pop, steps=steps, seed=seed)
     sel = select_reward(cands, rollout_fn)
     best = sel.get("best")
@@ -63,7 +115,9 @@ def _one_round(gene, task, *, llm, reflection, n_rewards, screen_generations, sc
     final = search_gait(gene, generations=final_generations, pop=final_pop, steps=steps, seed=seed,
                         reward_fn=best.compiled)
     v = evaluate_gait(gene, final.best_params, steps=steps)  # classify verdict, reward-independent
-    return {"reward_source": ("llm" if best.name.startswith("llm") else "template"), "reward_name": best.name,
+    _src = ("authored" if best.name.startswith("authored") else
+            "llm" if best.name.startswith("llm") else "template")
+    return {"reward_source": _src, "reward_name": best.name,
             "reward_expr": best.expr, "final": final, "v": v, "ranked": ranked,
             "n_gamed": sel.get("n_gamed", 0), "n_candidates": len(cands)}
 
@@ -128,7 +182,7 @@ def run_intelligent_reward_loop(gene, task: str = "walk forward", *, llm=None, n
                                 final_generations: int = 8, final_pop: int = 24, steps: int = 800,
                                 seed: int = 0, iterations: int = 1, bank: bool = True, db=None,
                                 train_backend: str = "cpu", gpu_iters: int = 200, gpu_envs: int = 512,
-                                progress=None) -> dict:
+                                progress=None, authored=None) -> dict:
     """Author → screen → select → train → verify → REFLECT → (re-propose), with zero hand-written reward code.
 
     1. ``propose_rewards`` writes ``n_rewards`` candidate reward expressions (LLM if given, else templates).
@@ -151,29 +205,34 @@ def run_intelligent_reward_loop(gene, task: str = "walk forward", *, llm=None, n
         # the reward loop). These compete in the SAME honest screen as the fresh proposals — a hint that loses on
         # this body is dropped, so recall accelerates without ever forcing a stale reward.
         seed_candidates, reward_hints = [], []
-        try:
-            from virturoid.services.gait_flywheel import recall_reward_hints
-            from virturoid.services.memory_db import MemoryDB
-            from virturoid.services.reward_dsl import RewardCandidate, compile_reward
-            _rdb = db or MemoryDB()
-            reward_hints = recall_reward_hints(_rdb, gene, k=6)
-            for i, h in enumerate(reward_hints):
-                try:
-                    seed_candidates.append(RewardCandidate(name=f"flywheel_{i}", expr=h["reward_expr"],
-                                                           compiled=compile_reward(h["reward_expr"])))
-                except Exception:  # noqa: BLE001 - a malformed banked expr is skipped, never fatal
-                    pass
-            if db is None:
-                _rdb.close()
-        except Exception:  # noqa: BLE001 - no bank yet -> cold-start from templates/LLM
-            pass
+        if authored:
+            # The agent stated its objective. A flywheel hint is a GUESS at an objective, so it does not get to
+            # compete with one — recall is skipped entirely and the report says the reward is theirs.
+            reward_hints = []
+        else:
+            try:
+                from virturoid.services.gait_flywheel import recall_reward_hints
+                from virturoid.services.memory_db import MemoryDB
+                from virturoid.services.reward_dsl import RewardCandidate, compile_reward
+                _rdb = db or MemoryDB()
+                reward_hints = recall_reward_hints(_rdb, gene, k=6)
+                for i, h in enumerate(reward_hints):
+                    try:
+                        seed_candidates.append(RewardCandidate(name=f"flywheel_{i}", expr=h["reward_expr"],
+                                                               compiled=compile_reward(h["reward_expr"])))
+                    except Exception:  # noqa: BLE001 - a malformed banked expr is skipped, never fatal
+                        pass
+                if db is None:
+                    _rdb.close()
+            except Exception:  # noqa: BLE001 - no bank yet -> cold-start from templates/LLM
+                pass
 
         best_round, iter_log, reflection_text = None, [], ""
         for it in range(max(1, iterations)):
             r = _one_round(gene, task, llm=llm, reflection=reflection_text, n_rewards=n_rewards,
                            screen_generations=screen_generations, screen_pop=screen_pop,
                            final_generations=final_generations, final_pop=final_pop, steps=steps, seed=seed,
-                           seed_candidates=(seed_candidates if it == 0 else None))
+                           seed_candidates=(seed_candidates if it == 0 else None), authored=authored)
             r["reflection"] = build_reflection_payload(gene, r["final"].best_params, r["reward_expr"], steps=steps)
             v = r["v"]
             iter_log.append({"iteration": it, "reward_expr": r["reward_expr"], "verdict": v["verdict"],
@@ -267,16 +326,53 @@ def _train_reward(args: dict) -> dict:
     backend = str(args.get("train_backend") or "cpu").lower()
     if backend not in ("cpu", "gpu", "auto"):
         return {"ok": False, "error": f"train_backend must be 'cpu', 'gpu' or 'auto' (got {backend!r})"}
+    # THE AGENT'S OWN REWARD-AS-CODE OBJECTIVE, which the server instructions have always promised and the tool
+    # never accepted. Compiled through the same AST allowlist as an LLM's; a bad expression is rejected BEFORE
+    # any physics runs, with the feature vocabulary attached so the next attempt can be right.
+    authored = None
+    if args.get("reward") is not None:
+        authored, why = compile_authored_rewards(args["reward"])
+        if why:
+            return {"ok": False, "error": why}
     out = run_intelligent_reward_loop(
-        gene, task=str(args.get("task") or "walk forward"), llm=llm,
+        gene, task=str(args.get("task") or "walk forward"), llm=llm, authored=authored,
         n_rewards=int(args.get("n_rewards", 4)), iterations=int(args.get("iterations", 1)),
         final_generations=int(args.get("generations", 8)), final_pop=int(args.get("pop", 24)),
         steps=int(args.get("steps", 800)), seed=int(args.get("seed", 0)),
         train_backend=backend, gpu_iters=int(args.get("gpu_iters", 200)),
         gpu_envs=int(args.get("gpu_envs", 512)),
         db=None)
-    out["reward_authored_by"] = "llm" if llm is not None else "templates (no LLM backend configured)"
+    out["reward_authored_by"] = ("you (the calling agent), via the `reward` parameter" if authored else
+                                 "llm" if llm is not None else "templates (no LLM backend configured)")
+    if out.get("ok"):
+        out["applied_to_robot"] = _land_on_robot(rid, out, args, door="train_reward")
     return out
+
+
+def _land_on_robot(rid: str, out: dict, args: dict, *, door: str) -> dict:
+    """CLOSE THE LOOP: put the trained controller on the held robot so the next ``verify_robot`` measures IT.
+
+    This tool read the gene with ``S.get_robot`` and never wrote one back — see ``trained_controller`` for the
+    full account and for why "apply by default, credible-gated, undoable" is the contract. The GPU arm's
+    artifact is a policy ``.npz``, which deploys through the POLICY bank (``policy_flywheel.recall_morph_policy``,
+    which verify already consults when the scripted gait is not credible) rather than through these five
+    scalars; the report says which of the two landed rather than letting one stand for both.
+    """
+    from virturoid.services.trained_controller import apply_trained_gait
+    ev = {"task": str(args.get("task") or "walk forward"), "reward_expr": out.get("reward_expr"),
+          "reward_source": out.get("reward_source"), "forward_m": out.get("forward_m"),
+          "robustness_rel": out.get("robustness_rel")}
+    rep = apply_trained_gait(rid, out.get("gait_params") or {}, door=door,
+                             apply=str(args.get("apply") or "auto").lower(),
+                             credible=bool(out.get("credible")), verdict=str(out.get("verdict") or ""),
+                             evidence=ev)
+    gpu = out.get("gpu_training") or {}
+    if gpu.get("trained"):
+        rep["policy_npz"] = gpu.get("policy")
+        rep["policy_note"] = ("MJX PPO also produced a neural policy; it deploys through the POLICY bank (verify "
+                              "recalls it when the scripted gait is not credible), not through the five CPG "
+                              "scalars applied above")
+    return rep
 
 
 def _generate_fusion(args: dict) -> dict:
@@ -349,10 +445,15 @@ REWARD_LOOP_TOOLS = {
     },
     "train_reward": {
         "description": "Optimize a held robot's controller from an NLP task ('walk forward fast', 'carry load "
-                       "over rough ground') with NO hand-written reward: the LLM authors candidate reward "
+                       "over rough ground') OR from a reward-as-code objective YOU write (pass `reward`): the "
+                       "LLM authors candidate reward "
                        "functions over a safe, AST-sandboxed feature vocabulary, each STEERS a real physics "
                        "search, and the winner is chosen by an un-gameable success metric (a reward that games "
-                       "is dropped). BE PRECISE ABOUT WHAT IS TRAINED: by default (train_backend='cpu') the "
+                       "is dropped). THE RESULT LANDS ON THE ROBOT: the winning gait is committed to the held "
+                       "gene (undo with edit_robot op:'undo'), so the next verify_robot measures the controller "
+                       "you just trained and reports gait_source 'tuned_for_this_body::train_reward' -- pass "
+                       "apply:'never' for a dry run that only returns the parameters. BE PRECISE ABOUT WHAT IS "
+                       "TRAINED: by default (train_backend='cpu') the "
                        "reward steers a CEM search over the 5-scalar CPG gait parameterization -- a real search "
                        "on real physics, NOT a neural policy and NOT PPO. Set train_backend='gpu' and the SAME "
                        "expression additionally steers MJX PPO on the GPU box (it replaces the shaped reward "
@@ -363,6 +464,17 @@ REWARD_LOOP_TOOLS = {
         "parameters": {"type": "object", "required": ["robot_id"], "properties": {
             "robot_id": {"type": "string"},
             "task": {"type": "string", "description": "the goal in plain language"},
+            "reward": {"description": "YOUR reward-as-code objective: one arithmetic expression (or a list of "
+                                      "them, which then compete in the same anti-gaming screen) over the "
+                                      "whitelisted per-step features. Supplying it REPLACES the LLM/template "
+                                      "proposal step -- your objective is used, not guessed at. Omit for the "
+                                      "autonomous loop.",
+                       "anyOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}}]},
+            "apply": {"type": "string", "enum": list(_APPLY_MODES), "default": "auto",
+                      "description": "where the trained controller goes. 'auto' (default) commits it to the "
+                                     "held robot when the run's own un-gameable verdict is a credible walk; "
+                                     "'never' returns it as an artifact and touches nothing (apply it later "
+                                     "with apply_gait); 'always' commits it regardless and says so."},
             "n_rewards": {"type": "integer", "description": "how many reward candidates to author (default 4)"},
             "iterations": {"type": "integer", "description": "reflect-and-re-propose rounds; >1 runs the Eureka "
                            "feedback loop, stopping early once a credible gait is found (default 1)"},

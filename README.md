@@ -59,6 +59,12 @@ Every body below was generated from a one-line prompt by the same pipeline — n
 - Generates the scenes to test it, then runs the real skill: pick and place, sort, navigate, or locomote.
 - Measures the outcome instead of assuming it.
 
+**Close the sim-to-real gap on a robot you own**
+- Writes the bench experiment to run on your actual hardware: a short, safe, information-rich command sequence, one joint at a time, with every amplitude bounded by that joint's own declared limits and every frequency bounded by the datasheet torque and no-load speed of the motor its bill of materials sized. A joint it cannot move safely is reported as such rather than commanded anyway.
+- Measures the gap from the log you send back — **per joint, in radians, milliseconds and newton-metres, never a single fidelity score**. It replays your commands through the simulator to compare trajectories, then subtracts the simulator's own inverse dynamics from your measured torque and regresses the remainder on the model's sensitivity, so it names *which* joints and *which* parameters are responsible. Actuation delay is identified separately by re-simulating the closed loop across a delay grid.
+- Fits each joint's viscous damping, reflected inertia and dry friction with a **confidence interval, not a point estimate**, and applies only what survives two refusals: parameters the experiment could not actually load are reported as unidentified rather than guessed, and a fit that does not measurably improve how the simulator tracks your log is withheld from the model entirely. Every applied calibration is reversible in one call and carries the prior it replaced.
+- No hardware yet? The same journey runs against a deliberately perturbed copy of the model, and labels every result as a simulation rather than a measurement — including refusing to raise the actuator-fidelity level. Honest scope: this validates the pipeline and the estimator, not the physics. Both sides are MuJoCo there, so MuJoCo's own modelling error cancels, and that is exactly the error a real log exists to expose. **No number we publish has been validated against a physical robot; the first hardware log needs a design partner.**
+
 **Reuse and organize**
 - Banks every trained body and skill into a morphology vector space and a linked project memory.
 - Warm-starts each new robot from the most similar past work instead of training from scratch.
@@ -159,46 +165,103 @@ Good entry points into the engine: `anatomy_designer.py` and `anatomy_compiler.p
 ## Installation
 
 ```bash
+git clone https://github.com/Haripratiik/Virturoid.git && cd Virturoid
 python -m venv .venv
 . .venv/bin/activate            # Windows: .venv\Scripts\activate
-pip install -e ".[all]"         # full install, or ".[desktop,sim]" for just the studio
+pip install -e ".[sim]"         # physics + CAD: everything below runs on this
 ```
 
-The core package needs only NumPy, so `pip install -e .` gives you an importable library and runnable CLIs without the heavy engines. The extras (`sim`, `cad`, `rl`, `desktop`, `web`, `all`) pull in MuJoCo, CAD, and the learning stack as needed.
+**`.[sim]` is the install to start with.** It is what the demo, the studio, the verdicts and the CAD export
+actually use. Measured on a clean venv (Windows, Python 3.13): **223 s to install, 696 MB on disk** — most of it
+OpenCascade, which is what makes the CAD real. `.[all]` also pulls PyTorch, JAX and PySide6 (several GB) and is
+only worth it once you want GPU training or the native desktop window.
+
+**`pip install -e .` is what makes `import virturoid` work.** The package lives in `src/`, so a clone alone is
+not importable — without the editable install, `import virturoid` fails from every directory, including the
+repo root. The core install needs only NumPy (69 MB venv) and gives you an importable library plus the
+`virturoid`, `virturoid-build`, `virturoid-import` and `virturoid-mvp` commands; the extras add the engines.
+
+Not ready to install? The two entry-point scripts — `scripts/run_mvp_demo.py` and `scripts/run_ui.py` — put
+`src/` on `sys.path` themselves, so those two run straight from a clone (you still need MuJoCo). Everything
+else, including your own code, expects the install or `PYTHONPATH=src` (Windows: `set PYTHONPATH=src`).
+
+| Extra | Pulls in | For |
+|---|---|---|
+| *(none)* | NumPy | schemas, planning, memory, the CLIs |
+| `sim` | MuJoCo, Pillow, build123d | **start here** — physics, verdicts, renders, STEP/STL CAD |
+| `web` | FastAPI, uvicorn | the FastAPI web app (`run_ui.py` itself needs nothing extra) |
+| `desktop` | PySide6, pywebview | Studio as a native window instead of a browser tab |
+| `rl` | JAX, PyTorch | GPU/MJX training and the morphology-aware policies |
+| `isaac` | usd-core | the OpenUSD / Isaac Lab hand-off |
+| `llm` | openai, anthropic, requests | the LLM design backends (offline is the default) |
+| `all` | all of the above | full local development |
 
 ## Usage
 
-### Start here (no API key, no GPU, ~1 minute)
+### Start here — two robots, no API key, no GPU (**allow 4–10 minutes**)
 
 ```bash
 python scripts/run_mvp_demo.py --mini      # -> build/demo/index.html : robots built from text, each with its verdict
 ```
 
-A self-contained gallery: every robot is composed from a prompt, simulated in MuJoCo, and labelled with the
-verdict it actually earned — including the ones that fail. Nothing here calls an LLM, so it runs on a fresh clone
-with no keys configured — and the page says so at the top, naming the design path it resolved and stamping every
-card with the one that produced that body. Run `--llm` (or set `VIRTUROID_LLM_BACKEND=openai` + `OPENAI_API_KEY`)
-to have a language model author the anatomy instead of the offline compositor; the physics, verdicts, and exports
-are identical either way.
+**Budget the time before you start it.** This used to be documented as "~1 minute" and it is not: two cold runs
+on the development machine measured **212 s and 336 s**, and an evaluator on a different machine measured
+**579 s**. Almost all of it is one stage — the quadruped's `create_robot` took 202 s, 321 s and 574 s in those
+three runs, while the arm that follows it took **7 s**. That is not a hang and it is
+not overhead — `create_robot` grounds the body to its real mass and then *searches* for a gait that fits that
+particular body, against a verdict that can see it fall. Fitting a body's controller to the body is the
+expensive, honest version of that step; the cheap version is scoring your robot at some other robot's
+hand-tuned operating point, which is what the search exists to stop.
 
-The full run (`python scripts/run_mvp_demo.py`, a few minutes) adds the measurement that matters most: a
+So the run talks while it works. Every stage announces itself, reports what it cost, and prints a
+`... still running` line every 15 seconds with a clock in the left margin:
+
+```
+[0:00]    [1/2] a quadruped robot dog
+[0:00]       create_robot ... (compose -> ground the mass -> fit an operating point to THIS body ...)
+[0:15]         ... still running: create_robot (15s)
+[3:22]       done create_robot in 202.2s
+[3:23]       done verify_robot (quick) in 0.5s
+[3:23]    -> CREDIBLE WALK  (203.8s for this robot)
+```
+
+The output is a self-contained gallery: every robot is composed from a prompt, simulated in MuJoCo, and
+labelled with the verdict it actually earned — including the ones that fail. Nothing here calls an LLM, so it
+runs on a fresh clone with no keys configured — and the page says so at the top, naming the design path it
+resolved and stamping every card with the one that produced that body. Run `--llm` (or set
+`VIRTUROID_LLM_BACKEND=openai` + `OPENAI_API_KEY`) to have a language model author the anatomy instead of the
+offline compositor; the physics, verdicts, and exports are identical either way.
+
+The full run (`python scripts/run_mvp_demo.py`, **measured 703 s / 11m43s** on the same machine) builds seven
+bodies — four of them legged, each with a flywheel learning pass — and adds the measurement that matters most: a
 **same-family comparison** — three quadruped-animal prompts, three measurably different bodies, each verified on
 its own, with a `SUBSTITUTED` column that says so if the walkability gate ever replaces one with a shared
-template. `--no-compare` skips it.
+template. `--no-compare` skips it; `--no-learn` skips the learning passes.
 
 ### Virturoid Studio (the app)
 
-Studio is the real frontend — a React + Vite desktop/web app (source in [`frontend/`](frontend/), built to
-[`frontend/dist/`](frontend/), which the Python backend serves at `/studio/`). Build it once, then run it:
+Studio is the real frontend — a React + Vite desktop/web app (source in [`frontend/`](frontend/), served by the
+Python backend at `/studio/`). **The built bundle is committed, so a clone needs no npm step:**
 
 ```bash
-cd frontend && npm install && npm run build && cd ..      # one-time: build the Studio bundle
-python scripts/run_ui.py --ui studio --web --port 8765    # Studio in the browser at http://127.0.0.1:8765/studio/
+python scripts/run_ui.py --ui studio --web --port 8765    # -> http://127.0.0.1:8765/studio/
 python scripts/run_ui.py --ui studio                      # or as a native desktop window (needs the desktop extra)
 ```
 
-`--ui studio` picks the URL the launcher opens and prints; without it you get the original lightweight build
-console at `/`. Both are served by the same process, so `/` and `/studio/` are always both reachable.
+With `--ui studio`, `http://127.0.0.1:8765/` **redirects to `/studio/`** and the older lightweight build console
+keeps its own address at `/legacy`. (Without the flag it is the other way round: the console is at `/`, Studio
+still at `/studio/`.) Opening the root and landing on the legacy console — whose viewport reads *"Unknown
+package."* until you pick one — was the single easiest way to conclude the app was broken while Studio was
+running one path segment away.
+
+**What you should see on a fresh clone:** four demo robots (`arm_sort`, `dog_walk`, `hexapod_walk`, `humanoid`)
+in the Robot Library — they are tracked in git under `build/ui_verify/`, and the server falls back to them when
+your own build root is still empty. The status column is deliberately unflattering: most of them read
+`UNVERIFIED` until you verify them. If the library *is* empty it now says which directory it scanned and how to
+fill it, instead of showing a blank grid.
+
+If you change the frontend, rebuild it with `cd frontend && npm install && npm run build`, or develop against
+it with hot reload (below).
 
 Describe a robot to the build assistant and it builds it in the live 3D viewport. Switch the viewport to **Episode** to replay the trained motion, open **Memory** for the cross-robot species tree, and **Analysis** for evaluation detail. To develop the frontend with hot reload, run the backend as above and `cd frontend && npm install && npm run dev` (Vite serves `http://localhost:5173/studio/` and proxies the API to the backend).
 
@@ -298,7 +361,7 @@ matching key/endpoint — the keys are yours and never leave your machine. Every
 - **Learned humanoid locomotion.** Bring the learning stack from quadrupeds to a balancing biped.
 - **Faster, command-conditioned gaits.** Steer a trained policy by target speed and direction.
 - **Onboard perception.** Range sensing and vision so robots can act in unknown environments.
-- **Sim-to-real transfer.** Carry trained controllers onto physical hardware.
+- **A hardware log.** Measuring the sim-to-real gap ships today (see *Close the sim-to-real gap on a robot you own*), but every number it has produced so far came from a simulated stand-in. Running the bench experiment on a physical robot, and carrying a trained controller onto it, needs a design partner.
 
 ## License
 

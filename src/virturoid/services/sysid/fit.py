@@ -194,7 +194,12 @@ def application_gate(trajectory: dict | None, n_identified: int, *,
                       "centre of mass, contact or gearbox elasticity -- being absorbed by the parameters it "
                       "can, so the numbers move and the simulator does not get closer. The fit is PROVISIONAL "
                       "and is withheld from the model; every value is still reported so it can be read, and "
-                      "apply_calibration(..., allow_provisional=True) will write it anyway."),
+                      # NAMES THE DOOR, not the Python function. This sentence is read by the customer, and
+                      # until `sysid.tools` existed it pointed at a private call they could not make: there was
+                      # no tool, no CLI verb and no route into this package at all. Telling somebody how to
+                      # override a gate in a language they are not speaking is the same defect as the gate
+                      # being undiscoverable -- it names an escape hatch that is not on their wire.
+                      "fit_actuators {allow_provisional: true} will write it anyway."),
     }
 
 

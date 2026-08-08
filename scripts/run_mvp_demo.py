@@ -3,8 +3,8 @@ them with un-gameable verdicts, and (for legged bodies) show the learned-gait FL
 emitted as ONE self-contained HTML page you open in a browser. No server, no build step: renders are embedded as
 base64, verdicts are the real ones (a robot that falls says so), and the flywheel bars are measured, not staged.
 
-    python scripts/run_mvp_demo.py                 # full battery -> build/demo/index.html
-    python scripts/run_mvp_demo.py --mini          # 2-robot quick pass (what the smoke test runs)
+    python scripts/run_mvp_demo.py                 # full battery -> build/demo/index.html  (~12 min)
+    python scripts/run_mvp_demo.py --mini          # 2-robot quick pass (what the smoke test runs; 4-10 min)
     python scripts/run_mvp_demo.py --llm            # use the configured LLM design path instead of offline
     python scripts/run_mvp_demo.py --no-learn       # skip the flywheel pass (faster)
     python scripts/run_mvp_demo.py --no-compare     # skip the same-family differentiation panel (faster)
@@ -13,6 +13,13 @@ base64, verdicts are the real ones (a robot that falls says so), and the flywhee
 Honesty (see memory 'verify-renders-not-just-numbers'): the gallery shows the render AND the measured verdict for
 every robot, including weak/flagged ones -- never a curated win. The flywheel delta is verify-before vs verify-after
 on the SAME held body at the SAME horizon.
+
+AND THAT INCLUDES BEING HONEST ABOUT WHAT IT COSTS YOU TO WATCH. This was documented as "~1 minute" while three
+cold --mini runs measured 212 s, 336 s and 579 s -- and printed NOTHING for 202/321/574 of those seconds, because
+one call (create_robot on the quadruped) owns almost the whole run: it grounds the body and then searches for an
+operating point that fits THAT body. The search is the honest version of the step and is not trimmed here. So the
+runner announces every stage, reports what it cost, and heart-beats every 15 s while a stage is still working --
+see ``_Stage``. A first-run reader should never have to guess whether this hung.
 
 ...AND that includes being honest about WHICH BRAIN DESIGNED THE BODY. This page used to be titled "text -> robot"
 while running with the project .env suppressed, which means get_llm() returned None and no language model ever saw
@@ -30,11 +37,19 @@ import base64
 import html
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
+
+# Wall clock for the whole run, so every line carries the elapsed time of the RUN and not just of its stage.
+_T0 = time.time()
+
+#: How often a still-running stage says so. 15 s is short enough that a reader never wonders whether the process
+#: died, long enough that the log stays readable.
+_HEARTBEAT_S = 15.0
 
 # A deliberately DIVERSE battery -- different morphologies exercise different verdict paths (legged gait, manipulator
 # grasp, mobile drive) so the gallery proves breadth, not one lucky body. Order = what a reviewer should see first.
@@ -88,6 +103,59 @@ def _ascii(s: object) -> str:
     typography: that file is written encoding='utf-8' and read by a browser, not a console."""
     return (str(s).replace("—", "-").replace("–", "-").replace("’", "'").replace("“", '"').replace("”", '"')
             .encode("ascii", "replace").decode("ascii"))
+
+
+def _clock(t: float | None = None) -> str:
+    """``[m:ss]`` since the process started -- a moving clock on every line, so a reader can tell at a glance
+    whether the run is progressing or wedged."""
+    s = int((t if t is not None else time.time()) - _T0)
+    return f"[{s // 60:d}:{s % 60:02d}]"
+
+
+def _say(msg: str, indent: int = 0) -> None:
+    """One console line, ASCII-safe, wall-clock stamped, flushed. Never buffered -- a progress line that arrives
+    at the end of the run is not a progress line."""
+    print(f"{_clock()} {' ' * indent}{_ascii(msg)}", flush=True)
+
+
+class _Stage:
+    """Announce a stage, HEARTBEAT while it runs, and report what it cost.
+
+    THIS IS THE FIX FOR THE FIRST-RUN EXPERIENCE, and it is worth saying why it is telemetry rather than a
+    speed-up. Measured on this checkout, ``--mini`` spends 321 of its 336 seconds inside ONE call --
+    ``create_robot`` on the quadruped -- and prints nothing for all 321 of them. A reader who has been told
+    "~1 minute" checks five times whether it hung, and closes the tab at minute two of their first command.
+
+    The 321 s is not waste to be trimmed: ``create_robot`` grounds the body and then fits an operating point TO
+    that body by bounded search against the deploy-horizon verdict (see ai_native_tools.create_robot's own cost
+    note -- 124.7 s / 360 evaluations for the authored dog). Making that cheaper means shipping a body tuned at
+    another robot's operating point, which is exactly the dishonesty the search exists to remove. So the run
+    SAYS what it is doing, every 15 seconds, with the clock running.
+
+    The heartbeat is a daemon thread that only prints; it touches no shared state, so it cannot affect a verdict.
+    """
+
+    def __init__(self, label: str, why: str = "", indent: int = 6) -> None:
+        self.label, self.why, self.indent = label, why, indent
+        self._stop = threading.Event()
+        self._t0 = 0.0
+        self.seconds = 0.0
+
+    def __enter__(self) -> "_Stage":
+        self._t0 = time.time()
+        _say(f"{self.label} ...{(' ' + self.why) if self.why else ''}", self.indent)
+        self._thread = threading.Thread(target=self._beat, daemon=True)
+        self._thread.start()
+        return self
+
+    def _beat(self) -> None:
+        while not self._stop.wait(_HEARTBEAT_S):
+            _say(f"... still running: {self.label} ({int(time.time() - self._t0)}s)", self.indent + 2)
+
+    def __exit__(self, *exc) -> None:
+        self._stop.set()
+        self.seconds = round(time.time() - self._t0, 1)
+        _say(f"{'x' if exc[0] else 'done'} {self.label} in {self.seconds}s", self.indent)
 
 
 def _design_path() -> dict:
@@ -184,19 +252,28 @@ def build_one(spec: dict, *, quick: bool, learn: bool, reuse: dict[str, dict] | 
     card: dict = {"prompt": prompt, "note": spec.get("note", ""), "error": None,
                   "img": None, "gif": None, "flywheel": None}
     try:
-        cr = (reuse or {}).get(prompt) or call_tool("create_robot", {"prompt": prompt})["result"]
+        held = (reuse or {}).get(prompt)
+        if held:
+            cr = held
+            _say(f"create_robot: reusing the body built for this prompt in the comparison panel", 6)
+        else:
+            with _Stage("create_robot", "(compose -> ground the mass -> fit an operating point to THIS body; "
+                                       "the gait fit is the slow part, minutes on CPU for a legged body)"):
+                cr = call_tool("create_robot", {"prompt": prompt})["result"]
         rid = cr["robot_id"]
         card["robot_id"] = rid
         # the COMPOSER's own record of which path built this gene -- so the page reports the design path per
         # robot instead of inferring it once from the flags (a configured LLM that 429s falls back per body)
         card["design_source"] = cr.get("design_source", "unknown")
 
-        rv = call_tool("render_view", {"robot_id": rid}).get("result", {})
+        with _Stage("render_view", "(MuJoCo render of the body)"):
+            rv = call_tool("render_view", {"robot_id": rid}).get("result", {})
         arts = rv.get("artifacts") or []
         card["img"] = _b64(arts[0]) if arts else None
 
         mode = "quick" if quick else "full"
-        vr = call_tool("verify_robot", {"robot_id": rid, "mode": mode}).get("result", {})
+        with _Stage(f"verify_robot ({mode})", "(real rollout -> the verdict on the card)"):
+            vr = call_tool("verify_robot", {"robot_id": rid, "mode": mode}).get("result", {})
         card.update({"kind": vr.get("kind", "?"), "verdict": vr.get("verdict", "no verdict"),
                      "credible": vr.get("credible_walk"), "survived": vr.get("survived")})
         card["metrics"] = {k: vr.get(k) for k in ("forward_m", "reach_m", "success_rate", "swim_m", "cadence_hz")
@@ -209,8 +286,11 @@ def build_one(spec: dict, *, quick: bool, learn: bool, reuse: dict[str, dict] | 
         # FLYWHEEL: for a legged body, learn a gait and re-verify on the SAME body/horizon -> measured before/after
         if learn and vr.get("kind") == "legged":
             before = vr.get("forward_m")
-            lg = call_tool("learn_gait", {"robot_id": rid, "generations": 6, "pop": 16, "steps": 900}).get("result", {})
-            vr2 = call_tool("verify_robot", {"robot_id": rid, "mode": "full"}).get("result", {})
+            with _Stage("learn_gait", "(6 generations x 16 candidates -- the flywheel pass)"):
+                lg = call_tool("learn_gait", {"robot_id": rid, "generations": 6, "pop": 16,
+                                              "steps": 900}).get("result", {})
+            with _Stage("verify_robot (full, after learning)", "(same body, same horizon -> the before/after bar)"):
+                vr2 = call_tool("verify_robot", {"robot_id": rid, "mode": "full"}).get("result", {})
             after = vr2.get("forward_m")
             if before is not None and after is not None:
                 card["flywheel"] = {"before": round(float(before), 3), "after": round(float(after), 3),
@@ -240,19 +320,23 @@ def build_family(specs: list[dict]) -> list[dict]:
     from virturoid.services.agent_tools import call_tool
 
     rows: list[dict] = []
-    for spec in specs:
+    for i, spec in enumerate(specs, 1):
         prompt = spec["prompt"]
         t0 = time.time()
         row: dict = {"prompt": prompt, "label": spec.get("label", prompt), "error": None, "img": None}
+        _say(f"[compare {i}/{len(specs)}] {prompt}", 3)
         try:
-            cr = call_tool("create_robot", {"prompt": prompt})["result"]
+            with _Stage("create_robot", "(compose -> ground -> fit an operating point to THIS body)"):
+                cr = call_tool("create_robot", {"prompt": prompt})["result"]
             rid = cr["robot_id"]
             row["design_source"] = cr.get("design_source", "unknown")
             row["robot_id"] = rid
-            rv = call_tool("render_view", {"robot_id": rid}).get("result", {})
+            with _Stage("render_view"):
+                rv = call_tool("render_view", {"robot_id": rid}).get("result", {})
             arts = rv.get("artifacts") or []
             row["img"] = _b64(arts[0]) if arts else None
-            vr = call_tool("verify_robot", {"robot_id": rid, "mode": "quick"}).get("result", {})
+            with _Stage("verify_robot (quick)", "(800-step rollout, identical for all three bodies)"):
+                vr = call_tool("verify_robot", {"robot_id": rid, "mode": "quick"}).get("result", {})
             row["verdict"] = vr.get("verdict", "no verdict")
             row["credible"] = vr.get("credible_walk")
             row["forward_m"] = vr.get("forward_m")
@@ -261,8 +345,8 @@ def build_family(specs: list[dict]) -> list[dict]:
             row["error"] = f"{type(exc).__name__}: {exc}"
         row["seconds"] = round(time.time() - t0, 1)
         rows.append(row)
-        print(f"      [compare] {_ascii(row['label'])}: {_ascii(row.get('verdict') or row.get('error'))} "
-              f"({row.get('mass_kg')} kg, {row.get('seconds')}s)", flush=True)
+        _say(f"-> {row['label']}: {row.get('verdict') or row.get('error')} "
+             f"({row.get('mass_kg')} kg, {row.get('seconds')}s)", 3)
     return rows
 
 
@@ -589,22 +673,36 @@ def run_gallery(prompts: list[dict], out_dir: str, *, quick: bool = False, learn
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     os.environ.setdefault("VIRTUROID_SESSION_DIR", str(out / "session"))
+    _say(f"output dir: {out.resolve()}")
     path_info = _design_path()
-    print(_ascii("design path: " + (f"LLM backend '{path_info.get('backend')}'" if path_info.get("llm")
-                                    else "OFFLINE compositor (no LLM enabled for this run)")), flush=True)
+    _say("design path: " + (f"LLM backend '{path_info.get('backend')}'" if path_info.get("llm")
+                            else "OFFLINE compositor (no LLM enabled for this run)"))
+    n_bodies = len({s["prompt"] for s in prompts} | {s["prompt"] for s in (compare or [])})
+    _say(f"plan: {n_bodies} bodies"
+         f"{f' ({len(compare)} in the comparison panel, {len(prompts)} in the gallery, the dog shared)' if compare else ''}"
+         f"{'; each legged body also gets a flywheel learn pass' if learn else ''}")
+    # SAY WHAT IT COSTS, BEFORE it costs it. Measured on this checkout (CPU, no GPU, cold memory bank):
+    # --mini took 336 s, of which 321 s were ONE call -- create_robot on the quadruped -- and the run printed
+    # nothing at all for those 321 s. The cost is real (create_robot fits an operating point to each body by
+    # bounded search; see ai_native_tools.create_robot's cost note), so the honest fix is to name it up front
+    # and then keep talking while it happens.
+    _say("cost: minutes, not seconds -- most of it in create_robot, which grounds each body and then SEARCHES")
+    _say("      for a gait that fits it (a legged body is ~2-6 min on CPU; an arm or a rover is seconds).")
+    _say("      Every stage prints when it starts and what it cost; a '... still running' line every "
+         f"{int(_HEARTBEAT_S)}s means it is working, not wedged.")
     family: list[dict] = []
     if compare:
-        print(f"[compare] same-family differentiation ({len(compare)} bodies) ...", flush=True)
+        _say(f"[compare] same-family differentiation ({len(compare)} bodies)")
         family = build_family(compare)
     reuse = {r["prompt"]: r for r in family if r.get("robot_id") and not r.get("error")}
     cards = []
     for i, spec in enumerate(prompts, 1):
-        print(f"[{i}/{len(prompts)}] {_ascii(spec['prompt'])} ...", flush=True)
+        _say(f"[{i}/{len(prompts)}] {spec['prompt']}", 3)
         c = build_one(spec, quick=quick, learn=learn, reuse=reuse)
-        # _ascii, not a bare f-string: the verdicts are interpolated here and some carry typographic dashes
+        # _say, not a bare f-string: the verdicts are interpolated here and some carry typographic dashes
         # ("a scripted gait can't balance a walking biped - needs a learned policy"), which a cp1252 console
         # renders as a black diamond. Sanitising at the print site covers every string, not one known literal.
-        print(f"      -> {_ascii(c.get('verdict', c.get('error')))}  ({c.get('seconds')}s)", flush=True)
+        _say(f"-> {c.get('verdict', c.get('error'))}  ({c.get('seconds')}s for this robot)", 3)
         cards.append(c)
     path = out / "index.html"
     path.write_text(render_html(cards, quick=quick, path=path_info, family=family), encoding="utf-8")
@@ -629,10 +727,14 @@ def main() -> int:
     # room for a differentiation claim it did not measure)
     compare = None if (args.mini or args.no_compare) else FAMILY_COMPARE
     t0 = time.time()
+    _say(f"Virturoid demo gallery -- {'mini (2 robots)' if args.mini else 'full battery'}, "
+         f"offline, CPU only, no API key.")
     path = run_gallery(battery, args.out, quick=quick, learn=learn, compare=compare, offline=not args.llm)
     n = len({s["prompt"] for s in battery} | {s["prompt"] for s in (compare or [])})   # the dog is shared, not doubled
-    print(_ascii(f"\nGallery ({n} robots) written in {round(time.time()-t0,1)}s:\n  {path}\n"
-                 f"Open it in a browser - it's self-contained."))
+    took = round(time.time() - t0, 1)
+    _say(f"Gallery ({n} robots) written in {took}s ({int(took // 60)}m{int(took % 60):02d}s):")
+    _say(f"  {path}")
+    _say("Open it in a browser - it's self-contained.")
     return 0
 
 

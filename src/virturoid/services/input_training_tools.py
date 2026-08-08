@@ -1183,6 +1183,23 @@ def _learn_gait(args: dict) -> dict:
         steps=int(args.get("steps", 900)), seed=int(args.get("seed", 0)), workers=int(args.get("workers", 1)))
     out["prompt"] = prompt
     out["deployable"] = True                                   # the learned params ARE the deploy controller
+    # ...and "deployable" now means DEPLOYED. ``learn_gait_flywheel`` fits an operating point to this exact body
+    # and hands back the numbers; nothing wrote them onto the held gene, so ``verify_robot`` afterwards ran the
+    # controller the robot had BEFORE training. Landing it here is what makes the ``deployable: True`` above a
+    # fact rather than a promise. See ``trained_controller`` for the contract (credible-gated, undoable).
+    if rid:
+        from virturoid.services.trained_controller import apply_trained_gait
+        out["applied_to_robot"] = apply_trained_gait(
+            rid, out.get("params") or {}, door="learn_gait", apply=str(args.get("apply") or "auto").lower(),
+            credible=bool(out.get("survived")) and bool(out.get("beats_default")),
+            verdict=str(out.get("stopped_reason") or ""),
+            evidence={"forward_m": out.get("forward_m"), "default_forward_m": out.get("default_forward_m"),
+                      "n_evals": out.get("n_evals"), "robustness_rel": out.get("robustness_rel")})
+    else:
+        out["applied_to_robot"] = {"applied": False, "reason": "no robot_id was given, so this gait was learned "
+                                                              "for a body composed on the fly and there is no "
+                                                              "held robot to apply it to; pass robot_id to train "
+                                                              "the robot you are actually holding"}
     return out
 
 
@@ -1407,12 +1424,21 @@ INPUT_TRAINING_TOOLS: dict[str, dict] = {
         "description": "LEARN a deployable walk for a legged body: CEM-optimize the crawl-gait controller's "
                        "parameters (freq/amps/duty/gains) with an un-gameable fitness (forward travel counts only "
                        "when upright + survived). Unlike an MJX policy, the result is CPU-deployable BY "
-                       "CONSTRUCTION (it IS the deploy controller). Returns the best gait + measured forward/height. "
-                       "Real MuJoCo, slow.",
+                       "CONSTRUCTION (it IS the deploy controller) -- and with a robot_id it is COMMITTED to that "
+                       "held robot, so the next verify_robot measures the gait you just learned and reports "
+                       "gait_source 'tuned_for_this_body::learn_gait' (undo with edit_robot op:'undo'; pass "
+                       "apply:'never' for a dry run). Consults the flywheel for a prior on this morphology "
+                       "first and banks a credible result after. Returns the best gait + measured "
+                       "forward/height. Real MuJoCo, slow -- the full budget; adapt_gait is the cheap version.",
         "parameters": {"type": "object", "properties": {
             "robot_id": {"type": "string", "description": "learn for THIS held robot (what verify_robot runs); "
-                                                          "omit to compose from prompt"},
+                                                          "omit to compose from prompt -- but then there is no "
+                                                          "held robot for the result to land on"},
             "prompt": {"type": "string", "default": "a quadruped robot dog"},
+            "apply": {"type": "string", "enum": ["auto", "always", "never"], "default": "auto",
+                      "description": "'auto' commits the learned gait to the held robot when it beat the default "
+                                     "and survived; 'never' returns it without touching the robot; 'always' "
+                                     "commits it regardless and says so"},
             "generations": {"type": "integer", "default": 10}, "pop": {"type": "integer", "default": 20},
             "steps": {"type": "integer", "default": 1000}, "seed": {"type": "integer", "default": 0}}},
         "handler": _learn_gait, "heavy": True,

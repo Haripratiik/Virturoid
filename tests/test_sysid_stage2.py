@@ -415,7 +415,10 @@ def test_the_brief_reports_what_reached_the_model_not_what_the_gate_wanted(dog, 
     assert "FAILED the tracking gate" in head and "applied ANYWAY" in head, head
     assert "NOT applied" not in brief["sentence"], "the brief denies a change the model actually carries"
     assert "closer" not in brief["sentence"].lower(), brief["sentence"]
-    assert "revert_calibration" in head, "no way back out is offered for a hypothesis in the model"
+    # A way back out, NAMED AS SOMETHING THE READER CAN CALL. This asserted `revert_calibration` -- the Python
+    # function -- until `sysid.tools` gave the package a door; a customer driving this over MCP could not call
+    # that, so the escape hatch offered for a hypothesis sitting in their model was not on their wire.
+    assert "calibration_status" in head and "revert" in head, head
     # And the certificate says the same thing in its own words, because that is the line that gets quoted.
     bench = brief["actuator_ladder"]["bench_identified"]
     assert bench["applied_over_the_gate"] is True
@@ -585,7 +588,9 @@ def test_the_record_says_what_moved_from_where_and_what_was_refused(calibrated, 
     assert rep["stale_entries"] == [], (
         "the fitted parameters were quoted against a baseline the compiler no longer produces: "
         f"{rep['stale_entries'][:4]}")
-    assert "revert_calibration" in rep["how_to_undo"]
+    # Same change of addressee as in the brief: the undo instruction has to name a call the customer can make,
+    # not the Python function that implements it.
+    assert "calibration_status" in rep["how_to_undo"] and "revert" in rep["how_to_undo"], rep["how_to_undo"]
     assert any("delay" in s for s in rep["not_applied"])
 
 

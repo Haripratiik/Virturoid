@@ -109,17 +109,86 @@ def _standing_height(gene) -> float:
         return 0.0
 
 
-def _reground_and_gate(gene, *, material: str):
-    """Re-derive masses/BOM for the mutated geometry, then GATE: the gene must still validate. Teaches on fail."""
+def _shape_key(gene) -> dict:
+    """``{name: (shape, length_m, radius_m)}`` — what an op has to have CHANGED for a re-derived mass to be
+    the customer's own request rather than a side effect."""
+    return {s.name: (str(s.shape), round(float(s.length_m or 0.0), 6), round(float(s.radius_m or 0.0), 6))
+            for s in gene.segments}
+
+
+def _reground_and_gate(gene, *, material: str, original=None, respec=None) -> dict:
+    """Re-derive masses/BOM for the mutated geometry, then GATE: the gene must still validate. Teaches on fail.
+
+    AND DO NOT RE-MASS THE CUSTOMER'S ROBOT ON THE WAY THROUGH. This called ``ground_gene`` bare, which takes
+    ``preserve_mass=False`` -- so every link's mass was re-derived from (primitive volume x density x fill) +
+    one of OUR catalog motors, on a body whose manufacturer masses already include its own motors. Measured
+    through ``call_tool`` on a real Menagerie Unitree Go2 ingested with ``mass_provenance.preserved: true,
+    delta_kg: 0.0``, then ONE ``add_limb``:
+
+        total 15.206 -> 32.683 kg, of which the arm is 2.733 -- so +14.7 kg is the customer's own Go2 being
+        silently re-weighed: base 6.921 -> 10.306, every thigh 1.152 -> 2.050, every calf 0.241 -> 2.177 (9x)
+
+    ...and ``metadata['mass_source']`` still read ``source_model``, so every door downstream would go on citing
+    Unitree for our number. ``ingest_project`` already routes an authoritative body through
+    ``gene_build.ground_and_repair`` for exactly this reason; the edit door was the one that did not, which is
+    why the guarantee survived ingest and died on the first amend.
+
+    The rule is per LINK, because provenance is per link:
+
+      * links this op CREATED (in ``gene`` but not in ``original``) have no manufacturer number to keep;
+      * links this op RESIZED (shape/length/radius moved) or RE-SPECIFIED (``respec`` -- e.g. ``set_payload``
+        raising a joint's torque requirement so a bigger motor is selected) were changed BY THE CUSTOMER, so
+        re-deriving them is honouring the request, not overriding it;
+      * every other link keeps the mass it arrived with.
+
+    Returns a mass ledger the operator puts in its diff, so a mass that does move is stated with its number
+    instead of being discovered later on a spec sheet.
+    """
+    from virturoid.services.gene_build import grounding_config
     from virturoid.services.grounded_physics import ground_gene
+    before_mass = {s.name: float(s.mass_kg or 0.0) for s in gene.segments}
+    cfg = grounding_config(gene)
+    derive: set[str] = set(str(n) for n in (respec or ()))
+    added: set[str] = set()
+    if original is not None:
+        was, now = _shape_key(original), _shape_key(gene)
+        added = {n for n in now if n not in was}
+        derive |= added | {n for n in now if n in was and now[n] != was[n]}
+        before_mass = {s.name: float(s.mass_kg or 0.0) for s in original.segments}
     try:
-        ground_gene(gene, material=material, fill=0.25)
+        if cfg["preserve_mass"]:
+            # The body's masses are the manufacturer's. Ground with the same config the EXPORT door uses, so
+            # the robot the customer edits cannot differ from the one that leaves the building.
+            ground_gene(gene, material=cfg["material"], fill=cfg["fill"], preserve_mass=True,
+                        derive_mass_links=derive)
+        else:
+            ground_gene(gene, material=material, fill=0.25)
     except Exception:  # noqa: BLE001 - grounding is value-add; a mutated gene can still be scored/rendered
         pass
     issues = gene.validate()
     if issues:
         raise EditError(f"edit would make the robot invalid ({'; '.join(issues[:2])}); "
                         "try a smaller factor or a different group")
+    return _mass_ledger(before_mass, gene, added=added, preserved=bool(cfg["preserve_mass"]))
+
+
+def _mass_ledger(before_mass: dict, gene, *, added: set, preserved: bool) -> dict:
+    """What this edit did to the robot's mass, per link, in numbers. The disclosure half of the promise."""
+    after = {s.name: float(s.mass_kg or 0.0) for s in gene.segments}
+    m0 = round(sum(before_mass.values()), 3)
+    m1 = round(sum(after.values()), 3)
+    new_mass = round(sum(v for n, v in after.items() if n in added), 3)
+    moved = [{"segment": n, "mass_kg": [round(before_mass[n], 3), round(after[n], 3)]}
+             for n in sorted(after)
+             if n in before_mass and abs(after[n] - before_mass[n]) > 1e-3]
+    led = {"total_mass_kg": [m0, m1], "added_mass_kg": new_mass,
+           # `or 0.0` so an unchanged robot reads 0.0, never -0.0 -- a minus sign in front of a mass delta is
+           # exactly the thing this ledger exists to make readable.
+           "existing_mass_changed_kg": round((m1 - m0) - new_mass, 3) or 0.0,
+           "n_existing_links_remassed": len(moved), "source_masses_preserved": bool(preserved)}
+    if moved:
+        led["remassed"] = moved[:8]
+    return led
 
 
 def scale_group(gene, *, group: str = "legs", dims: str = "length", factor: float = 1.2, only=None):
@@ -176,11 +245,11 @@ def scale_group(gene, *, group: str = "legs", dims: str = "length", factor: floa
         changed.append({"segment": s.name, "length_m": [before[0], round(s.length_m, 4)],
                         "radius_m": [before[1], round(s.radius_m, 4)]})
     h0 = _standing_height(gene)
-    _reground_and_gate(g, material=_dominant_material(gene))
+    mass = _reground_and_gate(g, material=_dominant_material(gene), original=gene)
     h1 = _standing_height(g)
     diff = {"op": "scale_group", "group": group, "dims": dims, "factor": round(f, 3),
             "n_changed": len(changed), "changed": changed[:8], "n_segments_total": len(g.segments),
-            "standing_height_m": [h0, h1]}
+            "standing_height_m": [h0, h1], "mass": mass}
     return g, diff
 
 
@@ -345,8 +414,11 @@ def set_material(gene, *, group: str = "all", material: str = "aluminum"):
         raise EditError(f"no '{group}' segments to re-material on this {g.robot_class}")
     for s in targets:
         s.material = material
-    _reground_and_gate(g, material=material)
-    return g, {"op": "set_material", "group": group, "material": material, "n_changed": len(targets)}
+    # A material change IS a mass re-spec for the parts it names (and only those): asking for carbon-fibre legs
+    # is asking for lighter legs. `respec` therefore releases exactly those links from mass preservation.
+    mass = _reground_and_gate(g, material=material, original=gene, respec={s.name for s in targets})
+    return g, {"op": "set_material", "group": group, "material": material, "n_changed": len(targets),
+               "mass": mass}
 
 
 def set_leg_count(gene, *, n_pairs: int):
@@ -360,21 +432,134 @@ def set_leg_count(gene, *, n_pairs: int):
     g = build_from_anatomy(_generic_legged_graph(n_pairs=n))
     if g is None:
         raise EditError("could not build a body at that leg count")
-    _reground_and_gate(g, material=_dominant_material(gene))
-    return g, {"op": "set_leg_count", "n_pairs": n, "structural": True,
+    # `original=gene` is honest here even though NOTHING carries over: every link of the rebuilt body is new,
+    # so the ledger reports the whole mass as added and states the before/after the customer actually cares
+    # about ("my 15.2 kg robot came back as a 13.5 kg template").
+    mass = _reground_and_gate(g, material=_dominant_material(gene), original=gene)
+    return g, {"op": "set_leg_count", "n_pairs": n, "structural": True, "mass": mass,
                "note": "topology changed (legs rebuilt); torso/appendage customization not carried over"}
 
 
-_ATTACH_SITES = {                      # where on the parent, as a fraction of its own extent (x_frac, y_frac, z_frac)
+#: Attach faces as a direction in the ROBOT'S OWN frame — +x forward, +y left, +z up. NOT in the parent link's
+#: local frame, and that distinction is the whole bug this table used to carry. A link's local +z is its LENGTH
+#: axis, and on an imported robot the trunk's length axis is horizontal: measured on a Menagerie Unitree Go2,
+#: the reconstructed base carries ``mount_euler`` (-1.571, 1.335, 1.335), so its local +z points along world
+#: (0.972, 0.234, 0.000) — forward and 13.5 deg to the left. Reading these numbers as parent-local therefore put
+#: an ``attach:"top"`` arm 1.07 m FORWARD of the base, 0.26 m off centreline and 0.00 m up: a horizontal
+#: broomstick out of the dog's nose. Resolved in the robot's frame, "top" is up on every body, whatever
+#: arbitrary frame its own root happens to have been reconstructed in.
+_ATTACH_SITES = {
     "top": (0.0, 0.0, 1.0), "bottom": (0.0, 0.0, -1.0), "front": (1.0, 0.0, 0.0),
     "back": (-1.0, 0.0, 0.0), "left": (0.0, 1.0, 0.0), "right": (0.0, -1.0, 0.0), "tip": (0.0, 0.0, 0.0),
 }
+#: how far toward the parent's surface the limb's ROOT sits, as a fraction of the parent's half-extent in that
+#: direction. <1 so the first link starts INSIDE the shell and the seam is covered (a limb rooted exactly on
+#: the surface reads as a separate object stuck to the robot, and trips the no-new-detachment gate).
+_MOUNT_INSET = 0.85
+
+
+def _parent_frame(gene, host_name: str):
+    """``(R_world_from_parent, aabb_lo, aabb_hi, parent_world_pos, root_world_pos)`` for ``host_name``, measured
+    on the COMPILED body — the only place the parent's real orientation and real extent are both knowable.
+
+    The extent is the parent's OWN COLLIDING geoms — children excluded (they are separate bodies), and the
+    cosmetic ones excluded too (mass=0 contype=0 motor cans, collars and fairings are drawn at the joints and
+    stick out well past the shell: on the Go2's base they stretch the measured envelope from 0.366 m to 0.624 m
+    along the trunk axis, which would mount a 'front' limb 70 mm in front of the robot). What is left is the
+    body the physics and the verdict are computed on, which is the right thing to bolt onto.
+
+    ``None`` if the body cannot be compiled/measured.
+    """
+    try:
+        import mujoco
+        import numpy as np
+
+        from virturoid.services.gene_compiler import compile_gene_to_mjcf
+        mj = mujoco.MjModel.from_xml_string(compile_gene_to_mjcf(gene, include_floor=False, spawn_z=0.5))
+        d = mujoco.MjData(mj)
+        mujoco.mj_forward(mj, d)
+        bid = mujoco.mj_name2id(mj, mujoco.mjtObj.mjOBJ_BODY, host_name)
+        root = gene.root()
+        rid = mujoco.mj_name2id(mj, mujoco.mjtObj.mjOBJ_BODY, root.name) if root is not None else -1
+        if bid < 0:
+            return None
+        aabb = mj.geom_aabb.reshape(mj.ngeom, 6)
+        corners = np.array([[x, y, z] for x in (-1, 1) for y in (-1, 1) for z in (-1, 1)], float)
+
+        def envelope(colliding_only: bool):
+            lo, hi = np.full(3, np.inf), np.full(3, -np.inf)
+            for gi in range(mj.ngeom):
+                if int(mj.geom_bodyid[gi]) != bid:
+                    continue
+                if colliding_only and not (int(mj.geom_contype[gi]) or int(mj.geom_conaffinity[gi])):
+                    continue
+                rot = np.zeros(9)
+                mujoco.mju_quat2Mat(rot, mj.geom_quat[gi])
+                pts = mj.geom_pos[gi] + (aabb[gi, :3] + corners * aabb[gi, 3:]) @ rot.reshape(3, 3).T
+                lo, hi = np.minimum(lo, pts.min(axis=0)), np.maximum(hi, pts.max(axis=0))
+            return (lo, hi) if (np.isfinite(lo).all() and np.isfinite(hi).all()) else None
+
+        box = envelope(True) or envelope(False)    # a link with no collider at all still has to be mountable
+        if box is None:
+            return None
+        lo, hi = box
+        return (d.xmat[bid].reshape(3, 3).copy(), lo, hi, d.xpos[bid].copy(),
+                (d.xpos[rid].copy() if rid >= 0 else d.xpos[bid].copy()))
+    except Exception:  # noqa: BLE001 - measurement aid; the primitive fallback below still places the limb
+        return None
+
+
+def _limb_mount(gene, host, site: str):
+    """Where the new chain's first link mounts, and which way it grows: ``(mount_offset, mount_euler, placed)``.
+
+    ``mount_offset`` is in the PARENT'S local frame (the compiler puts a child at ``(x, y, parent.length + z)``)
+    and ``mount_euler`` turns the child's local +z — which is the direction the chain extends — to the world
+    direction the attach face names. ``placed`` is the disclosure: the anchor in the ROBOT'S frame relative to
+    its root, and the direction the limb grows, so the caller can state where the arm went instead of guessing.
+    """
+    d_world = _ATTACH_SITES[site]
+    if site == "tip":                                  # serial extension: continue along the parent's own axis
+        return (0.0, 0.0, 0.0), (0.0, 0.0, 0.0), {"attach": "tip", "grows_along": "the parent's own axis"}
+    try:
+        import numpy as np
+
+        from virturoid.services.anatomy_compiler import _aim_R, _R_to_euler
+    except Exception:  # noqa: BLE001
+        return (0.0, 0.0, 0.0), (0.0, 0.0, 0.0), {"attach": site}
+    d_world = np.array(d_world, float)
+    d_world /= (np.linalg.norm(d_world) or 1.0)
+    frame = _parent_frame(gene, host.name)
+    if frame is None:
+        # No compiled measurement: fall back to the parent's PRIMITIVE envelope and assume its local frame is
+        # the robot frame (true of every body this composer draws — trunk +z = height, +x = fore-aft).
+        R = np.eye(3)
+        hl, hr = max(1e-4, float(host.length_m or 0.1)), max(1e-4, float(host.radius_m or 0.03))
+        lo, hi = np.array([-hr, -hr, 0.0]), np.array([hr, hr, hl])
+        p_world = r_world = np.zeros(3)
+        measured = False
+    else:
+        R, lo, hi, p_world, r_world = frame
+        measured = True
+    d_local = R.T @ d_world
+    centre, half = (lo + hi) / 2.0, np.maximum((hi - lo) / 2.0, 1e-6)
+    # distance from the parent's centre to its surface along d_local (the AABB slab hit)
+    reach = min([half[i] / abs(d_local[i]) for i in range(3) if abs(d_local[i]) > 1e-9]
+                or [float(np.max(half))])
+    anchor = centre + d_local * (reach * _MOUNT_INSET)
+    off = anchor - np.array([0.0, 0.0, float(host.length_m or 0.0)])
+    euler = _R_to_euler(R.T @ _aim_R(d_world))
+    at_robot = (R @ anchor) + p_world - r_world
+    return (tuple(round(float(v), 5) for v in off), tuple(round(float(v), 6) for v in euler),
+            {"attach": site, "grows_toward": [round(float(v), 3) for v in d_world],
+             "anchor_m_from_root": [round(float(v), 4) for v in at_robot],
+             "frame": ("measured on the compiled body" if measured
+                       else "estimated from the parent's primitive envelope (could not compile the body)")})
 
 
 def add_limb(gene, *, parent: str | None = None, segments: int = 3, length_m: float = 0.25,
              radius_m: float = 0.03, attach: str = "top", joint_axes: list | None = None,
              end_effector: str = "gripper", name: str = "limb", taper: float = 0.82,
-             payload_kg: float = 0.5):
+             payload_kg: float = 0.5, rest_angles: list | None = None):
     """STRUCTURAL edit: GROW A NEW ARTICULATED CHAIN on an existing body. 'Give it a third arm', 'add a tail',
     'put a sensor mast on the back' are all this one op.
 
@@ -389,7 +574,16 @@ def add_limb(gene, *, parent: str | None = None, segments: int = 3, length_m: fl
     caller says how many links, how long, where they attach and what tops them; the role is just the name.
 
     ``attach`` names a face of the parent ('top' for a back-mounted arm, 'front' for a head, 'tip' for a serial
-    extension) and is resolved against the PARENT'S OWN size, so the same call works on a Go2 and on a humanoid.
+    extension). It is resolved in the ROBOT'S frame against the parent's MEASURED extent, so 'top' is the top of
+    the machine on a Go2, on a humanoid and on a body whose imported root frame is rotated arbitrarily -- see
+    :data:`_ATTACH_SITES` for the 1.07 m broomstick that reading it parent-locally produced. The chain grows
+    along the same direction, and the diff's ``placement`` states where it landed relative to the root.
+
+    ``rest_angles`` (radians, one per actuated link, short lists padded with 0) is the REST POSTURE. A chain at
+    all-zero joints is a straight line of collinear capsules, which reads as a mast -- correct for a sensor mast
+    and not for an arm, whose shoulder and elbow are only visible when they are BENT. It stays an argument
+    rather than a per-role default because the whole point of this operator is that a tail, a mast, a neck and
+    an arm are one structure; the caller knows which one they asked for.
     """
     n = _num(segments, "segments", cast=int)
     if not (1 <= n <= 8):
@@ -418,12 +612,8 @@ def add_limb(gene, *, parent: str | None = None, segments: int = 3, length_m: fl
             raise EditError("this robot has no root segment to attach a limb to")
 
     base = name if name not in by else f"{name}_{sum(1 for k in by if k.startswith(name)) + 1}"
-    fx, fy, fz = _ATTACH_SITES[site]
-    hr = float(host.radius_m or 0.03)
-    hl = float(host.length_m or 0.1)
-    # mount_offset is measured from the PARENT'S TIP (the compiler puts a child at (x, y, parent.length + z)),
-    # so a 'top' mount sits at the tip and a 'back' mount steps back along the parent's own length.
-    off = (round(fx * hl * 0.5, 5), round(fy * hr, 5), round((fz - 1.0) * hl * 0.5 if fz else -hl * 0.5, 5))
+    # WHERE THE FACE ACTUALLY IS, on the body as compiled — see :func:`_limb_mount` / :data:`_ATTACH_SITES`.
+    off, euler0, placed = _limb_mount(gene, host, site)
     axes = list(joint_axes or [])
     added = []
     prev = host.name
@@ -435,6 +625,7 @@ def add_limb(gene, *, parent: str | None = None, segments: int = 3, length_m: fl
             mass_kg=round(max(0.02, 1.2 * seg_len * r_i * 30), 4), joint_type="revolute", joint_axis=axis,
             joint_lower=-2.6, joint_upper=2.6,
             mount_offset=off if i == 0 else (0.0, 0.0, 0.0),
+            mount_euler=euler0 if i == 0 else (0.0, 0.0, 0.0),
             actuator_torque_nm=round(max(2.0, 40.0 * (taper ** i)), 2), is_end_effector=False)
         g.segments.append(seg)
         added.append(seg.name)
@@ -471,10 +662,27 @@ def add_limb(gene, *, parent: str | None = None, segments: int = 3, length_m: fl
                                                 + reach * (_pk / max(m_down, 1e-6)))
         s.torque_req_nm = round(max(1.0, m_down * 9.81 * max(r_com, 0.02) * 1.5), 2)
         s.actuator_torque_nm = s.torque_req_nm
-    _reground_and_gate(g, material=_dominant_material(gene))
+    if rest_angles:
+        _rest = dict((getattr(g, "metadata", None) or {}).get("rest_pose") or {})
+        for _i in range(n):
+            try:
+                _a = float(rest_angles[_i]) if _i < len(rest_angles) else 0.0
+            except (TypeError, ValueError):
+                raise EditError(f"rest_angles[{_i}] must be a number (radians), got {rest_angles[_i]!r}") from None
+            _rest[f"{base}_{_i}_joint"] = round(max(-2.6, min(2.6, _a)), 5)
+        g.metadata = {**(getattr(g, "metadata", None) or {}), "rest_pose": _rest}
+    # ONLY THE NEW LINKS ARE OURS TO WEIGH. `original=gene` is what makes that true rather than aspirational --
+    # see :func:`_reground_and_gate`. The `note` states the arithmetic, because "the robot's existing structure
+    # is untouched" was already printed on the diff of the run that added 14.7 kg to the customer's Go2.
+    mass = _reground_and_gate(g, material=_dominant_material(gene), original=gene)
+    kept = "" if not mass["n_existing_links_remassed"] else (
+        f"; {mass['n_existing_links_remassed']} EXISTING link(s) also changed mass "
+        f"({mass['existing_mass_changed_kg']:+.3f} kg) -- see diff['mass']['remassed']")
     return g, {"op": "add_limb", "parent": host.name, "attach": site, "segments_added": added,
-               "n_actuated_added": n, "structural": True,
-               "note": f"grew a {n}-link chain on {host.name!r}; the robot's existing structure is untouched"}
+               "n_actuated_added": n, "structural": True, "placement": placed, "mass": mass,
+               "note": f"grew a {n}-link chain on {host.name!r} at its {site!r} face; it adds "
+                       f"{mass['added_mass_kg']:.3f} kg, taking the robot {mass['total_mass_kg'][0]:.3f} -> "
+                       f"{mass['total_mass_kg'][1]:.3f} kg{kept}"}
 
 
 def set_payload(gene, *, payload_kg: float = 2.0, girth_scale: bool = True):
@@ -517,7 +725,11 @@ def set_payload(gene, *, payload_kg: float = 2.0, girth_scale: bool = True):
     md["rated_payload_kg"] = round(float(pk), 3)
     g.metadata = md
     mass0 = round(total_mass, 3)
-    _reground_and_gate(g, material=_dominant_material(gene))    # upsizes actuators for the new torque; re-derives mass
+    # The joints named here had their torque REQUIREMENT re-specified by the customer, so their mass is ours to
+    # re-derive even on a body whose masses are otherwise the manufacturer's -- a bigger motor really is heavier.
+    # Every link they did NOT ask to change keeps its own number.
+    ledger = _reground_and_gate(g, material=_dominant_material(gene), original=gene,
+                                respec={s.name for s in actuated})
     mass1 = round(sum(float(s.mass_kg or 0.0) for s in g.segments), 3)
     # HONEST saturation check: if a joint's chosen real motor can't actually meet the scaled requirement, the
     # payload exceeds what the actuator catalog can drive -- say so (a gearbox / bigger class is needed) rather
@@ -530,6 +742,7 @@ def set_payload(gene, *, payload_kg: float = 2.0, girth_scale: bool = True):
                                "best_motor_nm": round(float(s.actuator_torque_nm or 0.0), 1)})
     out = {"op": "set_payload", "payload_kg": pk, "load_factor": round(load_factor, 3),
            "n_joints_upsized": len(changed), "changed": changed[:8], "total_mass_kg": [mass0, mass1],
+           "mass": ledger,
            "note": "joint torque raised for the payload -> re-grounding upsized the real motors (mass/cost rose)"}
     if undersized:
         out["undersized_joints"] = undersized[:8]
@@ -565,6 +778,103 @@ OPERATORS = {
 }
 _STRUCTURAL = {"set_leg_count", "adopt_walkable_template", "add_limb"}
 
+#: Finding checks an op is EXPECTED to move, because moving them IS the request. A gate that reverts these is
+#: not protecting the design, it is refusing the instruction.
+#:
+#: ``add_limb``/``symmetry`` is the one that cost a customer their afternoon. ``anatomy_critic`` flags a legged
+#: body whose y-centroid is more than 40 mm off centre, which is exactly and unavoidably what mounting ONE arm
+#: on a quadruped does -- so "put an arm on my Go2", the single most-requested amend on the product, was
+#: auto-reverted by a med-severity note describing the thing that had been asked for. The finding is still
+#: MEASURED and still REPORTED (see :func:`explain_findings`); it just no longer votes to revert.
+_EXPECTED_FINDINGS = {"add_limb": {"symmetry"}}
+
+
+def expected_findings(ops) -> set[str]:
+    """Finding checks the given ``[{op, args}]`` sequence is allowed to introduce without being reverted."""
+    out: set[str] = set()
+    for spec in (ops or []):
+        out |= _EXPECTED_FINDINGS.get(str((spec or {}).get("op") or ""), set())
+    return out
+
+
+def design_findings(gene) -> list[dict]:
+    """Every deterministic design finding on this body, NAMED: ``[{check, severity, detail, part}]``.
+
+    The non-regression gate used to compare two INTEGERS -- ``(high_or_fatal, weighted_findings)`` -- and print
+    them. Measured, that produced ``before {high_or_fatal: 0, weighted_findings: 0} / after {0, 2}`` on a
+    perfectly reasonable ``add_limb``: zero fatal findings on either side, the #1 use case blocked, and not one
+    word about WHICH check moved, on WHICH part, or what to do instead. The finding it would not name was a
+    single ``med``. This returns the findings themselves so a refusal can quote them.
+
+    Sources are the same three the gate already scored, so the explanation cannot drift from the decision.
+    """
+    out: list[dict] = []
+    try:
+        from virturoid.services.gene_validation import validate_gene_design
+        for f in validate_gene_design(gene)["risk_flags"]:
+            out.append({"check": str(f.get("check")), "severity": str(f.get("severity")),
+                        "detail": str(f.get("detail") or ""), "source": "gene_validation"})
+    except Exception:  # noqa: BLE001 - an unavailable verifier contributes no finding, never invented evidence
+        pass
+    try:
+        from virturoid.services.anatomy_critic import critique_gene
+        for f in critique_gene(gene)["issues"]:
+            out.append({"check": str(f.get("check")), "severity": str(f.get("severity")),
+                        "detail": str(f.get("detail") or ""), "source": "anatomy_critic"})
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from virturoid.services.visual_physics_gate import audit_gene
+        for i in audit_gene(gene).issues:
+            out.append({"check": str(i.code), "severity": "high", "detail": str(i.detail or ""),
+                        "part": str(i.geom or "") or None, "source": "visual_physics_gate"})
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
+_FINDING_WEIGHT = {"fatal": 8, "high": 5, "med": 2, "low": 1}
+
+
+def findings_score(findings, *, ignore=()) -> tuple[int, int]:
+    """``(high_or_fatal, weighted_total)`` over findings, skipping checks in ``ignore``. The gate's ordering."""
+    keep = [f for f in findings if f.get("check") not in set(ignore)]
+    return (sum(f.get("severity") in ("fatal", "high") for f in keep),
+            sum(_FINDING_WEIGHT.get(f.get("severity"), 0) for f in keep))
+
+
+def explain_findings(before, after, *, ops=None) -> dict:
+    """Which findings this edit INTRODUCED, and what a caller can actually do about it.
+
+    Returns ``{new, expected, worse, score_before, score_after, message}``. ``message`` is prose an engineer can
+    act on: it names each new finding, its severity, its part, whether it was the point of the request, and the
+    three ways forward (accept it with ``gate_non_regression: false``, change the op, or fix the finding).
+    """
+    ignore = expected_findings(ops)
+    fb, fa = design_findings(before), design_findings(after)
+    seen = list(fb)
+    new: list[dict] = []
+    for f in fa:                                   # multiset difference: two identical findings are two findings
+        match = next((x for x in seen if x.get("check") == f.get("check")
+                      and x.get("detail") == f.get("detail")), None)
+        if match is None:
+            new.append(f)
+        else:
+            seen.remove(match)
+    blocking = [f for f in new if f.get("check") not in ignore]
+    intended = [f for f in new if f.get("check") in ignore]
+    lines = []
+    for f in blocking:
+        part = f" on '{f['part']}'" if f.get("part") else ""
+        lines.append(f"  - [{f.get('severity')}] {f.get('check')}{part}: {f.get('detail')}")
+    for f in intended:
+        lines.append(f"  - [{f.get('severity')}] {f.get('check')}: {f.get('detail')} "
+                     f"(EXPECTED for this edit — not counted against it)")
+    return {"new": new, "expected_checks": sorted(ignore), "blocking": blocking,
+            "score_before": list(findings_score(fb, ignore=ignore)),
+            "score_after": list(findings_score(fa, ignore=ignore)),
+            "message": "\n".join(lines)}
+
 
 def op_specs() -> list[dict]:
     """JSON-schema-ish specs of the edit operators (for the intent classifier + tool docs)."""
@@ -579,9 +889,14 @@ def op_specs() -> list[dict]:
         {"op": "add_limb", "args": {"parent": "<segment name, default the root>", "segments": "1-8",
                                     "length_m": "0.01-2.0", "radius_m": "0.004-0.3",
                                     "attach": sorted(_ATTACH_SITES), "end_effector": "gripper|hand|tool|pad|none",
-                                    "name": "<prefix, e.g. arm3 / tail / mast>"},
+                                    "name": "<prefix, e.g. arm3 / tail / mast>",
+                                    "rest_angles": "[rad per actuated link] — the resting posture; omit for a "
+                                                   "straight chain (a mast), give e.g. [0, -0.6, 1.2] for an arm "
+                                                   "with a visible shoulder and elbow"},
          "for": "STRUCTURAL: GROW a new articulated chain on the existing body — 'add a third arm', 'add a "
-                "tail', 'put a sensor mast on the back'. Keeps the robot; only adds."},
+                "tail', 'put a sensor mast on the back'. Keeps the robot; only adds. `attach` is a face of the "
+                "robot (top = its back, front = its nose), not of the parent link's own axis; the chain grows "
+                "that way and the diff reports where it landed plus what it added to the robot's mass."},
         {"op": "set_payload", "args": {"payload_kg": "0.1-50.0", "girth_scale": "true|false"},
          "for": "make it CARRY/LIFT heavier: upsize actuators (+ load-path girth) for the payload; BOM/mass rise"},
         {"op": "adopt_walkable_template", "args": {},

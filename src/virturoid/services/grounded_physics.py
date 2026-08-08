@@ -254,7 +254,8 @@ def source_declared_torques(gene) -> dict[str, float]:
 
 
 def ground_gene(gene, *, material: str = "aluminum", fill: float = 0.3, margin: float = 1.3,
-                preserve_mass: bool = False, preserve_torque: bool | None = None) -> dict:
+                preserve_mass: bool = False, preserve_torque: bool | None = None,
+                derive_mass_links=None) -> dict:
     """Mutate ``gene`` in place: set each link's mass from material+geometry (+ its actuator's mass) and each
     actuated joint's torque limit to a real actuator's PEAK. The actuator is sized so its CONTINUOUS (rated)
     torque covers the sustained requirement with ``margin`` -- real thermal practice; never size a joint at its
@@ -267,6 +268,17 @@ def ground_gene(gene, *, material: str = "aluminum", fill: float = 0.3, margin: 
     manufacturer's real per-link masses, and re-deriving them from a primitive-volume estimate replaces the
     customer's robot with our guess at it (measured on a Menagerie Go2: 15.206 kg of real link masses became
     13.235 kg of carbon-fibre estimates, base 6.921 -> 6.107).
+
+    ``derive_mass_links`` is the ESCAPE HATCH from ``preserve_mass``, per link, and it exists because
+    preservation is a statement about PROVENANCE and provenance is per link, not per body. A customer's Go2 is
+    authoritative; a robot arm somebody just bolted onto it is not, and there is no manufacturer number to
+    preserve for a link that did not exist a second ago. Without this, an edit had exactly two options: keep
+    every mass (so a new limb weighs whatever the operator guessed and never gets its actuator) or re-derive
+    every mass (measured: ONE ``add_limb`` moved a preserved 15.206 kg Go2 to 32.683 kg while the arm itself
+    accounted for 2.733 -- +14.7 kg of silent re-massing of the customer's own robot, base 6.921 -> 10.306 and
+    every calf 0.241 -> 2.177). Named links are derived from geometry + actuator exactly as an unpreserved run
+    would; every other link keeps the number it arrived with. The caller decides which is which -- see
+    ``edit_operators._reground_and_gate``, where it is (links this op created) + (links this op re-specified).
 
     ``preserve_torque`` is the same protection for ACTUATOR CAPACITY, and it did not exist: mass was safe and
     torque was overwritten one line later, so an imported robot kept its manufacturer's masses and lost its
@@ -290,6 +302,11 @@ def ground_gene(gene, *, material: str = "aluminum", fill: float = 0.3, margin: 
     """
     from virturoid.services.component_catalog import select_actuator
     density = MATERIALS.get(material, MATERIALS["aluminum"])
+    # Links whose mass is OURS to derive even under ``preserve_mass`` (added or re-specified by an edit).
+    _derive = {str(n) for n in (derive_mass_links or ())}
+
+    def _mass_is_ours(seg) -> bool:
+        return (not preserve_mass) or (seg.name in _derive)
     declared = source_declared_torques(gene) if preserve_torque is not False else {}
     if preserve_torque is True and not declared:
         declared = {s.name: abs(float(s.actuator_torque_nm))
@@ -350,7 +367,7 @@ def ground_gene(gene, *, material: str = "aluminum", fill: float = 0.3, margin: 
                             "required_force_n": round(float(required), 2), "transmission_m": transmission_m,
                             "max_speed_radps": act.max_speed_radps,
                             **_source_torque_note(s, keep, torque_where)})
-                if not preserve_mass:
+                if _mass_is_ours(s):
                     s.mass_kg = round(max(0.02, struct + act_mass), 3)
                 total += s.mass_kg
                 continue
@@ -364,7 +381,7 @@ def ground_gene(gene, *, material: str = "aluminum", fill: float = 0.3, margin: 
                         "stall_nm": act.peak_torque_nm, "rated_nm": act.rated_torque_nm,
                         "max_speed_radps": act.max_speed_radps, "required_nm": round(required, 2),
                         **_source_torque_note(s, keep, torque_where)})
-        if not preserve_mass:
+        if _mass_is_ours(s):
             s.mass_kg = round(max(0.02, struct + act_mass), 3)  # grounded mass = structure + actuator
         total += s.mass_kg
     balance_mass = 0.0
@@ -415,6 +432,9 @@ def ground_gene(gene, *, material: str = "aluminum", fill: float = 0.3, margin: 
                                       "margin": round(float(margin), 6)}
     return {"material": material, "bom": bom, "total_mass_kg": round(total, 3),
             "mass_preserved": bool(preserve_mass),
+            # Which links this call derived a mass for DESPITE preservation -- the disclosure that keeps
+            # "we kept your robot's mass" a checkable claim rather than a slogan.
+            "mass_derived_links": sorted(n for n in _derive if any(s.name == n for s in gene.segments)),
             # Visible, per-joint, in the same report the BOM travels in: a reader must be able to tell which
             # joint limits are the customer's measurement and which are our catalog estimate.
             "torque_preserved": bool(declared),
