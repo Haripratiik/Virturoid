@@ -46,6 +46,15 @@ true unchanged value, and all 15 misattributed numbers were written into the com
 are now stated in the engineer-facing output too, per parameter and per fit: see ``PARAMETER_ALSO_ABSORBS``
 and ``parameters_not_fitted``.
 
+**5. That gate is scored at the ACTUATION DELAY, and it had to be.** Both replays used to run at delay 0
+against logs that had one, so both carried a timing error no fitted parameter could remove and the ratio was
+driven to 1 as the delay grew -- a ceiling, not a threshold effect. MEASURED on the Menagerie Go2 at the
+package's own default 20 ms injection: the largest value the metric could return, substituting the TRUE
+hardware model for the fitted one, was 1.016x against a 1.5x threshold. The gate was refusing every fit on
+every robot with meaningful latency, correctly by its own rule and for a reason that had nothing to do with the
+fit. Running both replays at the identified delay fixes it, which is why ``fit_parameters`` measures the
+latency BEFORE the trajectory. See ``docs/calibration_wedge_under_delay.md``.
+
 What is reused from Stage 1, unchanged: the bench rig (``bench_model``/``bench_gains``/``pd_replay``/
 ``inverse_torque``/``central_derivative``), the log alignment and per-joint windowing (``_align_log``,
 ``_windows``), the model's own sensitivity columns (``_sensitivity_columns``), the excitation statistics
@@ -74,6 +83,33 @@ TRUST_FLOOR_MULT = 20.0
 #: A fit is only allowed to reach the model if applying it makes the simulator track the log MEASURABLY better.
 #: The number is ``trajectory.improvement_x`` -- position RMS before / after, on a quantity the fit did not
 #: optimise -- and this is the threshold it has to clear.
+#:
+#: **The threshold has never moved. The SCORING POINT has, once, and the band below was re-measured after it.**
+#: Both replays now run at the identified actuation delay rather than at zero. The reason is in
+#: ``_trajectory_improvement``: scored at zero delay against a log that has one, this ratio has a CEILING that
+#: depends only on the delay -- 1.016x at 20 ms on the Menagerie Go2 -- so on any robot with real latency it
+#: refused every fit, including ones that had recovered all three parameters to within 13.3%.
+#:
+#: RE-MEASURED at the new scoring point, Go2, full 12-joint 120 s plan, three injections x three delays:
+#:
+#:                                              0 ms      20 ms     40 ms
+#:   +30% link mass and inertia                 1.000     1.059     1.033    refused at every delay
+#:   hardware IS the sim (nothing to find)      n/a*      0.000     0.000    refused at every delay
+#:   ------------------------------------------------------------------- the band the threshold sits in
+#:   frictionloss/damping/armature (correct)   12.214     1.683     1.484
+#:
+#:   * no pair was identified at all, so there was nothing to gate.
+#:
+#: Read that honestly. The band is NARROWER than the one this threshold was originally sized in (0.999 vs
+#: 3.343): the misspecified ceiling rose to 1.059 and the correct floor fell to 1.484, because at 40 ms the
+#: Go2's hips ring hard enough that trajectory RMS stops being a sensitive function of the parameters. The
+#: threshold is above the 40 ms correct case, so that case is REFUSED -- a false negative, at double the delay
+#: Hwangbo et al. name and double this package's own default. The gate never became permissive: no
+#: misspecification reaches 1.06 at any delay measured. Moving the threshold down to admit 1.484 would put it
+#: within 40% of the misspecified ceiling, which is not a trade this package should make silently.
+#:
+#: The ORIGINAL calibration, taken with both replays at delay 0 on a composed 14-DOF quadruped and a 35 s
+#: excitation, is kept below because it is what sized the number:
 #:
 #: NOT a round number picked for looking reasonable. It comes from the measured separation between fits the
 #: estimator CAN express and fits it cannot (sim2sim, composed quadruped, 14 joints, 35 s excitation). The
@@ -115,6 +151,14 @@ TRUST_FLOOR_MULT = 20.0
 #: to 0.995 -- the six cells it now refuses were the ones nearest the floor, so the deltas that get replayed
 #: change. It did not move the case across the band, which is the point: a resolution gate cannot detect a
 #: misspecification, and only this one does.
+#:
+#: Two rows in that older table are BODY-SPECIFIC and read as general, which is worth saying next to them: the
+#: "+ 20 ms of delay -> 3.536, 42/42 identified" figures are the composed dog's. On the Go2 the same case is
+#: 1.683 at the new scoring point and its delay-blind CEILING was 1.016, so 3.536 was never reachable there by
+#: any fit. The composed dog's bench loop tolerates delay in a way a real quadruped's does not -- its worst
+#: tracking RMS moves 0.0339 -> 0.0365 rad across 0-40 ms of delay while the Go2's hips go 0.0298 -> 0.1848 --
+#: which is why every number in this package needs re-taking on an imported body before it is quoted as
+#: general. See ``docs/calibration_wedge_under_delay.md`` section 3c.
 MIN_TRACKING_IMPROVEMENT_X = 1.5
 
 #: What a fitted number could ALSO be. Surfaced on every parameter cell and in the engineer brief, because the
@@ -586,32 +630,51 @@ def fit_parameters(gene, log: dict, *, plan: dict | None = None,
         "wall_clock_s": None,
     }
 
+    # LATENCY FIRST, and that ordering is load-bearing. ``_trajectory_improvement`` replays the loop, and a
+    # replay run at the wrong delay measures the delay instead of the fit -- MEASURED on the Go2, the gate's own
+    # CEILING at the package's default 20 ms injection is 1.016x against a 1.5x threshold, so no fit of any
+    # quality could pass. Scoring both replays at the IDENTIFIED delay is what makes the ratio about the
+    # parameters again, and that requires knowing the delay before the trajectory is measured.
+    if measure_delay:
+        out["latency"] = _delay_on_the_fitted_model(gene, model, aligned, deltas, dofs, kp, kd, log, plan,
+                                                    joints, int(delay_max_ticks))
     if measure_trajectory:
+        lat = out.get("latency") or {}
+        ticks = int(lat["delay_ticks"]) if lat.get("identified") and lat.get("delay_ticks") else 0
         out["trajectory"] = _trajectory_improvement(gene, model, aligned, deltas, dofs, kp, kd, log, plan,
-                                                    joints)
+                                                    joints, delay_ticks=ticks,
+                                                    delay_identified=bool(lat.get("identified")),
+                                                    delay_source=lat.get("source"))
     # THE CONSUMER ``improvement_x`` never had. Computed here so every caller -- apply_calibration,
     # l2_requirements, engineer_brief -- rules on the same field rather than each re-deriving it or, as before,
     # none of them reading it at all.
     out["application"] = application_gate(out.get("trajectory"), len(identified_pairs))
-    if measure_delay:
-        out["latency"] = _delay_on_the_fitted_model(gene, model, aligned, deltas, dofs, kp, kd, log, plan,
-                                                    joints, int(delay_max_ticks))
     out["wall_clock_s"] = round(time.perf_counter() - t_wall, 3)
     return out
 
 
 def _delay_on_the_fitted_model(gene, model, aligned, deltas, dofs, kp, kd, log, plan, joints,
                                max_ticks: int) -> dict:
-    """Sweep the actuation delay on the FITTED model rather than the prior one.
+    """The actuation delay: open-loop off the log, with the closed-loop sweep run on the FITTED model beside it.
 
-    Stage 1 measured, and its tests guard, that a delay-only sweep cannot see past a dynamics error: a 20 ms
-    delay injected alongside a friction/damping/inertia error makes delay=0 the best-fitting delay on the
-    uncorrected model. Stage 2 IS that correction, so this is the sweep that is entitled to an answer -- and
-    the answer still cannot be applied, which is recorded on the result rather than left for the reader to
-    discover downstream.
+    The closed-loop sweep is the one this stage was built around, on the reasoning that Stage 1's delay-only
+    search fails because it cannot see past a dynamics error and Stage 2 IS that correction. That reasoning is
+    right and the remedy is still too weak to reach: MEASURED on the Menagerie Go2, the whole parameter gap is
+    worth 0.00526 rad of trajectory RMS while the delay alone is worth 0.02444 rad, so the thing being removed
+    is 4.6x smaller than the thing it was supposed to reveal. Closing it moved the argmin from 0 ms to 10 ms
+    against a 20 ms injection and stopped there.
+
+    So the sweep is no longer in charge. ``_delay_from_command_response`` measures the same delay without a
+    plant model at all, is unaffected by how good the fit is, and recovers 0/20/40 ms exactly. The sweep is
+    still run -- on the fitted model, which is the strongest version of it -- and reported, because a
+    disagreement between the two is worth seeing.
     """
     from virturoid.services.sysid.bench_rig import start_pose
-    from virturoid.services.sysid.gap_report import _delay_search
+    from virturoid.services.sysid.gap_report import (
+        _delay_from_command_response,
+        _delay_search,
+        _merge_latency,
+    )
 
     dt = float(model.opt.timestep)
     log_hz = 1.0 / dt
@@ -622,21 +685,41 @@ def _delay_on_the_fitted_model(gene, model, aligned, deltas, dofs, kp, kd, log, 
     applied = {name: {p: deltas[name][p] for p in (joints.get(name, {}).get("identified") or [])}
                for name in dofs}
     fitted = _model_with(model, applied, dofs)
-    out = _delay_search(fitted, q_cmd, q_hw, kp=kp, kd=kd, q_start=q0, ctrl_every=ctrl_every,
-                        max_ticks=int(max_ticks), dt=dt)
-    out["searched_on"] = "the FITTED model (only identified deltas applied)"
-    out["why_this_model"] = ("a delay-only sweep on the uncorrected model is dominated by the parameter "
-                             "error; closing that first is what makes the remaining mismatch about timing")
+    traj = _delay_search(fitted, q_cmd, q_hw, kp=kp, kd=kd, q_start=q0, ctrl_every=ctrl_every,
+                         max_ticks=int(max_ticks), dt=dt)
+    traj["searched_on"] = "the FITTED model (only identified deltas applied)"
+    traj["why_this_model"] = ("a delay-only sweep on the uncorrected model is dominated by the parameter "
+                              "error; closing that first is what makes the remaining mismatch about timing")
+    cmd = _delay_from_command_response(fitted, aligned, dofs, plan, kp=kp, kd=kd, ctrl_every=ctrl_every,
+                                       max_ticks=int(max_ticks), dt=dt)
+    out = _merge_latency(cmd, traj, "the per-joint output phase lag in the gap report is the OBSERVABLE "
+                                    "closed-loop lag and is a LOWER BOUND on this figure.")
+    out["searched_on"] = traj["searched_on"]
     return out
 
 
-def _trajectory_improvement(gene, model, aligned, deltas, dofs, kp, kd, log, plan, joints) -> dict:
+def _trajectory_improvement(gene, model, aligned, deltas, dofs, kp, kd, log, plan, joints, *,
+                            delay_ticks: int = 0, delay_identified: bool = False,
+                            delay_source: str | None = None) -> dict:
     """Replay the log's own commands through the model BEFORE and AFTER the fit and report the position gap.
 
     This is the number the engineer recognises and the one that decides whether the fit was worth applying,
     and it is deliberately measured on an INDEPENDENT quantity: the fit minimised a torque residual, so a
     torque residual falling proves only that the optimiser worked. Only the identified deltas are applied --
     applying the refused ones here would flatter the number with parameters we are not allowed to ship.
+
+    **Both replays run at the IDENTIFIED actuation delay**, and that is the fix to a defect that made this
+    number useless on any robot with real latency. Both replays used to run at delay 0 against a log that had
+    one, so both carried a timing error no fitted parameter could remove, and the ratio was driven to 1 as the
+    delay grew regardless of the fit. It is a ceiling, not a threshold effect -- substitute the TRUE hardware
+    model for the fitted one and the largest value the old metric could return was, MEASURED on the Go2,
+    4.964x at 10 ms, **1.016x at 20 ms** and 1.000x at 40 ms, against a 1.5x gate. At 40 ms the fit recovered
+    all three parameters to within 13.3% and scored 1.000x. Nothing about that number was about the fit.
+
+    Running both sides at the same, correct delay cancels the timing term the way the ratio always assumed it
+    did. The old figure is kept as ``improvement_x_at_zero_delay`` so the two can be read against each other,
+    and when the delay could NOT be identified this falls back to zero delay and says so -- scoring at a delay
+    we cannot measure would just move the error somewhere less visible.
     """
     import numpy as np
 
@@ -652,10 +735,15 @@ def _trajectory_improvement(gene, model, aligned, deltas, dofs, kp, kd, log, pla
     applied = {name: {p: deltas[name][p] for p in (joints.get(name, {}).get("identified") or [])}
                for name in dofs}
     fitted = _model_with(model, applied, dofs)
+    d = max(0, int(delay_ticks))
 
-    _, q_before, _, _ = pd_replay(model, q_cmd, kp=kp, kd=kd, q_start=q0, ctrl_every=ctrl_every)
-    _, q_after, _, _ = pd_replay(fitted, q_cmd, kp=kp, kd=kd, q_start=q0, ctrl_every=ctrl_every)
+    def _pair(ticks):
+        kw = dict(kp=kp, kd=kd, q_start=q0, ctrl_every=ctrl_every, delay_ticks=int(ticks))
+        _, qb, _, _ = pd_replay(model, q_cmd, **kw)
+        _, qa, _, _ = pd_replay(fitted, q_cmd, **kw)
+        return qb, qa
 
+    q_before, q_after = _pair(d)
     per_joint = {}
     for name, adr in dofs.items():
         b = float(np.sqrt(np.mean((q_before[:, adr] - q_hw[:, adr]) ** 2)))
@@ -664,8 +752,17 @@ def _trajectory_improvement(gene, model, aligned, deltas, dofs, kp, kd, log, pla
                            "improvement_x": round(b / a, 3) if a > 1e-12 else None}
     before = float(np.sqrt(np.mean((q_before - q_hw) ** 2)))
     after = float(np.sqrt(np.mean((q_after - q_hw) ** 2)))
+
+    at_zero = None
+    if d:
+        qb0, qa0 = _pair(0)
+        b0 = float(np.sqrt(np.mean((qb0 - q_hw) ** 2)))
+        a0 = float(np.sqrt(np.mean((qa0 - q_hw) ** 2)))
+        at_zero = round(b0 / a0, 3) if a0 > 1e-12 else None
+
     return {
-        "measured": "position RMS of our replay against the log, over all logged joints",
+        "measured": "position RMS of our replay against the log, over all logged joints, with BOTH replays "
+                    "run at the identified actuation delay",
         "independent_of_the_objective": "the fit minimised a TORQUE residual; this is a POSITION gap, so it "
                                         "is not the quantity that was optimised",
         "before_rms_rad": round(before, 6),
@@ -674,8 +771,22 @@ def _trajectory_improvement(gene, model, aligned, deltas, dofs, kp, kd, log, pla
         "before_rms_deg": round(float(np.degrees(before)), 4),
         "after_rms_deg": round(float(np.degrees(after)), 4),
         "per_joint": per_joint,
-        "caveat": "the delay is NOT applied here (no actuation-delay model exists in the compiled model), so "
-                  "any residual timing error is still in this number",
+        "scored_at_delay_ms": round(d * ctrl_every * dt * 1000.0, 3),
+        "delay_identified": bool(delay_identified),
+        "delay_source": delay_source,
+        "improvement_x_at_zero_delay": at_zero,
+        "why_scored_at_the_delay": (
+            "both replays carry the same actuation delay, so the timing error cancels in the ratio and what is "
+            "left is the fitted parameters. Scored at 0 ms this number has a CEILING set by the delay alone -- "
+            "measured on the Go2, 1.016x at 20 ms against a 1.5x gate, reachable by no fit."
+            if d else
+            ("the log shows no actuation delay, so 0 ms is the correct scoring point" if delay_identified else
+             "the actuation delay could NOT be identified, so this falls back to 0 ms. Any timing error in the "
+             "log is still inside this number and it may be an under-estimate of the fit's worth; the gate "
+             "refusing on it is a refusal about the LOG, not about the parameters")),
+        "caveat": "the delay is not written into the compiled model (MuJoCo has no transport delay and our "
+                  "emitter sets no dyntype), so this is the delay HELD IN THE REPLAY, not a model that ships "
+                  "with it. See calibration.model_represents_actuation_delay.",
     }
 
 

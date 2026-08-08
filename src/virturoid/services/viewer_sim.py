@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from virturoid.services.install_paths import policy_bank_dir
 
 _GEOM_TYPE = {0: "plane", 2: "sphere", 3: "capsule", 4: "ellipsoid", 5: "cylinder", 6: "box", 7: "mesh"}
 
@@ -162,7 +163,7 @@ def _load_locomotion_policy(package_dir: Path, feature_dim: int, models_dir: str
         species = genome.get("species")
     except Exception:  # noqa: BLE001
         species = None
-    for cand in ([Path(models_dir) / ("learned_" + str(species).replace("/", "_") + ".npz")] if species else []):
+    for cand in ([policy_bank_dir(models_dir) / ("learned_" + str(species).replace("/", "_") + ".npz")] if species else []):
         if cand.exists():
             try:
                 pol = MorphPolicy.from_npz(str(cand))

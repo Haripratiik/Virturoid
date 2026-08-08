@@ -3,6 +3,7 @@
   "battery_version": "v1",
   "model": "offline_heuristic_v1",
   "mode": "offline",
+  "generator_label": "OFFLINE deterministic builders. The LIVE (gpt-5.5, production-lane) baseline is a SEPARATE file, tests/fixtures/design_bench_baseline_live_v1.json, measured 2026-08-08 (#280) at verdict@1 = 0.000 over the 6 of 20 prompts that got a real answer. Neither file may be graded against the other's floor; test_the_two_baselines_cannot_be_graded_against_each_others_floor enforces it. NOTE for readers of per_case below: elephant__appearance and palletizer__construction are 'true' HERE and were REFUSED by the live path (LLMDesignUnavailable), so this map is a floor on the offline compiler, NOT evidence the product can build those bodies.",
   "provenance_note": "#208 (2026-08-07): MEASURED, not assumed. All 20 rows of the committed cassette were authored by the DETERMINISTIC builders -- 14 heuristic, 6 anatomy_generic -- so every number in this file is a measurement of the offline fallback path, NOT of the LLM-first product. 'mode' must equal DesignCassette().mode(); test_baseline_declares_the_generator_it_was_measured_on enforces it, so a live re-record cannot be compared against this floor without also re-declaring the mode.",
   "schema_valid@1": 1.0,
   "compile@1": 1.0,

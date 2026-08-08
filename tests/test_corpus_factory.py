@@ -88,6 +88,68 @@ def test_held_out_aware_proposer_saves_the_budget(tmp_path):
     assert len(res.admitted) == 2 and res.rejected.get("held_out", 0) == 0   # no slot wasted on a held-out body
 
 
+def test_novelty_is_decided_before_the_expensive_verify(tmp_path):
+    """#281: novelty is pure structure and the verifier is a 39 s gait fit, so a duplicate must never reach it.
+    The measured night rejected 9 proposals for novelty AFTER paying to fit each one a controller."""
+    calls = []
+
+    def counting_verify(gene):
+        calls.append(gene.id)
+        return {"schema_valid": True, "compiles": True, "source": "physics", "credible": True,
+                "fitness": 0.6, "verdict": "CREDIBLE", "kind": "legged"}
+    it = iter([_legged(4, "A"), _legged(4, "DUP")])          # DUP is structurally identical to A
+    res = CF.run_factory_night(lambda ctx: next(it, None), manifest_path=tmp_path / "c.json",
+                               verify_fn=counting_verify)
+    assert len(res.admitted) == 1 and res.rejected.get("novelty") == 1
+    assert calls == ["A"], f"the duplicate was verified before it was deduped: {calls}"
+
+
+def test_a_failed_draft_does_not_end_the_night(tmp_path):
+    """A proposer hiccup (a composition that raised) used to return None through the wrapper, and
+    ``run_factory_night`` reads None as 'the bank is exhausted' — so one transient failure forfeited the rest
+    of the budget silently. A None mid-resample is a failed DRAFT, not an exhausted bank."""
+    queue = [_aquatic(), None, _legged(4, "A"), _aquatic(), _legged(5, "B")]
+    it = iter(queue)
+    wrapped = CF.held_out_aware(lambda ctx: next(it, None), max_resample=4)
+    res = CF.run_factory_night(wrapped, config=CF.FactoryConfig(max_bodies=2),
+                               manifest_path=tmp_path / "c.json", verify_fn=_fake_verify({"A", "B"}))
+    assert len(res.admitted) == 2 and res.rejected.get("held_out", 0) == 0
+    assert res.proposer["failed_drafts"] == 1 and res.proposer["reserved_drafts"] == 2
+
+
+def test_the_guard_steers_the_proposer_instead_of_only_filtering_it(tmp_path):
+    """The whole point of #281: a reserved draft must come back to the proposer WITH ITS REASON, and the guard's
+    constraints must reach the proposer before it draws at all."""
+    seen_context, told = {}, []
+
+    def proposer(ctx):
+        seen_context.update(ctx)
+        return next(it, None)
+    it = iter([_aquatic(), _legged(4, "A")])
+    wrapped = CF.held_out_aware(proposer, max_resample=3,
+                                on_reserved=lambda g, p, why: told.append(why))
+    CF.run_factory_night(wrapped, config=CF.FactoryConfig(max_bodies=1),
+                         manifest_path=tmp_path / "c.json", verify_fn=_fake_verify({"A"}))
+    assert told and told[0]["niche"] == "aquatic" and told[0]["reason"]
+    assert seen_context["guard"]["max_limbs"] == 5           # the brief, handed over before any body exists
+    assert "avoid_niches" in seen_context["guard"] and "corpus_keys" in seen_context
+
+
+def test_guard_brief_is_the_guards_own_constraints():
+    from virturoid.services.heldout_set import design_constraints
+    assert CF.guard_brief() == design_constraints()
+
+
+def test_proposer_stats_report_drafts_per_slot(tmp_path):
+    """drafts/slot is the number that says whether steering works: 1.0 means every draft became a proposal."""
+    it = iter([_legged(4, "A"), _legged(5, "B")])
+    wrapped = CF.held_out_aware(lambda ctx: next(it, None))
+    res = CF.run_factory_night(wrapped, config=CF.FactoryConfig(max_bodies=2),
+                               manifest_path=tmp_path / "c.json", verify_fn=_fake_verify({"A", "B"}))
+    assert res.proposer["drafts"] == 2 and res.proposer["drafts_per_slot"] == 1.0
+    assert res.to_dict()["proposer"]["slots"] == 2
+
+
 def test_checkpoint_persists_and_resumes(tmp_path):
     mp = tmp_path / "corpus.json"
     it1 = iter([_legged(4, "A")])
@@ -124,6 +186,79 @@ def test_proposer_failure_is_isolated_not_fatal(tmp_path):
     res = CF.run_factory_night(flaky, manifest_path=tmp_path / "c.json", verify_fn=_fake_verify({"OK"}))
     assert len(res.admitted) == 1                          # the night survived the proposer error
     assert any(d.get("stage") == "propose" for d in res.diagnostics)
+
+
+def _night_module():
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+    import corpus_factory_night
+    return corpus_factory_night
+
+
+def test_the_legged_target_grid_spans_the_axes_that_actually_move_the_body():
+    """The grid's cells are the MEASURED-effective axes (body-plan route, size word, biped stature); an inert
+    axis in here is a slot spent to re-bank a body the corpus already has."""
+    night = _night_module()
+    targets = night._legged_targets()
+    assert len(targets) == len({p for p, _ in targets})                # no duplicate prompt in the grid
+    assert {t["route"] for _, t in targets} == {"template", "anatomy", "biped"}
+    assert min(night._BIPED_STATURES_M) > 1.03                         # below this the biped builder clamps flat
+    # interleaved: the first three targets are three DIFFERENT body plans, not three sizes of one
+    assert len({t["route"] for _, t in targets[:3]}) == 3
+    # every target must name a body the guard can admit — a reserved cell is a cell that can never be banked
+    from virturoid.services.heldout_set import MANY_LIMB_MIN
+    assert MANY_LIMB_MIN >= 6 and not any("six-legged" in p or "eight-legged" in p for p, _ in targets)
+
+
+def test_night_proposer_spends_a_draft_not_a_slot_on_a_reserved_body(monkeypatch):
+    """The load-bearing behaviour: a body the guard reserves is composed CHEAP, recognised, and its target
+    retired — it never reaches the expensive walkability stage and never occupies a proposal slot."""
+    night = _night_module()
+    from virturoid.services import anatomy_compiler, morphology_composer
+    drafted, finalized = [], []
+
+    def fake_compose(prompt, *, llm="auto", ensure_walkable=False, strict_llm=False, **kw):
+        drafted.append(prompt)
+        assert ensure_walkable is False, "the draft stage must not pay for walkability"
+        return _aquatic() if len(drafted) <= 2 else _legged(4, f"OK{len(drafted)}")
+
+    def fake_walk(gene, prompt="", **kw):
+        finalized.append(prompt)
+        return gene
+    monkeypatch.setattr(morphology_composer, "compose_robot", fake_compose)
+    monkeypatch.setattr(anatomy_compiler, "ensure_walkable_quad", fake_walk)
+
+    propose = night._offline_proposer(False, ("legged",), llm=None)
+    got = propose({"thinnest_classes": ["legged"], "corpus_keys": set()})
+    from virturoid.services.heldout_set import is_held_out
+    gene, prompt = got
+    assert not is_held_out(gene, prompt=prompt)
+    assert len(drafted) == 3 and finalized == [drafted[2]]     # 2 reserved drafts, 1 finalize — not 3 finalizes
+    assert propose.stats == {"drafts_composed": 3, "reserved_drafts": 2, "duplicate_drafts": 0,
+                             "failed_drafts": 0, "finalized": 1}
+    # the two reserved targets are RETIRED, not re-rolled: the next call draws fresh prompts
+    propose({"thinnest_classes": ["legged"], "corpus_keys": set()})
+    assert drafted[3] not in drafted[:3]
+
+
+def test_night_proposer_dedups_structurally_before_paying_to_verify(monkeypatch):
+    """A body the corpus already holds is refused at draft time, where it costs ~0 s, instead of downstream at
+    the novelty gate where it would already have cost a gait fit."""
+    night = _night_module()
+    from virturoid.services import anatomy_compiler, morphology_composer
+    from virturoid.services.heldout_set import body_key
+    n = {"i": 0}
+
+    def fake_compose(prompt, **kw):
+        n["i"] += 1
+        return _legged(4, "SAME") if n["i"] <= 2 else _legged(5, "NEW")
+    monkeypatch.setattr(morphology_composer, "compose_robot", fake_compose)
+    monkeypatch.setattr(anatomy_compiler, "ensure_walkable_quad", lambda g, p="", **kw: g)
+    propose = night._offline_proposer(False, ("legged",), llm=None)
+    got = propose({"corpus_keys": {body_key(_legged(4, "SAME"))}})
+    assert body_key(got[0]) == body_key(_legged(5, "NEW"))
+    assert propose.stats["duplicate_drafts"] == 2 and propose.stats["finalized"] == 1
 
 
 @pytest.mark.slow

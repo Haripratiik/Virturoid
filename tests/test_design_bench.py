@@ -9,8 +9,18 @@ import pytest
 from virturoid.schemas.gene import GeneSegment, RobotGene
 from virturoid.services import design_bench as DB
 
-_BASELINE = json.loads((Path(__file__).resolve().parents[1] / "tests" / "fixtures"
-                        / "design_bench_baseline_v1.json").read_text())
+_FIXTURES = Path(__file__).resolve().parents[1] / "tests" / "fixtures"
+_BASELINE = json.loads((_FIXTURES / "design_bench_baseline_v1.json").read_text())
+# The LIVE baseline (#280) — the same battery run through the production lane against a real model. Kept in a
+# SEPARATE fixture from the offline one on purpose: they measure different generators, so neither may be graded
+# against the other's floor.
+_LIVE_BASELINE = json.loads((_FIXTURES / "design_bench_baseline_live_v1.json").read_text())
+_LIVE_CASSETTE_PATH = _FIXTURES / "design_cassette_live_v1.json"
+
+
+def _live_cassette():
+    from virturoid.services.design_cassette import DesignCassette
+    return DesignCassette(_LIVE_CASSETTE_PATH)
 
 
 def _bad_gene() -> RobotGene:
@@ -186,6 +196,102 @@ def test_diff_compares_only_the_prompts_both_runs_scored():
     assert d["verdict@1_baseline_shared"] == 0.5 and d["verdict@1_candidate_shared"] == 0.5
     assert d["delta_verdict@1_shared"] == 0.0
     assert d["baseline_mode"] == "offline" and d["candidate_mode"] == "live"
+
+
+# ---------------------------------------------------------------- the LIVE baseline (#280)
+def test_the_live_baseline_declares_the_generator_it_was_measured_on():
+    """The live floor and the live cassette must agree about WHICH GENERATOR produced them, exactly as the
+    offline pair does. Without this, a re-record that fell back to the deterministic builders would be graded
+    against a floor labelled 'live' and the artifact would stop describing itself."""
+    cas = _live_cassette()
+    assert _LIVE_BASELINE["mode"] == cas.mode() == "live"
+    assert _LIVE_BASELINE["model"] == DB.label_for_mode("live") == "live_llm_v1"
+    assert cas.provenance()["n_authored_by_builder"] == 0     # no offline body smuggled into the live floor
+
+
+def test_the_two_baselines_cannot_be_graded_against_each_others_floor():
+    """THE point of having two files. The offline number grades the deterministic builders; the live number
+    grades the product. They are not interchangeable and the harness must refuse the swap in BOTH directions."""
+    assert _BASELINE["mode"] == "offline" and _LIVE_BASELINE["mode"] == "live"
+    assert _BASELINE["model"] != _LIVE_BASELINE["model"]
+    with pytest.raises(DB.ProvenanceMismatch):
+        DB.check_label(_LIVE_BASELINE["model"], _BASELINE["mode"])     # live label on offline rows
+    with pytest.raises(DB.ProvenanceMismatch):
+        DB.check_label(_BASELINE["model"], _LIVE_BASELINE["mode"])     # offline label on live rows
+    # and the two disagree per case on prompts both measured -- so quoting one for the other is a real error,
+    # not a pedantic one. MEASURED 2026-08-08: offline 0.5 vs live 0.0 on the six shared prompts.
+    shared = set(_BASELINE["per_case"]) & set(_LIVE_BASELINE["per_case"])
+    assert shared, "the two baselines share no prompt; the diff below would be vacuous"
+    assert any(_BASELINE["per_case"][k] != _LIVE_BASELINE["per_case"][k] for k in shared)
+
+
+def test_a_rate_limit_is_not_a_design_failure():
+    """THE #280 defect, pinned. MEASURED 2026-08-08: a full live battery produced 16 'refusals' of which **14
+    were HTTP 429** -- the org's 50-requests-per-day cap on the fast model. The funnel scored all 16 the same
+    way, as schema failures in the absolute denominator, and printed ``verdict@1 = 0.0``. That number measured
+    an exhausted API quota while carrying the product's label.
+
+    Transport failures must leave the denominator (NAMED, never silently dropped); design refusals must stay in
+    it, because a model declining to produce a sound body IS the product's measured behaviour."""
+    from virturoid.services.design_cassette import is_infrastructure_failure
+    assert is_infrastructure_failure("Error code: 429 - rate limit reached for gpt-4.1-mini")
+    assert is_infrastructure_failure("APIConnectionError: connection reset")
+    assert is_infrastructure_failure("Error code: 503 - service unavailable")
+    # a real design refusal is NOT excused -- it is the product's honest answer and stays scored
+    assert not is_infrastructure_failure(
+        "LLMDesignUnavailable: center of mass falls outside the foot support polygon")
+    assert not is_infrastructure_failure("LLMDesignUnavailable: 5 joint(s) near/over their static hold torque")
+    assert not is_infrastructure_failure(None) and not is_infrastructure_failure("")
+
+    out = DB.bench_from_cassette(cassette=_live_cassette(), verify=False)
+    excluded = set(out["excluded_infrastructure_failures"])
+    assert excluded == set(_LIVE_BASELINE["infrastructure_excluded"])
+    assert out["n_attempts"] == _LIVE_BASELINE["n_attempts_scored"] == 20 - len(excluded)
+    assert "429" in out["infrastructure_warning"] or "TRANSPORT" in out["infrastructure_warning"]
+    # the excluded prompts are named in the funnel, so "unmeasured" can never read as "measured and failed"
+    assert all(pid in out["infrastructure_warning"] for pid in excluded)
+    # and they are absent from per_case rather than sitting there as False
+    assert not (excluded & set(out["per_case"]))
+
+
+def test_the_live_refusals_are_named_rather_than_averaged_away():
+    """A refusal is the single most product-relevant outcome the bench records: a prompt the product cannot
+    serve. The fixture must name each one with its reason, and each must be scored (false), not dropped."""
+    cas = _live_cassette()
+    refused = {p for p in cas.prompt_ids() if cas.entry_provenance(p)["failure_kind"] == "design_refusal"}
+    assert refused == set(_LIVE_BASELINE["refusals"]) and refused
+    assert _LIVE_BASELINE["n_refused"] == len(refused)
+    for pid, reason in _LIVE_BASELINE["refusals"].items():
+        assert reason.strip(), f"{pid} refused with no recorded reason"
+        assert _LIVE_BASELINE["per_case"][pid] is False       # counted against us, not excused
+
+
+def test_the_offline_floor_is_not_evidence_the_product_can_build_those_bodies():
+    """The trap this whole task exists to close. The offline per-case floor protects bodies the LIVE path did
+    not deliver, so the floor must never be read as a capability claim. Assert the overlap EXISTS and is
+    documented, rather than pretending it does not."""
+    live = _LIVE_BASELINE["per_case"]
+    protected_but_unbuilt = sorted(k for k, was in _BASELINE["per_case"].items()
+                                   if was and k in live and not live[k])
+    assert protected_but_unbuilt, ("the offline floor and the live result no longer disagree; re-record the "
+                                   "live baseline and rewrite this test rather than deleting it")
+    # the live fixture must account for every one of them -- as a refusal, or as a body that compiled and did
+    # not earn a credible verdict. Silence about them is what made the offline number misleading.
+    for pid in protected_but_unbuilt:
+        assert pid in live, pid
+
+
+@pytest.mark.slow
+def test_no_live_authored_body_silently_stops_walking():
+    """The per-case floor over the model's OWN designs, replayed token-free — the live twin of the offline
+    per-case gate. Re-recording measures the generator and costs tokens; this replay measures the
+    compiler+physics under those designs and costs nothing."""
+    out = DB.bench_from_cassette(cassette=_live_cassette(), verify=True)
+    floor = _LIVE_BASELINE["per_case"]
+    missing = sorted(set(floor) - set(out["per_case"]))
+    assert not missing, f"live cassette no longer covers {missing}; re-record before moving the floor"
+    broke = sorted(k for k, was in floor.items() if was and not out["per_case"].get(k))
+    assert not broke, "these live-authored bodies were credible and are not any more: " + ", ".join(broke)
 
 
 @pytest.mark.slow

@@ -296,8 +296,9 @@ def test_the_injected_perturbation_comes_back(recovery):
 
 
 def test_the_actuation_delay_is_recovered_exactly(recovery):
-    """Whole control ticks, recovered by re-simulating the declared loop. Exact is the right bar here: the delay
-    lives on a grid, so anything other than the injected tick is a different answer, not a noisy one."""
+    """Whole control ticks, recovered by aligning the declared control law against the logged applied torque.
+    Exact is the right bar here: the delay lives on a grid, so anything other than the injected tick is a
+    different answer, not a noisy one."""
     d = recovery["delay"]
     assert d["identified"] is True, d
     assert d["error_ms"] == 0.0, f"injected {d['injected_ms']} ms, recovered {d['recovered_ms']} ms"
@@ -305,20 +306,35 @@ def test_the_actuation_delay_is_recovered_exactly(recovery):
 
 
 def test_latency_is_not_claimed_when_a_dynamics_error_could_explain_it_instead(dog, plan):
-    """Measured failure, guarded: a delay-only sweep on an UNCORRECTED model picks delay=0 when friction and
-    inertia errors dominate the trajectory. The tool must decline on that pass and say why, and only claim the
-    delay once the identified parameter deltas have removed the competing explanation."""
+    """Measured failure, guarded: a delay-only TRAJECTORY sweep on an UNCORRECTED model picks delay=0 when
+    friction and inertia errors dominate the trajectory. That sweep must decline on that pass and say why, and
+    only claim the delay once the identified parameter deltas have removed the competing explanation.
+
+    It is no longer the estimator in charge -- ``_delay_from_command_response`` measures the same delay off the
+    log with no plant model in the path, and answers on the uncorrected pass -- but the closed-loop sweep is
+    still run and reported, and its documented weakness is still exactly this. It is pinned here because it is
+    the reason the open-loop estimator exists; if this ever stops reproducing, the argument for the whole
+    design has changed. See ``tests/test_sysid_delay_wedge.py`` for why the sweep cannot be trusted on a real
+    robot at all.
+    """
     from virturoid.services.sysid import measure_gap
     from virturoid.services.sysid.synthetic_hardware import synthetic_hardware_log
 
     _, log = synthetic_hardware_log(dog, perturbation=INJECTED, delay_ticks=DELAY_TICKS, plan=plan)
     gap = measure_gap(dog, log, plan=plan)
     lat = gap["latency"]
-    assert "after_parameter_correction" in lat, "no corrected-model pass was run"
+    injected_ms = DELAY_TICKS * 1000.0 / plan["controller"]["control_hz"]
+
+    # The verdict that ships comes from the open-loop estimate, and it does not need the correction at all.
     assert lat["identified"] is True
-    assert lat["source"] == "after_parameter_correction", (
+    assert lat["source"] == "command_response"
+    assert lat["delay_ms"] == injected_ms
+
+    sweep = lat["trajectory_sweep"]
+    assert "after_parameter_correction" in sweep, "no corrected-model pass was run"
+    assert sweep["source"] == "after_parameter_correction", (
         "the uncorrected sweep should not have been able to claim this delay")
-    assert lat["after_parameter_correction"]["delay_ms"] == DELAY_TICKS * 1000.0 / plan["controller"]["control_hz"]
+    assert sweep["after_parameter_correction"]["delay_ms"] == injected_ms
 
 
 def test_the_estimator_reports_its_own_floor_and_the_floor_is_not_zero(recovery):

@@ -14,6 +14,7 @@ no MuJoCo, no LLM. Production defaults bind the real fidelity ladder + the spend
 """
 
 from __future__ import annotations
+from virturoid.services.install_paths import anchored
 
 
 def default_body_zoo():
@@ -98,7 +99,7 @@ def _golden_policy_for(models_dir: str):
 
 def run_night(*, memory_dir: str, journal_path=None, budget_evals: int = 200, n_candidates: int = 12,
               per_candidate_evals: int = 8, zoo=None, evaluate_for=None, probe=None, llm=None, archive=None,
-              run_golden: bool = True, warm_start_pool: str = "build/models", mutate_prob: float = 0.5,
+              run_golden: bool = True, warm_start_pool: str = str(anchored("build/models")), mutate_prob: float = 0.5,
               seed: int = 0):
     """Run one night. Returns ``{golden, proposed, night}``. ``evaluate_for`` defaults to the real fidelity ladder
     (GPU); inject a stub for CPU tests. ``probe`` is the cheap learnability estimator (skipped if None). If the
@@ -138,7 +139,7 @@ def run_night(*, memory_dir: str, journal_path=None, budget_evals: int = 200, n_
             "sealed_floors": sealed}
 
 
-def ratchet_golden_floors(models_dir: str = "build/models") -> dict:
+def ratchet_golden_floors(models_dir: str = str(anchored("build/models"))) -> dict:
     """N21: after a banking night, re-verify each locomotion task against the best banked transfer and SEAL its
     golden floor to 0.9× the verified metric (only ever tightening). This is how new flywheel capabilities become
     drift-protected — without it the golden suite stays vacuous for everything banked after night 1. Returns the

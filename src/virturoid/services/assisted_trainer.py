@@ -16,6 +16,7 @@ The result: each build of a class is quicker to train than the last, because the
 from __future__ import annotations
 
 from pathlib import Path
+from virturoid.services.install_paths import policy_bank_dir
 
 _DEFAULT_BUDGET = {"generations": 30, "pop": 24, "steps": 320}
 _LESSON_CODE = "locomotion_budget"
@@ -255,7 +256,7 @@ def train_assisted(gene, *, target: float = 0.35, models_dir: str = "models", me
             from virturoid.services.gpu_trainer import default_training_recipe, gpu_available, train_gene_on_gpu
             if gpu_available(timeout=15):
                 say("GPU healthy — training on MJX (2048 envs)…")
-                out = train_gene_on_gpu(gene, out_path=str(Path(models_dir) / f"gpu_{cls}.npz"),
+                out = train_gene_on_gpu(gene, out_path=str(policy_bank_dir(models_dir) / f"gpu_{cls}.npz"),
                                         iters=max(120, budget["generations"] * 4), envs=2048,
                                         progress=progress, timeout=1200, keep_checkpoints=True,
                                         **default_training_recipe(gene))

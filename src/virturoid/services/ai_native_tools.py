@@ -10,20 +10,29 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-_RENDER_DIR = Path("build/agent_renders")
+from virturoid.services.install_paths import anchored
+
+_RENDER_DIR = anchored("build/agent_renders")
 
 
 def _render_dir() -> Path:
-    """The render directory as an ABSOLUTE path, resolved at CALL time.
+    """The render directory as an ABSOLUTE path, ANCHORED to the install, resolved at CALL time.
 
     ``_RENDER_DIR`` is relative, so ``str(dir / name)`` handed back to a caller was a CWD-relative string like
     ``build\\agent_renders\\robot_x_view.png``. An MCP host launched from a different working directory than the
     one the server process happens to sit in cannot open that -- the picture existed on disk and the path to it
-    did not resolve. Resolving here (rather than freezing an absolute constant at import) keeps the existing
-    behaviour that a test or a run under a different CWD writes under THAT CWD's ``build/``; only the string we
-    report changes, from relative to absolute. Matches what ``safe_build_path``/``export_held`` already return.
+    did not resolve. Resolving here (rather than freezing an absolute constant at import) is what makes the
+    string we report absolute, matching ``safe_build_path``/``export_held``.
+
+    It used to resolve against ``Path.cwd()``, justified as "a run under a different CWD writes under THAT
+    CWD's build/". That justification does not survive the cross-process case, which is the one this product
+    actually runs in: ``ui_server`` renders session previews HERE (``ui_server._send_session_detail``) while a
+    stdio MCP client spawns ``mcp_server`` as a separate process with a working directory the host chooses. Two
+    CWDs, two ``build/agent_renders``, and the picture the viewer just wrote is not the one the agent is
+    offered -- with no error on either side. Same defect as the sessions store and the memory bank; see
+    ``services.install_paths``. Anchored, there is one render directory per install.
     """
-    return (Path.cwd() / _RENDER_DIR).resolve()
+    return anchored(_RENDER_DIR).resolve()
 
 
 # ------------------------------------------------------------------ helpers

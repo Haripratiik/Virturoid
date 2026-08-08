@@ -22,6 +22,7 @@ from pathlib import Path
 from xml.sax.saxutils import escape
 
 from virturoid.schemas.gene import RobotGene
+from virturoid.services.install_paths import anchored
 
 TABLE_TOP_Z = 0.025  # shared with the scene exporter
 _MOUNT_Z = {"table": TABLE_TOP_Z, "floor": 0.0, "torso": 0.0, "free": 0.1}  # "free" spawns above the floor
@@ -456,7 +457,7 @@ def _pose_keyframe(gene: RobotGene, base_z: float) -> str:
             f'    <key name="rest" qpos="{qstr}"/>\n  </keyframe>\n')
 
 
-def gene_to_meshed_mjcf(gene: RobotGene, cache_dir: str = "build/_viewmesh", *,
+def gene_to_meshed_mjcf(gene: RobotGene, cache_dir: str = str(anchored("build/_viewmesh")), *,
                         include_floor: bool = True, spawn_z: float | None = None,
                         kitbash: bool = False, synth: bool = False, show_actuators: bool = True,
                         task: str = "") -> str:

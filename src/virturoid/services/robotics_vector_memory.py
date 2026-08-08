@@ -33,6 +33,7 @@ import sqlite3
 import time
 
 from virturoid.schemas.gene import RobotGene
+from virturoid.services.install_paths import anchored
 from virturoid.services.morphology_embedding import FEATURE_NAMES, embed_gene
 
 _TEXT_DIM = 64
@@ -181,7 +182,9 @@ def cosine(a: list[float], b: list[float]) -> float:
 # The learned graph latent (GeneGNN.embed) is used for the body sub-space ONLY when a trained model exists
 # AND its latent agrees with the deterministic morphology space on obvious cases — so a learned z_body can
 # never be worse than the shipped hand-crafted vector (the same "never worse" discipline as similar_runs).
-_GNN_MODEL_PATH = "build/models/gene_gnn.pt"
+#: ANCHORED (see ``services.install_paths``): guarded by ``if not Path(_GNN_MODEL_PATH).exists()`` and then
+#: skipped, so CWD-relative meant the GNN encoder was silently unavailable from any other directory.
+_GNN_MODEL_PATH = str(anchored("build/models/gene_gnn.pt"))
 _TRUSTED_GNN = None   # None = untried; False = absent/untrusted; else a loaded GeneGNN
 
 

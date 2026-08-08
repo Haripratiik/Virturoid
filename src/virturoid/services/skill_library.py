@@ -18,6 +18,7 @@ not a duplicate. Relates to [[virturoid-flywheel-vision]], [[general-codesign-fl
 from __future__ import annotations
 
 from pathlib import Path
+from virturoid.services.install_paths import policy_bank_dir
 
 # Human-facing skill name -> (task_type used by the bank, the structural kinds it transfers across).
 # Locomotion skills share ONE transferable MorphPolicy across every legged body; mobile bases share another.
@@ -207,13 +208,13 @@ def acquire_skill(gene, skill: str = "walk", *, db, models_dir: str = "models", 
         policy, quality, gens = res["policy"], deploy_quality(gene, res["policy"]), g * seeds
 
     # BANK back (keep-best). Write a UNIQUE npz so a worse later run never clobbers the banked best file.
-    Path(models_dir).mkdir(parents=True, exist_ok=True)
-    npz = str(Path(models_dir) / f"skill_{task_type}_{kind}__{getattr(gene, 'id', 'imported')}.npz")
+    policy_bank_dir(models_dir).mkdir(parents=True, exist_ok=True)
+    npz = str(policy_bank_dir(models_dir) / f"skill_{task_type}_{kind}__{getattr(gene, 'id', 'imported')}.npz")
     policy.to_npz(npz, quality)
     # BRIDGE to the per-species eval path: locomotion_episode/banked_policy_for read ``learned_<species>.npz``,
     # so write that too — then the body's own skill is used by the production skill the moment it's acquired.
     sp = getattr(gene, "species", None) or getattr(gene, "robot_class", None) or "imported"
-    policy.to_npz(str(Path(models_dir) / ("learned_" + str(sp).replace("/", "_") + ".npz")), quality)
+    policy.to_npz(str(policy_bank_dir(models_dir) / ("learned_" + str(sp).replace("/", "_") + ".npz")), quality)
     sid = f"morph_{kind}_{task_type}"
     db.record_skill(sid, kind, task_type, success_rate=float(quality), params_path=npz,
                     species=getattr(gene, "species", None), gene_id=getattr(gene, "id", None),

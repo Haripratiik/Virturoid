@@ -17,6 +17,8 @@ See [[task-effectiveness-loop]], [[morph-policy-theme1]] (the locomotion analog)
 
 from __future__ import annotations
 
+from virturoid.services.install_paths import policy_bank_dir
+
 _GOAL_SLOTS = 3   # object-offset packed into the policy's perception ring
 
 
@@ -258,8 +260,8 @@ def bank_grasp_residual(policy, gene, db, *, models_dir: str = "models", residua
 
     from virturoid.services.task_matched_eval import robot_kind
     kind = robot_kind(gene)
-    Path(models_dir).mkdir(parents=True, exist_ok=True)
-    npz = str(Path(models_dir) / f"grasp_{kind}__{getattr(gene, 'id', 'imported')}.npz")
+    policy_bank_dir(models_dir).mkdir(parents=True, exist_ok=True)
+    npz = str(policy_bank_dir(models_dir) / f"grasp_{kind}__{getattr(gene, 'id', 'imported')}.npz")
     policy.to_npz(npz, success_rate)
     db.record_skill(f"morph_{kind}_grasp", kind, "grasp", success_rate=float(success_rate), params_path=npz,
                     species=getattr(gene, "species", None), gene_id=getattr(gene, "id", None),
@@ -270,7 +272,7 @@ def bank_grasp_residual(policy, gene, db, *, models_dir: str = "models", residua
     # db handle — mirrors locomotion's learned_<species>.npz. Scales ride in a sidecar json.
     import json
     sp = getattr(gene, "species", None) or getattr(gene, "robot_class", None) or "imported"
-    base = Path(models_dir) / ("learned_" + str(sp).replace("/", "_") + "_grasp")
+    base = policy_bank_dir(models_dir) / ("learned_" + str(sp).replace("/", "_") + "_grasp")
     policy.to_npz(str(base.with_suffix(".npz")), success_rate)
     base.with_suffix(".json").write_text(
         json.dumps({"residual_scale": float(residual_scale), "fin_residual_scale": float(fin_residual_scale)}),
@@ -287,7 +289,7 @@ def banked_grasp_policy(gene, *, models_dir: str = "models"):
 
     from virturoid.services.morph_policy import MorphPolicy
     sp = getattr(gene, "species", None) or getattr(gene, "robot_class", None) or "imported"
-    base = Path(models_dir) / ("learned_" + str(sp).replace("/", "_") + "_grasp")
+    base = policy_bank_dir(models_dir) / ("learned_" + str(sp).replace("/", "_") + "_grasp")
     if not base.with_suffix(".npz").exists():
         return None, None
     try:

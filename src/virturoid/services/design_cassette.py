@@ -66,6 +66,40 @@ def authored_by_model(design_source: str | None) -> bool:
     return str(design_source or "") in MODEL_AUTHORED_SOURCES
 
 
+#: Substrings that identify a recorded failure as TRANSPORT, not design. MEASURED 2026-08-08 (#280): a full
+#: 20-prompt live battery produced 16 "refusals" -- and **14 of them were HTTP 429**, the organisation's 50
+#: requests-per-day cap on the fast model, hit partway through the run. The bench scored all 16 identically, as
+#: schema failures in the absolute denominator, and printed ``verdict@1 = 0.0``. That number was a measurement
+#: of an exhausted API quota wearing the label of the product's design quality -- the exact defect #208 closed
+#: facing the other way, and strictly worse, because a live baseline fixture recorded during an outage would
+#: have frozen "the product can build nothing" in as the regression floor.
+#:
+#: So a failure now carries WHY. Design refusals are the product's honest strict-mode behaviour and are real
+#: data; infrastructure failures are not a measurement of anything and are excluded from the denominator with
+#: their prompt ids named (never silently dropped -- see ``design_bench.bench_from_cassette``).
+INFRASTRUCTURE_ERROR_MARKERS: tuple[str, ...] = (
+    "error code: 429", "rate limit", "rate_limit", "too many requests",
+    "error code: 500", "error code: 502", "error code: 503", "error code: 504",
+    "internal server error", "service unavailable", "bad gateway", "overloaded",
+    "connection error", "connection aborted", "connection reset", "connectionerror",
+    "timeout", "timed out", "apitimeouterror", "apiconnectionerror",
+    "insufficient_quota", "quota", "authenticationerror", "permissiondenied",
+    "invalid_api_key", "ssl", "temporarily unavailable",
+)
+
+
+def is_infrastructure_failure(error: str | None) -> bool:
+    """Was this recorded failure the NETWORK/QUOTA, rather than the model declining to produce a sound design?
+
+    Decided from the recorded error text, so legacy rows are classifiable without re-recording -- the same
+    property that made ``authored_by_model`` able to classify the 2026-07 fixture. Conservative by
+    construction: anything not matching a known transport signature counts as a DESIGN refusal, so an
+    unrecognised failure is scored against us rather than excused.
+    """
+    text = str(error or "").lower()
+    return any(m in text for m in INFRASTRUCTURE_ERROR_MARKERS)
+
+
 class DesignCassette:
     """A load/record/replay handle over one cassette JSON file. Pure I/O + dict lookup — no design logic."""
 
@@ -128,6 +162,13 @@ class DesignCassette:
             entry["provenance"] = prov
         self._data.setdefault("entries", {})[prompt_id] = entry
 
+    def drop(self, prompt_id: str) -> bool:
+        """Forget one entry so the next record run re-generates it. The reason this exists is #280: a row whose
+        stored outcome is a TRANSPORT failure is not an answer, and because ``design_from_prompt`` replays
+        anything already present, leaving it in place would make a single rate-limit window poison that prompt
+        permanently. Returns whether an entry was removed."""
+        return self._data.setdefault("entries", {}).pop(prompt_id, None) is not None
+
     # -------------------------------------------------------------- provenance (the honest-gate substrate)
     def entry_provenance(self, prompt_id: str) -> dict:
         """Per-row provenance, DERIVED not asserted. ``authored_by_model`` is decidable for every row (legacy
@@ -135,9 +176,16 @@ class DesignCassette:
         ``failed`` marks a recorded design FAILURE — an attempt that produced no body at all."""
         e = self.entry(prompt_id) or {}
         prov = e.get("provenance") or {}
+        failed = "gene" not in e
+        infra = failed and is_infrastructure_failure(e.get("error"))
         return {"prompt_id": prompt_id,
                 "design_source": e.get("design_source"),
-                "failed": "gene" not in e,
+                "failed": failed,
+                # WHY it failed. "infrastructure" is not a measurement of the product (#280); "design_refusal"
+                # is -- it is strict mode declining to substitute a template, which is the behaviour we want.
+                "failure_kind": (None if not failed else "infrastructure" if infra else "design_refusal"),
+                "infrastructure_failure": infra,
+                "error": e.get("error"),
                 "authored_by_model": authored_by_model(e.get("design_source")),
                 "llm_calls": prov.get("llm_calls"),
                 "backend": prov.get("backend"), "model": prov.get("model"),
@@ -163,24 +211,36 @@ class DesignCassette:
         """The whole-cassette provenance block that Design-Bench stamps onto its funnel."""
         rows = [self.entry_provenance(p) for p in self.prompt_ids()]
         built = [r for r in rows if not r["failed"]]
+        infra = [r for r in rows if r["infrastructure_failure"]]
+        refused = [r for r in rows if r["failure_kind"] == "design_refusal"]
         n_live = sum(1 for r in built if r["authored_by_model"])
         calls = [r["llm_calls"] for r in rows if r["llm_calls"] is not None]
         srcs: dict[str, int] = {}
         for r in rows:
-            key = "(design failed)" if r["failed"] else str(r["design_source"] or "unknown")
+            key = ("(infrastructure failure)" if r["infrastructure_failure"] else "(design refused)"
+                   if r["failed"] else str(r["design_source"] or "unknown"))
             srcs[key] = srcs.get(key, 0) + 1
         return {"mode": self.mode(), "n_rows": len(rows),
                 "n_built": len(built), "n_failed": len(rows) - len(built),
+                # #280: a failure is only a measurement when it was the MODEL that declined.
+                "n_design_refused": len(refused), "n_infrastructure_failed": len(infra),
+                "infrastructure_prompt_ids": sorted(r["prompt_id"] for r in infra),
+                "design_refused_prompt_ids": sorted(r["prompt_id"] for r in refused),
+                "n_usable": len(rows) - len(infra),
                 "n_authored_by_model": n_live, "n_authored_by_builder": len(built) - n_live,
                 "design_sources": srcs,
                 "llm_calls_total": sum(calls) if calls else None,
                 "n_rows_with_measured_calls": len(calls),
+                "llm_calls_caveat": ("A FLOOR, not a cost. llm_client._LedgerClient records a call only after "
+                                     "complete_json RETURNS, so every completion that raised -- which is every "
+                                     "one of the 429s -- billed latency (and possibly tokens) while counting 0."),
                 "backends": sorted({r["backend"] for r in rows if r["backend"]}),
                 "models": sorted({r["model"] for r in rows if r["model"]}),
                 "evidence": ("authored_by_model is read off design_source; the listed sources are assigned only "
                              "inside llm-is-not-None branches of morphology_composer. Design failures are "
                              "counted but do not vote on the mode (see DesignCassette.mode). Rows without "
-                             "llm_calls predate provenance recording (#208)."),
+                             "llm_calls predate provenance recording (#208). failure_kind is read off the "
+                             "recorded error text against INFRASTRUCTURE_ERROR_MARKERS (#280)."),
                 "path": str(self.path)}
 
     def save(self, *, battery_version: str | None = None) -> Path:
@@ -197,6 +257,8 @@ class DesignCassette:
             sources[e.get("source", "unknown")] = sources.get(e.get("source", "unknown"), 0) + 1
         return {"version": self._data.get("version"), "battery_version": self._data.get("battery_version"),
                 "n_entries": len(entries), "n_failures": sum(1 for e in entries.values() if "gene" not in e),
+                "n_infrastructure_failures": sum(1 for e in entries.values()
+                                                 if "gene" not in e and is_infrastructure_failure(e.get("error"))),
                 "sources": sources, "path": str(self.path)}
 
 

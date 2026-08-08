@@ -362,12 +362,21 @@ def bench_from_cassette(cassette=None, *, verify: bool = True, fragility: bool =
     else:
         check_label(model, prov["mode"])
     designs = []
+    excluded_infra: list[str] = []
     for rec in B.battery():
         pid = B.prompt_id(rec)
         # A SUBSET cassette (the small live arm, #208) holds only some prompts. Scoring the absent ones would
         # book 15 phantom schema failures and make the live verdict@1 uncomparable with the full replay, so
         # ``only_recorded`` narrows the denominator instead -- and the funnel says so, loudly, below.
         if only_recorded and not cas.has(pid):
+            continue
+        # #280: an HTTP 429 is NOT a design failure. MEASURED on the 2026-08-08 live battery -- 14 of 16
+        # "refusals" were the org's 50-requests-per-day cap on the fast model, and the funnel dutifully
+        # reported verdict@1 = 0.0 for them. That is a number about an API quota wearing the product's label.
+        # Transport failures leave the denominator (named, never dropped silently); design refusals stay in it,
+        # because a model declining to produce a sound body IS the product's measured behaviour.
+        if cas.has(pid) and cas.entry_provenance(pid)["infrastructure_failure"]:
+            excluded_infra.append(pid)
             continue
         designs.append({"prompt_id": pid, "family": rec["family"], "phrasing": rec["phrasing"],
                         "concept": rec["concept"], "constraints": rec.get("constraints"),
@@ -389,6 +398,13 @@ def bench_from_cassette(cassette=None, *, verify: bool = True, fragility: bool =
                              n_battery=n_battery, is_subset=len(designs) < n_battery,
                              coverage=round(len(designs) / n_battery, 4) if n_battery else None)
     out["mode"] = prov["mode"]
+    out["excluded_infrastructure_failures"] = sorted(excluded_infra)
+    if excluded_infra:
+        out["infrastructure_warning"] = (
+            f"{len(excluded_infra)}/{n_battery} prompts were dropped from the denominator because the recording "
+            f"hit TRANSPORT failures (rate limit / timeout / outage), not design failures: "
+            f"{', '.join(sorted(excluded_infra))}. Those prompts are UNMEASURED here -- not failed. Re-record "
+            f"them before quoting this funnel as a capability statement.")
     if out["provenance"]["is_subset"]:
         out["subset_warning"] = (f"SUBSET: {len(designs)}/{n_battery} battery prompts scored. verdict@1 here is "
                                  f"NOT comparable with a full-battery number -- use diff_funnels, which "

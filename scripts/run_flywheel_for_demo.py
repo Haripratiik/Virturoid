@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from virturoid.services.flywheel_chart import flywheel_compounding_chart, render_ascii_chart  # noqa: E402
 from virturoid.services.flywheel_runner import run_flywheel  # noqa: E402
+from virturoid.services.install_paths import anchored
 
 # similar bodies so later cycles warm-start from earlier ones (that is what makes the curve compound)
 DEMO_PROMPTS = [
@@ -27,7 +28,8 @@ DEMO_PROMPTS = [
 ]
 
 
-def main(out_root: str = "build/ui_verify", n: int = 3) -> int:
+def main(out_root: str = None, n: int = 3) -> int:
+    out_root = out_root if out_root is not None else anchored("build/ui_verify")  # tracked demo set; anchored
     prompts = DEMO_PROMPTS[: max(2, n)]
     with tempfile.TemporaryDirectory() as mem, tempfile.TemporaryDirectory() as builds:
         report = run_flywheel(prompts, memory_dir=Path(mem), out_root=Path(builds))

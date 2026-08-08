@@ -40,6 +40,8 @@ def _print_funnel(out: dict, path: str) -> None:
     print(f"\n=== Design-Bench {out['battery_version']} · model={out['model']} · n={out['n_attempts']} ===")
     print(f"  MODE {out.get('mode')}   authored-by-model {prov.get('n_authored_by_model')}/{prov.get('n_rows')}"
           f"   sources {prov.get('design_sources')}")
+    if out.get("infrastructure_warning"):
+        print(f"  !! {out['infrastructure_warning']}")
     if out.get("subset_warning"):
         print(f"  !! {out['subset_warning']}")
     print(f"  schema_valid@1 {out['schema_valid@1']}   compile@1 {out['compile@1']}   "
@@ -120,14 +122,29 @@ def main() -> None:
             prompts = [by_id[w] for w in want]
         else:
             prompts = B.battery()[: args.limit] if args.limit else B.battery()
+        # An INFRASTRUCTURE failure is not a recorded answer, it is a missing one (#280). ``design_from_prompt``
+        # replays any prompt the cassette already holds, so without this a single rate-limit window would
+        # poison those rows PERMANENTLY: every later re-record would skip them and keep replaying the outage.
+        stale = [B.prompt_id(r) for r in prompts
+                 if cas.has(B.prompt_id(r)) and cas.entry_provenance(B.prompt_id(r))["infrastructure_failure"]]
+        for pid in stale:
+            cas.drop(pid)
+        if stale:
+            print(f"[record] retrying {len(stale)} row(s) whose last outcome was a transport failure: "
+                  f"{', '.join(stale)}")
         ok = fail = 0
         t_rec = time.time()
         for rec in prompts:
+            t_one = time.time()
             g, src = design_from_prompt(rec["prompt"], prompt_id=B.prompt_id(rec), cassette=cas,
                                         allow_generate=True, record=True, strict_llm=args.live)
             ok, fail = (ok + 1, fail) if g is not None else (ok, fail + 1)
-            print(f"  [{'ok ' if g is not None else 'FAIL'}] {B.prompt_id(rec):28s} source={src}")
-        cas.save(battery_version=B.BATTERY_VERSION)
+            print(f"  [{'ok ' if g is not None else 'FAIL'}] {B.prompt_id(rec):28s} source={src} "
+                  f"({round(time.time() - t_one, 1)}s)", flush=True)
+            # Save after EVERY prompt, not once at the end. A live full-battery record is ~37 minutes of
+            # billed completions; saving only on completion means one dropped connection discards all of it.
+            # Replay reads whatever is on disk, so a partial cassette is a usable subset, not a corrupt file.
+            cas.save(battery_version=B.BATTERY_VERSION)
         print(f"[record] {'LIVE (production lane)' if args.live else 'offline'}: ok={ok} fail={fail} "
               f"n={len(prompts)} wall={round(time.time() - t_rec, 1)}s -> {cassette_path}")
         print(f"[record] measured provenance: {cas.provenance()}")

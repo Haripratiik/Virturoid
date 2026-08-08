@@ -14,6 +14,7 @@ the next build priority (e.g. forward hexapod locomotion, which needs the learne
 
 from __future__ import annotations
 
+from virturoid.services.install_paths import anchored
 from virturoid.services.virt_bench import get_task, list_tasks, verify_submission
 
 
@@ -84,7 +85,7 @@ def run_arm_a(task_id: str, *, steps: int = 600, seed: int | None = None) -> dic
 
 def run_arm_b(task_id: str, *, steps: int = 600, max_evals: int = 12, on_node=None, use_memory: bool = True,
               use_gpu: bool = False, gpu_iters: int = 60, gpu_envs: int = 1024, gpu_hifi=None,
-              models_dir: str = "build/models", seed: int | None = None) -> dict:
+              models_dir: str = str(anchored("build/models")), seed: int | None = None) -> dict:
     """Full-harness arm with up to THREE candidate sources, all scored by the SAME independent verifier at the
     frozen horizon: (1) MEMORY -- recall the banked policy that best transfers to this body (the flywheel moat);
     (2) SEARCH the CPG gait direction on the cheap CPU rung; (3) GPU RESIDUAL (plan gap-closure WS1/#66) -- when
@@ -208,7 +209,7 @@ def run_arm_b(task_id: str, *, steps: int = 600, max_evals: int = 12, on_node=No
 
 
 def run_scoreboard(*, split: str | None = "dev", steps: int = 600, max_evals: int = 12, use_memory: bool = True,
-                   models_dir: str = "build/models", families=("locomotion", "manipulation")) -> dict:
+                   models_dir: str = str(anchored("build/models")), families=("locomotion", "manipulation")) -> dict:
     """Run both arms over the tasks in ``split`` (``"dev"`` / ``"held_out"`` / ``None`` = all) whose family is in
     ``families`` (locomotion + manipulation by default) and return an honest, verifier-scored A-vs-B scoreboard.
     ``B_solved - A_solved`` is the measured value of the full harness -- the head-to-head number for "beats
@@ -244,7 +245,7 @@ def _metric(res: dict):
 
 
 def run_head_to_head(*, split: str | None = "held_out", steps: int = 600, max_evals: int = 12,
-                     models_dir: str = "build/models", families=("locomotion", "manipulation"),
+                     models_dir: str = str(anchored("build/models")), families=("locomotion", "manipulation"),
                      use_gpu: bool = False, gpu_iters: int = 60, gpu_envs: int = 1024, gpu_hifi=None,
                      seed: int | None = None, prereg_path: str | None = None,
                      with_baseline: bool = False, baseline_llm=None) -> dict:

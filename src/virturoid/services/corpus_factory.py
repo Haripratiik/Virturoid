@@ -49,11 +49,16 @@ class NightResult:
     annecs: int = 0
     mean_pairwise_similarity: float | None = None
     wall_s: float = 0.0
+    # Drafts drawn vs slots filled. A night reporting 20 proposals hides how many BODIES were built to get
+    # them; when a proposer resamples past reserved niches, drafts/slots is the ratio that says whether the
+    # guard is steering (→1.0) or the proposer is re-rolling blind into the same wall (→ max_resample+1).
+    proposer: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {"admitted": self.admitted, "rejected": self.rejected, "coverage": self.coverage,
                 "annecs": self.annecs, "mean_pairwise_similarity": self.mean_pairwise_similarity,
-                "n_admitted": len(self.admitted), "n_diagnostics": len(self.diagnostics), "wall_s": self.wall_s}
+                "n_admitted": len(self.admitted), "n_diagnostics": len(self.diagnostics), "wall_s": self.wall_s,
+                "proposer": self.proposer}
 
 
 def _compiles_and_credible(gene) -> dict:
@@ -197,7 +202,15 @@ def _reject(gate: str, niche, detail=None) -> dict:
 def admit(gene, *, grid, corpus_genes, corpus_keys, niche_best: dict, config: FactoryConfig, verify_fn,
           prompt=None) -> dict:
     """Run one candidate through the ordered gate stack. Returns an admit/reject record with the FIRST failing
-    gate (auditable). Verification runs only after the cheap structural gates pass."""
+    gate (auditable). Verification runs only after the cheap structural gates pass.
+
+    CHEAPEST-FIRST IS LITERAL. The novelty/dedup gate is pure structure — a body_key comparison and an embedding
+    distance, microseconds — but it used to sit BEHIND ``verify_fn``, which for a gait-corpus night is a 39 s
+    fit-plus-robustness measurement per body (measured 2026-08-08 on this checkout). A night that rejected 9
+    proposals for novelty therefore spent ~6 minutes fitting controllers for bodies it had already decided were
+    duplicates. Novelty depends on nothing the verifier produces, so it moves ahead of it. Admissions are
+    unchanged by the move (a body failing novelty was never admitted); what changes is the bill, and the reported
+    gate for a body that would have failed both — now the cheaper, more actionable one."""
     from virturoid.services.heldout_set import body_key, is_held_out
     from virturoid.services.novelty_search import embedding_novelty, niche_key
     key = niche_key(gene)
@@ -207,19 +220,7 @@ def admit(gene, *, grid, corpus_genes, corpus_keys, niche_best: dict, config: Fa
     # 1) feasibility (cheap, pre-sim): a valid kinematic tree
     if gene.validate():
         return _reject("feasibility", key, "schema")
-    res = verify_fn(gene)
-    if not res.get("schema_valid", True) or not res.get("compiles", True):
-        return _reject("feasibility", key, "compile")
-    # 2) real-data anchor: the label must be a physics verdict, NEVER a metric-predicted outcome (§10.2/§10.5)
-    if res.get("source") != "physics":
-        return _reject("real_data_anchor", key, res.get("source"))
-    # 3) verdict: the render-level un-gameable credible verdict
-    if not res.get("credible"):
-        return _reject("verdict", key, res.get("verdict"))
-    # 4) success floor
-    if float(res.get("fitness", 0.0)) < config.success_forward_floor:
-        return _reject("success_floor", key, res.get("fitness"))
-    # 5) novelty / dedup — an EXACT structural duplicate (same body_key) is rejected outright (the un-gameable
+    # 2) novelty / dedup — an EXACT structural duplicate (same body_key) is rejected outright (the un-gameable
     #    duplicate signal; the embedding is coarse by design, so structure is the finer discriminator). The soft
     #    blended novelty catches the near-duplicate-but-not-identical case (the mode-collapse guard, §10.5).
     if body_key(gene) in (corpus_keys or set()):
@@ -227,6 +228,18 @@ def admit(gene, *, grid, corpus_genes, corpus_keys, niche_best: dict, config: Fa
     nov = 0.5 * grid.novelty(gene) + 0.5 * embedding_novelty(gene, corpus_genes)
     if nov < config.min_novelty:
         return _reject("novelty", key, round(nov, 4))
+    res = verify_fn(gene)
+    if not res.get("schema_valid", True) or not res.get("compiles", True):
+        return _reject("feasibility", key, "compile")
+    # 3) real-data anchor: the label must be a physics verdict, NEVER a metric-predicted outcome (§10.2/§10.5)
+    if res.get("source") != "physics":
+        return _reject("real_data_anchor", key, res.get("source"))
+    # 4) verdict: the render-level un-gameable credible verdict
+    if not res.get("credible"):
+        return _reject("verdict", key, res.get("verdict"))
+    # 5) success floor
+    if float(res.get("fitness", 0.0)) < config.success_forward_floor:
+        return _reject("success_floor", key, res.get("fitness"))
     # 6) diversity-aware retention: per-niche keep-best (keep-hard-when-abundant)
     incumbent = niche_best.get(key)
     if grid.count(gene) >= config.per_niche_cap and (incumbent is not None and res["fitness"] <= incumbent):
@@ -317,8 +330,10 @@ def run_factory_night(propose_fn, *, config: FactoryConfig | None = None, manife
     res = NightResult()
     start = time.perf_counter()
 
+    brief = guard_brief()          # the held-out guard as a design constraint, handed to the proposer up front
     for _ in range(cfg.max_bodies):
-        context = {"thinnest_classes": grid.thinnest_classes(), "coverage": grid.coverage(), "night": night}
+        context = {"thinnest_classes": grid.thinnest_classes(), "coverage": grid.coverage(), "night": night,
+                   "guard": brief, "filled_niches": sorted(grid.cells), "corpus_keys": set(corpus_keys)}
         try:
             proposed = propose_fn(context)
         except Exception as exc:  # noqa: BLE001 - a proposer failure is isolated, never kills the night
@@ -363,8 +378,15 @@ def run_factory_night(propose_fn, *, config: FactoryConfig | None = None, manife
     manifest.save()
     res.annecs = manifest.data["cumulative_annecs"]
     res.coverage = grid.coverage()
+    # DISTINCT BODIES is the flywheel's binding constraint (#274) and the dashboards did not report it: a corpus
+    # of 20 bodies that are 3 shapes reads as 20 everywhere. total_bodies vs distinct_body_keys says which.
+    res.coverage["distinct_body_keys"] = len(corpus_keys)
     res.mean_pairwise_similarity = _mean_pairwise_similarity(corpus)
     res.wall_s = round(time.perf_counter() - start, 2)
+    stats = getattr(propose_fn, "stats", None)
+    if isinstance(stats, dict):
+        res.proposer = {**stats, "slots": cfg.max_bodies,
+                        "drafts_per_slot": round(stats.get("drafts", 0) / max(1, cfg.max_bodies), 2)}
     # RATCHET the gated metric against the (possibly grown) ledger — adopts only if it beats baseline held-out
     if memory_dir is not None:
         try:
@@ -377,33 +399,68 @@ def run_factory_night(propose_fn, *, config: FactoryConfig | None = None, manife
     return res
 
 
-def held_out_aware(propose_fn, *, max_resample: int = 4):
-    """Wrap a proposer so a night's proposal budget is not WASTED on bodies the held-out guard will trivially
-    reject. MEASURED 2026-07-12 (v7-C1): a live-gpt-5.5 night admitted 1/30 with rejected={held_out: 25} — the
-    LLM designs bodies that land in reserved niches (extra limbs → many_limb, aquatic/aerial, wheel-leg hybrid),
-    burning 25 of 30 slots before any real gate ran. On a held-out proposal this resamples up to ``max_resample``
-    times and yields the first non-held-out body.
+def guard_brief() -> dict:
+    """The held-out guard stated as a DESIGN BRIEF for the proposer — what a body must avoid to be admissible.
 
-    This NEVER weakens the leak guard: the gate stack's held-out check stays authoritative (a held-out body that
-    slips through after exhausted resamples is still rejected there). The wrapper only stops the budget bleeding —
-    exactly the 'smart proposer targets thin niches' the factory was designed for (avoiding reserved niches is
-    part of being smart). Pure w.r.t. the guard; needs no corpus access."""
-    from virturoid.services.heldout_set import is_held_out
+    Passed into every proposal context by ``run_factory_night``. A code proposer reads ``max_limbs`` and picks
+    targets inside it; an LLM proposer gets the same dict in its prompt. This is the half of "steer, don't
+    filter" that happens BEFORE a body exists."""
+    from virturoid.services.heldout_set import design_constraints
+    return design_constraints()
+
+
+def held_out_aware(propose_fn, *, max_resample: int = 4, on_reserved=None):
+    """Make the held-out guard STEER the proposer instead of filtering it after the fact.
+
+    WHY THIS EXISTS, AND WHY THE FIRST VERSION DID NOT WORK. MEASURED 2026-07-12 (v7-C1): a live night admitted
+    1/30 with rejected={held_out: 25}. This wrapper was written for exactly that and the waste did not move —
+    a 40-body gated night still logged {held_out: 24}. Re-measured 2026-08-08, the reason was not the wrapper's
+    shape but the guard underneath it: ``_niche_many_limb`` counted the composer's NECK AND TAIL as limbs, so
+    100% of the factory's own legged prompt bank (18 of 18) composed to a "many-limbed" body. Resampling cannot
+    escape a partition that contains the entire family being proposed; the wrapper faithfully re-rolled four
+    times into the same wall and handed the fifth body to the gate. The guard is fixed at the source
+    (``heldout_set``, HELD_OUT_VERSION v2); this wrapper is fixed here.
+
+    Two changes, both about spending a DRAFT instead of a SLOT:
+
+    * ``on_reserved(gene, prompt, why)`` — the reject is reported back to the proposer with the guard's
+      ``explain()`` payload, so a proposer that can retarget (ours blacklists the target it just drew) does not
+      re-roll blind. A resample loop with no feedback is a random search over the same distribution.
+    * A proposer returning ``None`` mid-resample means THAT DRAFT failed, not that the bank is exhausted. The
+      old loop returned None on the first such hiccup, and ``run_factory_night`` reads None as "stop" — so one
+      transient composition error ended the night and forfeited the rest of the budget silently.
+
+    NEVER weakens the leak guard: the gate stack's held-out check stays authoritative on the FINAL body, and a
+    held-out body that survives exhausted resamples is still rejected there."""
+    from virturoid.services.heldout_set import explain
+    stats = {"drafts": 0, "reserved_drafts": 0, "failed_drafts": 0}
 
     def wrapped(context):
-        proposed = propose_fn(context)
-        tries = 0
-        while proposed is not None and tries < max_resample:
+        last = None
+        for _ in range(max(1, max_resample + 1)):
+            proposed = propose_fn(context)
+            stats["drafts"] += 1
+            if proposed is None:
+                stats["failed_drafts"] += 1
+                if last is None:
+                    return None                               # nothing drawn at all -> the bank really is done
+                continue                                      # a failed DRAFT is not an exhausted bank
+            last = proposed
             gene, prompt = (proposed if isinstance(proposed, tuple) else (proposed, None))
             try:
-                held = is_held_out(gene, prompt=prompt)
+                why = explain(gene, prompt=prompt)
             except Exception:  # noqa: BLE001 - an unclassifiable body is not our reason to resample
                 return proposed
-            if not held:
+            if not why["held_out"]:
                 return proposed
-            proposed = propose_fn(context)                    # this slot fell in a reserved niche -> try again
-            tries += 1
-        return proposed                                       # first non-held-out, or None (bank done), or last try
+            stats["reserved_drafts"] += 1
+            if on_reserved is not None:
+                try:
+                    on_reserved(gene, prompt, why)             # steer: tell the proposer WHICH wall it hit
+                except Exception:  # noqa: BLE001 - feedback is an accelerant, never a failure mode
+                    pass
+        return last                                            # exhausted -> hand it over; the gate still rules
+    wrapped.stats = stats    # drafts spent vs slots filled — the number that says whether steering is working
     return wrapped
 
 

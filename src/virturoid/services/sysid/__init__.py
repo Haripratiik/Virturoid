@@ -29,6 +29,15 @@ Stage 2 FITS, and APPLIES:
                              rule on the certificate's ``L2 bench-identified actuator`` rung by measuring the
                              six things it requires instead of asserting them.
 
+On that dominant residual specifically: the CONTROL-SIGNAL DELAY half of it is measured OPEN-LOOP, off the log,
+by ``gap_report._delay_from_command_response`` -- the shift that aligns the declared PD law evaluated on the
+logged state with the torque the log says was applied. It requires ``tau_meas`` (motor current is enough) and
+it does not involve the plant, which is the point: the closed-loop delay sweep this package shipped first is
+biased toward zero whenever the plant is wrong, and on the Menagerie Go2 it read a 40 ms delay as 10 ms.
+Actuation delay STILL cannot be applied to the compiled model -- MuJoCo has no transport delay and our emitter
+sets no ``dyntype`` -- so it is reported, held in the replay that scores the tracking gate, and blocked from
+the L2 rung by ``calibration.model_represents_actuation_delay``.
+
 ``synthetic_hardware`` is the sim2sim gate. WE OWN NO HARDWARE: every number this package has been validated
 against comes from perturbing a known model and recovering the perturbation. That validates the PIPELINE and
 the ESTIMATOR. It does not validate the PHYSICS -- MuJoCo's own modelling error cancels exactly when both the

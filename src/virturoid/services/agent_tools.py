@@ -819,7 +819,19 @@ def call_tool(name: str, args: dict | None = None) -> dict:
 # H2 (plan_v5): confine agent-supplied write paths (out_dir/build_root) under build/ so a tool can't be
 # steered to write outside the workspace. Resolve + verify containment; fall back to the default on escape.
 def safe_build_path(value, default_subdir: str):
-    """Return an absolute path under ``build/`` for an agent-supplied dir arg, or the default if it escapes."""
+    """Return an absolute path under ``build/`` for an agent-supplied dir arg, or the default if it escapes.
+
+    DELIBERATELY CWD-RELATIVE -- do not "fix" this to ``install_paths.anchored()``; the sweep has been here.
+    This is the function from incident 2 (f77d092: 231 leaked ``runs`` rows), and the reason it was not
+    anchored then is that anchoring makes the memory leak WORSE, not better. ``memory_db`` decides what to do
+    with a destination by comparing it against ``conventional_memory_dir()``, which is pinned to the process's
+    INITIAL CWD. Anchor this and, from any working directory other than the checkout,
+    ``safe_build_path(None, "memory")`` starts returning the checkout's REAL bank -- which no longer matches
+    the conventional dir, so the chokepoint classifies it as an EXPLICIT destination and writes to it. Today
+    the same call returns a harmless ``<cwd>/build/memory``. The containment that matters here (an
+    agent-supplied path may not escape the build root) is unaffected either way, because it is a
+    relationship between two paths, not a property of where the root is.
+    """
     build_root = (Path.cwd() / "build").resolve()
     default = build_root / default_subdir
     if not value:

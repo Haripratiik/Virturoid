@@ -859,7 +859,9 @@ SYSID_TOOLS: dict[str, dict] = {
                        "same commands through our model and compares trajectories, then subtracts our model's "
                        "inverse dynamics from the measured torque and regresses what is left on the model's own "
                        "sensitivity, so it names WHICH joints and WHICH parameters are implicated. Actuation "
-                       "delay is identified by re-simulating the closed loop across a delay grid, and every "
+                       "delay is identified OPEN-LOOP, by aligning the control law the plan declares against "
+                       "the applied torque in your log -- so it needs tau_meas (motor current is enough) and "
+                       "it does not depend on how good our dynamics model is. Every "
                        "attribution is put past an identifiability gate first: a parameter the experiment "
                        "could not load is reported as unidentified rather than guessed. Real MuJoCo; ~1 min "
                        "on a quadruped.",

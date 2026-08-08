@@ -26,6 +26,13 @@ WHAT_SIM2SIM_DOES_NOT_PROVE = (
 #: The default injection. Sized to be a realistic modelling error rather than a caricature: roughly a doubling
 #: of a mid-size joint's frictionloss, ~60% of its damping, and a reflected inertia comparable to a small
 #: gearbox's -- plus 2 control ticks (20 ms) of the actuator delay Hwangbo et al. name as the dominant term.
+#:
+#: That 20 ms used to be the exact point at which the wedge stopped working on a real body, and the fact that
+#: it is the DEFAULT is why the failure was invisible: every published number was taken on a composed dog whose
+#: bench loop tolerates delay (worst tracking RMS 0.0339 -> 0.0365 rad across 0-40 ms) while the Menagerie Go2's
+#: hips ring (0.0298 -> 0.1848 rad). Both halves are now measured on the Go2 -- the delay is recovered exactly
+#: at 0/20/40 ms and the tracking gate passes at 0 and 20 -- and the lesson stands: a default this package
+#: validates against is the one place a body-specific number is least likely to be noticed.
 DEFAULT_PERTURBATION = {"frictionloss": 0.08, "damping": 0.6, "armature": 0.03}
 DEFAULT_DELAY_TICKS = 2
 
@@ -167,6 +174,11 @@ def recovery_table(gene, *, perturbation: dict | None = None, delay_ticks: int =
         }
 
     ctrl_hz = float(plan["controller"]["control_hz"])
+    lat = gap.get("latency") or {}
+    # ``delay_ms`` is None when NO joint could even be scored -- a hold-only log, say. Reporting an error of
+    # "None minus 20" as a crash would turn a legitimate refusal into a broken harness.
+    injected_ms = round(delay_ticks * 1000.0 / ctrl_hz, 3)
+    recovered = lat.get("delay_ms")
     return {
         "ok": True,
         "robot": getattr(gene, "id", ""),
@@ -177,11 +189,12 @@ def recovery_table(gene, *, perturbation: dict | None = None, delay_ticks: int =
                        "wall_clock_s": round(t_excite, 3)},
         "measure_gap_wall_clock_s": gap.get("wall_clock_s"),
         "parameters": per_param,
-        "delay": {"injected_ms": round(delay_ticks * 1000.0 / ctrl_hz, 3),
-                  "recovered_ms": gap["latency"]["delay_ms"],
-                  "identified": gap["latency"]["identified"],
-                  "error_ms": round(gap["latency"]["delay_ms"] - delay_ticks * 1000.0 / ctrl_hz, 3),
-                  "source": gap["latency"].get("source", "uncorrected_model"),
-                  "at_grid_edge": gap["latency"]["at_grid_edge"]},
+        "delay": {"injected_ms": injected_ms,
+                  "recovered_ms": recovered,
+                  "identified": bool(lat.get("identified")),
+                  "error_ms": None if recovered is None else round(float(recovered) - injected_ms, 3),
+                  "source": lat.get("source", "uncorrected_model"),
+                  "not_identified_because": lat.get("not_identified_because"),
+                  "at_grid_edge": lat.get("at_grid_edge")},
         "gap": gap,
     }

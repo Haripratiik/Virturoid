@@ -1,0 +1,64 @@
+{
+  "note": "Design-Bench v1 LIVE baseline -- the LLM-first product, not the offline builders. Recorded 2026-08-08 by running the 20-prompt battery through the PRODUCTION lane (compose_robot(llm='auto', strict_llm=True), the same call robot_factory.create_robot makes by default) against gpt-5.5, then scoring the recorded designs with the same MuJoCo verdicts the offline baseline uses. Sibling file tests/fixtures/design_bench_baseline_v1.json grades the DETERMINISTIC OFFLINE BUILDERS. The two measure different generators; design_bench.check_label raises in both directions and the two fixtures declare different 'mode', so grading one against the other's floor is a test failure, not a silent re-baseline.",
+  "battery_version": "v1",
+  "model": "live_llm_v1",
+  "mode": "live",
+  "recorded_at": "2026-08-08",
+  "generator": {
+    "backend": "openai",
+    "design_model": "gpt-5.5",
+    "lane": "compose_robot(llm='auto', strict_llm=True) -- production default",
+    "record_wall_s": 5045,
+    "n_prompts_attempted": 20
+  },
+  "cassette": "tests/fixtures/design_cassette_live_v1.json",
+  "coverage_note": "PARTIAL, AND THE REASON MATTERS. 14 of the 20 recording attempts died on HTTP 429 -- the organisation's 50-requests-per-day cap on the fast model (gpt-4.1-mini), hit partway through the run. Those rows measure an exhausted quota, not a design, and are EXCLUDED FROM THE DENOMINATOR by design_cassette.is_infrastructure_failure rather than scored as failures. Before that exclusion existed this same run printed verdict@1 = 0.0 over n=20 -- a number about an API outage wearing the product's label. Every rate below is over the 6 prompts that carry a real design-path outcome.",
+  "n_attempts_scored": 6,
+  "n_battery": 20,
+  "n_infrastructure_excluded": 14,
+  "infrastructure_excluded": {
+    "cart__appearance": "LLMDesignUnavailable: LLM anatomy graph did not clear grounding: the anatomy graph did not compile: Error code: 429 - {'",
+    "cart__construction": "LLMDesignUnavailable: LLM anatomy graph did not clear grounding: the anatomy graph did not compile: Error code: 429 - {'",
+    "elephant__construction": "LLMDesignUnavailable: LLM anatomy graph did not clear grounding: the anatomy graph did not compile: Error code: 429 - {'",
+    "gecko__appearance": "LLMDesignUnavailable: LLM anatomy graph did not clear grounding: the anatomy graph did not compile: Error code: 429 - {'",
+    "gecko__construction": "LLMDesignUnavailable: LLM anatomy graph did not clear grounding: the anatomy graph did not compile: Error code: 429 - {'",
+    "inchworm__appearance": "LLMDesignUnavailable: LLM anatomy graph did not clear grounding: the anatomy graph did not compile: Error code: 429 - {'",
+    "mobile_manip__appearance": "LLMDesignUnavailable: LLM anatomy graph did not clear grounding: the anatomy graph did not compile: Error code: 429 - {'",
+    "mobile_manip__construction": "LLMDesignUnavailable: LLM anatomy graph did not clear grounding: the anatomy graph did not compile: Error code: 429 - {'",
+    "palletizer__appearance": "LLMDesignUnavailable: LLM anatomy graph did not clear grounding: the anatomy graph did not compile: Error code: 429 - {'",
+    "rover__appearance": "LLMDesignUnavailable: LLM anatomy graph did not clear grounding: the anatomy graph did not compile: Error code: 429 - {'",
+    "rover__construction": "LLMDesignUnavailable: LLM anatomy graph did not clear grounding: the anatomy graph did not compile: Error code: 429 - {'",
+    "starfish__appearance": "LLMDesignUnavailable: LLM anatomy graph did not clear grounding: the anatomy graph did not compile: Error code: 429 - {'",
+    "welder__appearance": "LLMDesignUnavailable: LLM anatomy graph did not clear grounding: the anatomy graph did not compile: Error code: 429 - {'",
+    "welder__construction": "LLMDesignUnavailable: LLM anatomy graph did not clear grounding: the anatomy graph did not compile: Error code: 429 - {'"
+  },
+  "schema_valid@1": 0.6667,
+  "compile@1": 0.6667,
+  "verdict@1": 0.0,
+  "diversity_unique_ratio": 1.0,
+  "spec_faithfulness": 0.75,
+  "by_family": {
+    "animal": 0.0,
+    "arm": 0.0,
+    "novel": 0.0
+  },
+  "by_phrasing": {
+    "appearance": 0.0,
+    "construction": 0.0
+  },
+  "refusals_note": "DESIGN REFUSALS: compose_robot raised LLMDesignUnavailable rather than substituting a template. This is the correct strict-mode behaviour and it is the most product-relevant number here -- these are prompts the product genuinely cannot serve. They stay IN the denominator (scored as schema failures) because a model declining to produce a sound body is a measurement of the product; a 429 is not.",
+  "n_refused": 2,
+  "refusals": {
+    "elephant__appearance": "LLMDesignUnavailable: LLM anatomy graph did not clear grounding: center of mass falls outside the foot support polygon \u2014 the rest pose is statically unstable (would topple)",
+    "palletizer__construction": "LLMDesignUnavailable: LLM anatomy graph did not clear grounding: 5 joint(s) near/over their static hold torque (worst wrist_pitch_link at 108% of capacity)"
+  },
+  "per_case_note": "PER-CASE floor over the MODEL-AUTHORED bodies, replayed token-free. It floors the COMPILER+PHYSICS applied to the model's own designs; re-recording is what measures the GENERATOR, and that is a periodic action, not a per-commit one. Every value is currently false -- all four bodies the model built compiled and none earned a credible verdict -- so this floor cannot yet catch a regression. It can only catch a re-record that quietly drops a prompt, which is why it is committed anyway.",
+  "per_case": {
+    "lynx__appearance": false,
+    "lynx__construction": false,
+    "elephant__appearance": false,
+    "palletizer__construction": false,
+    "starfish__construction": false,
+    "inchworm__construction": false
+  }
+}

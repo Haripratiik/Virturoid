@@ -17,6 +17,8 @@ import threading
 import uuid
 from pathlib import Path
 
+from virturoid.services.install_paths import anchored
+
 _LOCK = threading.RLock()
 _ROBOTS: dict[str, dict] = {}      # id -> {"gene", "undo": [dict...], "label", "prompt", "_mtime"}
 _SCENES: dict[str, dict] = {}      # id -> {"scene": dict, "undo": [dict...], "task", "theme", "_mtime"}
@@ -24,7 +26,22 @@ _UNDO_MAX = 20
 
 
 def _dir() -> Path:
-    return Path(os.environ.get("VIRTUROID_SESSIONS_DIR") or "build/sessions")
+    """Where the shared session store lives — ``VIRTUROID_SESSIONS_DIR``, else ANCHORED to the checkout.
+
+    The default used to be the bare relative ``"build/sessions"``, which is the shape that produced three
+    shipped incidents (see ``install_paths``). It mattered more here than anywhere else, because this
+    directory IS the cross-process contract: the module docstring above exists precisely because a stdio
+    MCP client spawns our server as its own process while ``ui_server`` runs as another, and file-backing
+    is what makes the app the live viewer of the agent's work. An MCP host sets its child's working
+    directory to whatever it likes -- so the two processes resolved ``build/sessions`` to two DIFFERENT
+    directories, and the failure mode is the exact one file-backing was introduced to fix: the agent
+    creates a robot, the viewer reports no such robot, and nothing errors on either side. MEASURED
+    2026-08-08: the same install resolved this to ``<repo>/build/sessions`` (39 held robots) from the repo
+    root and to ``C:/VSCodeFolders/build/sessions`` (absent, 0 robots) from one directory up.
+
+    The env override still wins and is still how a test or a night run gets a private store.
+    """
+    return Path(os.environ.get("VIRTUROID_SESSIONS_DIR") or anchored("build/sessions"))
 
 
 _UNSAFE_ID = re.compile(r"[^A-Za-z0-9._-]")

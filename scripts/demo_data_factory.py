@@ -16,9 +16,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from virturoid.services.data_factory import generate_grasp_demos  # noqa: E402
 from virturoid.services.morphology_composer import compose_robot  # noqa: E402
+from virturoid.services.install_paths import anchored
 
 
-def main(package: str = "build/ui_verify/arm_sort", n: int = 48) -> int:
+def main(package: str = None, n: int = 48) -> int:
+    package = package if package is not None else anchored("build/ui_verify/arm_sort")  # tracked demo set
     gene = compose_robot("grasp and lift a box on a table", llm=None)
     ds = generate_grasp_demos(gene, n=n)
     summary = {k: v for k, v in ds.items() if k != "demos"}

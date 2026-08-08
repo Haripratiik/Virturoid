@@ -116,7 +116,8 @@ def _resources_list() -> dict:
                           "description": f"{r.get('robot_class') or '?'} — {r.get('label')}", "mimeType": "application/json"})
     except Exception:  # noqa: BLE001 - resources are progressive enhancement
         pass
-    render_dir = Path("build/agent_renders")
+    from virturoid.services.ai_native_tools import _render_dir
+    render_dir = _render_dir()                  # ask the owner; a second literal here would drift from it
     if render_dir.exists():
         for p in sorted(render_dir.glob("*"))[:100]:
             if p.suffix.lower() in (".png", ".gif"):
@@ -128,7 +129,32 @@ def _resources_list() -> dict:
 # H1 (plan_v5): the ONLY filesystem roots resources/read may serve. Canonicalize + confine, so a
 # `file://../../etc/passwd` or a symlink can't escape — the Equixly 22%-of-servers arbitrary-read class
 # (Filesystem-MCP CVE-2025-53109/53110 remedy: resolve then allowlist). Artifacts we produce live here.
-_ALLOWED_READ_ROOTS = ("build/agent_renders", "build/agent_exports", "build/sessions")
+#
+# ASK THE OWNER; DO NOT RE-DERIVE. This used to be the tuple of literals
+# ``("build/agent_renders", "build/agent_exports", "build/sessions")``, resolved against the process CWD --
+# a fourth instance of the shape that produced three shipped incidents (see ``services.install_paths``), and
+# the worst-placed one, because a confinement boundary that disagrees with the writer fails in BOTH
+# directions. Concretely: ``session_state`` honours ``VIRTUROID_SESSIONS_DIR``, and this list did not, so
+# with that variable set the allowlist covered a directory nothing writes to while the real session files
+# sat outside it -- a legitimate ``resources/read`` of our own artifact was refused. The mirror case is the
+# one that matters for security: a root computed here from a DIFFERENT rule than the writer's is not the
+# boundary anyone reviewed.
+#
+# So each root is now fetched from the module that OWNS that destination, and there is exactly one rule per
+# destination in the process. Resolved per call, not frozen at import, because the owners resolve per call.
+def _allowed_read_roots() -> tuple[Path, ...]:
+    from virturoid.services.agent_tools import safe_build_path
+    from virturoid.services.ai_native_tools import _render_dir
+    from virturoid.services.session_state import _dir as _sessions_dir
+    roots = []
+    for get in (_render_dir,                                  # owner of build/agent_renders
+                lambda: safe_build_path(None, "agent_exports"),  # owner of build/agent_exports
+                _sessions_dir):                               # owner of build/sessions
+        try:
+            roots.append(Path(get()).resolve())
+        except (OSError, RuntimeError, ValueError):           # a root we cannot resolve is a root we do not allow
+            continue
+    return tuple(roots)
 
 
 def _read_allowed(path: Path) -> bool:
@@ -136,8 +162,7 @@ def _read_allowed(path: Path) -> bool:
         target = path.resolve()
     except (OSError, RuntimeError):
         return False
-    for root in _ALLOWED_READ_ROOTS:
-        r = Path(root).resolve()
+    for r in _allowed_read_roots():
         if r == target or r in target.parents:
             return True
     return False
@@ -153,7 +178,8 @@ def _resources_read(params: dict) -> dict:
         return {"contents": [{"uri": uri, "mimeType": "application/json", "text": json.dumps(payload, default=str)}]}
     path = Path(uri.replace("file://", ""))
     if not _read_allowed(path):                                 # H1: confine to our artifact roots
-        raise PermissionError(f"resource outside the allowed roots {_ALLOWED_READ_ROOTS}: {uri}")
+        allowed = ", ".join(str(r) for r in _allowed_read_roots())
+        raise PermissionError(f"resource outside the allowed roots {allowed}: {uri}")
     if not path.exists() or path.is_dir():
         raise FileNotFoundError(f"no resource {uri}")
     data = base64.b64encode(path.read_bytes()).decode("ascii")

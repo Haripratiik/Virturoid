@@ -11,6 +11,7 @@ better on the GPU/MJX path, whose policies bank into the SAME flywheel). Relates
 from __future__ import annotations
 
 from pathlib import Path
+from virturoid.services.install_paths import policy_bank_dir
 
 
 def learn_locomotion(robot, *, generations: int = 8, pop: int = 12, steps: int = 180,
@@ -116,7 +117,7 @@ def learn_locomotion(robot, *, generations: int = 8, pop: int = 12, steps: int =
     if recipe and normalizer is not None:                    # carry the normalizer on the policy object too
         policy.obs_mean, policy.obs_std = normalizer[0], normalizer[1]
     sp = species or getattr(robot, "species", None) or getattr(robot, "robot_class", None) or "imported"
-    npz = str(Path(models_dir) / ("learned_" + sp.replace("/", "_") + ".npz"))
+    npz = str(policy_bank_dir(models_dir) / ("learned_" + sp.replace("/", "_") + ".npz"))
     # KEEP-BEST: never let this run clobber a STRONGER policy already banked for this species. A weak from-scratch
     # run banking a stand-still over a banked walker is exactly what made the app "stop walking" (the flywheel must
     # be monotonic — banking only ever improves the species' best).
@@ -160,7 +161,7 @@ def banked_policy_for(gene, *, models_dir: str = "models"):
     from pathlib import Path
 
     sp = (getattr(gene, "species", None) or getattr(gene, "robot_class", None) or "imported")
-    path = Path(models_dir) / ("learned_" + str(sp).replace("/", "_") + ".npz")
+    path = policy_bank_dir(models_dir) / ("learned_" + str(sp).replace("/", "_") + ".npz")
     if not path.exists():
         return None
     try:

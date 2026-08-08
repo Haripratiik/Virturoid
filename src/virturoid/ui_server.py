@@ -11,6 +11,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
+from virturoid.services.install_paths import anchored
+from virturoid.services.install_paths import checkout_root as _install_checkout_root
 from virturoid.services.package_status import has_robot_package, package_status
 
 DEFAULT_PROMPT = "Build a tabletop robot arm that sorts red and blue blocks."
@@ -52,18 +54,37 @@ def checkout_root() -> Path | None:
     up gave a build root of ``<that dir>/build/ui_workbench``, no demo-set fallback (``build/ui_verify`` is also
     CWD-relative), and a Robot Library that renders EMPTY on a machine whose clone contains four tracked demo
     packages. Anchoring to the checkout makes 'which robots do I see' a property of the install, not of the
-    shell's pwd."""
-    here = Path(__file__).resolve()
-    for parent in here.parents:                       # .../src/virturoid -> .../src -> <checkout>
-        if (parent / "pyproject.toml").exists() and (parent / "src" / "virturoid").is_dir():
-            return parent
-    return None
+    shell's pwd.
+
+    The rule itself now lives in ``services.install_paths`` -- it is needed by the sessions store, the render
+    directory and the policy bank too, and a second copy of "find the checkout" is the very drift this whole
+    class of bug is made of. Kept as a name here because callers and tests import it from this module."""
+    return _install_checkout_root()
 
 
 def default_build_root() -> Path:
     """Where console-triggered builds are written when ``--build-root`` is not given."""
-    root = checkout_root()
-    return (root / "build" / "ui_workbench") if root else (Path("build") / "ui_workbench")
+    return anchored("build/ui_workbench")
+
+
+def _memory_dir_candidates(build_root: Path) -> tuple[Path, ...]:
+    """Where the Memory/Moat panels look for a bank: BUILD-ROOT-RELATIVE, and deliberately so.
+
+    The 2026-08-08 CWD-relative sweep flagged these three guesses as "a status surface re-deriving a
+    destination ``memory_db`` owns" and tried to consult ``default_memory_dir()`` first. That was WRONG, and
+    the suite said so -- ``test_moat_panel`` pins two contracts that the change broke:
+    ``test_the_route_reads_the_build_roots_own_memory_directory`` (a demo build set and a customer workspace
+    each report THEIR OWN bank, not the developer's) and
+    ``test_a_build_root_with_no_bank_answers_honestly_instead_of_erroring`` (an empty root must report
+    ``db_present: false``, not silently borrow some other bank's numbers and present them as this build's).
+
+    The distinction the sweep missed, and the one that matters: ``build_root`` is an EXPLICIT, absolute,
+    caller-supplied path -- ``create_server(host, port, build_root)``, already anchored by
+    ``_resolve_build_root``. Nothing here resolves against the process CWD, so this is not the bug shape at
+    all. A destination scoped to a caller's argument is not the same thing as a destination scoped to the
+    install; see docs/where_things_live.md.
+    """
+    return (Path(build_root) / "memory", Path(build_root), Path(build_root).parent / "memory")
 
 
 def _has_packages(d: Path) -> bool:
@@ -812,7 +833,12 @@ def _summarize_build(build: dict, used_model: bool) -> str:
 
 
 class _Handler(BaseHTTPRequestHandler):
-    root: Path = Path("build") / "ui_workbench"
+    #: ANCHORED, not ``Path("build") / "ui_workbench"``. ``create_server`` always overrides this on the
+    #: subclass it builds, so the class default is only ever a fallback -- but it is a fallback that
+    #: ``_serve_package_file``/``_send_package`` use as the CONFINEMENT root (``self.root.resolve() not in
+    #: [pkg, *pkg.parents]``), and a confinement root that moves with the shell's pwd is not a boundary.
+    #: Same defect as ``_resolve_build_root``'s old bare ``build/ui_verify``; see ``services.install_paths``.
+    root: Path = default_build_root()
     #: Which frontend ``/`` belongs to. "legacy" (default) keeps the original console at the root;
     #: "studio" redirects the root to /studio/ and leaves the console at /legacy.
     home: str = "legacy"
@@ -990,7 +1016,7 @@ class _Handler(BaseHTTPRequestHandler):
         if name:
             candidate = self.root / _safe_output_name(name)
             pkg = candidate if candidate.exists() else None
-        for cand in (self.root / "memory", self.root, self.root.parent / "memory"):
+        for cand in _memory_dir_candidates(self.root):
             try:
                 out = moat_panel(cand, package_dir=pkg)
             except Exception as exc:  # noqa: BLE001 - a status panel must never take the server down
@@ -1017,7 +1043,7 @@ class _Handler(BaseHTTPRequestHandler):
                 s["brain"] = None
             return s
 
-        for cand in (self.root / "memory", self.root, self.root.parent / "memory"):
+        for cand in _memory_dir_candidates(self.root):
             s = _with_brain(cand)
             if s.get("archive_coverage") or s.get("provenance_edges") or (s.get("brain") or {}).get("episodes"):
                 return s

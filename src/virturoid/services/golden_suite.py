@@ -15,6 +15,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from virturoid.services.install_paths import anchored
+
 
 @dataclass
 class GoldenCase:
@@ -33,7 +35,11 @@ GOLDEN_CASES = [
 ]
 
 
-_DEFAULT_FLOORS = "build/golden_floors.json"
+# ANCHORED to the install (see ``services.install_paths``). These are RATCHETED floors -- the drift alarm that
+# protects what the flywheel just learned -- and both halves fail silently when the path moves with the shell's
+# pwd: ``seal_golden_floor`` writes a registry nothing will read, and ``load_golden_cases`` finds no file and
+# quietly falls back to the base floors, so the alarm keeps passing at exactly the moment it stopped ratcheting.
+_DEFAULT_FLOORS = str(anchored("build/golden_floors.json"))
 
 
 def seal_golden_floor(task_id: str, verified_value: float, *, metric_key: str = "forward_m", margin: float = 0.9,
