@@ -1,13 +1,16 @@
 {
-  "note": "Design-Bench v1 baseline (offline heuristic cassette). Re-recorded 2026-07-22 from 0.65: the novel family (starfish/inchworm) dropped 1.0 -> 0.25 because the 2026-07 ANATOMICAL joint ranges replaced the ±3.14 catch-all — the old credible verdicts rode on hyperextension the honest ranges forbid. The gate is now HERMETIC (gait-hint recall disabled during the bench), so this number no longer floats with session DB state. Re-record via scripts/design_bench.py --record when the battery/composer changes.",
+  "note": "Design-Bench v1 baseline (offline heuristic cassette). Re-recorded 2026-07-22 from 0.65: the novel family (starfish/inchworm) dropped 1.0 -> 0.25 because the 2026-07 ANATOMICAL joint ranges replaced the \u00b13.14 catch-all \u2014 the old credible verdicts rode on hyperextension the honest ranges forbid. The gate is now HERMETIC (gait-hint recall disabled during the bench), so this number no longer floats with session DB state. Re-record via scripts/design_bench.py --record when the battery/composer changes.",
   "battery_version": "v1",
   "model": "offline_heuristic_v1",
   "mode": "offline",
-  "generator_label": "OFFLINE deterministic builders. The LIVE (gpt-5.5, production-lane) baseline is a SEPARATE file, tests/fixtures/design_bench_baseline_live_v1.json, measured 2026-08-08 (#280) at verdict@1 = 0.000 over the 6 of 20 prompts that got a real answer. Neither file may be graded against the other's floor; test_the_two_baselines_cannot_be_graded_against_each_others_floor enforces it. NOTE for readers of per_case below: elephant__appearance and palletizer__construction are 'true' HERE and were REFUSED by the live path (LLMDesignUnavailable), so this map is a floor on the offline compiler, NOT evidence the product can build those bodies.",
+  "generator_label": "OFFLINE deterministic builders replayed through the compiler and the physics. This file grades THAT, and nothing else. The LIVE (gpt-5.5, production-lane) baseline is a separate file, tests/fixtures/design_bench_baseline_live_v1.json; neither may be graded against the other's floor and design_bench.check_label raises in both directions. READ capability_reconciliation BELOW before quoting any number here as a product capability -- it is 0 of 11.",
   "provenance_note": "#208 (2026-08-07): MEASURED, not assumed. All 20 rows of the committed cassette were authored by the DETERMINISTIC builders -- 14 heuristic, 6 anatomy_generic -- so every number in this file is a measurement of the offline fallback path, NOT of the LLM-first product. 'mode' must equal DesignCassette().mode(); test_baseline_declares_the_generator_it_was_measured_on enforces it, so a live re-record cannot be compared against this floor without also re-declaring the mode.",
+  "floor_semantics": "WHAT per_case_outcome IS AND IS NOT. It is a floor on the OFFLINE lane: given the recorded cassette designs, does the compiler + MuJoCo still produce a credible verdict for this body? That is a real regression gate and it catches real breakage. It is NOT a statement that the product can serve the prompt. Measured 2026-08-08 over the live cassette, ZERO of the 11 bodies this floor protects has live corroboration: 3 are prompts the product correctly REFUSES (statically unstable rest pose / joints over static hold torque), 2 are bodies the live model built that do not move, and 6 have never had a live answer at all. Outcomes are the tri-state design_bench.OUTCOMES; per_case is the same map as booleans, kept because verdict@1 and diff_funnels are defined on it.",
   "schema_valid@1": 1.0,
   "compile@1": 1.0,
   "verdict@1": 0.55,
+  "correct@1": 0.55,
+  "refused@1": 0.0,
   "diversity_unique_ratio": 0.5,
   "spec_faithfulness": 0.5,
   "by_family": {
@@ -20,6 +23,28 @@
   "raised_note": "verdict@1 0.50 -> 0.55 and hybrid 0.0 -> 1.0 on 2026-07-30, closing #246. The hybrid family (mobile manipulator) had been at 0.0 with BOTH cases lost; the aggregate hid it because the loss was exactly one tolerance. Two real defects: the composer gave the arm no stowed driving pose (it chained 0.952 m straight up off a 0.32x0.38 m wheelbase, so the body tipped at ~1 g and full wheel traction IS ~1 g), and _honest_drive reset to qpos 0 so a body's own rest keyframe was discarded even when it had one. animal is recorded at its measured 0.1667 rather than the stale 0.0 it had drifted up from.",
   "per_case_note": "PER-CASE floor. The aggregate cannot do the job it was given: the battery is 20 prompts, so verdict@1 moves in steps of 0.05 -- the same size as the gate's tolerance -- and the cassette is deterministic, so this is lost information rather than sampling noise. A change that fixes one body and breaks another reads as no change at all. Measured 2026-07-30, that had already happened: hybrid (mobile manipulator) sat at 0.0 with BOTH cases lost while animal gained one, netting exactly -0.05. Root-caused and fixed (#246), so known_regressions is now EMPTY -- keep it that way by fixing, not by re-recording a lower number. This map is a floor: any body credible here must stay credible.",
   "known_regressions": [],
+  "per_case_outcome": {
+    "lynx__appearance": "failed",
+    "lynx__construction": "failed",
+    "elephant__appearance": "credible",
+    "elephant__construction": "failed",
+    "gecko__appearance": "failed",
+    "gecko__construction": "failed",
+    "rover__appearance": "credible",
+    "rover__construction": "credible",
+    "cart__appearance": "credible",
+    "cart__construction": "credible",
+    "welder__appearance": "failed",
+    "welder__construction": "credible",
+    "palletizer__appearance": "credible",
+    "palletizer__construction": "credible",
+    "mobile_manip__appearance": "credible",
+    "mobile_manip__construction": "credible",
+    "starfish__appearance": "failed",
+    "starfish__construction": "failed",
+    "inchworm__appearance": "failed",
+    "inchworm__construction": "credible"
+  },
   "per_case": {
     "cart__appearance": true,
     "cart__construction": true,
@@ -41,5 +66,78 @@
     "starfish__construction": false,
     "welder__appearance": false,
     "welder__construction": true
+  },
+  "production_outcome_note": "WHAT THE LIVE PRODUCT ACTUALLY DID for each of these prompts -- compose_robot(llm='auto', strict_llm=True), openai/gpt-5.5, recorded 2026-08-07 and 2026-08-08 and replayed token-free from tests/fixtures/design_cassette_live_v1.json. 'refused' is CORRECT behaviour, not a failure. 'unmeasured' means every live attempt at that prompt died on HTTP 429; it is the absence of evidence, never evidence of absence. This map must equal the live baseline's per_case_outcome wherever that file has the prompt -- test_the_offline_floor_cannot_claim_a_capability_the_product_lacks enforces it, so the two fixtures cannot drift apart silently.",
+  "production_outcome": {
+    "lynx__appearance": "failed",
+    "lynx__construction": "failed",
+    "elephant__appearance": "refused",
+    "elephant__construction": "unmeasured",
+    "gecko__appearance": "unmeasured",
+    "gecko__construction": "unmeasured",
+    "rover__appearance": "failed",
+    "rover__construction": "unmeasured",
+    "cart__appearance": "unmeasured",
+    "cart__construction": "unmeasured",
+    "welder__appearance": "credible",
+    "welder__construction": "unmeasured",
+    "palletizer__appearance": "unmeasured",
+    "palletizer__construction": "refused",
+    "mobile_manip__appearance": "refused",
+    "mobile_manip__construction": "unmeasured",
+    "starfish__appearance": "refused",
+    "starfish__construction": "failed",
+    "inchworm__appearance": "unmeasured",
+    "inchworm__construction": "failed"
+  },
+  "capability_reconciliation": {
+    "n_prompts": 20,
+    "offline_credible": [
+      "cart__appearance",
+      "cart__construction",
+      "elephant__appearance",
+      "inchworm__construction",
+      "mobile_manip__appearance",
+      "mobile_manip__construction",
+      "palletizer__appearance",
+      "palletizer__construction",
+      "rover__appearance",
+      "rover__construction",
+      "welder__construction"
+    ],
+    "n_offline_credible": 11,
+    "corroborated": [],
+    "contradicted": {
+      "elephant__appearance": "refused",
+      "inchworm__construction": "failed",
+      "mobile_manip__appearance": "refused",
+      "palletizer__construction": "refused",
+      "rover__appearance": "failed"
+    },
+    "unmeasured": [
+      "cart__appearance",
+      "cart__construction",
+      "mobile_manip__construction",
+      "palletizer__appearance",
+      "rover__construction",
+      "welder__construction"
+    ],
+    "product_only": [
+      "welder__appearance"
+    ],
+    "capability_claim_rate": 0.0,
+    "offline_only_floor": [
+      "cart__appearance",
+      "cart__construction",
+      "elephant__appearance",
+      "inchworm__construction",
+      "mobile_manip__appearance",
+      "mobile_manip__construction",
+      "palletizer__appearance",
+      "palletizer__construction",
+      "rover__appearance",
+      "rover__construction",
+      "welder__construction"
+    ]
   }
 }

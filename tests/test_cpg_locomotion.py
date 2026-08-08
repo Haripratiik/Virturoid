@@ -15,8 +15,15 @@ _MUJOCO = importlib.util.find_spec("mujoco") is not None
 @unittest.skipUnless(_MUJOCO, "needs MuJoCo")
 class TrotCpgPriorTests(unittest.TestCase):
     def _quad(self):
+        # THE WALKABLE body, explicitly (#285). ``compose_robot`` used to run the walkability gate inside itself,
+        # so a bare compose silently returned the fanned wide-stance template and these assertions were measured
+        # on THAT. Composing now returns the authored body and the gate runs for a caller that asks for it. The
+        # difference is not cosmetic here: measured on this checkout at seed 0 / 900 steps, the fanned template
+        # sags to height_ratio 0.914 under the scalar recipe and 1.000 under the CPG -- which is the collapse
+        # this test is named after -- while the authored parametric quad holds 1.000 under BOTH, so the
+        # comparison would be a vacuous tie. Ask for the body the claim was measured on.
         from virturoid.services.morphology_composer import compose_robot
-        return compose_robot("a quadruped robot that walks", llm=None)
+        return compose_robot("a quadruped robot that walks", llm=None, ensure_walkable=True)
 
     def test_cpg_keeps_the_quad_upright_where_the_scalar_recipe_collapses(self):
         # Same untrained policy (seed 0), same body: the CPG prior must hold the quad UPRIGHT and SURVIVING,

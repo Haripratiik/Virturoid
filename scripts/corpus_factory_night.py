@@ -50,27 +50,34 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 # actually reads off a functional walker prompt is the SIZE word. Eighteen prompts, three bodies, and a night
 # that then rejects the repeats for novelty after paying 39 s to fit a controller for each.
 #
-# So the bank is generated from a TARGET GRID over the axes the composer DEMONSTRABLY honours, and only those.
-# Measured 2026-08-08 by composing each candidate axis and comparing the resulting ``body_key``/niche/DOF:
+# THE INERT LIST ABOVE IS NOW HISTORY (task #285, 2026-08-08). Every axis it recorded as dead was dead because
+# the composer did not read it, and both causes were fixed at the source:
 #
-#   MOVES THE BODY      size word (small|medium|large)          3 cells on each quadruped route
-#                       body-plan route: a "walking robot" goes to the parametric template, a "walking creature"
-#                       to the general anatomy compiler, a "two-legged" one to the anthropometric biped —
-#                       different builders, different DOF (14 vs 8) and different MAP-Elites niches
-#                       stature in metres, BUT ONLY ON THE BIPED, and only above ~1.03 m (the builder clamps
-#                       head-height to [0.12, 0.32] = stature/8.55, so 0.5 m and 1.0 m are the same robot)
-#   INERT               leg count 3 or 5 (the generic body builds legs in PAIRS, so 3→2 and 5→4)
-#                       "long slender legs" / "short thick legs" / "wide stance" / "long body" — every
-#                       proportion adjective composed to a byte-identical body
-#                       stature on a quadruped, ``payload_kg=``, ``reach_m=`` — all byte-identical
+#   * ``morphology_priors.body_proportions`` reads the proportion words the composer used to drop —
+#     leg length, limb thickness, stance width, body length, body width — and both the parametric walker
+#     and the general anatomy compiler apply them;
+#   * ``_leg_count`` answers 1..12 instead of {2,4,6,8}, and an odd count builds a real centreline leg
+#     instead of rounding up to the next pair;
+#   * ``morphology_composer._fallback_gene`` no longer substitutes the canonical fanned template at COMPOSE
+#     time. That single line was the larger half of the collapse: every offline walker prompt shipped one
+#     shape at one of three clamped scales, so nothing the composer expressed could reach a body.
 #
-# So the grid is ten targets, not forty-eight, and that is the HONEST ceiling of the offline composer: it can
-# make about ten structurally distinct legged bodies and no more. A 20-body night will run out of new structures
-# and stop, which is the correct behaviour — see the note on ``_offline_proposer``'s dedup. The bottleneck for
-# #274 (distinct bodies) is the COMPOSER's expressiveness, not the factory's proposal budget, and no prompt
-# engineering inside this file can move it further.
+# RE-MEASURED on the same 324-prompt grid (leg count x size x proportion, both routes), by composing each
+# prompt and hashing every segment length/radius/mount: 20 distinct structures BEFORE, 189 AFTER. On the
+# coarse ``heldout_set.body_key`` the factory itself dedups with, 19 -> 91. (body_key is blind to stance
+# width and trunk length because neither moves a link length, so it undercounts; the finer number is the one
+# that describes what the flywheel actually has to learn from.) Composing is also ~free again -- the grid
+# took 237 s before, because every compose ran a MuJoCo rollout for the substitution gate, and 0 s now.
+#
+# Still genuinely inert, and still worth knowing: stature in metres on a QUADRUPED, ``payload_kg=`` and
+# ``reach_m=`` on any legged body. Those are requirement inputs the legged branch does not consume.
 _SIZE_WORDS = ("small", "medium", "large")
 _BIPED_STATURES_M = (1.2, 1.6, 2.0, 2.4)       # above the builder's lower clamp, so each is a different robot
+# The proportion cells, as the composer's own vocabulary. Each is a DIFFERENT dimension of the body, so the
+# grid spans a volume rather than a line: leg length x limb thickness, stance, trunk length, trunk width.
+_PROPORTIONS = ("", "with long slender legs", "with short thick legs", "with a wide stance",
+                "with a narrow stance", "with a long body", "with a compact body", "with a broad body")
+_LEG_COUNTS = (3, 4, 5, 6, 8)                  # 3 and 5 are real layouts now, not rounded-up quadrupeds
 
 
 def _legged_targets() -> list[tuple[str, dict]]:
@@ -82,7 +89,18 @@ def _legged_targets() -> list[tuple[str, dict]]:
     quad_ana = [(f"a {w} four-legged walking creature", {"route": "anatomy", "size": w}) for w in _SIZE_WORDS]
     biped = [(f"a two-legged walking robot {h:.2f} m tall", {"route": "biped", "height_m": h})
              for h in _BIPED_STATURES_M]
-    out, pools = [], [quad_tpl, quad_ana, biped]
+    # proportion x route, and leg count x route: the axes #285 made live. The proposer walks the grid and
+    # retires a cell whose body_key the corpus already holds, so ordering only decides which cells a SHORT
+    # night reaches -- interleaving keeps that first handful structurally spread.
+    prop_tpl = [(f"a four-legged walking robot {q}", {"route": "template", "proportion": q})
+                for q in _PROPORTIONS if q]
+    prop_ana = [(f"a four-legged walking creature {q}", {"route": "anatomy", "proportion": q})
+                for q in _PROPORTIONS if q]
+    legs_tpl = [(f"a {n}-legged walking robot", {"route": "template", "legs": n})
+                for n in _LEG_COUNTS if n != 4]
+    legs_ana = [(f"a {n}-legged walking creature", {"route": "anatomy", "legs": n})
+                for n in _LEG_COUNTS if n != 4]
+    out, pools = [], [quad_tpl, quad_ana, biped, prop_tpl, legs_tpl, prop_ana, legs_ana]
     for i in range(max(len(p) for p in pools)):
         for pool in pools:
             if i < len(pool):

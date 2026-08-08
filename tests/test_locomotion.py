@@ -40,8 +40,17 @@ class LocomotionTests(unittest.TestCase):
         # per-prompt differentiation; that wide-stance body DRIFTS under the bare trot (direction is the learned
         # policy's job, as the distance check already concedes) but WALKS under the crawl -- exactly why the crawl
         # gait exists ([[walking-breakthrough-abduction]]). Assert the walk the product actually earns, gait-aware.
+        #
+        # ASK FOR THE WALKABLE BODY (#285). ``compose_robot`` used to run the walkability gate inside itself, so
+        # a bare compose silently returned the fanned template and this line measured THAT. It no longer does:
+        # composing returns the AUTHORED body, and the gate -- unchanged -- runs for a caller who asks for it
+        # (``ensure_walkable=True``) or for ``create_robot``, which grounds and fits an operating point first and
+        # then decides. Measured on the authored body at the shipped freq 1.5 / kp 32 it travels -0.17 m and rolls
+        # over, and with an operating point of its own it is a CREDIBLE WALK -- which is precisely why the
+        # decision moved to a caller that has one. This assertion is about the WALKABLE body, so it asks for one.
         from virturoid.services.task_matched_eval import evaluate_robot
-        self.assertGreaterEqual(float(evaluate_robot(g).get("value", 0.0)), 0.5,
+        w = compose_robot("a quadruped walking robot", ensure_walkable=True)
+        self.assertGreaterEqual(float(evaluate_robot(w).get("value", 0.0)), 0.5,
                                 "the composed quadruped must walk under the product's gait-aware verdict")
 
     def test_leg_count_is_parametric(self):

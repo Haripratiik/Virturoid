@@ -446,7 +446,7 @@ def _robotics_grounding(gene) -> dict:
             return {}
         with MemoryDB(mem) as db:
             vm = RoboticsVectorMemory(db)
-            if vm.count(BODY) == 0:
+            if vm.body_index_needs_rebuild():        # empty, or written by an older body-embedding version
                 vm.index_species_bodies()
             near = vm.nearest_bodies(gene, k=3, min_sim=0.0)
             gait = recall_gait(db, gene)

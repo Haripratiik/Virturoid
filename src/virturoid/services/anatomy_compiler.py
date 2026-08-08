@@ -969,7 +969,8 @@ def build_from_anatomy(graph: dict) -> RobotGene:
 # supplies the species-specific anatomy when present. Hard-coding a graph per animal is the overfitting we
 # reject — the software must generalize to creatures nobody enumerated.
 def _generic_legged_graph(*, n_pairs: int, body=0.58, girth=0.13, leg=0.42, tail=0.14, fan=False,
-                          appendage_role: str = "leg", body_aspect: str = "") -> dict:
+                          appendage_role: str = "leg", body_aspect: str = "",
+                          leg_girth_mult: float = 1.0, center_leg: bool = False) -> dict:
     """A generic legged skeleton: torso + neck + head + tail + ``n_pairs`` of 3-segment walking legs, spread
     across the longitudinal anchors and fanned outward. Class-general — 2 pairs = quadruped, 3 = hexapod,
     4 = octopod. No species shape baked in; just a credible standing N-legged body.
@@ -1006,12 +1007,23 @@ def _generic_legged_graph(*, n_pairs: int, body=0.58, girth=0.13, leg=0.42, tail
         # legs had only 2 actuated joints; every real quadruped has 3/leg), total length 0.42 m (~thigh+shank
         # 0.2+0.2 like the Go2/Mini-Cheetah class), and a SLENDER girth (aspect >=3:1) instead of 1:1 stubs.
         parts.append({"name": f"{appendage_role}{i + 1}", "role": appendage_role, "parent": root_name, "attach": anchor, "aim": aim,
-                      "size": leg, "girth": 0.045 * leg, "segments": 4, "symmetry": "left_right",
-                      "joint": "revolute"})
+                      "size": leg, "girth": 0.045 * leg * leg_girth_mult, "segments": 4,
+                      "symmetry": "left_right", "joint": "revolute"})
+    if center_leg:
+        # An ODD leg count is a real request, not a rounding error. The pairs above carry the body (a bilateral
+        # animal is built that way); the odd one goes on the CENTRELINE at the rear -- a genuine tripedal /
+        # five-legged layout -- instead of being rounded up into another pair the customer never asked for.
+        # ``symmetry`` is omitted, which the compiler reads as a single un-mirrored chain.
+        parts.append({"name": f"{appendage_role}{n + 1}", "role": appendage_role, "parent": root_name,
+                      "attach": "rear_bottom", "aim": "back_down", "size": leg,
+                      "girth": 0.045 * leg * leg_girth_mult, "segments": 4, "joint": "revolute"})
     # The public class is intentionally broad for 6/8-legged bodies: downstream
     # capability lookups understand ``legged`` but a hexapod/octopod must never be
     # mislabeled as a quadruped and collapsed into its class-specific memory niche.
-    body_class = "legged" if (is_tentacled or n >= 3) else ("biped" if n == 1 else "quadruped")
+    n_legs_total = 2 * n + (1 if center_leg else 0)
+    body_class = ("legged" if (is_tentacled or n_legs_total >= 5)
+                  else ("biped" if n_legs_total == 2 else
+                        "quadruped" if n_legs_total == 4 else "legged"))
     return {"robot_class": body_class,
             "name": "creature", "parts": parts}
 
@@ -1052,21 +1064,34 @@ def generic_creature_gene(prompt: str, robot_class: str | None = None, n_legs: i
         return None
     # HONOR the requested appendage plan. An explicit tentacled/radial cue selects a round mantle plus articulated
     # tentacles; it never routes those appendages through the walking-leg/foot machinery.
-    n_pairs = max(1, min(4, int(n_legs) // 2)) if n_legs else 2
+    # The pairs the body is built from, plus ONE centreline appendage when the requested count is odd -- a
+    # three- or five-legged request used to be rounded to the nearest pair (3 -> 2, 5 -> 4) and composed a body
+    # byte-identical to a plain quadruped (#285). Radial/tentacled bodies keep the pair-only layout.
+    _req = int(n_legs) if n_legs else 4
     tentacled = any(w in p for w in ("octopus", "cephalopod", "tentacle", "tentacled"))
+    n_pairs = max(1, min(4, _req // 2))
+    center_leg = bool(_req % 2) and not tentacled and _req >= 3
     # P4: animal PROPORTION priors so a horse (long legs), a gecko (short splayed legs) and a turtle (short wide)
     # stop composing to one generic skeleton. 1.0 for generic/dog -> the fixed defaults (byte-identical baseline).
     # ...and SIZE words scale the whole body on top of those ratios, so "a small quadruped" is not the same body
     # as "a large quadruped" (measured 2026-07-21: they were byte-identical). Neutral prompt -> (1.0, 1.0).
     from virturoid.services.animal_proportions import animal_proportions, size_scale
+
+    from virturoid.services.morphology_priors import body_proportions
     prop = animal_proportions(p)
+    ask = body_proportions(p)          # #285: what the prompt LITERALLY asked for, on top of the species prior
     s, size_mass = size_scale(p)
     try:
         g = build_from_anatomy(_generic_legged_graph(
-            n_pairs=n_pairs, appendage_role="tentacle" if tentacled else "leg",
+            n_pairs=n_pairs, center_leg=center_leg, appendage_role="tentacle" if tentacled else "leg",
             body_aspect="round" if tentacled else "",
-            leg=round(0.42 * prop["leg"] * s, 4), body=round(0.58 * prop["torso"] * s, 4),
-            girth=round(0.13 * ((prop["mass"] * size_mass) ** (1.0 / 3.0)) * s, 4), fan=(prop["stance"] > 1.2),
+            leg=round(0.42 * prop["leg"] * ask["leg"] * s, 4),
+            body=round(0.58 * prop["torso"] * ask["torso"] * s, 4),
+            girth=round(0.13 * ((prop["mass"] * size_mass) ** (1.0 / 3.0)) * ask["girth"] * s, 4),
+            leg_girth_mult=ask["thick"],
+            # A wide/splayed stance is asked for either by the species prior (gecko, crocodile) or in so many
+            # words ("a wide stance"); both reach the same fanned layout.
+            fan=(prop["stance"] * ask["stance"] > 1.2),
         ))
         if tentacled:
             g.robot_class = "legged"
@@ -1273,7 +1298,21 @@ def ensure_walkable_quad(gene, prompt: str = "", *, force: bool = False):
         # the real prerequisite. Prompt-level differentiation (size words + animal proportions) is unaffected
         # and still applies; only bodies that CANNOT walk are normalised here, and that is recorded in
         # metadata.walkability_fallback rather than hidden. See docs/mvp_readiness_report.md.
-        cand = build_from_anatomy(_generic_legged_graph(n_pairs=2, fan=True, girth=0.18))
+        # ...but the rebuild now CARRIES THE PROPORTIONS THE PROMPT ASKED FOR (#285). Substituting a fixed
+        # template was the second half of the diversity collapse: measured 2026-08-08, every offline
+        # "walking robot" prompt shipped this one shape at one of three clamped scales, so whatever the
+        # composer expressed was discarded here. Only the EXPLICIT ask is carried (``body_proportions``,
+        # all-1.0 for a prompt that says nothing) — the species priors are deliberately not, because this
+        # rebuild exists precisely for bodies whose own shape did not walk. A prompt with no proportion
+        # words rebuilds the byte-identical canonical template, so nothing that ships today moves.
+        from virturoid.services.morphology_priors import body_proportions
+        _ask = body_proportions(prompt or "")
+        cand = build_from_anatomy(_generic_legged_graph(
+            # fan stays ON unless a NARROW stance was explicitly asked for: the wide fanned stance is what
+            # makes this rebuild walk at all, so a neutral prompt must keep it (and stay byte-identical).
+            n_pairs=2, fan=(_ask["stance"] > 0.8), girth=round(0.18 * _ask["girth"], 4),
+            leg=round(0.42 * _ask["leg"], 4), body=round(0.58 * _ask["torso"], 4),
+            leg_girth_mult=_ask["thick"]))
         if cand is None:
             return gene
         # B1 (2026-07-24 audit): SCALE the fanned template to the authored body's size instead of substituting a

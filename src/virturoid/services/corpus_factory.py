@@ -149,7 +149,19 @@ def gait_fit_verify_fn(memory_dir):
         elif fit.get("searched"):
             return {**base, "credible": False, "kind": "legged", "source": "physics",
                     "verdict": f"no operating point still walking at {_SETTLE_STEPS} steps ({fit.get('reason')})",
-                    "n_evals": fit.get("n_evals"), "gait_source": "none"}
+                    "n_evals": fit.get("n_evals"), "degenerate_search": fit.get("degenerate_search"),
+                    "deepest_rollout_steps": fit.get("deepest_rollout_steps"), "gait_source": "none"}
+        elif fit.get("skipped"):
+            # NOTHING WAS MEASURED. The `else` below reads "adopted nothing and did not search" as "the shipped
+            # default already walks it" and admits the row as a CREDIBLE WALK on the default's own numbers —
+            # true for a body the fitter short-circuited on, FALSE for one it never ran. Two ways to get here:
+            # VIRTUROID_SKIP_GAIT_FIT=1, and (2026-08-08) a body whose deployed controller is not the crawl gait
+            # this fitter searches at all (`fit_gait_for_body` -> `crawl_deployment_match`). Without this branch
+            # the serial-spine inchworm would be admitted to the corpus as a credible walk at +0.000 m.
+            return {**base, "credible": False, "kind": "legged", "source": "physics", "gait_source": "none",
+                    "verdict": f"NOT MEASURED — no gait fit was run for this body ({fit.get('reason')})",
+                    "not_applicable": bool(fit.get("not_applicable")),
+                    "deployed_controller": fit.get("deployed_controller")}
         else:
             # The shipped default already walks it. Measure THAT point's margin — the row is only bankable if the
             # walk survives a perturbation of itself, and nothing upstream has asked that question.

@@ -7,9 +7,11 @@ with ModuleNotFoundError and every legged robot silently read as "could not simu
 now re-exports these for back-compat.
 
 A credible WALK requires ALL of: survived (didn't fall) + upright at the body's true stance height (not a crouch)
-+ real foot-lift cadence + genuine stepping support + forward travel + A RATE THAT HOLDS. A body that stands still
-scores cadence 0 -> SLIDE; a low unstable body scores low upright_frac -> CROUCH; a body that covers ground and
-then stops scores a decaying travel rate -> DRIFTS THEN STALLS; a fall is named by its dominant orientation mode.
++ real foot-lift cadence + genuine stepping support + forward travel + A RATE THAT HOLDS + A COURSE IT HELD. A body
+that stands still scores cadence 0 -> SLIDE; a low unstable body scores low upright_frac -> CROUCH; a body that
+covers ground and then stops scores a decaying travel rate -> DRIFTS THEN STALLS; a body that goes round in a
+circle scores a swung heading / a path much longer than its net displacement -> WALKS IN A CIRCLE; a fall is named
+by its dominant orientation mode.
 """
 from __future__ import annotations
 
@@ -144,18 +146,111 @@ def settling(r: dict) -> dict | None:
             "holds_rate": bool(full >= _RATE_HOLD_FRAC * early)}
 
 
+# ---------------------------------------------------------------------------------------------------------
+# COURSE: did it go somewhere, or did it go round?
+# ---------------------------------------------------------------------------------------------------------
+#: SUSTAINED heading deviation from the heading it set out on, in degrees. 90 is not a taste parameter: at a
+#: right angle the body is travelling PERPENDICULAR to where it started, so progress along its original heading
+#: has stopped, and past it the body is coming back. Below 90 every further step still increases how far it has
+#: got from the start along that heading; above, more time buys no more distance. That is exactly the property
+#: "walked N metres" is claiming, and the property a circle does not have.
+_CLEAN_HEADING_DEV = 90.0
+#: ...and the single worst frame keeps an absolute ceiling at 2x, the same rule (and the same reason) as
+#: ``_HARD_ROLL_MAX``/``_HARD_PITCH_MAX``: reading a percentile must not let a body that turned right around
+#: through 180 deg pass on the technicality that it did not stay there.
+_HARD_HEADING_DEV = 180.0
+#: net displacement / ground covered. 0.5 = "you walked twice as far as you got". A perfect circle scores 0 (it
+#: ends where it began), a half-circle 0.64, a straight walk ~1. MEASURED on this checkout: the straight
+#: hexapod scores 0.969 and pays only 3% to intra-stride body sway, and the WORST credible row in the whole
+#: re-simulated bank (83 of the 102 locomotion rows, at 800/1500/6000 steps each) scores 0.725 — so this gate
+#: sits 1.45x below the corpus it must not break. It is also what catches a body that mills about without its
+#: heading ever swinging far (measured: the template quad under a hard steer keeps heading dev at 35 deg and
+#: still scores 0.370), which the heading gate alone never sees.
+_MIN_STRAIGHTNESS = 0.5
+#: ...and below this much ground covered, ``straightness`` is 0/0 and the question is UNANSWERABLE, so it is
+#: reported as ``None`` and the milling gate does not fire. Same rule ``settling`` follows: never fail a body for
+#: a question its own trace cannot answer. 0.05 m is far below the 0.3 m ``forward`` gate, so no rollout whose
+#: scalars pass can land here — ``path_m >= |net_m| >= |forward|`` by construction. What DOES land here is a
+#: metrics dict carrying an orientation-only trace (several diagnostics build one), and before this floor existed
+#: such a dict read as MILLS AROUND on a path of exactly 0.00 m.
+_MIN_PATH_M = 0.05
+
+
+def course_summary(r: dict) -> dict | None:
+    """WHERE DID IT GO — net displacement, ground actually covered, and how far the heading swung from its start.
+
+    THE DEFECT THIS EXISTS FOR (measured 2026-08-08, task D5). ``morph_policy``'s ``forward`` is world-frame
+    delta-x, and until this function existed nothing else about the PATH reached the verdict: a body that walked a
+    2.2 m circle and came back past its own start line reported ``forward 1.582 m`` and printed CREDIBLE WALK,
+    with ``yaw_max 179.4 deg`` computed and used only to name a fall mode on a body that had already failed.
+    Delta-x is not wrong — it is the honest projection on the start heading, and it is BOUNDED for a circle — but
+    the 0.3 m gate it is tested against is trivially cleared by any loop wider than that.
+
+    That ``yaw_max 179.4`` is itself worth a sentence, because it is the smaller half of the same bug.
+    ``orientation_summary``'s yaw comes from ``arctan2``, so it is the heading MODULO a half-turn and SATURATES at
+    180: it cannot count a full revolution. Integrated properly, the same episode swings **440 deg** — it goes
+    round MORE THAN ONCE — so even the diagnostic number that did exist understated the defect by 2.5x, and no
+    threshold placed on it could ever have separated "turned 179" from "turned 719".
+
+    Two numbers, because there are two ways to not-go-anywhere and neither implies the other:
+
+      * ``heading_dev_p95_deg`` — the SUSTAINED unwrapped heading deviation from the start heading. Catches
+        turning. P95 and not max for the reason ``orientation_summary`` gives at length: a max is monotone in the
+        number of frames, and a body's heading oscillates within every stride (measured: up to ~30 deg peak on
+        banked rows whose net course change is under 20 deg), so a max-based gate would read stride oscillation
+        as a course change and get stricter the longer you looked.
+      * ``straightness`` — net displacement / path length. Catches milling: a body can wander a long way for
+        little net gain while its heading barely swings, and a heading gate alone never sees it.
+
+    Prefers the rollout's OWN per-physics-step accumulation (``path_m``/``heading_dev_p95_deg``, emitted by
+    ``crawl_gait_rollout`` since this task) because that is exact and independent of ``frame_every``; falls back
+    to integrating the recorded ``qpos_frames`` so a legacy result, a banked row's replay, a serpentine run or a
+    learned-policy rollout is auditable too. MEASURED, the two agree to 0.3% (straight hexapod 0.969 per-step vs
+    0.971 off a 300-frame trace), and straightness is flat to within 1% from 60 samples up to every step.
+
+    ``None`` when the rollout recorded neither — never a guess.
+    """
+    import numpy as np
+    if r.get("path_m") is not None and r.get("heading_dev_p95_deg") is not None:
+        path = float(r["path_m"]); net = float(r.get("net_m") or 0.0)
+        return {"net_m": round(net, 3), "path_m": round(path, 3),
+                "straightness": round(net / path, 3) if path >= _MIN_PATH_M else None,
+                "heading_dev_p95_deg": float(r["heading_dev_p95_deg"]),
+                "heading_dev_max_deg": float(r.get("heading_dev_max_deg") or r["heading_dev_p95_deg"]),
+                "source": "rollout"}
+    frames = r.get("qpos_frames") or []
+    if len(frames) < 3:
+        return None
+    P = np.asarray([[float(f[0]), float(f[1])] for f in frames])
+    Q = np.asarray([[float(f[3]), float(f[4]), float(f[5]), float(f[6])] for f in frames])
+    yaw = np.arctan2(2 * (Q[:, 0] * Q[:, 3] + Q[:, 1] * Q[:, 2]), 1 - 2 * (Q[:, 2] ** 2 + Q[:, 3] ** 2))
+    d = (np.diff(yaw) + np.pi) % (2 * np.pi) - np.pi          # per-frame wrap, then integrate: an UNWRAPPED
+    dev = np.abs(np.concatenate([[0.0], np.cumsum(d)]))       # heading, so a full turn reads 360 and not 0
+    net = float(np.hypot(*(P[-1] - P[0])))
+    path = float(np.sum(np.linalg.norm(np.diff(P, axis=0), axis=1)))
+    return {"net_m": round(net, 3), "path_m": round(path, 3),
+            "straightness": round(net / path, 3) if path >= _MIN_PATH_M else None,
+            "heading_dev_p95_deg": round(float(np.degrees(np.percentile(dev, 95))), 1),
+            "heading_dev_max_deg": round(float(np.degrees(np.max(dev))), 1),
+            "source": "trace"}
+
+
 def classify(r: dict) -> str:
-    """Explicit, honest verdict from the anti-Goodhart metrics + orientation + SETTLING. A CREDIBLE WALK requires
-    the scalar gates AND a LEVEL body AND a RATE THAT HOLDS:
+    """Explicit, honest verdict from the anti-Goodhart metrics + orientation + SETTLING + COURSE. A CREDIBLE WALK
+    requires the scalar gates AND a LEVEL body AND a RATE THAT HOLDS AND A COURSE IT HELD:
 
     * LEVEL — a gait that clears forward/upright/cadence by REARING or PITCH-DIVING (which games the forward
       metric with a violent lurch, while ``upright_frac`` — a z-height/up-vector check — misses the pitch) is not
       a credible walk. Judged on the SUSTAINED attitude; see ``orientation_summary``.
     * RATE — a body whose travel-per-1000-steps decays has not walked, it has drifted; see ``settling``.
+    * COURSE — a body that goes ROUND rather than ANYWHERE has not walked either. ``forward`` is world-frame
+      delta-x, so a circular path whose far side happens to sit at +x books that delta-x as travel: measured, the
+      offline lynx's fragile operating point walks a 2.2 m loop back past its own start line and reported
+      CREDIBLE WALK, 1.582 m. See ``course_summary``.
 
-    Both extra gates are judged only from what the rollout actually recorded: orientation needs the qpos trace,
-    settling needs a trace of at least ``_SETTLE_MIN_STEPS``. A metric-only call keeps the scalar verdict, and a
-    short rollout keeps exactly the verdict it has always had.
+    All three extra gates are judged only from what the rollout actually recorded: orientation and course need the
+    qpos trace (or, for course, the rollout's own per-step accumulation), settling needs a trace of at least
+    ``_SETTLE_MIN_STEPS``. A metric-only call keeps the scalar verdict.
     """
     survived = bool(r.get("survived"))
     up = float(r.get("upright_frac", 0.0)); hr = float(r.get("height_ratio", 0.0))
@@ -166,8 +261,13 @@ def classify(r: dict) -> str:
                         and o["roll_max"] < _HARD_ROLL_MAX and o["pitch_max"] < _HARD_PITCH_MAX)
     s = settling(r)
     holds = s is None or bool(s["holds_rate"])
+    c = course_summary(r)
+    turned = c is not None and (c["heading_dev_p95_deg"] >= _CLEAN_HEADING_DEV
+                                or c["heading_dev_max_deg"] >= _HARD_HEADING_DEV)
+    milled = c is not None and c["straightness"] is not None and c["straightness"] < _MIN_STRAIGHTNESS
+    on_course = c is None or not (turned or milled)
     scalars_ok = survived and up >= 0.6 and cad >= 1.0 and sup >= 0.25 and fwd >= 0.3
-    if scalars_ok and level and holds:
+    if scalars_ok and level and holds and on_course:
         return "CREDIBLE WALK"
     # not a credible walk: name the DOMINANT fall mode from the orientation trace (if replayable) so the
     # verdict is diagnostic, not just "bad" — a roll-over reads as CROUCH by height alone, which misleads.
@@ -176,6 +276,20 @@ def classify(r: dict) -> str:
         name, val = max(modes, key=lambda t: t[1])
         if not survived and val >= 45.0:
             return f"FELL by {name} (roll {o['roll_max']:.0f} / pitch {o['pitch_max']:.0f} / yaw {o['yaw_max']:.0f} deg max)"
+    if scalars_ok and level and not on_course:
+        # It is up, it is stepping, it covered ground — and it did not GO anywhere. Reported before the
+        # rate/lurch branches because it is the more specific and more actionable diagnosis: a circler usually
+        # also fails the rate hold (its net displacement stops growing once it comes back round), and "it walked
+        # in a circle" tells an engineer what to fix in a way "it moved, then stopped" does not.
+        where = (f"{c['net_m']:.2f} m net for {c['path_m']:.2f} m walked, heading swung "
+                 f"{c['heading_dev_p95_deg']:.0f} deg")
+        if turned and milled:
+            return (f"WALKS IN A CIRCLE ({where} — it came back on itself; `forward` is world-frame "
+                    f"displacement and a loop can point part of itself down +x)")
+        if turned:
+            return (f"TURNS OFF COURSE ({where} — its heading left the direction it set out in, so more "
+                    f"steps buy no more distance)")
+        return (f"MILLS AROUND ({where} — most of the ground it covered was not progress)")
     if scalars_ok and level and not holds:  # upright the whole way and never fell — but it stopped advancing
         return (f"DRIFTS THEN STALLS (travel-per-1000 steps fell {s['rate_early']:+.2f} -> {s['rate_full']:+.2f} m "
                 f"between step {s['early_steps']} and {s['steps']} — it moved, then stopped)")

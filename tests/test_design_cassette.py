@@ -206,15 +206,27 @@ def test_a_transport_failed_row_can_be_dropped_so_a_re_record_retries_it(tmp_pat
 
 def test_the_committed_live_cassette_carries_its_outage_openly():
     """The committed live fixture was recorded through a rate-limit window. That is not hidden: the artifact
-    reports which prompts died on transport, so nobody can read '4 built of 20' as a capability statement."""
+    reports which prompts died on transport, so nobody can read '6 built of 20' as a capability statement.
+
+    It MERGES two sessions of the identical production lane (2026-08-07 and 2026-08-08). The 08-08 full-battery
+    run lost 14 rows to the org's daily cap; where the earlier arm had a real answer for one of those prompts
+    it is used instead, which is why coverage is 10/20 and not 6/20. A row is never merged over a real answer,
+    only over a transport failure, and every entry carries its own ``recorded_at``."""
+    import json
     from pathlib import Path
-    cas = DesignCassette(Path(__file__).resolve().parents[1] / "tests" / "fixtures"
-                         / "design_cassette_live_v1.json")
+    path = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "design_cassette_live_v1.json"
+    cas = DesignCassette(path)
     prov = cas.provenance()
     assert prov["mode"] == "live" and prov["n_rows"] == len(B.battery())
-    assert prov["n_infrastructure_failed"] == 14 and prov["n_usable"] == 6
-    assert prov["n_built"] == 4 and prov["n_design_refused"] == 2
+    assert prov["n_infrastructure_failed"] == 10 and prov["n_usable"] == 10
+    assert prov["n_built"] == 6 and prov["n_design_refused"] == 4
     assert prov["models"] == ["gpt-5.5"]
+    # the merge is self-describing: both sessions declared, and every row dates itself
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    assert set(raw["recording_sessions"]) == {"2026-08-07", "2026-08-08"}
+    assert all(e.get("recorded_at", "")[:10] in raw["recording_sessions"] for e in raw["entries"].values())
+    # ...and every row ran the same lane, so the two sessions are commensurable
+    assert all(cas.entry_provenance(p)["strict_llm"] is True for p in cas.prompt_ids())
     # and the call counter is documented as a FLOOR -- the ledger records a call only after complete_json
     # returns, so every completion that raised (all the 429s) billed latency and counted zero.
     assert "FLOOR" in prov["llm_calls_caveat"]

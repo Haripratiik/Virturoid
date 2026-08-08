@@ -46,6 +46,13 @@ def _print_funnel(out: dict, path: str) -> None:
         print(f"  !! {out['subset_warning']}")
     print(f"  schema_valid@1 {out['schema_valid@1']}   compile@1 {out['compile@1']}   "
           f"verdict@1 {out['verdict@1']}  (HEADLINE)")
+    # verdict@1 is CAPABILITY (did the customer get a robot); correct@1 is HONESTY (did the product do the
+    # right thing, which includes declining to build a body whose rest pose topples). Printed together so
+    # neither can be quoted for the other -- the offline floor was read as capability for exactly that reason.
+    print(f"  correct@1 {out.get('correct@1')}  = verdict@1 + refused@1 {out.get('refused@1')}   "
+          f"(refusal = CORRECT, not failure)")
+    for pid, why in sorted((out.get("refusals") or {}).items()):
+        print(f"     refused  {pid:28s} {str(why)[:96]}")
     print(f"  fitness(ref-norm) {out['fitness']['ref_norm_mean']}   diversity(uniq) "
           f"{out['diversity']['unique_ratio']}   spec-faithful {out['spec_faithfulness']['rate']}")
     print(f"  verdict-fragility {out['verdict_fragility']['rate']}   quality/physics-eval "
@@ -69,6 +76,11 @@ def _do_diff(a_path: str, b_path: str, out_path: str) -> None:
           f"{d['verdict@1_candidate_shared']}   delta {d['delta_verdict@1_shared']}")
     print(f"  gained: {d['gained']}")
     print(f"  lost:   {d['lost']}")
+    # 'lost' is a boolean word for two different things. Split them: a prompt the candidate correctly DECLINED
+    # is not a broken body. Neither list is a gate verdict -- two generators are never graded against each
+    # other -- but conflating them is exactly how the offline floor came to be read as a capability claim.
+    print(f"  of those, candidate DECLINED (correct, unserved): {d.get('declined_by_candidate')}")
+    print(f"  of those, candidate BUILT and it does not work:   {d.get('built_but_broken_in_candidate')}")
     print(f"  -> {out_path}")
 
 

@@ -193,6 +193,12 @@ def compose_from_spec(spec: dict) -> RobotGene:
     b.base(base.get("name", "base"), shape=base.get("shape", "box"),
            length=float(base.get("length", 0.1)), radius=float(base.get("radius", 0.04)),
            mass=float(base.get("mass", 1.0)), geometry=base.get("geometry"))
+    if base.get("cross_section"):
+        # A box root with two DIFFERENT half-extents (a trunk that is longer front-to-back than it is wide).
+        # ``radius_m`` alone can only describe a square footprint, so a stretched or narrowed body would render
+        # long and collide square. gene_compiler reads ``cross_section`` in preference to the square radius.
+        _cs = tuple(float(v) for v in base["cross_section"][:2])
+        b._segments[0].cross_section = _cs
     for ln in spec.get("links", []):
         b.link(ln["name"], float(ln["length"]), radius=float(ln.get("radius", 0.03)),
                mass=float(ln.get("mass", 0.3)), joint=ln.get("joint", "revolute"),
@@ -255,11 +261,17 @@ def _leg_count(prompt: str) -> int:
     if any(w in p for w in ("hexapod", "insect", "ant ", "six-legged", "six legs", "6-legged", "6 legs",
                             "crab", "crustacean", "beetle", "mantis", "cockroach", "roach")):
         return 6                                          # insects/hexapods/crabs -> 6 credible walking legs
-    for word, k in (("two", 2), ("four", 4), ("six", 6), ("eight", 8)):
+    # ODD AND ONE-PAIR COUNTS ARE REAL REQUESTS. This used to enumerate only two/four/six/eight and gate the
+    # numeric form on the same set, so "a three-legged walking robot" and "a five-legged walking robot" both
+    # returned 4 and composed a body byte-identical to the plain quadruped — two dead cells in the corpus grid
+    # (measured 2026-08-08, #285). The builder now places an odd leg on the centreline instead of rounding it
+    # away, so the whole 1..12 range is answerable and the count the customer typed is the count they get.
+    for word, k in (("one", 1), ("two", 2), ("three", 3), ("four", 4), ("five", 5), ("six", 6),
+                    ("seven", 7), ("eight", 8), ("nine", 9), ("ten", 10), ("twelve", 12)):
         if f"{word}-leg" in p or f"{word} leg" in p:
             return k
     m = re.search(r"(\d+)\s*-?\s*legs?", p)
-    if m and int(m.group(1)) in (2, 4, 6, 8):
+    if m and 1 <= int(m.group(1)) <= 12:
         return int(m.group(1))
     return 4
 
@@ -336,7 +348,17 @@ def morphology_from_requirements(reach_m: float, payload_kg: float, *, prompt: s
                 "end_effector": {"kind": "none"}}
     if robot_class in ("quadruped", "legged"):            # FREE-floating legged body: N legs (thigh+shin+foot)
         n = int(n_legs) if n_legs else _leg_count(p)      # 4 by default; hexapod=6, octopod=8, … (a parameter)
-        per_side = max(2, n // 2); n = per_side * 2
+        # LEG COUNT IS RESPECTED, INCLUDING ODD AND TWO. This used to read ``per_side = max(2, n // 2);
+        # n = per_side * 2``, which silently rounded 3 -> 4, 5 -> 4 AND 2 -> 4: measured 2026-08-08, "a
+        # three-legged walking robot" and "a five-legged walking robot" composed a body byte-identical to the
+        # plain quadruped, so two whole cells of the corpus grid were inert. Pairs still carry the body (a
+        # bilateral animal is built that way), but an odd count now adds ONE centreline leg at the rear rather
+        # than inventing a leg the customer did not ask for — a real tripedal layout, not a rounded quadruped.
+        # Floored at TWO: a one-legged hopper is a different machine (a pogo, balanced dynamically, with no
+        # static stance at all) and this parametric builder cannot express it -- so it is refused by rounding
+        # UP to the smallest body it can honestly build rather than emitting a degenerate single-limb tree.
+        n = max(2, min(12, n))
+        per_side, center_leg = max(1, n // 2), bool(n % 2)
         # Uniform SIZE scale: honor scale_m (animal body length) or nominal_dims['leg_mm'] so a tiny ant and a
         # big pack-mule differ (scale_m used to be a no-op here). s=1.0 by DEFAULT -> every dimension below is
         # byte-identical to the gait-tuned Go1-class baseline that the locomotion tests pin. Clamped so a
@@ -357,27 +379,45 @@ def morphology_from_requirements(reach_m: float, payload_kg: float, *, prompt: s
         # P4: animal proportion priors (leg length / stance width / torso length / mass) — 1.0 for generic/dog so
         # the gait-pinned baseline is byte-identical; a horse gets long legs, a gecko short splayed legs, etc.
         prop = animal_proportions(p)
-        lp, wp, tp, mp = prop["leg"], prop["stance"], prop["torso"], prop["mass"] * size_mass
+        # #285: what the customer LITERALLY asked for, on top of the species prior. "long slender legs",
+        # "short thick legs", "a wide stance", "a long body", "a slender torso" were all read as nothing —
+        # they composed a byte-identical robot — so the only phrase this function heard off a walker prompt
+        # was the size word. The two priors MULTIPLY: a horse-like quadruped WITH LONG LEGS is longer-legged
+        # than a horse. Neutral prompts return all-1.0, so the gait-pinned baseline body is byte-identical.
+        from virturoid.services.morphology_priors import body_proportions
+        ask = body_proportions(p)
+        lp = prop["leg"] * ask["leg"]
+        wp = prop["stance"] * ask["stance"]
+        tp = prop["torso"] * ask["torso"]
+        gp = ask["girth"]                                  # trunk cross-section (body WIDTH, an axis of its own)
+        kp_ = ask["thick"]                                 # limb diameter — length/diameter is the leg's character
+        mp = prop["mass"] * size_mass
         _tl, _cl = 0.12 * s * lp, 0.12 * s * lp            # thigh / calf link length (the gait-determining lever)
         # Real-quadruped leg topology (matches a Go1-class baseline): 3 actuated DOF per leg —
         # hip ABDUCTION (roll about body x) + hip PITCH (thigh) + KNEE (shin) — then a welded foot.
-        qleg = [{"length": 0.025 * s, "axis": (1, 0, 0), "torque": round(14.0 * st, 2), "radius": 0.032 * s,
-                 "mass": 0.15 * sm, "lower": -0.7, "upper": 0.7,
-                 "geometry": _role("quad_hip", 0.025 * s, 0.032 * s)},                       # hip abduction (roll)
+        # ``kp_`` (limb diameter) rides on every leg radius and, as area, on every leg mass — so "slender legs"
+        # and "thick legs" are a real structural difference and not just a word. Its UP direction saturates
+        # against the slenderness band enforced below (a leg may not be fatter than length/4.5, i.e. aspect
+        # 2.2); that is the realism prior doing its job, and it is why "thick legs" reads mostly as SHORTER,
+        # heavier legs rather than as fatter ones.
+        _kr, _km = kp_, kp_ ** 2
+        qleg = [{"length": 0.025 * s, "axis": (1, 0, 0), "torque": round(14.0 * st, 2), "radius": 0.032 * s * _kr,
+                 "mass": 0.15 * sm * _km, "lower": -0.7, "upper": 0.7,
+                 "geometry": _role("quad_hip", 0.025 * s, 0.032 * s * _kr)},                 # hip abduction (roll)
                 # ANATOMICAL joint ranges. These rows used to omit lower/upper, so they inherited the +-3.14
                 # (+-180 deg) catch-all from compose_from_spec -- a knee that hyperextends a half turn, which is
                 # the first thing a robotics reviewer notices in the XML. Values are MEASURED from the walking
                 # gait's own excursion on this body (thigh -1.25..+0.06, knee +1.07..+1.50) and set to contain it
                 # with margin, so the limits are honest anatomy AND cannot clamp the gait. Cross-checked against
                 # Unitree Go2 (Menagerie go2.xml): calf range -2.72..-0.84 is likewise FLEXION-ONLY (span 1.9).
-                {"length": _tl, "axis": (0, 1, 0), "torque": round(16.0 * st, 2), "radius": 0.035 * s,
-                 "mass": 0.3 * sm * mp, "lower": -1.7, "upper": 0.7,                          # hip pitch (fore/aft)
-                 "geometry": _role("quad_thigh", _tl, 0.035 * s)},                            # thigh
-                {"length": _cl, "axis": (0, 1, 0), "torque": round(12.0 * st, 2), "radius": 0.030 * s,
-                 "mass": 0.3 * sm * mp, "lower": 0.0, "upper": 2.4,                           # knee: flexion ONLY
-                 "geometry": _role("quad_calf", _cl, 0.030 * s)},                             # calf (shin)
-                {"length": 0.05 * s, "axis": (0, 1, 0), "torque": round(6.0 * st, 2), "radius": 0.038 * s,
-                 "mass": 0.3 * sm * mp, "joint": "fixed", "shape": "box",
+                {"length": _tl, "axis": (0, 1, 0), "torque": round(16.0 * st, 2), "radius": 0.035 * s * _kr,
+                 "mass": 0.3 * sm * mp * _km, "lower": -1.7, "upper": 0.7,                    # hip pitch (fore/aft)
+                 "geometry": _role("quad_thigh", _tl, 0.035 * s * _kr)},                      # thigh
+                {"length": _cl, "axis": (0, 1, 0), "torque": round(12.0 * st, 2), "radius": 0.030 * s * _kr,
+                 "mass": 0.3 * sm * mp * _km, "lower": 0.0, "upper": 2.4,                     # knee: flexion ONLY
+                 "geometry": _role("quad_calf", _cl, 0.030 * s * _kr)},                       # calf (shin)
+                {"length": 0.05 * s, "axis": (0, 1, 0), "torque": round(6.0 * st, 2), "radius": 0.038 * s * _kr,
+                 "mass": 0.3 * sm * mp * _km, "joint": "fixed", "shape": "box",
                  # anatomy_role is ADDITIVE: family stays "extrude" so _physics_proxy_from_geometry picks the
                  # identical box collider, but the mesh layer builds the real heel->toe sole instead of the
                  # rectangular slab that rendered as a white brick under every leg.
@@ -387,25 +427,53 @@ def morphology_from_requirements(reach_m: float, payload_kg: float, *, prompt: s
                               "fillet": 0.006 * s}}]                                          # foot pad
         if per_side == 2:
             xs = [round(0.12 * s * tp, 4), round(-0.12 * s * tp, 4)]   # torso length prior (dachshund long, etc.)
+        elif per_side == 1:
+            xs = [round(0.12 * s * tp, 4)]                # a single pair sits forward of the centre of mass
         else:                                             # spread legs evenly front→back along the body
             span = 0.14 * s * tp
             xs = [round(span - i * (2 * span / (per_side - 1)), 3) for i in range(per_side)]
-        sy_mount = round(0.13 * s * wp, 4)                # stance width prior (gecko splayed, horse narrow)
+        # Trunk half-width. ``gp`` is the girth ask ("a slender torso", "a broad body"); the per_side term
+        # widens the trunk so more leg pairs still mount ON it. The FORE-AFT extent lives in the leg stations
+        # and the loft below, which is why the torso ask scales BOTH -- a "long body" whose shell stayed the
+        # baseline length would render with its front legs hanging off the nose.
+        torso_r = round((0.16 + 0.02 * (per_side - 2)) * s * gp, 4)
+        # A WIDE STANCE IS ABDUCTION, NOT A HIP HANGING OFF THE SIDE OF THE BODY. Moving the mount outboard is
+        # what the stance prior did, and past the trunk's own half-width that detaches the leg: a gecko
+        # (stance 1.55) roots its hips at y=0.202 on a trunk whose widest lateral half-extent is 0.141, i.e.
+        # 6 cm out in open air. Real sprawled quadrupeds do it the other way -- the hip stays ON the body and
+        # the whole leg ROLLS outward, which is the hip abduction the crawl gait is built around
+        # ([[walking-breakthrough-abduction]]). So the mount is capped at the shell and the remainder becomes
+        # a splay angle sized to land the FOOT where the ask wanted it. Neutral prompts never reach the cap,
+        # so the pinned baseline body keeps mount y=0.13 and zero splay, byte-identical.
+        _y_shell = round(torso_r * 0.88, 4)               # the loft's widest lateral half-extent
+        _y_want = 0.13 * s * wp
+        sy_mount = round(min(_y_want, _y_shell), 4)       # stance width prior (gecko splayed, horse narrow)
+        _leg_reach = max(1e-6, _tl + _cl + 0.05 * s)
+        _splay = _math.asin(min(0.85, max(0.0, _y_want - sy_mount) / _leg_reach))
         mounts = [(x, sy) for x in xs for sy in (sy_mount, -sy_mount)]   # left + right of each x station
-        torso_r = round((0.16 + 0.02 * (per_side - 2)) * s, 3)  # widen the torso for more leg pairs
+        if center_leg:                                    # the odd leg: on the centreline, at the rear
+            mounts.append((round(-0.14 * s * tp, 4), 0.0))
         cls = "quadruped" if n == 4 else "legged"
         species = "quadruped.composed" if n == 4 else f"legged{n}.composed"
         # Head is a FORWARD-pointing muzzle at the FRONT of the torso (not a thumb on top): mount it as a
         # limb (only limbs carry mount_euler) at +x with a +90° pitch about y so its local +z aims along
         # world +x (forward). x=0.12 < torso_r keeps it flush so the connection audit still passes.
-        head_limb = {"prefix": "head", "parent": "torso", "mount_offset": (0.12 * s, 0.0, -0.04 * s),
+        # THE MUZZLE WAS INSIDE THE TRUNK. x=0.12*s put the head's far tip at 0.18 m while the trunk shell
+        # reaches 0.21 m, so the whole head segment rendered INSIDE the body -- the composed quadruped has
+        # had a head in its model and none in its picture. Place it against the shell's own nose (and ride
+        # the torso-length ask, so a stretched trunk does not swallow it again).
+        _hx_nose = 1.62 * (0.16 + 0.02 * (per_side - 2)) * s * tp        # the loft's widest fore-aft half-extent
+        _head_x = round(_hx_nose * 0.92, 5)
+        head_limb = {"prefix": "head", "parent": "torso", "mount_offset": (_head_x, 0.0, -0.04 * s),
                      "mount_euler": (0.0, _math.pi / 2, 0.0),
                      "links": [{"length": 0.06 * s, "radius": 0.032 * s, "joint": "fixed", "mass": 0.2 * sm,
                                 "geometry": {"family": "revolve",
                                              "profile": [[0.030 * s, 0], [0.028 * s, 0.016 * s],
                                                          [0.020 * s, 0.036 * s], [0.006 * s, 0.052 * s]]}}]}
+        # roll each leg AWAY from the centreline (sign follows its own side); a centreline leg never splays.
         leg_limbs = [{"prefix": f"leg{i}", "parent": "torso", "mount_offset": (sx, sy, -0.04 * s),
-                      "mount_euler": (_math.pi, 0.0, 0.0), "links": [dict(seg) for seg in qleg]}
+                      "mount_euler": (_math.pi + (1.0 if sy > 0 else -1.0 if sy < 0 else 0.0) * _splay, 0.0, 0.0),
+                      "links": [dict(seg) for seg in qleg]}
                      for i, (sx, sy) in enumerate(mounts)]
         t_len = 0.08 * s
         # Baked standing crouch (render/spawn-only): thigh pitched back + knee folded forward so each leg reads
@@ -416,16 +484,31 @@ def morphology_from_requirements(reach_m: float, payload_kg: float, *, prompt: s
             pre = limb["prefix"]
             rest_pose[f"{pre}_1_joint"] = -0.55   # thigh: pitch back
             rest_pose[f"{pre}_2_joint"] = 1.10    # calf: fold forward (bent knee)
+        # THE TRUNK'S TWO HALF-EXTENTS ARE NOW SEPARATE, and that is what makes the torso axis honest. The trunk
+        # used to derive BOTH its fore-aft and lateral half-extents from one ``torso_r``, so a dachshund's or a
+        # "long body" request's legs moved apart along +-x while the shell they hang off stayed the baseline
+        # length -- the legs drift toward, and past, the nose. ``torso_hx`` carries the torso-length ask (and the
+        # species prior), ``torso_r`` the girth ask; the leg stations sit at 0.12*s*tp, comfortably inside
+        # 1.18*0.16*s*tp, so every leg roots ON the trunk at any proportion. (sections: [z, half_y, half_x])
+        torso_hx = round((0.16 + 0.02 * (per_side - 2)) * s * tp, 4)   # == torso_r when tp == gp == 1 (baseline)
         return {"robot_class": cls, "base_mount": "free", "species": species, "rest_pose": rest_pose,
                 "base": {"name": "torso", "shape": "box", "length": t_len, "radius": torso_r, "mass": 3.0 * sm,
+                         # The BOX COLLIDER follows the same two half-extents, so physics and render agree about
+                         # how long the animal is instead of the collider staying square under a stretched shell.
+                         "cross_section": (round(torso_hx, 5), round(torso_r, 5)),
                          # an ORIGINAL rounded ANIMAL trunk (elliptical loft) — longer front-to-back (x) than
-                         # wide (y), tapering at the head/tail ends — instead of a square slab. Visual only:
-                         # the box collider + gait-tuned legs are unchanged. (sections: [z, half_y, half_x])
+                         # wide (y), tapering at the head/tail ends — instead of a square slab.
+                         # A TRUNK, NOT A PEBBLE. The fore-aft multipliers were 1.18/1.34/1.30/1.05 against a
+                         # lateral 0.72/0.88/0.84/0.60, i.e. a length:width of 1.4 -- which renders as a
+                         # flying-saucer disc with legs, and sits at the very bottom of this repo's own
+                         # ``QUAD_BANDS['torso_LW']`` (1.2..4.5, "a quadruped trunk is LONGER than wide").
+                         # A Unitree Go2's trunk is 0.70 x 0.31 = 2.26. These reach ~2.0. VISUAL ONLY: the box
+                         # collider comes from length/radius/cross_section above, which are untouched.
                          "geometry": {"family": "loft", "sections": [
-                             [0.0,           torso_r * 0.72, torso_r * 1.18],
-                             [0.375 * t_len, torso_r * 0.88, torso_r * 1.34],
-                             [0.688 * t_len, torso_r * 0.84, torso_r * 1.30],
-                             [t_len,         torso_r * 0.60, torso_r * 1.05]]}},
+                             [0.0,           torso_r * 0.72, torso_hx * 1.42],
+                             [0.375 * t_len, torso_r * 0.88, torso_hx * 1.62],
+                             [0.688 * t_len, torso_r * 0.84, torso_hx * 1.55],
+                             [t_len,         torso_r * 0.60, torso_hx * 1.24]]}},
                 "limbs": [head_limb] + leg_limbs,
                 "end_effector": {"kind": "none"}}
     if robot_class == "mobile_manipulator":              # G4 composite: a wheeled chassis CARRYING a grasp arm.
@@ -564,6 +647,32 @@ def _articulation_issues(gene) -> list[str]:
     return issues
 
 
+def _attach_envelope(seg) -> tuple[float, float]:
+    """The parent's REAL surface half-extents ``(x, y)`` — what a child can legitimately root inside.
+
+    ``radius_m`` alone describes a SQUARE footprint and is the last resort. A body whose shape is authored
+    (a loft trunk, an extruded plate) carries its true span in the geometry, and a box root that is longer
+    front-to-back than it is wide carries it in ``cross_section``. Measuring against the square would call a
+    muzzle mounted at the nose of an elongated trunk "floating in empty space" while it is in fact buried
+    inside the body — which is the opposite of the defect this check exists to catch.
+    """
+    geo = getattr(seg, "geometry", None)
+    if isinstance(geo, dict):
+        fam = str(geo.get("family") or "").lower()
+        if fam == "loft":
+            secs = [s for s in (geo.get("sections") or []) if isinstance(s, (list, tuple)) and len(s) >= 3]
+            if secs:
+                return (max(abs(float(s[2])) for s in secs), max(abs(float(s[1])) for s in secs))
+        if fam == "extrude":
+            pts = [p for p in (geo.get("profile") or []) if isinstance(p, (list, tuple)) and len(p) >= 2]
+            if pts:
+                return (max(abs(float(p[0])) for p in pts), max(abs(float(p[1])) for p in pts))
+    cs = getattr(seg, "cross_section", None)
+    if cs:
+        return (float(cs[0]), float(cs[1]))
+    return (float(seg.radius_m), float(seg.radius_m))
+
+
 def _morphology_quality_issues(gene) -> list[str]:
     """Quality gate for an LLM-proposed body BEYOND schema validity — catches the failure modes that make a
     generated body look broken: limbs that FLOAT off the parent (the "empty space / parts not attached"
@@ -583,8 +692,9 @@ def _morphology_quality_issues(gene) -> list[str]:
         # radius. A semantic front/rear mount is valid inside that envelope;
         # raw recipes without bounds retain the conservative radial check.
         bounds = mount_bounds.get(p.name) if isinstance(mount_bounds, dict) else None
-        x_limit = float(bounds.get("x", p.radius_m)) if isinstance(bounds, dict) else float(p.radius_m)
-        y_limit = float(bounds.get("y", p.radius_m)) if isinstance(bounds, dict) else float(p.radius_m)
+        _px, _py = _attach_envelope(p)
+        x_limit = float(bounds.get("x", _px)) if isinstance(bounds, dict) else _px
+        y_limit = float(bounds.get("y", _py)) if isinstance(bounds, dict) else _py
         outside_x = abs(float(mo[0])) - x_limit
         outside_y = abs(float(mo[1])) - y_limit
         if max(outside_x, outside_y) > 0.02:                  # >2 cm beyond the parent surface = a float
@@ -1025,16 +1135,20 @@ def _fallback_gene(prompt: str, heuristic_spec: dict, *, target_height_m: float 
     g = compose_from_spec(heuristic_spec)
     g.design_source = heuristic_spec.get("design_source", "heuristic")
     g.composition_notes = ["Deterministic requirement-to-morphology fallback used; review the delivered body class before relying on it."]
-    # ROLL-STABILITY: the heuristic parametric quad has a narrow stance and rolls over under any gait (a "large
-    # quadruped robot" fell by roll-over). The composed-quad branch gets ensure_walkable_quad; this late fallback
-    # didn't. force=True adopts the wide fanned stance IFF it materially out-walks the heuristic (evaluate_robot
-    # now scores a roll-over ~0, so the roll-stable fanned body wins). No-op for non-quad heuristic bodies.
-    if (getattr(g, "robot_class", "") or "").lower() == "quadruped":
-        try:
-            from virturoid.services.anatomy_compiler import ensure_walkable_quad
-            g = ensure_walkable_quad(g, prompt, force=True)
-        except Exception:  # noqa: BLE001 - the stance fallback is best-effort; a rolling body beats a crash
-            pass
+    # THIS FUNCTION COMPOSES; IT DOES NOT JUDGE. It used to end with ``ensure_walkable_quad(..., force=True)``
+    # for roll-stability, and MEASURED 2026-08-08 (#285) that one line was the larger half of the offline
+    # diversity collapse: every "walking robot" prompt shipped the canonical fanned template at one of three
+    # clamped scales, so nothing the composer expressed about a body could ever reach a customer.
+    #
+    # It fired on a measurement artefact, exactly as ``ai_native_tools.create_robot`` and the substitution site
+    # itself already argue at length. The gate reads ``evaluate_robot`` at the shipped freq 1.5 / kp 32 on a body
+    # that is NOT YET GROUNDED (a placeholder mass) and has never been given a controller of its own -- and
+    # ``fit_gait_for_body`` cannot run here for that same reason. Measured on the composed quads: 0.07 m
+    # FELL by ROLL-OVER at the shipped default, 0.936 m CREDIBLE WALK with an op-point of their own; a
+    # long-bodied variant walked 1.689 m on the SHIPPED default, better than the 1.057 m template offered in
+    # its place. So the decision is DEFERRED to whoever has a grounded body and a fitted controller:
+    # ``create_robot`` (which grounds, fits, then calls the gate) or any caller asking for
+    # ``compose_robot(ensure_walkable=True)``, which runs exactly the same gate one frame later.
     return g
 
 

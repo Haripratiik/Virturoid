@@ -30,6 +30,24 @@ PINNED_SIM_CONFIG = {"legged_steps": 800, "mobile_steps": 500, "manip_steps": 40
 # serpentine→CRAWLS. Anything else (SLIDE/LURCHES/TIPPED/STUCK/STANDS…) is a non-credible verdict.
 _CREDIBLE_PREFIXES = ("CREDIBLE", "DRIVES", "ARTICULATES", "PICKS UP", "SWIMS", "FLIES", "CRAWLS")
 
+# ---------------------------------------------------------------- the per-case OUTCOME vocabulary
+# A boolean per case cannot say the one thing the bench most needs to say. MEASURED on the live battery
+# (2026-08-08 + 2026-08-07 arms): the product REFUSED elephant__appearance ("center of mass falls outside the
+# foot support polygon"), palletizer__construction ("5 joint(s) near/over their static hold torque"),
+# mobile_manip__appearance and starfish__appearance. Under a boolean those land as ``False`` -- indistinguishable
+# from a body that was built and fell over -- so the floor could only record them as failures, and the offline
+# floor recorded three of the same prompt ids as ``true``. A gate written on that boolean protects bodies the
+# product declines to build, and would read a HONESTY IMPROVEMENT (a new refusal) as a regression.
+#
+# So the recorded expectation is tri-state. ``refused`` is a first-class CORRECT outcome; only ``failed`` is a
+# defect. The headline ``verdict@1`` is deliberately left alone -- a refused prompt is still an UNSERVED prompt,
+# so it must not count as credible -- and the new ``correct@1`` sits beside it for the honesty question.
+OUTCOME_CREDIBLE = "credible"        #: built, and the physics verdict is credible
+OUTCOME_REFUSED = "refused"          #: the product declined to produce a body (strict-mode grounding refusal)
+OUTCOME_FAILED = "failed"            #: a design exists (or was attempted) and does not earn a credible verdict
+OUTCOME_UNVERIFIED = "unverified"    #: structural run only (verify=False); no physics was asked for
+OUTCOMES = (OUTCOME_CREDIBLE, OUTCOME_REFUSED, OUTCOME_FAILED, OUTCOME_UNVERIFIED)
+
 
 # ---------------------------------------------------------------- physics verdict (gene-direct)
 def _verdict_for_gene(gene, *, quick: bool = True) -> dict:
@@ -130,16 +148,29 @@ def _spec_faithfulness(gene, constraints: dict) -> dict:
 
 # ---------------------------------------------------------------- per-design evaluation
 def evaluate_design(gene, *, constraints: dict | None = None, verify: bool = True,
-                    fragility: bool = False) -> dict:
+                    fragility: bool = False, refused: bool = False,
+                    refusal_reason: str | None = None) -> dict:
     """Grade ONE design through the funnel. ``gene=None`` records a design failure honestly (schema stage).
 
+    ``refused=True`` says the absent design is a REFUSAL — strict mode declining to produce an unsound body —
+    rather than a malformed one. It is still not credible (the prompt went unserved, so ``verdict@1`` must not
+    reward it) but it is routed to ``error_class="refused"`` and ``outcome="refused"``, because "we correctly
+    declined" and "we emitted a broken kinematic tree" are different facts about the product and a gate written
+    on the boolean alone cannot tell them apart.
+
     Returns a per-design row with the boolean stage passes, the physics fitness, the spec-faithfulness checks,
-    and ``error_class`` (the first failing stage — the routing signal for grounded repair, §8.2)."""
+    ``error_class`` (the first failing stage — the routing signal for grounded repair, §8.2) and ``outcome``
+    (the tri-state the per-case floors are recorded in)."""
     from virturoid.services.task_matched_eval import robot_kind
     row: dict = {"schema_valid": False, "compiles": False, "credible": False,
                  "fitness_raw": 0.0, "fitness_ref_norm": 0.0, "fitness_eff": 0.0,
-                 "error_class": "schema", "kind": None, "n_physics_evals": 0}
+                 "error_class": "schema", "kind": None, "n_physics_evals": 0,
+                 "outcome": OUTCOME_FAILED, "refused": bool(refused)}
     if gene is None:
+        if refused:
+            row["error_class"] = "refused"
+            row["outcome"] = OUTCOME_REFUSED
+            row["refusal_reason"] = (str(refusal_reason)[:300] if refusal_reason else None)
         return row
     # 1) schema_valid@1 — a valid, buildable kinematic tree
     issues = gene.validate()
@@ -166,6 +197,7 @@ def evaluate_design(gene, *, constraints: dict | None = None, verify: bool = Tru
         row["spec"] = _spec_faithfulness(gene, constraints)
     if not verify:
         row["error_class"] = None
+        row["outcome"] = OUTCOME_UNVERIFIED     # no physics was asked for; "failed" would be a claim, not a fact
         return row
     # 3) verdict@1 — the un-gameable physics verdict
     res = _verdict_for_gene(gene)
@@ -181,6 +213,7 @@ def evaluate_design(gene, *, constraints: dict | None = None, verify: bool = Tru
     row["fitness_ref_norm"] = round(min(row["fitness_raw"] / ref, 2.0), 4) if ref else 0.0
     row["fitness_eff"] = round(row["fitness_raw"] / _volume(gene), 4)
     row["error_class"] = None if row["credible"] else "verdict"
+    row["outcome"] = OUTCOME_CREDIBLE if row["credible"] else OUTCOME_FAILED
     # 4) verdict fragility — did a credible verdict survive a mild mass perturbation? (knife-edge exploit alarm)
     if fragility and row["credible"]:
         try:
@@ -246,13 +279,15 @@ def run_bench(designs: list[dict], *, model: str = "cassette", verify: bool = Tr
     """
     rows = []
     for d in designs:
-        r = evaluate_design(d.get("gene"), constraints=d.get("constraints"), verify=verify, fragility=fragility)
+        r = evaluate_design(d.get("gene"), constraints=d.get("constraints"), verify=verify, fragility=fragility,
+                            refused=bool(d.get("refused")), refusal_reason=d.get("refusal_reason"))
         r.update({k: d.get(k) for k in ("prompt_id", "family", "phrasing", "concept")})
         rows.append(r)
     n = len(rows) or 1
     n_schema = sum(1 for r in rows if r["schema_valid"])
     n_compile = sum(1 for r in rows if r["compiles"])
     n_credible = sum(1 for r in rows if r["credible"])
+    n_refused = sum(1 for r in rows if r["outcome"] == OUTCOME_REFUSED)
     credible_rows = [r for r in rows if r["credible"]]
     # error-class histogram over ALL attempts (the routing signal for WS-B)
     err_hist: dict[str, int] = {}
@@ -283,6 +318,20 @@ def run_bench(designs: list[dict], *, model: str = "cassette", verify: bool = Tr
         # and hermetic, so this is an exact function of the code) -- it is purely lost information, recovered here.
         # Gate on this map, not the rate, and a regression can name the body it broke.
         "per_case": {str(r.get("prompt_id")): bool(r["credible"]) for r in rows},
+        # ...and the boolean above still cannot say the one thing the LIVE battery most needed it to say. A
+        # refusal reads as False, exactly like a body that fell over, so a recorded floor could not tell "the
+        # product correctly declined" from "the product broke" -- and the offline floor duly marked three
+        # REFUSED prompt ids `true`. This is that map, tri-state. ``outcome_regressions`` gates on it.
+        "per_case_outcome": {str(r.get("prompt_id")): r["outcome"] for r in rows},
+        # The honesty rate beside the capability rate. verdict@1 answers "how often did the customer get a
+        # working robot"; correct@1 answers "how often did the product do the right thing" -- which counts an
+        # honest refusal, because shipping a topple-prone body instead would have been the WORSE outcome.
+        # Two separate numbers on purpose: neither may be quoted for the other, and verdict@1 is unchanged by
+        # this addition, so no floor recorded against it is weakened.
+        "refused@1": _rate(n_refused, len(rows)),
+        "correct@1": _rate(n_credible + n_refused, len(rows)),
+        "refusals": {str(r.get("prompt_id")): r.get("refusal_reason")
+                     for r in rows if r["outcome"] == OUTCOME_REFUSED},
         # conditional (labelled, for diagnosis only — never the headline)
         "conditional": {"compile|schema": _rate(n_compile, n_schema),
                         "verdict|compile": _rate(n_credible, n_compile)},
@@ -375,12 +424,18 @@ def bench_from_cassette(cassette=None, *, verify: bool = True, fragility: bool =
         # reported verdict@1 = 0.0 for them. That is a number about an API quota wearing the product's label.
         # Transport failures leave the denominator (named, never dropped silently); design refusals stay in it,
         # because a model declining to produce a sound body IS the product's measured behaviour.
-        if cas.has(pid) and cas.entry_provenance(pid)["infrastructure_failure"]:
+        ep = cas.entry_provenance(pid) if cas.has(pid) else None
+        if ep and ep["infrastructure_failure"]:
             excluded_infra.append(pid)
             continue
+        # A recorded DESIGN REFUSAL is the product declining to build an unsound body. It stays in the
+        # denominator (an unserved prompt is unserved) but it is carried through as a refusal, not as a
+        # nameless absent gene, so the funnel's tri-state can distinguish it from a malformed design.
+        refused = bool(ep and ep["failure_kind"] == "design_refusal")
         designs.append({"prompt_id": pid, "family": rec["family"], "phrasing": rec["phrasing"],
                         "concept": rec["concept"], "constraints": rec.get("constraints"),
-                        "gene": cas.get_gene(pid)})
+                        "gene": cas.get_gene(pid),
+                        "refused": refused, "refusal_reason": ep["error"] if refused else None})
     prev = os.environ.get("VIRTUROID_DISABLE_GAIT_HINTS")
     os.environ["VIRTUROID_DISABLE_GAIT_HINTS"] = "1"
     try:
@@ -412,6 +467,95 @@ def bench_from_cassette(cassette=None, *, verify: bool = True, fragility: bool =
     return out
 
 
+# ---------------------------------------------------------------- the per-case OUTCOME gate (tri-state)
+#: What each recorded outcome PROTECTS, and what counts as losing it. The whole point of the tri-state is that
+#: a refusal is a correct outcome with its own regression, distinct from a credible body's:
+#:
+#:   floor ``credible`` → the body must still walk/drive/reach. Anything else is a loss.
+#:   floor ``refused``  → the product must still DECLINE. Falling to ``failed`` means the honesty gate stopped
+#:                        firing and we now ship a body that does not work — a real regression, and one the
+#:                        boolean floor could not express at all (both sides read False).
+#:   floor ``failed``   → tracked debt. Protected against nothing; it cannot get worse.
+#:
+#: Upward moves are never failures, but they are REPORTED (``improved``) so the floor gets raised deliberately
+#: instead of drifting — the same discipline ``known_regressions`` enforces facing the other way.
+_OUTCOME_MUST_HOLD = {OUTCOME_CREDIBLE: (OUTCOME_CREDIBLE,),
+                      OUTCOME_REFUSED: (OUTCOME_REFUSED, OUTCOME_CREDIBLE),
+                      OUTCOME_FAILED: OUTCOMES,
+                      OUTCOME_UNVERIFIED: OUTCOMES}
+_OUTCOME_RANK = {OUTCOME_FAILED: 0, OUTCOME_REFUSED: 1, OUTCOME_CREDIBLE: 2}
+
+
+def outcome_regressions(floor: dict, got: dict) -> dict:
+    """Compare a recorded tri-state per-case floor against a fresh run's ``per_case_outcome``.
+
+    Returns ``{"broke": {pid: "was -> now"}, "improved": {...}, "missing": [...]}``. ``missing`` is not a
+    nicety: a refusal row carries no gene, so its replayed outcome is a pure function of the failure-kind
+    classifier — widen ``INFRASTRUCTURE_ERROR_MARKERS`` by one word (say "capacity", which appears in the
+    palletizer refusal) and that prompt would be reclassified as transport, dropped from the denominator, and
+    vanish from the map instead of failing anything. Absence is therefore a gate condition, not a skip.
+    """
+    broke: dict[str, str] = {}
+    improved: dict[str, str] = {}
+    missing = sorted(k for k in floor if k not in got)
+    for pid, was in floor.items():
+        now = got.get(pid)
+        if now is None:
+            continue
+        if now not in _OUTCOME_MUST_HOLD.get(was, OUTCOMES):
+            broke[pid] = f"{was} -> {now}"
+        elif _OUTCOME_RANK.get(now, -1) > _OUTCOME_RANK.get(was, -1):
+            improved[pid] = f"{was} -> {now}"
+    return {"broke": dict(sorted(broke.items())), "improved": dict(sorted(improved.items())), "missing": missing}
+
+
+#: The production outcome for a prompt the live path has never actually answered (every live attempt died on
+#: transport). NOT an outcome — the absence of one. Kept out of ``OUTCOMES`` on purpose so it can never be
+#: mistaken for a measurement, and so a floor entry resting on it reads as "no evidence", not "it works".
+PRODUCTION_UNMEASURED = "unmeasured"
+
+
+def capability_reconciliation(offline: dict, production: dict, *, prompt_ids=None) -> dict:
+    """Line up an OFFLINE per-case floor against what the LIVE product actually did, prompt by prompt.
+
+    THE DEFECT THIS EXISTS FOR. The offline floor is a floor on the deterministic builders replayed through the
+    compiler and the physics — a genuinely useful gate, and NOT a statement about the product. But it is a map
+    of prompt ids to ``true``, published next to ``verdict@1``, and it was read as one: three of its ``true``
+    entries (``elephant__appearance``, ``palletizer__construction``, ``mobile_manip__appearance``) are prompts
+    the live product **refuses**, correctly, because the anatomy graph it proposed put the centre of mass
+    outside the support polygon or drove joints past their static hold torque. Nothing in the artifact said so.
+
+    So the claim and the evidence are now stored together and checked. Every offline ``credible`` is classified:
+
+      * ``corroborated`` — the live product built it and it earned a credible verdict. Only these are capability.
+      * ``contradicted`` — the live product refused it, or built something that does not work.
+      * ``unmeasured``   — the live path has never returned a real answer for this prompt (transport only).
+
+    ``product_only`` is the same question facing the other way, and it is not decoration: MEASURED here, the one
+    prompt the live product DID serve credibly (``welder__appearance``) is ``failed`` in the offline floor. A
+    floor that protects nothing the product does, and fails to protect the one thing it does, is worth naming.
+    """
+    ids = sorted(prompt_ids) if prompt_ids is not None else sorted(set(offline) | set(production))
+    rows = {pid: {"offline": offline.get(pid), "production": production.get(pid, PRODUCTION_UNMEASURED)}
+            for pid in ids}
+    off_credible = [p for p in ids if offline.get(p) == OUTCOME_CREDIBLE]
+    corroborated = [p for p in off_credible if rows[p]["production"] == OUTCOME_CREDIBLE]
+    contradicted = {p: rows[p]["production"] for p in off_credible
+                    if rows[p]["production"] in (OUTCOME_REFUSED, OUTCOME_FAILED)}
+    unmeasured = [p for p in off_credible if rows[p]["production"] == PRODUCTION_UNMEASURED]
+    product_only = [p for p in ids
+                    if rows[p]["production"] == OUTCOME_CREDIBLE and offline.get(p) != OUTCOME_CREDIBLE]
+    return {"n_prompts": len(ids), "rows": rows,
+            "offline_credible": off_credible, "n_offline_credible": len(off_credible),
+            "corroborated": corroborated, "contradicted": dict(sorted(contradicted.items())),
+            "unmeasured": unmeasured, "product_only": product_only,
+            # The blunt number: of the bodies the offline gate PROTECTS, how many is the product known to build?
+            "capability_claim_rate": (round(len(corroborated) / len(off_credible), 4) if off_credible else None),
+            # Everything the offline floor protects without live corroboration. A reader of the offline artifact
+            # must see this list; it is what stops `true` being read as "the product can do this".
+            "offline_only_floor": sorted(set(contradicted) | set(unmeasured))}
+
+
 # ---------------------------------------------------------------- cassette-vs-live diff (#208)
 def diff_funnels(baseline: dict, candidate: dict) -> dict:
     """Compare two funnels case by case. Built for the cassette-vs-live question specifically: the aggregate
@@ -419,6 +563,7 @@ def diff_funnels(baseline: dict, candidate: dict) -> dict:
     the same prompt set when the live arm is a small sample. So the comparison is restricted to the prompts
     BOTH scored, and the restricted rates are reported next to the full ones."""
     a, b = baseline.get("per_case") or {}, candidate.get("per_case") or {}
+    oa, ob = baseline.get("per_case_outcome") or {}, candidate.get("per_case_outcome") or {}
     shared = sorted(set(a) & set(b))
     gained = sorted(k for k in shared if b[k] and not a[k])
     lost = sorted(k for k in shared if a[k] and not b[k])
@@ -436,6 +581,20 @@ def diff_funnels(baseline: dict, candidate: dict) -> dict:
         "delta_verdict@1_shared": (None if not shared else
                                    round(_rate(b, shared) - _rate(a, shared), 4)),
         "gained": gained, "lost": lost, "n_changed": len(gained) + len(lost),
+        # The same comparison in the TRI-STATE, where "lost" splits into the two very different things it was
+        # hiding. MEASURED offline->live: of the 5 prompts the boolean calls lost, THREE are refusals -- the
+        # candidate declined to build a body whose rest pose topples or whose joints sit over their static
+        # hold torque. That is not a defect, and a comparison that cannot say so is the reason the offline
+        # floor was read as a capability claim in the first place.
+        #
+        # NOTE these are NOT gate verdicts. Two different generators are never graded against each other
+        # (``check_label`` refuses it in both directions); this is a description of how they differ.
+        "outcome_changes": {k: f"{oa[k]} -> {ob[k]}" for k in shared
+                            if k in oa and k in ob and oa[k] != ob[k]},
+        "declined_by_candidate": sorted(k for k in shared if ob.get(k) == OUTCOME_REFUSED
+                                        and oa.get(k) != OUTCOME_REFUSED),
+        "built_but_broken_in_candidate": sorted(k for k in shared if oa.get(k) == OUTCOME_CREDIBLE
+                                                and ob.get(k) == OUTCOME_FAILED),
         # full-battery rates, kept ONLY as context; they are not comparable when the sets differ
         "verdict@1_baseline_full": baseline.get("verdict@1"), "verdict@1_candidate_full": candidate.get("verdict@1"),
     }

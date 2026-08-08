@@ -48,6 +48,50 @@ def test_schema_failure_stops_at_schema_stage():
 def test_none_design_is_an_honest_attempt():
     r = DB.evaluate_design(None)
     assert r["error_class"] == "schema" and not r["schema_valid"]
+    assert r["outcome"] == DB.OUTCOME_FAILED and r["refused"] is False
+
+
+# ---------------------------------------------------------------- the tri-state outcome (a refusal is not a bug)
+def test_a_refusal_is_a_first_class_outcome_not_a_schema_failure():
+    """THE representation defect. A design refusal and a malformed kinematic tree both arrive as ``gene=None``,
+    so the funnel booked both as ``schema`` failures and both as ``per_case: false``. Under that encoding the
+    recorded floor cannot say 'the product correctly declined' -- which is why the OFFLINE floor marked three
+    REFUSED prompt ids ``true`` and nothing could tell.
+
+    A refusal is still not credible (the prompt went unserved, so verdict@1 must not reward it) but it is a
+    different fact about the product, and it now says so."""
+    ref = DB.evaluate_design(None, refused=True, refusal_reason="center of mass falls outside the support polygon")
+    bad = DB.evaluate_design(_bad_gene())
+    assert ref["outcome"] == DB.OUTCOME_REFUSED and ref["error_class"] == "refused" and ref["refused"] is True
+    assert "support polygon" in ref["refusal_reason"]
+    assert not ref["credible"]                      # honesty: an unserved prompt is unserved
+    assert bad["outcome"] == DB.OUTCOME_FAILED and bad["error_class"] == "schema"
+    assert ref["outcome"] != bad["outcome"]         # ...and the two are no longer the same recorded fact
+
+
+def test_the_outcome_gate_tells_a_refusal_apart_from_a_broken_body():
+    """The transition policy, stated as a table. Only the moves that represent a real LOSS may fail, and the
+    one the boolean floor structurally could not express -- refused -> failed, both sides False -- is the one
+    that matters most: it means the grounding gate stopped firing and we now ship a body that does not work."""
+    floor = {"walks": DB.OUTCOME_CREDIBLE, "declined": DB.OUTCOME_REFUSED, "debt": DB.OUTCOME_FAILED}
+    # nothing moved
+    assert DB.outcome_regressions(floor, dict(floor)) == {"broke": {}, "improved": {}, "missing": []}
+    # a credible body stopped working, and a refusal turned into a body that does not work
+    bad = DB.outcome_regressions(floor, {"walks": DB.OUTCOME_FAILED, "declined": DB.OUTCOME_FAILED,
+                                         "debt": DB.OUTCOME_FAILED})
+    assert bad["broke"] == {"walks": "credible -> failed", "declined": "refused -> failed"}
+    # a credible body that starts being REFUSED is also a loss -- the customer stopped getting a robot
+    assert DB.outcome_regressions(floor, dict(floor, walks=DB.OUTCOME_REFUSED))["broke"] \
+        == {"walks": "credible -> refused"}
+    # upward moves never fail, but they are reported so the floor is raised deliberately, not by drift
+    up = DB.outcome_regressions(floor, {"walks": DB.OUTCOME_CREDIBLE, "declined": DB.OUTCOME_CREDIBLE,
+                                        "debt": DB.OUTCOME_CREDIBLE})
+    assert up["broke"] == {} and up["improved"] == {"debt": "failed -> credible",
+                                                   "declined": "refused -> credible"}
+    # tracked debt protects nothing: a failed case may do anything, including start being refused
+    assert DB.outcome_regressions({"debt": DB.OUTCOME_FAILED}, {"debt": DB.OUTCOME_REFUSED})["broke"] == {}
+    # a case that VANISHES is a gate condition, not a skip (see the reclassification test below)
+    assert DB.outcome_regressions(floor, {"walks": DB.OUTCOME_CREDIBLE})["missing"] == ["debt", "declined"]
 
 
 # ---------------------------------------------------------------- structural funnel (fast, deterministic)
@@ -109,18 +153,25 @@ def test_no_individual_body_silently_stops_walking():
 
     So gate on the bodies themselves. Any case credible in the recorded floor must stay credible, and the
     failure message names the body -- which is the whole point, since 'verdict@1 fell by 0.05' never did.
+
+    Gated on the TRI-STATE map, not the boolean: this cassette holds no refusals, so the two agree today, but
+    the floor must be written in a vocabulary that can express one. The boolean is checked alongside so the
+    two representations cannot drift apart.
     """
     out = DB.bench_from_cassette(verify=True)
-    got = out["per_case"]
-    floor = _BASELINE.get("per_case") or {}
-    assert floor, "baseline carries no per_case floor; re-record with scripts/design_bench.py --record"
-    missing = sorted(set(floor) - set(got))
-    assert not missing, f"battery no longer covers {missing}; re-record the baseline if that is intended"
-    broke = sorted(k for k, was in floor.items() if was and not got.get(k))
-    assert not broke, (
-        "these bodies were credible and are not any more: " + ", ".join(broke)
+    floor = _BASELINE.get("per_case_outcome") or {}
+    assert floor, "baseline carries no per_case_outcome floor; re-record with scripts/design_bench.py --record"
+    reg = DB.outcome_regressions(floor, out["per_case_outcome"])
+    assert not reg["missing"], \
+        f"battery no longer covers {reg['missing']}; re-record the baseline if that is intended"
+    assert not reg["broke"], (
+        "these bodies changed for the worse: " + "; ".join(f"{k} ({v})" for k, v in reg["broke"].items())
         + f"  (verdict@1 {out['verdict@1']} vs baseline {_BASELINE['verdict@1']} — note the aggregate can "
           "absorb one flip entirely, which is why this per-case check exists)")
+    # the boolean map is derived from the same rows; if they ever disagree one of them is lying
+    assert out["per_case"] == {k: (v == DB.OUTCOME_CREDIBLE) for k, v in out["per_case_outcome"].items()}
+    assert _BASELINE["per_case"] == {k: (v == DB.OUTCOME_CREDIBLE)
+                                     for k, v in sorted(_BASELINE["per_case_outcome"].items())}
 
 
 # ---------------------------------------------------------------- provenance gates (#208)
@@ -185,9 +236,11 @@ def test_diff_compares_only_the_prompts_both_runs_scored():
     runs may cover different prompt sets, and even when they do not, verdict@1 moves in steps the size of the
     gate's own tolerance (see ``per_case``). So the diff names the bodies that changed."""
     base = {"mode": "offline", "model": "offline_heuristic_v1", "verdict@1": 0.5,
-            "per_case": {"a": True, "b": False, "c": True}}
+            "per_case": {"a": True, "b": False, "c": True},
+            "per_case_outcome": {"a": "credible", "b": "failed", "c": "credible"}}
     cand = {"mode": "live", "model": "live_llm_v1", "verdict@1": 1.0,
-            "per_case": {"a": False, "b": True, "d": True}}
+            "per_case": {"a": False, "b": True, "d": True},
+            "per_case_outcome": {"a": "refused", "b": "credible", "d": "credible"}}
     d = DB.diff_funnels(base, cand)
     assert d["n_shared"] == 2 and d["shared_prompt_ids"] == ["a", "b"]
     assert d["gained"] == ["b"] and d["lost"] == ["a"] and d["n_changed"] == 2
@@ -196,6 +249,9 @@ def test_diff_compares_only_the_prompts_both_runs_scored():
     assert d["verdict@1_baseline_shared"] == 0.5 and d["verdict@1_candidate_shared"] == 0.5
     assert d["delta_verdict@1_shared"] == 0.0
     assert d["baseline_mode"] == "offline" and d["candidate_mode"] == "live"
+    # ...and the tri-state says WHICH KIND of change 'lost' was: 'a' is not broken, it is declined
+    assert d["outcome_changes"] == {"a": "credible -> refused", "b": "failed -> credible"}
+    assert d["declined_by_candidate"] == ["a"] and d["built_but_broken_in_candidate"] == []
 
 
 # ---------------------------------------------------------------- the LIVE baseline (#280)
@@ -254,44 +310,137 @@ def test_a_rate_limit_is_not_a_design_failure():
     assert not (excluded & set(out["per_case"]))
 
 
-def test_the_live_refusals_are_named_rather_than_averaged_away():
-    """A refusal is the single most product-relevant outcome the bench records: a prompt the product cannot
-    serve. The fixture must name each one with its reason, and each must be scored (false), not dropped."""
+def test_the_live_refusals_are_recorded_as_correct_behaviour_not_as_failures():
+    """THE representation fix, at the fixture. Four prompts on the live battery were REFUSED by production in
+    strict mode -- two for a rest pose whose centre of mass leaves the support polygon, two for joints at
+    108-128% of their static hold torque. Declining to ship those bodies is the product working.
+
+    Under the boolean floor they were recorded as ``false``, i.e. as failures, indistinguishable from a body
+    that was built and fell over. So the floor could not protect the refusal, and the OFFLINE floor
+    simultaneously marked three of the same prompt ids ``true``. Now each is ``refused``: still not credible
+    (verdict@1 is a CAPABILITY rate and an unserved prompt is unserved), but a correct outcome that
+    ``outcome_regressions`` will defend."""
     cas = _live_cassette()
     refused = {p for p in cas.prompt_ids() if cas.entry_provenance(p)["failure_kind"] == "design_refusal"}
-    assert refused == set(_LIVE_BASELINE["refusals"]) and refused
-    assert _LIVE_BASELINE["n_refused"] == len(refused)
+    assert refused == set(_LIVE_BASELINE["refusals"]) and len(refused) == _LIVE_BASELINE["n_refused"] == 4
+    # the two the task named, plus the two the same grounding rules caught on the other phrasings
+    assert {"elephant__appearance", "palletizer__construction", "mobile_manip__appearance"} <= refused
     for pid, reason in _LIVE_BASELINE["refusals"].items():
         assert reason.strip(), f"{pid} refused with no recorded reason"
-        assert _LIVE_BASELINE["per_case"][pid] is False       # counted against us, not excused
+        assert _LIVE_BASELINE["per_case_outcome"][pid] == DB.OUTCOME_REFUSED      # correct, not failed
+        assert _LIVE_BASELINE["per_case"][pid] is False                           # ...and still not credible
 
 
-def test_the_offline_floor_is_not_evidence_the_product_can_build_those_bodies():
-    """The trap this whole task exists to close. The offline per-case floor protects bodies the LIVE path did
-    not deliver, so the floor must never be read as a capability claim. Assert the overlap EXISTS and is
-    documented, rather than pretending it does not."""
-    live = _LIVE_BASELINE["per_case"]
-    protected_but_unbuilt = sorted(k for k, was in _BASELINE["per_case"].items()
-                                   if was and k in live and not live[k])
-    assert protected_but_unbuilt, ("the offline floor and the live result no longer disagree; re-record the "
-                                   "live baseline and rewrite this test rather than deleting it")
-    # the live fixture must account for every one of them -- as a refusal, or as a body that compiled and did
-    # not earn a credible verdict. Silence about them is what made the offline number misleading.
-    for pid in protected_but_unbuilt:
-        assert pid in live, pid
+def test_correct_at_1_counts_an_honest_refusal_and_verdict_at_1_does_not():
+    """Two rates, and neither may be quoted for the other. verdict@1 answers 'did the customer get a robot';
+    correct@1 answers 'did the product do the right thing'. Collapsing them in either direction is a lie:
+    counting a refusal as capability inflates the product, counting it as a defect punishes the honesty gate
+    for firing. MEASURED on the live cassette: 0.1 and 0.5 -- the gap IS the four refusals."""
+    out = DB.bench_from_cassette(cassette=_live_cassette(), verify=False)
+    n = out["n_attempts"]
+    assert out["refused@1"] == round(4 / n, 4) == _LIVE_BASELINE["refused@1"]
+    # verify=False cannot produce a credible verdict, so correct@1 is exactly the refusal rate here
+    assert out["correct@1"] == out["refused@1"] and out["verdict@1"] == 0.0
+    # and the refusals are routed as refusals, NOT as schema failures, in the error histogram
+    assert out["error_classes"].get("refused") == 4 and "schema" not in out["error_classes"]
+    assert set(out["refusals"]) == set(_LIVE_BASELINE["refusals"])
+    # the recorded floor keeps the two rates apart too
+    assert _LIVE_BASELINE["verdict@1"] == 0.1 and _LIVE_BASELINE["correct@1"] == 0.5
+
+
+def test_a_refusal_reclassified_as_transport_cannot_slip_out_of_the_gate():
+    """The subtle way this gate could be silently emptied. A refusal row carries no gene, so its replayed
+    outcome is a pure function of ``is_infrastructure_failure`` over the recorded error text. Add one word to
+    INFRASTRUCTURE_ERROR_MARKERS -- 'capacity' appears verbatim in the palletizer refusal -- and that prompt
+    stops being a design refusal, leaves the denominator as an infrastructure exclusion, and DISAPPEARS from
+    per_case_outcome instead of failing anything. Absence must therefore be a gate condition."""
+    from virturoid.services import design_cassette as DC
+    out = DB.bench_from_cassette(cassette=_live_cassette(), verify=False)
+    assert "palletizer__construction" in out["per_case_outcome"]
+
+    import pytest as _pytest
+    mp = _pytest.MonkeyPatch()
+    try:
+        mp.setattr(DC, "INFRASTRUCTURE_ERROR_MARKERS", DC.INFRASTRUCTURE_ERROR_MARKERS + ("capacity",))
+        widened = DB.bench_from_cassette(cassette=_live_cassette(), verify=False)
+    finally:
+        mp.undo()
+    assert "palletizer__construction" not in widened["per_case_outcome"]      # vanished, not failed
+    reg = DB.outcome_regressions(_LIVE_BASELINE["per_case_outcome"], widened["per_case_outcome"])
+    assert "palletizer__construction" in reg["missing"]                      # ...and the gate says so
+
+
+def test_the_offline_floor_cannot_claim_a_capability_the_product_lacks():
+    """THE defect this task exists to close, machine-checked instead of written in a note.
+
+    The offline per-case floor is a map of prompt ids to ``credible``, published beside ``verdict@1``, and it
+    was being read as a statement about the product. It is not one. MEASURED 2026-08-08 across both live
+    recording sessions: of the ELEVEN bodies the offline floor protects, **zero** have live corroboration --
+    3 are prompts production correctly refuses, 2 are bodies the live model built that do not move, and 6 have
+    never returned a real answer at all (every attempt died on HTTP 429).
+
+    So the claim and the evidence now live in the same artifact, and this test keeps them from drifting: the
+    offline fixture's ``production_outcome`` must AGREE with the live fixture wherever the live fixture has the
+    prompt, and every uncorroborated ``credible`` must be named in ``offline_only_floor``. A reader of either
+    file can no longer mistake the floor for a capability claim, and neither can a future re-record."""
+    from virturoid.services import design_battery as BB
+    ids = [BB.prompt_id(r) for r in BB.battery()]
+    live = _LIVE_BASELINE["per_case_outcome"]
+    prod = _BASELINE["production_outcome"]
+
+    # 1) the offline fixture's picture of production is the LIVE fixture's, not an assertion of its own
+    assert set(prod) == set(ids)
+    for pid in ids:
+        assert prod[pid] == live.get(pid, DB.PRODUCTION_UNMEASURED), pid
+    # 'unmeasured' is not an outcome and must never be mistaken for one
+    assert DB.PRODUCTION_UNMEASURED not in DB.OUTCOMES
+
+    # 2) the stored reconciliation is exactly what the code computes from the two maps
+    rec = DB.capability_reconciliation(_BASELINE["per_case_outcome"], live, prompt_ids=ids)
+    stored = _BASELINE["capability_reconciliation"]
+    for k in ("offline_credible", "corroborated", "unmeasured", "product_only", "offline_only_floor",
+              "contradicted", "n_offline_credible", "capability_claim_rate", "n_prompts"):
+        assert stored[k] == rec[k], f"{k}: fixture says {stored[k]}, measurement says {rec[k]}"
+
+    # 3) every protected body without live corroboration is NAMED
+    assert set(rec["offline_only_floor"]) == set(rec["contradicted"]) | set(rec["unmeasured"])
+    assert set(rec["corroborated"]).isdisjoint(rec["offline_only_floor"])
+    assert rec["capability_claim_rate"] == 0.0 and rec["n_offline_credible"] == 11, (
+        "the reconciliation moved. That is allowed -- but update the fixture's floor_semantics prose with it, "
+        "because that prose is what stops the map being read as capability.")
+
+    # 4) the three the task named are contradicted by a REFUSAL specifically, not by a failure
+    for pid in ("elephant__appearance", "palletizer__construction", "mobile_manip__appearance"):
+        assert _BASELINE["per_case_outcome"][pid] == DB.OUTCOME_CREDIBLE       # the floor protects it...
+        assert rec["contradicted"][pid] == DB.OUTCOME_REFUSED                  # ...and production declines it
+
+    # 5) and the floor is wrong in the OTHER direction too, which is the part a boolean could never show:
+    #    the one prompt production serves credibly is 'failed' in the offline floor.
+    assert rec["product_only"] == ["welder__appearance"]
+    assert _BASELINE["per_case_outcome"]["welder__appearance"] == DB.OUTCOME_FAILED
 
 
 @pytest.mark.slow
-def test_no_live_authored_body_silently_stops_walking():
-    """The per-case floor over the model's OWN designs, replayed token-free — the live twin of the offline
+def test_no_live_outcome_silently_changes_for_the_worse():
+    """The per-case floor over the model's OWN outcomes, replayed token-free — the live twin of the offline
     per-case gate. Re-recording measures the generator and costs tokens; this replay measures the
-    compiler+physics under those designs and costs nothing."""
+    compiler+physics under those designs (and the classification of its refusals) and costs nothing.
+
+    Tri-state, so it defends two different things at once: ``welder__appearance`` must keep articulating, and
+    the four refusals must keep being refusals. The second is the one the boolean floor could not express --
+    'refused' and 'built but broken' both read False, so a change that stopped the grounding gate firing and
+    started shipping a topple-prone elephant would have moved nothing this test could see."""
     out = DB.bench_from_cassette(cassette=_live_cassette(), verify=True)
-    floor = _LIVE_BASELINE["per_case"]
-    missing = sorted(set(floor) - set(out["per_case"]))
-    assert not missing, f"live cassette no longer covers {missing}; re-record before moving the floor"
-    broke = sorted(k for k, was in floor.items() if was and not out["per_case"].get(k))
-    assert not broke, "these live-authored bodies were credible and are not any more: " + ", ".join(broke)
+    floor = _LIVE_BASELINE["per_case_outcome"]
+    reg = DB.outcome_regressions(floor, out["per_case_outcome"])
+    assert not reg["missing"], f"live cassette no longer covers {reg['missing']}; re-record before moving floor"
+    assert not reg["broke"], ("these live outcomes changed for the worse: "
+                             + "; ".join(f"{k} ({v})" for k, v in reg["broke"].items()))
+    assert not reg["improved"], (f"good news: {reg['improved']}. Re-record the live baseline so the floor "
+                                 "rises deliberately rather than by drift.")
+    # the headline rates the fixture publishes are the ones this replay produces
+    assert (out["verdict@1"], out["correct@1"], out["refused@1"]) == \
+        (_LIVE_BASELINE["verdict@1"], _LIVE_BASELINE["correct@1"], _LIVE_BASELINE["refused@1"])
 
 
 @pytest.mark.slow

@@ -167,10 +167,23 @@ def evaluate_gait(gene, params: dict, *, steps: int = 1200, reward_fn=None) -> d
     p = _clip(params)
     r = crawl_gait_rollout(gene, steps=steps, freq=p["freq"], hip_amp=p["hip_amp"], knee_amp=p["knee_amp"],
                            kp=p["kp"], kd=p["kd"], record_qpos=True)
+    # HOW MUCH PHYSICS THIS ACTUALLY BOUGHT. ``horizon_steps`` is what was ASKED for; this is what was
+    # INTEGRATED before the body collapsed (or 0 when the rollout never ran a step at all). A caller that
+    # declines a body "at the 6000-step horizon" is entitled to know whether any rollout ever reached it —
+    # measured on the live inchworm, ``crawl_gait_rollout(steps=6000)`` returns in 0.3 s having integrated ~30
+    # steps, because the leg-crawl controller has no leg to drive on a limbless spine, and 379 of those were
+    # reported to a customer as a search that failed (docs/body_vs_controller_ruling.md D1).
+    #
+    # ``"steps" in r`` IS THE "any physics at all" TEST, and it is not a guess: ``crawl_gait_rollout``'s real
+    # rollout return always carries ``steps``, while its degenerate no-graph early return (no base joint / no
+    # actuated tokens) carries none — and that one claims ``alive == steps`` and ``survived: True`` for a body
+    # that was never stepped. Reading ``alive`` off it would report a full horizon of physics that did not happen.
+    integrated = (int(r.get("alive", 0)) if "steps" in r else 0)
     if not r.get("finite", True):
         return {"fitness": -10.0, "forward": 0.0, "height_ratio": 0.0, "survived": False,
                 "cadence": 0.0, "support_frac": 0.0, "credible": False, "verdict": "non-finite",
-                "reward_return": -10.0, "horizon_steps": int(steps), "rates": {}, "holds_rate": None}
+                "reward_return": -10.0, "horizon_steps": int(steps), "rates": {}, "holds_rate": None,
+                "steps_integrated": integrated}
     fwd = float(r.get("forward", 0.0))
     hr = float(r.get("height_ratio", 0.0))
     cad = float(r.get("cadence", 0.0))
@@ -198,7 +211,8 @@ def evaluate_gait(gene, params: dict, *, steps: int = 1200, reward_fn=None) -> d
             "cadence": cad, "support_frac": sup, "credible": credible, "verdict": verdict,
             "reward_return": reward_return, "horizon_steps": int(steps),
             "rates": ({int(k): round(v, 4) for k, v in s["rates"].items()} if s else {}),
-            "holds_rate": (bool(s["holds_rate"]) if s else None)}
+            "holds_rate": (bool(s["holds_rate"]) if s else None),
+            "steps_integrated": integrated}
 
 
 def perturbed_params(params: dict, rel: float, rng, keys=PARAM_NAMES) -> dict:

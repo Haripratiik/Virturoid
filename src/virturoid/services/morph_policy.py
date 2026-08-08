@@ -1274,9 +1274,17 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float | None = None, hi
       scalar ``kp``/``kd`` and cannot reproduce the rollout it would claim to describe (the vectors are attached
       as ``kp_per_joint``/``kd_per_joint`` for a future exporter that can).
 
+    THE RESULT NOW CARRIES ITS COURSE (``path_m``, ``net_m``, ``straightness``, ``heading_dev_p95_deg``,
+    ``heading_dev_max_deg``), integrated per physics step. ``forward`` is world-frame delta-x — the honest
+    projection on the heading the body set out on — but two endpoints cannot tell a straight walk from a loop
+    that happens to point part of itself down +x, and measured, one did not: a fitted operating point that walked
+    a 2.2 m circle back past its own start line reported ``forward 1.582 m`` and was called a CREDIBLE WALK.
+
     ``live_duty`` — make the ``duty`` argument actually reach the controller (see the note at the parameter
       defaults below: it is INERT today). ON, ``duty`` replaces the structurally-derived swing fraction. The
       >=10-leg stability cap still applies afterwards as a ``min``, so a centipede's duty is still bounded."""
+    import math as _math
+
     import mujoco
     import numpy as np
 
@@ -1429,6 +1437,14 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float | None = None, hi
             _qref = np.array([float(d.qpos[qadr[k]]) for k in range(graph.n_tokens)])
             _z0 = float(d.qpos[bq + 2]) or z0
         x0 = float(d.qpos[bq]); y0 = float(d.qpos[bq + 1]); yaw0 = _yaw_of(d); alive = nsteps; hr = 1.0
+        # COURSE ACCUMULATORS (task D5). `forward` below is world-frame delta-x, which a CIRCULAR path can book as
+        # travel — measured, a body that walked a 2.2 m loop back past its own start line reported forward 1.582 m
+        # and printed CREDIBLE WALK. Answering "did it go anywhere or did it go round" needs the PATH, not the two
+        # endpoints, so both are integrated here per PHYSICS STEP: exact, independent of `frame_every` (a verdict
+        # must not move because someone changed the trace sampling), and available even when nothing is recorded.
+        # Measurement only — no control state is touched, so the gait is byte-identical.
+        _px, _py, _yprev, _ydev, _path = x0, y0, yaw0, 0.0, 0.0
+        _devs: list[float] = []                                # |unwrapped heading deviation from yaw0|, per step
         frames = [] if record else None
         c_prev = (np.asarray(d.geom_xpos[feet_idx, 2]) < fz0 + 0.02) if len(feet_idx) else np.zeros(0, bool)
         lifts = up_steps = support_steps = 0
@@ -1466,6 +1482,13 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float | None = None, hi
                 alive = t; break
             if record and t % frame_every == 0:
                 frames.append(d.qpos.copy())
+            _x = float(d.qpos[bq]); _y = float(d.qpos[bq + 1])
+            _path += ((_x - _px) ** 2 + (_y - _py) ** 2) ** 0.5
+            _px, _py = _x, _y
+            _yn = _yaw_of(d)
+            _ydev += _math.atan2(_math.sin(_yn - _yprev), _math.cos(_yn - _yprev))   # wrap the STEP, integrate the
+            _yprev = _yn                                                            # total -> a full turn reads 360
+            _devs.append(abs(_ydev))
             z = float(d.qpos[bq + 2]); hr = min(1.0, max(0.0, z / _z0))
             q = d.qpos[bq + 3:bq + 7]; upr = 1.0 - 2.0 * (float(q[1]) ** 2 + float(q[2]) ** 2)
             if z < 0.5 * _z0:
@@ -1477,13 +1500,28 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float | None = None, hi
                 lifts += int(np.sum(c_prev & ~c_now)); ng = int(np.sum(c_now))
                 support_steps += int(0 < ng < len(feet_idx)); c_prev = c_now
         forward = float(d.qpos[bq] - x0)                      # + = the walk direction the dir_sign probe selected
-        yaw_change = float(np.arctan2(np.sin(_yaw_of(d) - yaw0), np.cos(_yaw_of(d) - yaw0)))
+        # UNWRAPPED. This used to be `atan2(sin(yaw-yaw0), cos(yaw-yaw0))`, which is the yaw MODULO a full turn:
+        # a body that turned 190 deg reported -170 (the wrong WAY round), and one that turned a full 360 reported
+        # 0 — the two headings a locomotion verdict most needs to tell apart from "went straight". The integrated
+        # value is the honest one and is what `gait_quality.course_summary` gates on. Small turns (every existing
+        # caller: tests/test_legged_steering asserts opposite-sign yaw at +-0.5 bias over 1200 steps, ~22 deg) are
+        # numerically unchanged, because below 180 deg the two definitions agree exactly.
+        yaw_change = float(_ydev)
+        _net = float(((float(d.qpos[bq]) - x0) ** 2 + (float(d.qpos[bq + 1]) - y0) ** 2) ** 0.5)
         _T = max(1, alive) * dt
         res = {"finite": True, "forward": round(forward, 3), "height_ratio": round(hr, 3), "alive": alive,
                "survived": bool(alive >= nsteps and hr > 0.6), "speed": round(forward / max(1, alive) / dt, 3),
                "cadence": round(lifts / _T, 2), "upright_frac": round(up_steps / max(1, alive), 3),
                "support_frac": round(support_steps / max(1, alive), 3), "n_feet": int(len(feet_idx)),
                "yaw_change": round(yaw_change, 3), "lateral": round(float(d.qpos[bq + 1] - y0), 3),
+               # THE COURSE IT ACTUALLY HELD, so a LOOP cannot present as a straight line. `forward` alone is two
+               # endpoints; these are the path between them. `gait_quality.course_summary` gates on them and
+               # `classify` puts them in the verdict string. p95 (not max) for the reason `orientation_summary`
+               # gives: heading oscillates within every stride, so a max would read stride wobble as a turn.
+               "path_m": round(_path, 3), "net_m": round(_net, 3),
+               "straightness": round(_net / _path, 3) if _path > 1e-6 else 0.0,
+               "heading_dev_p95_deg": round(float(np.degrees(np.percentile(_devs, 95))) if _devs else 0.0, 1),
+               "heading_dev_max_deg": round(float(np.degrees(max(_devs))) if _devs else 0.0, 1),
                "gait": "crawl", "n_tokens": graph.n_tokens,
                # THE HORIZON THIS RESULT WAS MEASURED AT, and the trace's sampling stride. Without these two a
                # metrics dict cannot say how long anyone looked, so `gait_quality.settling` cannot tell a walk

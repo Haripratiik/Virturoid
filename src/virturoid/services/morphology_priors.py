@@ -10,7 +10,82 @@ Checks are structural (segment tree), not sim-based, so the gate is fast + depen
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
+
+
+# ------------------------------------------------------------------ prompt -> PROPORTION multipliers
+# MEASURED 2026-08-08 (task #285): the only phrase ``compose_robot`` read off a functional walker prompt was the
+# SIZE word. "long slender legs", "short thick legs", "a wide stance" and "a long body" all composed BYTE-
+# IDENTICAL bodies -- so eighteen hand-written legged prompts collapsed to three structures and the corpus
+# factory's distinct-body ceiling sat at about ten. This table is the missing reader.
+#
+# IT IS AN AXIS, NOT A TABLE OF SPECIES. ``animal_proportions`` answers "what shape is a gecko"; this answers
+# "what did the customer literally ask for", and the two MULTIPLY -- "a horse-like quadruped with long legs" is
+# longer-legged than a horse. Neutral prompts return all-1.0 so every body that ships today is byte-identical
+# (the locomotion suite pins that baseline).
+#
+# AN ADJECTIVE ONLY COUNTS NEXT TO THE NOUN IT MODIFIES. "a compact 3-joint pick arm" must not shorten a torso
+# and "a small four-legged robot" must not double-count the size word, so each rule needs its own noun within a
+# short window ("long slender legs", "long-legged", "wide stance"). A bare adjective with no noun is ignored --
+# under-reading is recoverable, mis-reading is not.
+_LEG_NOUNS = r"(?:legs?|limbs?|shanks?|thighs?|shins?)"
+_BODY_NOUNS = r"(?:body|bodies|torso|trunk|chassis|spine|back)"
+_STANCE_NOUNS = r"(?:stance|track|footprint|gauge|straddle)"
+# (axis, adjectives, nouns, multiplier). Order matters only within an axis: first hit wins, so the strongest
+# reading is listed first.
+_PROPORTION_RULES: tuple[tuple[str, str, str, float], ...] = (
+    ("leg",    r"long|tall|elongated|lanky|leggy|stilt-?like|high-?clearance", _LEG_NOUNS,    1.45),
+    ("leg",    r"short|stubby|squat|low-?slung|crouched|stumpy",               _LEG_NOUNS,    0.68),
+    ("thick",  r"thick|stocky|sturdy|chunky|beefy|heavy|burly|robust|stout",   _LEG_NOUNS,    1.35),
+    ("thick",  r"slender|slim|thin|spindly|skinny|delicate|wiry|willowy",      _LEG_NOUNS,    0.72),
+    ("stance", r"wide|broad|splayed|sprawling|sprawled|fanned|straddling",     _STANCE_NOUNS, 1.55),
+    ("stance", r"narrow|tucked|tight|slim|close-?coupled",                     _STANCE_NOUNS, 0.68),
+    ("torso",  r"long|elongated|stretched|extended|lengthy",                   _BODY_NOUNS,   1.60),
+    ("torso",  r"short|compact|stubby|squat|stocky|abbreviated",               _BODY_NOUNS,   0.68),
+    ("girth",  r"wide|broad|barrel-?chested|deep|bulky|fat|thick|heavy-?set",  _BODY_NOUNS,   1.45),
+    ("girth",  r"slender|slim|narrow|lean|thin|streamlined|skinny",            _BODY_NOUNS,   0.70),
+)
+# Hyphenated compounds carry the noun inside the word ("long-legged", "wide-stanced", "short-bodied"), which the
+# adjective+noun window above cannot see. Same axes, same multipliers.
+_COMPOUND_RULES: tuple[tuple[str, str, float], ...] = (
+    ("leg",    r"\b(?:long|tall|lanky)-legged\b",                      1.45),
+    ("leg",    r"\b(?:short|stubby|squat|stumpy)-legged\b",            0.68),
+    ("thick",  r"\b(?:thick|stocky|sturdy|chunky)-limbed\b",           1.35),
+    ("thick",  r"\b(?:slender|slim|thin|spindly)-limbed\b",            0.72),
+    ("stance", r"\b(?:wide|broad|splay)-(?:stanced?|track(?:ed)?)\b",  1.55),
+    ("stance", r"\b(?:narrow|close)-(?:stanced?|track(?:ed)?)\b",      0.68),
+    ("torso",  r"\b(?:long|elongated)-bodied\b",                       1.60),
+    ("torso",  r"\b(?:short|compact|stubby)-bodied\b",                 0.68),
+)
+PROPORTION_UNIT = {"leg": 1.0, "thick": 1.0, "stance": 1.0, "torso": 1.0, "girth": 1.0}
+
+
+def body_proportions(prompt: str) -> dict:
+    """Explicit PROPORTION multipliers the prompt asked for: ``{leg, thick, stance, torso, girth}``.
+
+    ``leg`` scales the stride levers (thigh + shank), ``thick`` their diameter, ``stance`` the lateral foot
+    spread, ``torso`` the trunk's fore-aft length (and the leg stations along it), ``girth`` its width. All
+    1.0 when the prompt says nothing -- a neutral prompt must compose the byte-identical baseline body.
+
+    Deterministic, word-boundary matched, first-hit-wins per axis. Composes multiplicatively with
+    ``animal_proportions`` (species shape) and ``size_scale`` (overall size), which answer different questions.
+    """
+    p = (prompt or "").lower()
+    out = dict(PROPORTION_UNIT)
+    hit: set[str] = set()
+    for axis, pat, mult in _COMPOUND_RULES:
+        if axis not in hit and re.search(pat, p):
+            out[axis] = mult
+            hit.add(axis)
+    for axis, adjectives, nouns, mult in _PROPORTION_RULES:
+        if axis in hit:
+            continue
+        # adjective, then up to two intervening words (another adjective, "and", a hyphen), then the noun
+        if re.search(rf"\b(?:{adjectives})\b(?:[\s,-]+(?:and\s+)?\w+){{0,2}}[\s,-]+{nouns}\b", p):
+            out[axis] = mult
+            hit.add(axis)
+    return out
 
 
 @dataclass

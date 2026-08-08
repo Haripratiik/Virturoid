@@ -642,6 +642,10 @@ def learn_gait_flywheel(gene, db, *, generations: int = 10, pop: int = 20, steps
         "credible": bool(learned.get("credible", False)),
         "horizon_steps": int(deploy_steps),                  # how long anyone actually looked...
         "settled": learned.get("holds_rate") is not None,    # ...and whether that was long enough to judge
+        # ...and how much of that horizon the winner's rollout ACTUALLY INTEGRATED. ``horizon_steps`` is the
+        # number a decline sentence quotes; this is the number that says whether the quote was earned. ``None``
+        # when the evaluator did not report it (a stubbed one in a unit test), which is "unknown", never "zero".
+        "deploy_steps_integrated": learned.get("steps_integrated"),
         "rates": learned.get("rates"),
         # ...and how much of a perturbation the answer survives, which is the part a horizon can never tell you.
         "robustness_rel": rob["robustness_rel"],
@@ -880,6 +884,129 @@ def margin_sentence(rob: dict, *, head: bool = True) -> str:
     return lead + tail
 
 
+#: The rollout function every rung of this module searches — ``gait_search.evaluate_gait`` calls it
+#: unconditionally, and the five parameters in ``_FIT_PARAMS`` are ITS parameters.
+_SEARCHED_CONTROLLER = "morph_policy.crawl_gait_rollout"
+
+#: Below this fraction of the requested horizon, a search has not MEASURED the body it is reporting on. Not a
+#: physics constant — a DISCLOSURE threshold. 2% of the 6000-step horizon is 120 steps (0.24 s of simulated
+#: time), and a decline that quotes "still walking at 6000 steps" after 120 steps of physics is quoting a
+#: horizon nothing ever reached. The live inchworm books ~30 steps (0.5%) per rollout, 379 times over.
+_DEGENERATE_INTEGRATION_FRAC = 0.02
+
+
+def crawl_deployment_match(gene) -> dict:
+    """Will the controller THIS FITTER SEARCHES ever be the controller this body is DRIVEN by?
+
+    A SEARCH THAT CANNOT SUCCEED MUST NOT BE REPORTED AS A SEARCH THAT FAILED. Measured on the live inchworm
+    (docs/body_vs_controller_ruling.md, defect D1): ``fit_gait_for_body`` spent "360 gaits (379 physics
+    rollouts)" in **1.3 seconds** and told the customer "none was still walking at the 6000-step horizon". Every
+    one of those rollouts was the same unactuated collapse, because the body is a limbless serial spine and
+    ``crawl_gait_rollout``'s wave gait drives ``build_appendage_map(...).legs`` — of which it has none. Meanwhile
+    ``ai_native_tools._honest_gait`` routes exactly that body to ``_honest_serpentine`` BEFORE it ever reads
+    ``metadata['gait_params']``, so nothing this fitter could have adopted would have reached the robot anyway.
+    That sentence reads to a customer as a measured negative about their design; it is a measurement artefact,
+    the same class as a NaN twin issuing a certificate.
+
+    THIS FUNCTION IS THE MATRIX, in the order the product actually dispatches (``verify_robot`` first, then
+    ``_honest_gait``), so the two can be compared rather than assumed equal:
+
+        structure                       deployed by the product        this fitter searches   applicable?
+        aerial (rotors / class)         aerial._honest_fly             crawl                  NO
+        aquatic (class / metadata)      _honest_swim                   crawl                  NO
+        LIMBLESS SERIAL SPINE           _honest_serpentine             crawl                  NO   <- D1
+        mobile (wheels)                 _honest_drive                  crawl                  NO
+        manipulator / spray / other     _honest_reach / no verdict     crawl                  NO
+        legged, 0 measured legs         crawl, driving nothing         crawl                  NO
+        legged, 2 legs (biped)          crawl, then _honest_biped      crawl                  YES (partial)
+        legged, >=3 legs                crawl                          crawl                  YES
+
+    Only the last two rows are searchable. The rest get an honest refusal, never a decline.
+
+    FAIL-OPEN, DELIBERATELY. Anything this cannot determine (no MuJoCo, a partial gene, a stub in a unit test)
+    returns ``applicable=True`` with ``measured=False``: a diagnostic must never be the thing that stops a real
+    body from being fitted. The cost of a false "applicable" is the search we run today; the cost of a false
+    "not applicable" is a body silently denied its own controller.
+    """
+    out = {"searched_controller": _SEARCHED_CONTROLLER, "deployed_controller": _SEARCHED_CONTROLLER,
+           "applicable": True, "match": True, "measured": False, "kind": None, "n_legs": None, "why": ""}
+    try:
+        from virturoid.services.aquatic import _is_serial_spine
+        from virturoid.services.body_kind import body_kind, measured_appendages
+        # A REFUSAL IS ONLY ALLOWED ON A BODY THAT COMPILED. ``body_kind`` NEVER RAISES — a gene with no
+        # segments, or one segment, or a partial stub falls through every structural branch to its terminal
+        # "manipulator (fixed base + articulation)". Refusing on that answer would deny a controller to a body
+        # nothing has actually looked at, which is the same failure this function exists to stop, pointed the
+        # other way. ``measured_appendages`` compiles the body (and caches it), so ``measured`` is the honest
+        # "we have seen this robot" flag, and every branch below is gated on it.
+        amap = measured_appendages(gene)
+        if not amap.get("measured"):
+            return {**out, "why": "this body would not compile for the structural measurement, so which "
+                                  "controller it deploys is unknown — searching rather than refusing on a "
+                                  "classification nothing could check"}
+        bk = body_kind(gene)
+        out["kind"] = bk.kind
+        out["measured"] = True
+        if bk.kind == "aerial":
+            return {**out, "deployed_controller": "aerial._honest_fly", "applicable": False, "match": False,
+                    "why": "this body is FLOWN (rotor thrust + a geometric flight controller), never walked — "
+                           "verify_robot routes it to _honest_fly and would never read a fitted leg gait"}
+        if bk.kind == "aquatic":
+            return {**out, "deployed_controller": "ai_native_tools._honest_swim", "applicable": False,
+                    "match": False,
+                    "why": "this body is SWUM in real MuJoCo fluid — verify_robot routes it to _honest_swim and "
+                           "would never read a fitted leg gait"}
+        if bk.kind == "mobile":
+            return {**out, "deployed_controller": "ai_native_tools._honest_drive", "applicable": False,
+                    "match": False, "why": "this body DRIVES on wheels — verify_robot routes it to _honest_drive"}
+        if bk.kind != "legged":
+            return {**out, "deployed_controller": f"ai_native_tools verdict for kind={bk.kind!r}",
+                    "applicable": False, "match": False,
+                    "why": f"verify_robot gives a {bk.kind} body no leg-gait verdict at all, so a fitted crawl "
+                           f"operating point could never reach it"}
+        # THE SPINE TEST IS SCOPED TO LEGGED BODIES, and the scope is load-bearing rather than tidy: a 6-DOF ARM
+        # is also "a single non-branching revolute chain", so ``_is_serial_spine`` says True for it. Only
+        # ``_honest_gait`` consults that predicate, and verify_robot has already sent a manipulator to
+        # ``_honest_reach`` before ``_honest_gait`` is ever reached — so testing it earlier here would refuse an
+        # arm for the wrong reason and print the wrong controller name in the disclosure. Measured: it did.
+        if _is_serial_spine(gene):
+            # The D1 row.
+            return {**out, "deployed_controller": "morph_policy.serpentine_rollout", "applicable": False,
+                    "match": False,
+                    "why": "this body is a LIMBLESS SERIAL SPINE, driven by the serpentine travelling-wave "
+                           "controller (ai_native_tools._honest_serpentine), not by the leg crawl gait this "
+                           "fitter searches — it has no legs for that wave to drive, so every candidate would "
+                           "be the same unactuated collapse"}
+        legs = int(amap.get("legs") or 0)
+        out["n_legs"] = legs
+        if legs == 0:
+            return {**out, "applicable": False, "match": False,
+                    "why": "the crawl wave gait has NO ACTUATED LEG to drive on this body (the appendage map "
+                           "measures zero), so every operating point produces the identical unactuated rollout "
+                           "and the search cannot distinguish them"}
+        if legs == 2:
+            return {**out, "why": "biped: _honest_gait runs the crawl FIRST (so a fitted point does ship if it "
+                                  "is credible) and falls back to _honest_biped's static-balance verdict only "
+                                  "when it is not — the search is applicable, but a scripted crawl balancing a "
+                                  "2-legged body is a learned-control frontier"}
+        return {**out, "why": f"legged, {legs} legs measured — the crawl gait this fitter searches is the one "
+                              f"_honest_gait deploys"}
+    except Exception:  # noqa: BLE001 - a diagnostic must never block a real fit; see the docstring
+        return {**out, "measured": False,
+                "why": "could not determine which controller this body deploys; proceeding with the search "
+                       "rather than refusing one"}
+
+
+def _integrated(res) -> int | None:
+    """Physics steps a rollout result actually integrated, or ``None`` when the evaluator did not say.
+
+    ``None`` is NOT zero. A stubbed evaluator in a unit test reports nothing here, and treating silence as "no
+    physics happened" would turn every contract test's honest decline into a degeneracy alarm.
+    """
+    v = (res or {}).get("steps_integrated")
+    return int(v) if v is not None else None
+
+
 def fit_gait_for_body(gene, *, deploy_steps: int = _SETTLE_STEPS, search_steps: int = _SETTLE_STEPS,
                       max_evals: int = 96,
                       warm_evals: int = 24, generations: int = 8, pop: int = 24, seed: int = 0,
@@ -987,6 +1114,38 @@ def fit_gait_for_body(gene, *, deploy_steps: int = _SETTLE_STEPS, search_steps: 
                          "was never searched, so nothing here is a finding about whether it can walk")
         _stash(gene, out)
         return out
+    # DOES THE CONTROLLER THIS FITTER SEARCHES EVER REACH THIS BODY? Asked BEFORE a single rollout is paid for.
+    # See ``crawl_deployment_match`` for the matrix and for the measurement that made this necessary: a search
+    # over a controller the body is never driven by is not a search, and its empty result is not a finding.
+    deploy = crawl_deployment_match(gene)
+    out["deployed_controller"] = deploy["deployed_controller"]
+    if not deploy["applicable"]:
+        out.update({"skipped": True, "not_applicable": True, "searched": False, "adopted": False,
+                    "n_evals": 0, "n_rollouts": 0, "deployment": deploy,
+                    "reason": (f"NO SEARCH WAS RUN, and nothing here is a finding about this body. This fitter "
+                               f"searches {_SEARCHED_CONTROLLER} and its five parameters "
+                               f"{', '.join(_FIT_PARAMS)}; this body is driven by "
+                               f"{deploy['deployed_controller']} instead — {deploy['why']}. Running the search "
+                               f"anyway would spend hundreds of rollouts that measure nothing and then report a "
+                               f"decline, which a reader takes for a measured negative about the design")})
+        if deploy["deployed_controller"] == "morph_policy.serpentine_rollout":
+            # Say what it would take, because "not applicable" must not be read as "not fittable". The serpentine
+            # controller exposes exactly five parameters of its own (amp, wavenum, freq, kp, kd — the same arity
+            # as _FIT_PARAMS) and _honest_serpentine calls it with the defaults for all five. What is missing is
+            # not a search; it is a CREDIBILITY BAR for undulatory gaits. `gait_quality.classify` is written for
+            # legged travel (cadence, support fraction, roll/pitch of an upright trunk) and `_honest_serpentine`
+            # gates on a bare `planar_m > 0.15` with no settling and no yaw. Optimising against that threshold
+            # would manufacture exactly the gate-scrape the ruling documents for the starfish (0.302 m over a
+            # 0.30 m bar), so the honest order is bar first, search second.
+            out["fittable_in_principle"] = True
+            out["what_would_make_it_fittable"] = (
+                "morph_policy.serpentine_rollout exposes (amp, wavenum, freq, kp, kd) and _honest_serpentine "
+                "calls it with the defaults for all five, so this body class has never had ANY operating point "
+                "fitted to it. Wiring a search needs a credibility bar for undulatory travel first — "
+                "gait_quality.classify measures legged cadence/support/upright, and _honest_serpentine's bare "
+                "'planar_m > 0.15' is a threshold an optimiser would scrape rather than a walk it would find")
+        _stash(gene, out)
+        return out
     _ckey = _fit_cache_key(gene, {"deploy_steps": deploy_steps, "search_steps": search_steps,
                                   "max_evals": max_evals, "warm_evals": warm_evals,
                                   "generations": generations, "pop": pop, "seed": seed,
@@ -1006,6 +1165,11 @@ def fit_gait_for_body(gene, *, deploy_steps: int = _SETTLE_STEPS, search_steps: 
         out["default_forward_m"] = round(float(default["forward"]), 4)
         out["default_verdict"] = default.get("verdict")
         out["default_rates"] = default.get("rates")
+        # THE DEEPEST ANY ROLLOUT ACTUALLY GOT. A decline quotes a horizon ("none was still walking at the
+        # 6000-step horizon"); this is the number that says whether the quote was earned. Kept as a running
+        # maximum over every deploy-horizon rollout this call observes, and left ``None`` when nothing reported
+        # it — see ``_integrated``.
+        deepest = _integrated(default)
         if bool(default["survived"]) and bool(default.get("credible", False)):
             # Already walks under the shipped controller -> never churn it. This is what keeps the change
             # additive: only bodies that would otherwise be discarded pay for (or receive) a new op-point.
@@ -1028,6 +1192,9 @@ def fit_gait_for_body(gene, *, deploy_steps: int = _SETTLE_STEPS, search_steps: 
                                          out=out, kw=kw)
             n_evals += n_try
             n_rollouts += int(learned.get("n_rollouts_attempt") or learned.get("n_rollouts") or 0)
+            _att = learned.get("deploy_steps_integrated")
+            if _att is not None:
+                deepest = int(_att) if deepest is None else max(deepest, int(_att))
             if not learned.get("beats_default"):
                 continue
             _ensure_margin(gene, learned, deploy_steps)
@@ -1055,6 +1222,9 @@ def fit_gait_for_body(gene, *, deploy_steps: int = _SETTLE_STEPS, search_steps: 
             # `credible`, and the disagreement seen on the cat came from shipping different numbers than were
             # gated, not from the gate. Confirming the stored dict closes that class of drift for good.
             confirm = evaluate_gait(gene, params, steps=deploy_steps)
+            _ci = _integrated(confirm)
+            if _ci is not None:
+                deepest = _ci if deepest is None else max(deepest, _ci)
             out["confirm_forward_m"] = round(float(confirm["forward"]), 4)
             out["confirm_verdict"] = confirm.get("verdict")
             out["confirm_rates"] = confirm.get("rates")          # the rate profile behind the verdict, not just a total
@@ -1086,6 +1256,8 @@ def fit_gait_for_body(gene, *, deploy_steps: int = _SETTLE_STEPS, search_steps: 
             gene.metadata = md
             out["adopted"] = True
             out["params"] = params
+            out["deepest_rollout_steps"] = deepest      # reported on BOTH outcomes; an adoption earns its horizon
+            out["degenerate_search"] = False
             _rob = (margin_sentence(rob) if rob["robustness_rel"] is not None else
                     f"is FRAGILE — no perturbed copy of it survives even a {min(_ROBUST_LADDER):g} relative "
                     f"change ({rob['probes']}), a sturdier point was looked for over "
@@ -1096,9 +1268,32 @@ def fit_gait_for_body(gene, *, deploy_steps: int = _SETTLE_STEPS, search_steps: 
                              f"step {deploy_steps} ({out['confirm_forward_m']} m, rate {_rate_str(confirm)}) vs "
                              f"the default's {out['default_forward_m']} m; it {_rob}")
         else:
-            out["reason"] = (f"searched {n_evals} gaits ({n_rollouts} physics rollouts) for this body over "
-                             f"{out.get('seed_attempts')} seed attempt(s); none was still walking at the "
-                             f"{deploy_steps}-step horizon")
+            # THE HORIZON IN THE SENTENCE HAS TO HAVE BEEN REACHED BY SOMETHING. A decline is a claim about the
+            # body, so it may only quote a horizon some rollout actually integrated. When the deepest one
+            # collapsed in the first couple of percent, the honest report is that the search measured NOTHING —
+            # 379 rollouts in 1.3 s is arithmetically impossible for real physics, and until now nothing noticed
+            # (docs/body_vs_controller_ruling.md D1). This is the GENERAL net: it does not know or care why the
+            # body dies instantly, only that a horizon nobody reached must not be quoted as one that was.
+            floor = max(1, int(_DEGENERATE_INTEGRATION_FRAC * deploy_steps))
+            degenerate = deepest is not None and deepest < floor
+            out["deepest_rollout_steps"] = deepest
+            out["degenerate_search"] = bool(degenerate)
+            if degenerate:
+                out["reason"] = (
+                    f"searched {n_evals} gaits ({n_rollouts} physics rollouts) for this body over "
+                    f"{out.get('seed_attempts')} seed attempt(s) AND MEASURED NOTHING: the deepest rollout "
+                    f"collapsed at step {deepest} of {deploy_steps} "
+                    f"({deepest / max(1, deploy_steps):.1%} of the horizon), so no candidate was ever judged at "
+                    f"the horizon this result is about. NOTHING HERE IS A FINDING about whether this body can "
+                    f"walk — a search whose rollouts all die on contact cannot tell two operating points apart. "
+                    f"The body is driven by {out.get('deployed_controller')}; check that it is a body the leg "
+                    f"crawl gait can drive at all (crawl_deployment_match) before reading this as a negative")
+            else:
+                _depth = ("" if deepest is None else
+                          f" (the deepest rollout reached step {deepest} of {deploy_steps})")
+                out["reason"] = (f"searched {n_evals} gaits ({n_rollouts} physics rollouts) for this body over "
+                                 f"{out.get('seed_attempts')} seed attempt(s); none was still walking at the "
+                                 f"{deploy_steps}-step horizon{_depth}")
     except Exception as exc:  # noqa: BLE001 - fitting an op-point must never BLOCK a build...
         # ...but it must never masquerade as one either. A swallowed KeyError used to return in 0 s looking
         # exactly like "searched, adopted nothing", so a crash read as a considered decline — the same artefact

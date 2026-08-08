@@ -34,7 +34,7 @@ import time
 
 from virturoid.schemas.gene import RobotGene
 from virturoid.services.install_paths import anchored
-from virturoid.services.morphology_embedding import FEATURE_NAMES, embed_gene
+from virturoid.services.morphology_embedding import BODY_EMBED_VERSION, FEATURE_NAMES, embed_gene
 
 _TEXT_DIM = 64
 BODY_DIM = len(FEATURE_NAMES)
@@ -419,9 +419,31 @@ class RoboticsVectorMemory:
             except (json.JSONDecodeError, TypeError, KeyError, ValueError):
                 continue
             self.upsert(BODY, r["species_pattern"], embed_body(gene, latent=_body_latent(gene)),
-                        {"robot_class": r["robot_class"], "buildable": bool(r["buildable"])})
+                        {"robot_class": r["robot_class"], "buildable": bool(r["buildable"]),
+                         "embed_version": BODY_EMBED_VERSION})
             written += 1
         return written
+
+    def body_index_needs_rebuild(self) -> bool:
+        """True when the persisted ``body`` sub-space is empty OR was written by an older body embedding.
+
+        A morphology key is only a key while every vector in it was produced by the SAME map. When the map
+        changes (``BODY_EMBED_VERSION``), the rows already on disk do not become wrong-looking — they become
+        SILENTLY comparable to fresh ones, which is worse: kNN keeps answering, just about the wrong bodies.
+        The species-derived rows are all regenerable from ``species_tree.genes``, so the honest response to a
+        version change is to rebuild them rather than to mix generations.
+        """
+        rows = self.conn.execute("SELECT meta FROM vectors WHERE obj_type=?", (BODY,)).fetchall()
+        if not rows:
+            return True
+        for r in rows:
+            try:
+                meta = json.loads(r["meta"] or "{}")
+            except json.JSONDecodeError:
+                return True
+            if int(meta.get("embed_version") or 0) < BODY_EMBED_VERSION:
+                return True
+        return False
 
     def _species_genes(self) -> dict:
         """species_pattern -> RobotGene for nodes carrying a full gene (for skill body embeddings)."""
