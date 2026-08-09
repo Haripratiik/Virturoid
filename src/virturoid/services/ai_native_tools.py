@@ -2309,17 +2309,52 @@ def _scene_from_dict(d: dict):
 # ------------------------------------------------------------------ job tools (long-running: handle + poll)
 def start_training(args: dict) -> dict:
     """Kick off a REAL build+train job (minutes) and return a job_id immediately — poll with get_job. Uses the
-    in-process job_registry (autonomous_build with train=True). The portable MCP long-job pattern."""
+    in-process job_registry (autonomous_build with train=True). The portable MCP long-job pattern.
+
+    IT DOES NOT TRAIN YOUR HELD ROBOT, and it now says so. ``robot_id`` is read for exactly one thing — the
+    PROMPT the robot was created from — and then ``autonomous_build`` composes a BRAND-NEW body from that
+    prompt and trains that. A customer who ingested their Go2 and called ``start_training`` on it got a
+    different robot trained and nothing in the reply distinguished the two. Same disclosure shape as
+    ``agent_tools._design_search`` ("applied to nothing", 2026-08-08): a tool that does not touch the held
+    robot must say which body it did touch. The door that trains a HELD robot is
+    ``agent_design_tools.train_held`` (job kind ``train_gene``), or ``train_reward``.
+
+    SECURITY: ``build_root`` is agent-supplied and is where the whole generated package lands
+    (``job_registry._run_autonomous_build`` -> ``output_dir = build_root / slug(prompt)``). It used to be
+    ``Path(args.get("build_root") or "build/agent_builds")`` RAW — the one ``build_root`` caller that skipped
+    the H2 containment ``train_held`` uses. Measured before this fix: ``build_root="../../../../../../pwned"``
+    put a real file six levels above the process's build root — and, because ``_run_autonomous_build`` also
+    derives ``memory_dir = build_root / "memory"``, the flywheel bank went with it. It goes through
+    ``safe_build_path`` now, which resolves the candidate and falls back to ``build/agent_builds`` when it is
+    not under ``build/``. Worth naming precisely: this was not an undocumented back door. The schema guard
+    forces every key a handler reads to be advertised, so ``agent_tools._PARAM_DOCS["start_training"]`` already
+    described ``build_root`` to every connected agent as "job workspace, confined under build/" — a promise
+    only ``train_held`` was keeping.
+    """
     from virturoid.services import job_registry as J
+    from virturoid.services.agent_tools import safe_build_path      # H2: confine agent-supplied write paths
+    rid = args.get("robot_id")
     prompt = args.get("prompt")
-    if not prompt and args.get("robot_id"):
+    if not prompt and rid:
         from virturoid.services import session_state as S
-        prompt = (S.robot_meta(args["robot_id"]) or {}).get("prompt")
+        prompt = (S.robot_meta(rid) or {}).get("prompt")
     if not prompt:
         return {"ok": False, "error": "provide a prompt (or a robot_id created from one)"}
     job = J.create("autonomous_build", {"prompt": prompt, "train": bool(args.get("train", True)),
-                                        "target": float(args.get("target", 0.8))}, Path(args.get("build_root") or "build/agent_builds"))
-    return {"ok": True, "job_id": job.get("id"), "status": job.get("status"),
+                                        "target": float(args.get("target", 0.8))},
+                   safe_build_path(args.get("build_root"), "agent_builds"))
+    trains = {"held_robot": False, "builds": "a NEW body composed from the prompt",
+              "prompt_used": str(prompt)}
+    if rid:
+        trains["robot_id"] = str(rid)
+        trains["reason"] = (f"robot_id '{rid}' was read for its PROMPT only. The body you hold is not built on, "
+                            "trained, or modified by this job — autonomous_build composes a new one from that "
+                            "prompt, so an ingested/edited robot's own geometry does NOT carry through. To "
+                            "train the robot you hold: train_held {robot_id} or train_reward {robot_id}.")
+    else:
+        trains["reason"] = ("no robot_id was given; this job composes and trains a new body from the prompt and "
+                            "holds nothing. To train a robot you hold: train_held / train_reward {robot_id}.")
+    return {"ok": True, "job_id": job.get("id"), "status": job.get("status"), "trains": trains,
             "note": "poll get_job(job_id, since) for progress + result"}
 
 
@@ -2422,9 +2457,15 @@ AI_NATIVE_TOOLS: dict[str, dict] = {
                    "parameters": {"type": "object", "required": ["scene_id", "ops"], "properties": {
                        "scene_id": {"type": "string"}, "ops": {"type": "array", "items": {"type": "object"}}}}},
     "start_training": {"description": "Kick off a real build+train job (minutes); returns a job_id immediately. "
-                       "Poll with get_job.", "heavy": False, "handler": start_training,
+                       "Poll with get_job. IT BUILDS A NEW BODY FROM THE PROMPT — `robot_id` is read for its "
+                       "prompt only and the robot you hold is never built on, trained or modified (the reply's "
+                       "`trains` block says so on every call). To train the robot you HOLD — your ingested or "
+                       "edited body, its own geometry and mass — use train_held or train_reward instead.",
+                       "heavy": False, "handler": start_training,
                        "parameters": {"type": "object", "properties": {"prompt": {"type": "string"},
-                       "robot_id": {"type": "string"}, "train": {"type": "boolean", "default": True}}}},
+                       "robot_id": {"type": "string", "description": "a held robot to take the PROMPT from; its "
+                                    "body is NOT trained (see the tool description)"},
+                       "train": {"type": "boolean", "default": True}}}},
     "get_job": {"description": "Poll a training/build job: status + new progress events + result.", "heavy": False,
                 "handler": get_job, "parameters": {"type": "object", "required": ["job_id"], "properties": {
                     "job_id": {"type": "string"}, "since": {"type": "integer", "default": 0}}}},

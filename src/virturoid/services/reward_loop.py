@@ -386,8 +386,44 @@ def _land_on_robot(rid: str, out: dict, args: dict, *, door: str) -> dict:
     return rep
 
 
+def _artifact_dir(rid: str, leaf: str):
+    """Where a GENERATOR tool lands its output: ``build/agent_builds/<robot_id>/<leaf>/``, created.
+
+    Both generators below used to write into ``tempfile.mkdtemp()`` and walk away from the directory, so the
+    tool an agent reaches for on "write my control scripts" handed back filenames and a pass/fail verdict and
+    not one line of code nor a path to any. The files did eventually reach the customer through ``export_held``
+    (``gene_build._emit_bom`` -> ``write_control_scripts`` / ``write_sensor_fusion``), so nothing was lost
+    forever -- but an agent calling the tool IN THE MOMENT got nothing it could use, which is the whole promise.
+
+    ``rid`` is caller-supplied, so the composed path goes through ``safe_build_path`` (H2) even though a rid
+    that reaches here already named a real held robot: same defense-in-depth rule ``session_state._safe_id``
+    states -- sanitize at the source AND at the path choke point.
+    """
+    from virturoid.services.agent_tools import safe_build_path
+    base = safe_build_path(None, "agent_builds")
+    d = safe_build_path(base / str(rid) / leaf, "agent_builds")
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _write_generated(d, files: dict) -> dict:
+    """Write ``{relative_path: text}`` under ``d``; return ``{rel: {path, bytes}}`` with ABSOLUTE paths."""
+    written = {}
+    for rel, content in files.items():
+        p = d / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content, encoding="utf-8")
+        written[rel] = {"path": str(p), "bytes": len(content.encode("utf-8"))}
+    return written
+
+
 def _generate_fusion(args: dict) -> dict:
-    """NLP tool: 'set up sensor fusion for my robot' -> a deployable EKF/AHRS/odometry stack from its BOM."""
+    """NLP tool: 'set up sensor fusion for my robot' -> a deployable EKF/AHRS/odometry stack from its BOM.
+
+    The stack is WRITTEN (``fusion_dir``) and returned INLINE. Every byte of it is derived from this robot's
+    BOM -- the EKF's state mask from which sensors observe what, the static transforms from where they mount --
+    so there is no boilerplate to hold back and 4.6 KB is a cheap answer to "give me the stack".
+    """
     from virturoid.services import session_state as S
     rid = args.get("robot_id")
     if not rid:
@@ -398,14 +434,38 @@ def _generate_fusion(args: dict) -> dict:
     try:
         from virturoid.services.sensor_fusion_compiler import compile_sensor_fusion
         out = compile_sensor_fusion(gene, task=str(args.get("task") or ""))
-        out.pop("_files_content", None)                      # the manifest, not the raw file bodies
-        return {"ok": True, **out}
+        files = out.pop("_files_content", None) or {}
+        d = _artifact_dir(rid, "fusion")
+        # `files` arrives from the manifest as a bare list of names; replace it with the same contract
+        # generate_control_scripts uses -- {relative_name: {path, bytes}} -- so one shape covers both
+        # generators. The bare list survives inside config/fusion_manifest.json, which is the manifest's own home.
+        return {"ok": True, **out, "fusion_dir": str(d), "files": _write_generated(d, files),
+                "source": files,
+                "source_note": "every file is derived from THIS robot's BOM, so all of it is inline; the same "
+                               "bytes are on disk under fusion_dir, and export_held ships them under fusion/"}
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
 
 def _generate_control_scripts(args: dict) -> dict:
-    """NLP tool: 'write the control scripts for my robot' -> the operational .py inventory, each validated."""
+    """NLP tool: 'write the control scripts for my robot' -> the operational .py inventory, each validated.
+
+    WHAT COMES BACK, and why it is split. The scripts are written to ``scripts_dir`` and validated THERE (the
+    directory is kept, not a temp dir that is abandoned), and ``files`` gives an absolute path per file. The
+    generated content divides in two, and saying so is more useful than a uniform blob:
+
+    * ``config`` -- ``control_config.json`` and the manifest, DERIVED from this robot (its joint list, its obs
+      layout, the per-joint torque ceilings the BOM's actuators set). Inline, always: ~2.9 KB, and it is the
+      part that differs per robot. It is also the part a reviewer must actually read.
+    * the six ``.py`` -- ``obs_assembler``/``safety_filter``/``state_machine``/``watchdog``/``teleop``/
+      ``calibrate``, which are module-level TEMPLATES in ``control_script_compiler._SCRIPTS``: byte-identical
+      for every robot, parameterized only through the config above. 9.6 KB of the 12.5 KB total, and the same
+      9.6 KB on every call. Returned by path by default, and inline on ``include_source: true``.
+
+    ``include_source`` is not a hedge: an agent whose MCP server is not on its own filesystem cannot open a
+    path, and for it one flag returns every byte. The default just declines to spend ~2.4k tokens re-sending
+    the same template to an agent that can read the directory it was handed.
+    """
     from virturoid.services import session_state as S
     rid = args.get("robot_id")
     if not rid:
@@ -414,17 +474,22 @@ def _generate_control_scripts(args: dict) -> dict:
     if gene is None:
         return {"ok": False, "error": f"no held robot '{rid}'; create_robot / submit_design / ingest_project first"}
     try:
-        import tempfile
-        from pathlib import Path
         from virturoid.services.control_script_compiler import compile_control_scripts, validate_scripts
         out = compile_control_scripts(gene, task=str(args.get("task") or ""))
-        # validate in a scratch dir so the caller gets an honest compile+dry-run verdict, not just source
-        d = Path(tempfile.mkdtemp()) / "scripts"
-        d.mkdir(parents=True, exist_ok=True)
-        for rel, content in out["files"].items():
-            (d / rel).write_text(content, encoding="utf-8")
-        report = validate_scripts(d)
-        return {"ok": True, "manifest": out["manifest"], "validation": report}
+        d = _artifact_dir(rid, "scripts")
+        written = _write_generated(d, out["files"])
+        report = validate_scripts(d)                 # compile + dry-run the files the caller is being handed
+        import shutil
+        shutil.rmtree(d / "__pycache__", ignore_errors=True)   # the dry-run's bytecode is not the deliverable
+        res = {"ok": True, "manifest": out["manifest"], "validation": report,
+               "scripts_dir": str(d), "files": written,
+               "config": {k: v for k, v in out["files"].items() if k.endswith(".json")},
+               "source_note": "config (per-robot: joints, obs layout, BOM torque ceilings) is inline above; the "
+                              ".py are shared templates parameterized by it -- read them at files[*].path, or "
+                              "pass include_source:true to get their source inline too"}
+        if bool(args.get("include_source")):
+            res["source"] = out["files"]
+        return res
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
@@ -436,10 +501,19 @@ REWARD_LOOP_TOOLS = {
                        "every joint command to the PEAK TORQUE of the real actuator the BOM sized for it, a "
                        "safety state machine (estop/stand/active/fall-damping), a watchdog, a teleop stub, and a "
                        "joint calibration routine. Every generated .py is compile-checked AND dry-run before it "
-                       "ships; the result includes that honest pass/fail verdict. No human writes the glue.",
+                       "ships; the result includes that honest pass/fail verdict. No human writes the glue. YOU "
+                       "GET THE CODE, not just a verdict: the scripts are written to `scripts_dir` (kept, under "
+                       "build/agent_builds/<robot_id>/scripts) and `files` gives an absolute path per file. "
+                       "`config` -- the per-robot part (joint list, obs layout, the BOM actuators' torque "
+                       "ceilings) -- comes back inline; the six .py are shared templates driven by that config, "
+                       "so pass include_source:true if you want their source inline as well.",
         "parameters": {"type": "object", "required": ["robot_id"], "properties": {
             "robot_id": {"type": "string"},
-            "task": {"type": "string", "description": "the deployment task (affects the obs layout)"}}},
+            "task": {"type": "string", "description": "the deployment task (affects the obs layout)"},
+            "include_source": {"type": "boolean", "default": False,
+                               "description": "also return the .py SOURCE inline (~9.6 KB, identical for every "
+                                              "robot). Off by default because the files are on disk at "
+                                              "files[*].path; turn it on when you cannot read that path."}}},
         "handler": _generate_control_scripts, "heavy": False,
     },
     "generate_fusion": {
@@ -448,7 +522,11 @@ REWARD_LOOP_TOOLS = {
                        "odometry source, referencing EXACTLY the sensors the robot has, on the links they mount "
                        "to. Picks the estimator by what the robot IS: a wheeled base gets a 2-D planar filter, a "
                        "legged body gets contact-aided leg-odometry + full-3-D AHRS, a fixed arm gets none (it "
-                       "doesn't localize) -- and it discloses any unobservable state. No human writes an EKF YAML.",
+                       "doesn't localize) -- and it discloses any unobservable state. No human writes an EKF YAML. "
+                       "YOU GET THE STACK: every file is written under `fusion_dir` "
+                       "(build/agent_builds/<robot_id>/fusion), listed with an absolute path in `files`, AND "
+                       "returned inline in `source` -- all of it is derived from your robot, so there is no "
+                       "boilerplate to hold back.",
         "parameters": {"type": "object", "required": ["robot_id"], "properties": {
             "robot_id": {"type": "string"},
             "task": {"type": "string", "description": "the deployment task (affects the sensor suite)"}}},
