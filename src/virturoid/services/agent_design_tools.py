@@ -965,18 +965,39 @@ def export_isaac(args: dict) -> dict:
 def train_held(args: dict) -> dict:
     """Optimize/train a controller for the HELD robot and return a job_id (poll get_job). Default mode
     'gait_search' = the bounded, VERIFIED CPG search (CPU, reliable) on THIS gene; 'gpu_rl' = MJX PPO on the
-    box when reachable. The long-job handle pattern (start now, poll later)."""
+    box when reachable. The long-job handle pattern (start now, poll later).
+
+    THE RESULT LANDS ON THE ROBOT. 248afca closed the open training loop for ``train_reward``, ``learn_gait``
+    and ``adapt_gait`` and MISSED THIS ONE — the tool an engineer reaches for first and the only training tool
+    named in the MCP server ``instructions``. Measured on a real Menagerie Go2 through ``call_tool``: train_held
+    ran 15.0 s, reported ``status: succeeded``, and the held gene was BYTE-IDENTICAL afterwards
+    (``verify_robot`` 0.36 m, ``gait_source: flywheel_hint``); handing the very same numbers to ``apply_gait``
+    took 0.01 s and moved it to 0.466 m. The plumbing worked; this door was not connected to it. Same contract
+    as the other three (``trained_controller``): ``apply='auto'`` commits when the run's own un-gameable verdict
+    is a credible walk, ``'never'`` is artifact-only, ``'always'`` lands it loudly, and every commit goes
+    through ``session_state.commit_robot`` so ``edit_robot op:'undo'`` reverts it.
+    """
     from virturoid.services import job_registry as J
     from virturoid.services import session_state as S
+    from virturoid.services.trained_controller import APPLY_MODES
     rid = args.get("robot_id")
     if not rid or S.get_robot(rid) is None:
         return {"ok": False, "error": f"no robot '{rid}'; submit_design/create_robot first"}
+    mode = str(args.get("apply") or "auto").lower()
+    if mode not in APPLY_MODES:
+        return {"ok": False, "error": f"apply must be one of {', '.join(APPLY_MODES)} (got {mode!r})"}
     from virturoid.services.agent_tools import safe_build_path  # H2: confine writes under build/
     job = J.create("train_gene", {"robot_id": rid, "mode": args.get("mode", "gait_search"),
-                                  "max_evals": int(args.get("max_evals", 8)), "iters": int(args.get("iters", 200))},
+                                  "max_evals": int(args.get("max_evals", 8)), "iters": int(args.get("iters", 200)),
+                                  "apply": mode},
                    safe_build_path(args.get("build_root"), "agent_builds"))
-    return {"ok": True, "job_id": job.get("id"), "status": job.get("status"),
-            "note": "poll get_job(job_id, since) for progress + the honest gait verdict"}
+    return {"ok": True, "job_id": job.get("id"), "status": job.get("status"), "apply": mode,
+            "applies_to_robot": mode != "never",
+            "note": ("poll get_job(job_id, since) for progress + the honest gait verdict. The trained controller "
+                     "is COMMITTED to this robot when the run's own verdict is a credible walk (apply='auto'); "
+                     "the job result carries applied_to_robot saying whether it landed and why, and the job "
+                     "status is 'no_output' — never 'succeeded' — when nothing landed. Undo: edit_robot "
+                     "{robot_id, ops:[{op:'undo'}]}.")}
 
 
 def run_train_gene_job(args: dict, progress=None) -> dict:
@@ -998,6 +1019,7 @@ def run_train_gene_job(args: dict, progress=None) -> dict:
         rid = S.put_robot(gene, prompt=str(args["prompt"]).strip(), label="train_gene")
     else:
         return {"error": "provide 'robot_id' (a held robot) or 'prompt' (to compose one) to train"}
+    apply_mode = str(args.get("apply") or "auto").lower()
     mode = args.get("mode", "gait_search")
     if mode == "gpu_rl":
         from virturoid.services.gpu_trainer import default_training_recipe, gpu_available, train_gene_on_gpu
@@ -1005,11 +1027,13 @@ def run_train_gene_job(args: dict, progress=None) -> dict:
             recipe = default_training_recipe(gene)           # AUTO recipe per body (cpg/adaptive/deploy deltas)
             say("train", f"GPU reachable — MJX PPO on the held gene (auto recipe: adaptive={recipe['adaptive']}, "
                          f"cpg={recipe['cpg']})")
-            out = Path("build/agent_builds") / rid / "policy.npz"
+            from virturoid.services.agent_tools import safe_build_path as _sbp
+            out = _sbp(None, "agent_builds") / rid / "policy.npz"
             out.parent.mkdir(parents=True, exist_ok=True)
             npz = train_gene_on_gpu(gene, out_path=str(out), iters=int(args.get("iters", 200)), envs=512,
                                     progress=lambda m: say("train", m), **recipe)
-            return {"mode": "gpu_rl", "policy": npz, "trained": bool(npz)}
+            return {"mode": "gpu_rl", "policy": npz, "trained": bool(npz),
+                    "applied_to_robot": _land_gpu_policy(rid, gene, npz, apply=apply_mode, say=say)}
         say("train", "GPU not reachable — falling back to the CPU gait search")
     # One gait path owns recall, bounded search, classify()-credible early-stop, deploy comparison and banking.
     say("search", "recalling prior gait hints, then physics-evaluating a bounded per-body search")
@@ -1031,12 +1055,75 @@ def run_train_gene_job(args: dict, progress=None) -> dict:
         _bank_to_flywheel(gene, prompt=f"[agent-trained] {gene.robot_class}", task="locomotion",
                           success_rate=min(1.0, max(0.0, abs(float(learned["forward_m"])) / 0.5)),
                           source="agent_trained")
+    # ...AND ONTO THE ROBOT. Banking the winner into the flywheel (above) made it available to the NEXT body and
+    # left THIS one untouched: the gene was byte-identical after a 15 s train_held on a real Go2, and the next
+    # verify_robot honestly reported it was still running ``flywheel_hint``. See ``trained_controller`` for the
+    # contract; ``door='train_held'`` is what the verdict's ``gait_source`` names afterwards.
+    from virturoid.services.trained_controller import apply_trained_gait
+    # The verdict string is what a refusal QUOTES, so it has to name the gate that refused. ``stopped_reason``
+    # alone produced "did not produce a credible walk (credible_walk)" — measured on a composed dog whose search
+    # early-stopped on a credible point that was the shipped default itself, i.e. a true statement of the gate
+    # printed as a contradiction. Both halves of ``solved`` are reported instead, with the two distances.
+    _verdict = (f"{learned.get('stopped_reason')}; survived={bool(learned.get('survived'))}, "
+                f"beats_default={bool(learned.get('beats_default'))} "
+                f"({learned.get('forward_m')} m vs the shipped default's {learned.get('default_forward_m')} m)")
+    applied = apply_trained_gait(
+        rid, learned.get("params") or {}, door="train_held", apply=apply_mode,
+        credible=solved, verdict=_verdict,
+        evidence={"forward_m": learned.get("forward_m"), "default_forward_m": learned.get("default_forward_m"),
+                  "n_evals": learned.get("n_evals"), "robustness_rel": learned.get("robustness_rel"),
+                  "banked_gait": learned.get("banked_skill")})
+    say("apply", (f"committed to the held robot — verify_robot now reports "
+                  f"gait_source '{applied.get('gait_source_after')}'") if applied.get("applied")
+        else f"NOT applied: {applied.get('reason')}")
     return {"mode": "gait_search", "solved": solved, "credible": bool(learned.get("survived")),
             "n_evals": learned["n_evals"], "stopped_reason": learned["stopped_reason"],
             "reused_prior": learned["reused_prior"], "banked_gait": learned["banked_skill"],
             "default_forward_m": learned["default_forward_m"], "beats_default": learned["beats_default"],
+            "forward_m": learned["forward_m"], "applied_to_robot": applied,
             "best": {"params": learned["params"], "forward_m": learned["forward_m"],
                      "height_ratio": learned["height_ratio"]}}
+
+
+def _land_gpu_policy(rid: str, gene, npz: str | None, *, apply: str, say) -> dict:
+    """Where the ``gpu_rl`` arm's artifact goes — and an honest report when it goes nowhere.
+
+    A neural policy is not five CPG scalars, so it cannot land through ``trained_controller``; it deploys through
+    the POLICY bank, which ``verify_robot`` consults (``ai_native_tools._learned_gait_attempt`` ->
+    ``policy_flywheel.recall_morph_policy``) when the scripted gait is not credible. But nothing in any agent
+    path ever CALLED ``bank_morph_policy`` — the only caller in the repo was ``desktop.py`` — so a GPU run wrote
+    an ``.npz`` into a build directory that no verdict path reads, and reported ``trained: true``. That is the
+    same defect as the scripted arm's, one artifact type over. ``bank_morph_policy`` re-rolls the policy on THIS
+    body and banks it only when it is a credible deployed walk, which is exactly the ``apply='auto'`` gate, so
+    the gating is the bank's and is not re-implemented here.
+    """
+    base = {"applied": False, "robot_id": rid, "door": "train_held", "apply_mode": str(apply),
+            "channel": "policy_bank", "policy_npz": npz}
+    if not npz:
+        return {**base, "reason": "GPU training produced no policy artifact, so there was nothing to apply"}
+    if str(apply) == "never":
+        return {**base, "reason": "apply='never' — the policy .npz is returned as an artifact and neither the "
+                                  "held robot nor the policy bank was touched"}
+    try:
+        from virturoid.services.memory_db import DEFAULT_DB_PATH, MemoryDB
+        from virturoid.services.policy_flywheel import bank_morph_policy
+        with MemoryDB(DEFAULT_DB_PATH) as db:
+            rep = bank_morph_policy(npz, gene, db, task_type="locomotion")
+    except Exception as exc:  # noqa: BLE001 - a banking failure must be reported, never swallowed into "trained"
+        return {**base, "reason": f"could not bank the trained policy: {type(exc).__name__}: {exc}",
+                "error": f"{type(exc).__name__}: {exc}"}
+    if not rep.get("banked"):
+        say("apply", f"policy NOT deployable: {rep.get('verdict')}")
+        return {**base, "reason": (f"the trained policy was re-rolled on this exact body and its own un-gameable "
+                                   f"verdict was {rep.get('verdict')!r}, so it was not banked and verify_robot "
+                                   f"will not deploy it — the robot keeps the controller it had"),
+                "verdict": rep.get("verdict"), "forward_m": rep.get("forward")}
+    say("apply", f"policy banked as {rep['skill_id']} — verify_robot can now deploy it on this body")
+    return {**base, "applied": True, "skill_id": rep.get("skill_id"), "verdict": rep.get("verdict"),
+            "forward_m": rep.get("forward"), "gait_source_after": "learned_policy",
+            "reason": ("banked as a reusable MorphPolicy skill after a credible deployed rollout ON THIS BODY; "
+                       "verify_robot deploys it (gait_source 'learned_policy') when the scripted gait is not "
+                       "credible")}
 
 
 def list_skills(_args: dict) -> dict:
@@ -1184,9 +1271,20 @@ AGENT_DESIGN_TOOLS: dict[str, dict] = {
                      "properties": {"robot_id": {"type": "string"},
                                     "robot_name": {"type": "string", "description": "name for the generated cfg/files"}}}},
     "train_held": {"description": "Optimize/train a controller for the HELD robot; returns a job_id (poll "
-                   "get_job). mode 'gait_search'(CPU, default) or 'gpu_rl'(MJX PPO when the box is up).", "heavy": False,
+                   "get_job). mode 'gait_search'(CPU, default) or 'gpu_rl'(MJX PPO when the box is up). The "
+                   "result LANDS: the searched controller is committed to the held robot when the run's own "
+                   "un-gameable verdict is a credible walk, so the next verify_robot measures what you trained "
+                   "and reports gait_source 'tuned_for_this_body::train_held' (gpu_rl banks a policy instead, "
+                   "gait_source 'learned_policy'). Undo with edit_robot op:'undo'; apply:'never' for a dry run. "
+                   "The job result's applied_to_robot says whether it landed and why, and the job finishes "
+                   "'no_output' rather than 'succeeded' when nothing landed.", "heavy": False,
                    "handler": train_held, "parameters": {"type": "object", "required": ["robot_id"], "properties": {
-                       "robot_id": {"type": "string"}, "mode": {"type": "string"}, "max_evals": {"type": "integer"}}}},
+                       "robot_id": {"type": "string"}, "mode": {"type": "string"}, "max_evals": {"type": "integer"},
+                       "apply": {"type": "string", "enum": ["auto", "always", "never"], "default": "auto",
+                                 "description": "'auto' commits the trained controller when this run produced a "
+                                                "credible walk that beat the default; 'never' returns it as an "
+                                                "artifact and touches nothing; 'always' commits it regardless "
+                                                "and reports the verdict it overrode"}}}},
     "list_skills": {"description": "The general TASK vocabulary: skills you can sequence + the predicate ops a "
                     "goal scores. Call before run_task/submit_task. No args.", "heavy": False,
                     "handler": list_skills, "parameters": {"type": "object", "properties": {}}},

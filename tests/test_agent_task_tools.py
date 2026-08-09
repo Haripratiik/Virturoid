@@ -60,10 +60,10 @@ class AgentTaskToolTests(unittest.TestCase):
         self.assertIn("teleport", r["error"])
 
     def test_run_task_is_in_the_mcp_view(self):
-        from virturoid.services.agent_tools import tool_specs
+        from virturoid.services.agent_tools import MCP_TOOL_VIEW_MAX, tool_specs
         names = [t["name"] for t in tool_specs(view="mcp")]
         self.assertIn("run_task", names)
-        self.assertLessEqual(len(names), 17)
+        self.assertLessEqual(len(names), MCP_TOOL_VIEW_MAX)   # the budget, read from where it is documented
 
 
 if __name__ == "__main__":

@@ -86,16 +86,37 @@ def test_the_journey_is_registered_with_well_formed_schemas():
 
 
 @pytest.mark.skipif(not _MUJOCO, reason="the MCP registry import needs MuJoCo")
-def test_the_journey_is_discoverable_in_the_tools_list_payload():
-    """`MCP_TOOL_VIEW` is at its documented cross-client cap of 15 (test_agent_first asserts it), so these are
-    advertised on `verify_robot` -- the honesty anchor, since "is this verdict true of MY machine?" is the next
-    question anyone with a physical robot asks. A client reading tools/list must SEE every name."""
+def test_the_journey_has_its_own_entry_in_the_tools_list_payload():
+    """A name inside ANOTHER tool's description is not a discoverable tool.
+
+    That was the previous fix and it was not enough. An engineer re-walking the journey on a real Go2 got the
+    whole chain to run end to end (plan 0.7 s -> simulate 5.1 s -> gap 105.4 s -> fit 198.1 s -> status 0.0 s)
+    and then found `tools/list` returned 15 entries with NONE of the six among them: they were only named in
+    `verify_robot`'s prose, which they called "a deliberate but fragile door". Prose is read by a careful human
+    and not by the tool-SELECTION step of the model this product ships to.
+
+    So the assertion is now about the SHAPE of the payload, not about a substring in it: there is a real entry
+    for the capability, and every step is a value of its `step` enum -- a place a strict MCP client validates
+    arguments against, rather than a sentence it may or may not weigh. Six first-class entries were measured at
+    +10,761 bytes of payload and 6 of Cursor's ~40 cross-server slots; this is one slot and ~1.2 kB.
+    """
     from virturoid.mcp_server import _handle
+    from virturoid.services.agent_tools import MCP_TOOL_VIEW_MAX
     listed = _handle("tools/list", {})["tools"]
-    assert len(listed) <= 15, "the lean menu must not grow past its budget"
-    blob = " ".join(t["description"] for t in listed)
+    assert len(listed) <= MCP_TOOL_VIEW_MAX, "the lean menu must not grow past its budget"
+
+    entry = next((t for t in listed if t["name"] == "calibrate_to_hardware"), None)
+    assert entry is not None, ("the sim-to-real journey has no entry of its own in tools/list: "
+                               + ", ".join(t["name"] for t in listed))
+    steps = entry["inputSchema"]["properties"]["step"]["enum"]
     for name in _ALL:
-        assert name in blob, f"{name} dispatches but no tools/list entry names it -- undiscoverable"
+        assert name in steps, f"{name} dispatches but is not a step a client can select -- undiscoverable"
+        assert name in entry["description"], f"{name} is not named where a client reads what the entry does"
+    assert set(steps) == set(_ALL), f"the enum and the journey disagree: {sorted(set(steps) ^ set(_ALL))}"
+
+    # ...and the question it answers is still hung off the tool where a customer asks it.
+    verify = next(t for t in listed if t["name"] == "verify_robot")
+    assert "calibrate_to_hardware" in verify["description"], "verify_robot must point at the physical-robot answer"
 
 
 @pytest.mark.skipif(not _MUJOCO, reason="the MCP registry import needs MuJoCo")
@@ -106,6 +127,59 @@ def test_the_journey_dispatches_over_MCP_tools_call(held_arm):
                                  "arguments": {"robot_id": held_arm, "budget_s": 10.0}})
     assert res["isError"] is False, res
     assert res["structuredContent"].get("ok") is True
+
+
+@pytest.mark.skipif(not _MUJOCO, reason="the MCP registry import needs MuJoCo")
+def test_the_entry_point_dispatches_each_step_and_routes_when_asked_for_none(held_arm):
+    """The entry point has to BE the journey, not a link to it -- otherwise it is one more thing to read.
+
+    Both argument spellings are exercised on purpose: nested under `step_args` (what the schema advertises, and
+    what a strict client validates cleanly) and flat at the top level (how an agent that already knows the
+    step's signature writes it). A grouped entry that honoured only one of them would send half its callers
+    into a silently-dropped argument.
+    """
+    from virturoid.mcp_server import _handle
+
+    def call(arguments):
+        return _handle("tools/call", {"name": "calibrate_to_hardware", "arguments": arguments})
+
+    where = call({"robot_id": held_arm})
+    assert where["isError"] is False, where
+    body = where["structuredContent"]
+    assert body["next_step"] in _ALL and body["you_are_here"]["calibration_attached"] is False
+    assert set(body["steps"]) == set(_ALL)
+
+    nested = call({"robot_id": held_arm, "step": "plan_bench_experiment",
+                   "step_args": {"budget_s": 10.0, "out_dir": "sysid_tests"}})
+    assert nested["isError"] is False, nested
+    assert nested["structuredContent"]["step"] == "plan_bench_experiment"
+    assert Path(nested["structuredContent"]["plan_path"]).exists()
+
+    flat = call({"robot_id": held_arm, "step": "calibration_status"})
+    assert flat["isError"] is False and flat["structuredContent"]["calibrated"] in (True, False)
+
+    # ...and it can never be talked into calling itself, which is the one way a router breaks the server.
+    loop = call({"robot_id": held_arm, "step": "calibrate_to_hardware"})
+    assert loop["isError"] is True and "not a step" in loop["structuredContent"]["error"]
+    unknown = call({"robot_id": held_arm, "step": "fit_everything"})
+    assert unknown["isError"] is True and set(unknown["structuredContent"]["steps"]) == set(_ALL)
+
+
+@pytest.mark.skipif(not _MUJOCO, reason="the MCP registry import needs MuJoCo")
+def test_every_step_is_still_callable_under_its_own_name():
+    """Grouping is for the MENU. It must not become the only way in: the six names are what every plan, every
+    `next` field and every one of this file's other tests hands the customer.
+
+    The step list is read off the WIRE rather than imported from `sysid.tools`, for the reason the last test in
+    this file enforces -- and it is the stronger assertion anyway: it checks that what the payload ADVERTISES
+    dispatches, not that a constant agrees with itself."""
+    from virturoid.mcp_server import _handle
+    from virturoid.services.agent_tools import TOOLS
+    entry = next(t for t in _handle("tools/list", {})["tools"] if t["name"] == "calibrate_to_hardware")
+    steps = entry["inputSchema"]["properties"]["step"]["enum"]
+    for name in steps:
+        assert name in TOOLS and callable(TOOLS[name]["handler"]), f"advertised step {name} dispatches nowhere"
+    assert "calibrate_to_hardware" not in steps, "the router must not be a step of itself"
 
 
 def test_capabilities_answers_the_question_an_engineer_actually_asked():

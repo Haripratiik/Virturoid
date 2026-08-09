@@ -162,6 +162,14 @@ def _design_search(args: dict) -> dict:
             "best": ({"params": b.spec.get("params"), "forward_m": round(float(b.result.get("forward", 0)), 3),
                       "cadence": round(float(b.result.get("cadence", 0)), 1),
                       "failure_mode": b.artifact["failure_mode"], "fitness": b.fitness} if b else None),
+            # A tool that produces a controller must say where that controller went. This one searches a body
+            # COMPOSED FROM THE PROMPT and never held, so there is nothing for the winner to land on — which is
+            # a fine contract, but only if it is stated. (The sweep that closed ``train_held``, 2026-08-08.)
+            "applied_to_robot": {"applied": False, "reason": "design_search explores a body composed from the "
+                                 "prompt, not a held robot, so its winning parameters are an ARTIFACT and were "
+                                 "applied to nothing. To fit and LAND a controller on a robot you hold: "
+                                 "learn_gait / adapt_gait / train_held {robot_id}, or apply_gait with these "
+                                 "params once the body is held."},
             "tree": rep.tree()}
 
 
@@ -188,6 +196,7 @@ def _capabilities(_args: dict) -> dict:
             out["sim_to_real"] = {
                 "what": "measure how far this simulator is from a PHYSICAL robot, per joint, in rad / ms / N.m "
                         "-- then fit the actuator parameters that close it and apply them, reversibly",
+                "entry_point": ("calibrate_to_hardware" if "calibrate_to_hardware" in TOOLS else steps[0]["tool"]),
                 "journey": steps,
                 "needs": "a log from a short bench experiment run on the real machine. Without hardware, "
                          "simulate_bench_log produces one off a perturbed copy of the model and labels every "
@@ -649,21 +658,44 @@ _derive_registry_backed_docs()
 
 # The CONSOLIDATED MCP surface (agent_first_plan.md G-G). Research: Cursor caps ~40 active tools ACROSS all
 # servers and SILENTLY drops the rest; Codex/weaker clients degrade with a big flat menu. So the MCP server
-# advertises this small, workflow-shaped view (<=15) instead of all ~30 registry tools. Every folded tool is
+# advertises this small, workflow-shaped view instead of all ~74 registry tools. Every folded tool is
 # still callable by name (call_tool dispatches the full registry) — we just don't crowd the menu with it:
 #   describe_robot/diagnose_body -> get_robot ; simulate_gait -> verify_robot(mode) ; undo_robot+edit_ops ->
 #   edit_robot(op) ; search_memory/nearest_bodies -> recall_knowledge ; list_tools/capabilities/design_brain/
 #   build_robot/evaluate_robot/design_search/start_training/submit_scene_spec -> covered by the loop tools +
 #   the server `instructions`. Ordered by the canonical loop so the menu reads as a workflow.
+#
+# WHAT THE CAP ACTUALLY PROTECTS, and why it moved from 15 to 16 on 2026-08-08. It is not a protocol limit and
+# nothing here enforces it; it is OUR SHARE of a CLIENT-side budget: Cursor's ~40 active tools across every
+# connected server, silently dropped past that. 15 was a share allocation, not a measurement (the plan's own
+# target was "~13"), and it leaves the rest of the customer's stack ~25 slots. There is a SECOND client budget
+# underneath it — Claude Code's ~25k-token cap on a tools/list response — and the two trade against each other,
+# which is the part that had gone unmeasured. The only way we had of keeping the count down was to name folded
+# tools inside an ANCHOR tool's description, and that spends the payload budget instead: measured 2026-08-08,
+# verify_robot's registry description is 387 chars and its tools/list description was 1,175 (+788 of sibling
+# text), train_held 154 -> 904. The whole payload is 11,676 bytes (~2.9k tokens) at 15 entries, so the token
+# budget is not the binding constraint — the COUNT is, and only against Cursor.
+#
+# The sim-to-real chain forced the question. Six tools named only inside verify_robot's paragraph is a door a
+# careful reader finds and a model's tool-SELECTION step does not. Six first-class entries would have cost
+# 10,761 bytes of payload (nearly doubling it) and 6 of Cursor's ~40 — that is the real thing the cap protects
+# against, and it is a cost worth refusing. So the chain is GROUPED behind one entry (`calibrate_to_hardware`,
+# which names all six in its own `step` enum and dispatches each) for ONE slot, and verify_robot's 788-char
+# sibling paragraph collapses to a one-line pointer. Net: +1 of 40 on the count budget, roughly flat on payload,
+# and the capability is selectable instead of buried. Add the 17th only with the same arithmetic.
 MCP_TOOL_VIEW: tuple[str, ...] = (
     "get_design_schema", "submit_design", "critique_design",  # author / see-measure-critique
     "ingest_project",                                          # INGEST an existing robot folder (gateway, below)
     "get_robot", "edit_robot", "render_view",                  # inspect / localized-edit / see
-    "verify_robot", "run_task",                                # honest verdict / any-goal task
+    "verify_robot", "calibrate_to_hardware", "run_task",       # honest verdict / sim-to-real / any-goal task
     "create_scene",                                             # themed scene (edit_scene stays callable)
     "train_held", "get_job", "export_held",                    # train (job) / poll / export
     "recall_knowledge", "llm_spend",                           # memory recall / zero-token proof
 )
+
+#: The cross-client COUNT budget above, in one place so the server, the tests and this module cannot drift on
+#: it. Raising it is a decision about the CUSTOMER's other MCP servers, so it is named rather than inlined.
+MCP_TOOL_VIEW_MAX = 16
 
 # ADVANCED AUTHORING (M5, 2026-07-24 audit): the reward-loop / sensor-fusion / control-script compilers are
 # callable-by-name but kept OUT of the lean core menu (which must stay within the cross-client budget). Like the
@@ -701,22 +733,24 @@ _INGEST_SIBLINGS: tuple[str, ...] = (
     "import_cad", "adopt_control_script", "sandbox_policy",
 )
 
-# THE SIM-TO-REAL GAP, hung on the honesty anchor. `verify_robot` is where a customer asks "is this verdict
-# true?"; the next question anyone with a physical robot asks is "true of MY machine?", and until 2026-08-08
-# nothing on any wire answered it. Advertised here rather than added to MCP_TOOL_VIEW for the usual reason —
-# the view is at its documented cap of 15 and test_agent_first asserts it — and ORDERED as the journey runs, so
-# a client reading tools/list gets the sequence and not a bag of names. The synthetic entry is called out
-# separately on purpose: the one mistake this surface must never permit is reading a sim2sim result as a
-# measurement of somebody's hardware.
-_SIM_TO_REAL_SIBLINGS: tuple[str, ...] = (
-    "plan_bench_experiment", "measure_sim_to_real_gap", "fit_actuators", "calibration_status",
-)
-_SIM_TO_REAL_NO_HARDWARE: tuple[str, ...] = ("simulate_bench_log", "sim_to_real_transfer")
+# THE SIM-TO-REAL GAP. `verify_robot` is where a customer asks "is this verdict true?"; the next question
+# anyone with a physical robot asks is "true of MY machine?". That capability used to be advertised the way
+# every other folded sibling is — six names inside this paragraph, appended to verify_robot's description —
+# and an engineer re-walking the journey on a real Go2 found the whole chain ran end to end (309 s) while
+# `tools/list` returned 15 tools with NONE of the six among them. Names in another tool's prose are read by a
+# careful human and not by the tool-selection step of the model we are actually shipping to, which is the same
+# defect class as learn_gait/adapt_gait having been on no wire at all.
+#
+# So this one is not a sibling list any more: `calibrate_to_hardware` is a real entry in MCP_TOOL_VIEW (see the
+# budget arithmetic there) and the six names live in ITS `step` enum, where a client sees them as the values of
+# a validated parameter. verify_robot keeps a one-line pointer, because that is where the question is asked.
+_SIM_TO_REAL_ENTRY = "calibrate_to_hardware"
 
 
 def tool_specs(view: str | None = None) -> list[dict]:
     """The agent/MCP-discoverable tool list: ``[{name, description, parameters, heavy}]``. ``view='mcp'`` returns
-    only the consolidated <=15-tool MCP surface (G-G), in workflow order; default returns the full registry."""
+    only the consolidated MCP surface (G-G, ``MCP_TOOL_VIEW_MAX`` entries), in workflow order; default returns
+    the full registry."""
     if view == "mcp":
         out = []
         for n in MCP_TOOL_VIEW:
@@ -744,20 +778,10 @@ def tool_specs(view: str | None = None) -> list[dict]:
                     desc = (desc + " Callable companion: " + ", ".join(avail)
                             + " — DRY-RUN the same ops first (blast radius + what it invalidates, nothing edited).")
             if n == "verify_robot":                            # SIM-TO-REAL: is this verdict true of MY machine?
-                s2r = [s for s in _SIM_TO_REAL_SIBLINGS if s in TOOLS]
-                if s2r:
-                    desc = (desc + " SIM-TO-REAL, the same question about a PHYSICAL robot — callable by name "
-                            "via a tools/call, in this order: " + " -> ".join(s2r)
-                            + ". They author a short, safe bench experiment bounded by the robot's own joint "
-                              "limits and its motors' datasheets, measure how far our simulator is from the log "
-                              "that comes back (per joint, in rad/ms/N.m, never a scalar score), fit each "
-                              "joint's damping/reflected-inertia/dry-friction with an interval, and apply only "
-                              "what the identifiability and tracking gates allow — reversibly.")
-                    no_hw = [s for s in _SIM_TO_REAL_NO_HARDWARE if s in TOOLS]
-                    if no_hw:
-                        desc = (desc + " NO HARDWARE: " + ", ".join(no_hw) + " stay in simulation and label "
-                                "themselves as such — a result from either is about our estimator or a policy's "
-                                "robustness, never a measurement of a physical machine.")
+                if _SIM_TO_REAL_ENTRY in TOOLS:
+                    desc = (desc + " Is this verdict true of a PHYSICAL robot? That is " + _SIM_TO_REAL_ENTRY
+                            + ", its own entry in this menu — the bench experiment, the measured gap, the "
+                              "actuator fit, and the no-hardware path that can never read as a measurement.")
             if n == "create_scene":
                 avail = [s for s in _SCENE_SIBLINGS if s in TOOLS]
                 if avail:

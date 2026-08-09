@@ -33,6 +33,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 # Runnable as `python scripts/corpus_factory_night.py` from the repo root, which is how the docstring above and
@@ -195,6 +196,61 @@ def _offline_proposer(strict_llm: bool, classes: tuple[str, ...] | None = None, 
     return propose
 
 
+def narrated(verify_fn, journal: Path):
+    """Wrap the VERIFY step so the night says what it is doing, per slot, WHILE it runs.
+
+    TWO THINGS WERE INVISIBLE, and both were measured on this checkout 2026-08-08 during a real gated night.
+
+    * **A running night emits nothing.** ``run_factory_night`` prints its funnel once, at the end. On the night
+      that motivated this, single slots took 487.8 s and 523.4 s with no output at all — and the only way to
+      tell a body being honestly searched from a hung process was to sample the process's CPU counter from
+      outside the program. (It was being searched. The absence of output is also what made an observer misread
+      the elapsed time by 5x in the other direction, which is its own argument for printing the clock.) A verify
+      step measured at 22-524 s per body here has to narrate.
+    * **A night that does not finish loses the half of the funnel that explains the result.** Admits are
+      checkpointed to the manifest after every one; REJECTIONS are counted in memory and written only after the
+      loop. So killing a long night — or crashing in it — discards every "rejected for novelty", "no operating
+      point", "not measured", which is precisely the evidence for why a corpus came out small.
+
+    The journal is one JSON object per line, appended and flushed per candidate, so it survives a kill -9 and
+    can be read while the night is still running. It records the VERIFY verdict, which is not the same thing as
+    the admission: a body can verify credible and still be rejected downstream for novelty. Both halves matter
+    and this is the half ``run_factory_night`` does not checkpoint.
+    """
+    from virturoid.services.corpus_factory import _compiles_and_credible
+    inner, n = verify_fn or _compiles_and_credible, {"i": 0}
+    journal.parent.mkdir(parents=True, exist_ok=True)
+
+    def verify(gene) -> dict:
+        n["i"] += 1
+        t0 = time.perf_counter()
+        try:
+            res = inner(gene)
+        except Exception as exc:  # noqa: BLE001 - the night's own error handling still owns the outcome
+            _append(journal, {"slot": n["i"], "wall_s": round(time.perf_counter() - t0, 1),
+                              "error": f"{type(exc).__name__}: {exc}"[:200]})
+            raise
+        # ``t`` is wall CLOCK, and it is what makes the night's cost decomposable: ``wall_s`` is what VERIFY
+        # spent, and the gap to the next slot's ``t`` is what the PROPOSER spent (compose + the walkability pass,
+        # which runs its own gait fits). Without it the two are indistinguishable in a slow night.
+        rec = {"slot": n["i"], "t": time.strftime("%H:%M:%S"), "wall_s": round(time.perf_counter() - t0, 1),
+               "class": getattr(gene, "robot_class", None), "segments": len(getattr(gene, "segments", ()) or ()),
+               "credible": res.get("credible"), "gait_source": res.get("gait_source"),
+               "robustness_rel": res.get("robustness_rel"), "fitness": res.get("fitness"),
+               "verdict": str(res.get("verdict"))[:160]}
+        _append(journal, rec)
+        print(f"  slot {rec['slot']:>3}  {rec['wall_s']:>7.1f}s  credible={rec['credible']}  "
+              f"{rec['class']}/{rec['segments']}seg  {rec['verdict']}", file=sys.stderr, flush=True)
+        return res
+    return verify
+
+
+def _append(path: Path, rec: dict) -> None:
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(rec, default=str) + "\n")
+        fh.flush()
+
+
 def claim_destination(memory: str) -> Path:
     """Make ``--memory`` the destination for EVERY default in this process, before virturoid is imported.
 
@@ -262,6 +318,9 @@ def main() -> None:
     proposer = held_out_aware(raw)
     verify_fn = (gait_fit_verify_fn(mem) if args.gait_corpus else
                  (gait_search_verify if args.deep_verify else None))
+    journal = mem / "night_journal.jsonl"
+    verify_fn = narrated(verify_fn, journal)
+    print(f"per-slot verify journal: {journal}", file=sys.stderr)
     res = run_factory_night(proposer, config=cfg,
                             manifest_path=args.manifest or (mem / "corpus_factory.json"),
                             memory_dir=mem,
@@ -270,13 +329,14 @@ def main() -> None:
     out = res.to_dict()
     out["proposer"] = {**out.get("proposer", {}), **getattr(raw, "stats", {}), "llm": llm or "off"}
     print(json.dumps(out, indent=2, default=str))
-    rows = gait_rows(mem) if args.gait_corpus else None
     hours = max(res.wall_s, 1e-9) / 3600.0
     print(f"\nadmitted {len(res.admitted)} · ANNECS {res.annecs} · rejected {dict(res.rejected)} · "
           f"mean-sim {res.mean_pairwise_similarity} · {res.wall_s}s")
     print(f"proposer {out['proposer']}")
-    if rows is not None:
-        print(f"gait rows banked this night: {rows} · {rows / hours:.1f} rows/hour · "
+    if args.gait_corpus:
+        rows, gated = gait_rows(mem)
+        print(f"gait rows in this bank: {rows} ({gated} carry the fragility gate, {rows - gated} do not) · "
+              f"{gated / hours:.1f} GATED rows/hour · {rows / hours:.1f} rows/hour · "
               f"{len(res.admitted) / hours:.1f} admits/hour")
 
 
@@ -301,14 +361,30 @@ def llm_preflight() -> tuple[bool, str]:
         return False, f"backend UNUSABLE ({type(exc).__name__}: {str(exc)[:110]}) -> deterministic composition"
 
 
-def gait_rows(mem: Path) -> int:
-    """Locomotion rows in this night's bank — the number a gait-corpus night exists to move."""
+def gait_rows(mem: Path) -> tuple[int, int]:
+    """``(all locomotion rows, rows stamped with the fragility gate)`` in this night's bank.
+
+    REPORTING ONLY THE FIRST NUMBER OVERSTATES THE NIGHT. Not every row in the destination was written by the
+    night's ``gait_bank_fn``: ``gait_fit_verify_fn`` calls ``_compiles_and_credible`` first, and that is the
+    ordinary product verify path — ``verify_robot`` -> ``ai_native_tools._auto_bank_gait`` -> ``bank_gait(...,
+    ungated_reason=...)`` — so a body that walks at the shipped default leaves an UNGATED row behind before the
+    gate stack has ruled on it. MEASURED on the 2026-08-08 night: 1 of the first 11 rows was ``ungated_declared``
+    and carried no robustness margin at all.
+
+    That matters because it is the ungated rows that made the OLD bank unusable as evidence (99 of 103), and
+    because ``mine_gait_hints`` filters to ``BANK_GATE`` as soon as any gated row exists — so an ungated row is
+    not corpus, it is ballast. The night should say how many of its rows are the real thing.
+    """
     try:
         import sqlite3
-        with sqlite3.connect(mem / "virturoid_memory.db") as conn:
-            return int(conn.execute("SELECT COUNT(*) FROM skills WHERE task_type='locomotion'").fetchone()[0])
+        from virturoid.services.gait_flywheel import BANK_GATE
+        with sqlite3.connect(f"file:{mem / 'virturoid_memory.db'}?mode=ro", uri=True) as conn:
+            n = int(conn.execute("SELECT COUNT(*) FROM skills WHERE task_type='locomotion'").fetchone()[0])
+            g = int(conn.execute("SELECT COUNT(*) FROM skills WHERE task_type='locomotion' AND "
+                                 "json_extract(base_config, '$.bank_gate') = ?", (BANK_GATE,)).fetchone()[0])
+            return n, g
     except Exception:  # noqa: BLE001
-        return -1
+        return -1, -1
 
 
 if __name__ == "__main__":

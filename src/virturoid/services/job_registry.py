@@ -194,11 +194,24 @@ def _terminal_status(job: dict) -> str:
     """The honest verdict for a worker that returned without raising.
 
     A build job's promise is a robot package; when it deliberately produced none (impossible or
-    ambiguous prompt, ungrounded LLM design), the chip must not read SUCCEEDED. Other job kinds
-    (``tool``, ``train_gene``) have no package promise and keep the old semantics."""
+    ambiguous prompt, ungrounded LLM design), the chip must not read SUCCEEDED.
+
+    A ``train_gene`` job's promise is a CONTROLLER ON THE HELD ROBOT, and it used to read SUCCEEDED
+    unconditionally — measured on a real Go2, ``train_held`` ran 15.0 s, finished ``succeeded``, and left the
+    gene byte-identical, which is a green chip on top of nothing. Now the same rule applies to it: the run
+    landed a controller (or was explicitly asked not to, ``apply='never'``) or the job did not do what it
+    promised. A worker that returned a refusal dict (``{"error": ...}``, e.g. no such held robot) is a FAILURE,
+    not a success carrying an error string."""
     result = job.get("result")
     if job["kind"] == "autonomous_build" and isinstance(result, dict) and not result.get("package_written"):
         return NO_OUTPUT
+    if job["kind"] == "train_gene" and isinstance(result, dict):
+        if result.get("error"):
+            job["error"] = job["error"] or str(result["error"])
+            return FAILED
+        rep = result.get("applied_to_robot")
+        if isinstance(rep, dict) and not rep.get("applied") and str(rep.get("apply_mode") or "") != "never":
+            return NO_OUTPUT
     return SUCCEEDED
 
 

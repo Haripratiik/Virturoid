@@ -24,9 +24,10 @@ channel spoke to that row, and on the live bank it is the LARGEST bucket.
                   ladder on the ones still walking. THIS IS THE HONEST NUMBER and it costs physics: ~1 rollout
                   per row plus up to 12 for the ladder (measured ~3 s/row on a quadruped bank, 5 min for 97).
     --gates       run gait_hints' three evidence gates over the whole bank AND over the surviving subset, each
-                  arm counted BOTH ways (rows as observations / one row per distinct body) — the falsifiable
-                  test of whether a cleaner corpus reveals structure the pooled one hides, and of how much of
-                  any apparent structure is one well-sampled body counted many times (#274).
+                  arm counted THREE ways (rows as observations / one row per distinct body / one row per
+                  distinct operating point) — the falsifiable test of whether a cleaner corpus reveals structure
+                  the pooled one hides, and of how much of any apparent structure is one well-sampled body
+                  counted many times (#274) or one repeated controller counted many times (``_op_point``).
 """
 from __future__ import annotations
 
@@ -165,13 +166,40 @@ def _body_of(row: dict) -> str:
     return _body_of(row["gene"], row["skill_id"])
 
 
+def _op_point(params: dict) -> str:
+    """The row's OPERATING-POINT identity — the five fitted coordinates, rounded to what a fit can resolve.
+
+    Body dedup removes replication of the ROBOT and leaves replication of the CONTROLLER: two different bodies
+    that both shipped the byte-identical default (1.5/0.9/1.0/32/1.5), or two warm-starts that converged on one
+    clone point, are one observation of that point counted twice, and they carry that replication into every
+    parameter at once. ``gait_hints._DEDUP_RULE`` records this as the third check that dissolved knee_amp on the
+    live bank (band 0.098 -> 0.438 of the prior, correlation flipping sign); it was done by hand there. Here it
+    is a first-class dedup arm, run through the SAME ``representative_rows`` rule as the body arm.
+
+    THIS ARM IS ORTHOGONAL TO THE BODY ARM, NOT STRONGER THAN IT, and reading it as stronger inverts the
+    conclusion. MEASURED on the live bank's 51 fragility-surviving rows (2026-08-08): 21 distinct bodies, 34
+    distinct operating points — and after op-point dedup the surviving 34 rows still come from only 18 bodies,
+    with ONE body supplying 9 of them. So ``freq`` PASSES this arm 5/5 and FAILS the body arm at 1/5, and the
+    body arm is the one telling the truth: the association is one well-sampled robot counted nine times. A claim
+    has to survive BOTH arms. Neither alone is the gate.
+    """
+    from virturoid.services.gait_hints import _PARAM_KEYS
+    return "|".join(f"{k}={float(params[k]):.4f}" if isinstance(params.get(k), (int, float)) else f"{k}=?"
+                    for k in _PARAM_KEYS)
+
+
 def gates(rows: list[dict], measured: list[dict] | None) -> dict:
     """gait_hints' three evidence gates, per parameter, over the whole bank and over the surviving subset —
-    each arm run BOTH ways: counting rows as independent observations (the pre-#274 behaviour, kept only as the
-    comparison) and counting DISTINCT BODIES (what the shipped gate now does).
+    each arm run THREE ways: counting rows as independent observations (the pre-#274 behaviour, kept only as the
+    comparison), counting DISTINCT BODIES (what the shipped gate now does), and counting DISTINCT OPERATING
+    POINTS (the pseudo-replication body dedup cannot see — see ``_op_point``).
 
-    The dedup itself is not reimplemented here: ``_region_evidence(bodies=...)`` collapses to one row per body
+    The dedup itself is not reimplemented here: ``_region_evidence(bodies=...)`` collapses to one row per group
     through ``gait_hints.representative_rows``, so this script and the product can never drift apart on the rule.
+
+    ``selections_ok`` is reported because it is the answer to a DIFFERENT question than ``ok``: it is the
+    selection-stability panel's tally, and a parameter that passes 5/5 is a different claim from one that passes
+    because every group happened to hold exactly one row (panel not exercised, reported as null).
 
     The outcome is the RE-MEASURED distance when ``--remeasure`` ran, otherwise the distance recorded at bank
     time. Prefer the re-measured one: a banked ``forward_m`` from a 1500-step horizon is a claim about a horizon
@@ -190,18 +218,20 @@ def gates(rows: list[dict], measured: list[dict] | None) -> dict:
                                                for m in measured if m["skill_id"] in ok]
     out = {}
     for arm, triples in arms.items():
-        for dedup in (False, True):
+        for dedup in ("rows as observations", "ONE ROW PER DISTINCT BODY", "ONE ROW PER DISTINCT OP-POINT"):
             res = {}
             for key in _PARAM_KEYS:
-                vals = [(float(p[key]), abs(float(f)), b) for p, f, b in triples
+                vals = [(float(p[key]), abs(float(f)),
+                         b if dedup == "ONE ROW PER DISTINCT BODY" else _op_point(p)) for p, f, b in triples
                         if isinstance(p.get(key), (int, float)) and isinstance(f, (int, float))]
                 lo, hi = _search_range(key)
                 ev = _region_evidence([v for v, _, _ in vals], [f for _, f, _ in vals], lo, hi,
-                                      bodies=([b for _, _, b in vals] if dedup else None))
-                res[key] = {k: ev[k] for k in ("ok", "support", "rows", "spread_vs_prior",
-                                               "rho_center_distance", "p_association", "p_vs_winner_null",
-                                               "why")}
-            out[arm + (", ONE ROW PER DISTINCT BODY" if dedup else ", rows as observations")] = res
+                                      bodies=(None if dedup == "rows as observations"
+                                              else [b for _, _, b in vals]))
+                res[key] = {k: ev[k] for k in ("ok", "support", "rows", "selections_ok", "center", "band",
+                                               "spread_vs_prior", "rho_center_distance", "p_association",
+                                               "p_vs_winner_null", "why")}
+            out[f"{arm}, {dedup}"] = res
     return out
 
 
@@ -251,7 +281,8 @@ def main() -> None:
             for key, ev in res.items():
                 print(f"  {key:9s} {'PASS' if ev['ok'] else 'fail'}  n={ev['support']}/{ev['rows']} rows "
                       f"spread/prior={ev['spread_vs_prior']} rho={ev['rho_center_distance']} "
-                      f"p_assoc={ev['p_association']} p_winner_null={ev['p_vs_winner_null']}")
+                      f"p_assoc={ev['p_association']} p_winner_null={ev['p_vs_winner_null']} "
+                      f"panel={ev['selections_ok'] or 'n/a'}")
                 if not ev["ok"]:
                     print(f"            {ev['why']}")
     if args.json:

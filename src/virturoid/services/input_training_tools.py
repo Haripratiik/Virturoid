@@ -1054,6 +1054,21 @@ def _adopt_control_script(args: dict) -> dict:
     out["params_source"] = params_source
     if script_meta:
         out["control_script"] = script_meta
+    # ...AND LAND IT. Found by the same sweep that caught ``train_held`` (2026-08-08): this tool fits a
+    # controller to the held body, warm-started from the CUSTOMER'S OWN parameters, and said "improved the
+    # user's controller" while writing nothing — so the very next verify_robot re-measured the controller the
+    # robot had before, exactly the defect 248afca closed for the other three doors. Same contract
+    # (``trained_controller``): credible-gated, undoable, artifact-only under apply='never'. The gate is
+    # ``beat_imported``, which is already the tool's own honest bar (a CREDIBLE walk that travels further than
+    # the user's controller) — an "improvement" that failed it must never overwrite what the customer shipped.
+    from virturoid.services.trained_controller import apply_trained_gait
+    out["applied_to_robot"] = apply_trained_gait(
+        rid, out.get("improved_params") or {}, door="adopt_control_script",
+        apply=str(args.get("apply") or "auto").lower(),
+        credible=bool(out.get("beat_imported")), verdict=str(out.get("verdict") or ""),
+        evidence={"forward_m": (out.get("improved") or {}).get("forward_m"),
+                  "imported_forward_m": (out.get("utilised") or {}).get("forward_m"),
+                  "params_source": params_source})
     return out
 
 
@@ -1360,12 +1375,19 @@ INPUT_TRAINING_TOOLS: dict[str, dict] = {
                        "gait search WARM-STARTED from the user's params, returning a measured before/after + the "
                        "improved params. Honest: it keeps the user's controller if tuning can't credibly beat it. "
                        "Measured: an imported CPG that shuffled 0.34 m (not credible) improved to a 0.62 m credible "
-                       "walk (1.8x). Real MuJoCo, slow.",
+                       "walk (1.8x). Real MuJoCo, slow. The improved controller is COMMITTED to the held robot "
+                       "when it credibly beat the user's own (so the next verify_robot reports gait_source "
+                       "'tuned_for_this_body::adopt_control_script'); otherwise the customer's controller stands "
+                       "and applied_to_robot says why. Undo with edit_robot op:'undo'.",
         "parameters": {"type": "object", "required": ["robot_id"], "properties": {
             "robot_id": {"type": "string", "description": "the held robot to run/improve the controller on"},
             "script_path": {"type": "string", "description": "a .py control script (a sibling policy_params.json is auto-found)"},
             "params_path": {"type": "string", "description": "a policy_params.json (freq/amplitude/... )"},
             "params": {"type": "object", "description": "inline control params (alternative to a path)"},
+            "apply": {"type": "string", "enum": ["auto", "always", "never"], "default": "auto",
+                      "description": "'auto' commits the improved controller only when it credibly beat the "
+                                     "imported one; 'never' returns it without touching the robot; 'always' "
+                                     "commits it regardless and says so"},
             "generations": {"type": "integer", "default": 6}, "pop": {"type": "integer", "default": 16},
             "steps": {"type": "integer", "default": 800}, "seed": {"type": "integer", "default": 0}}},
         "handler": _adopt_control_script, "heavy": True,

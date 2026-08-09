@@ -17,10 +17,11 @@ _MUJOCO = importlib.util.find_spec("mujoco") is not None
 def test_m5_advanced_tools_are_discoverable_and_callable():
     """M5: train_reward / generate_fusion / generate_control_scripts must be DISCOVERABLE (advertised by name in
     the MCP view, like the ingest siblings) and CALLABLE by name -- without bloating the lean core menu past its
-    cross-client budget (the ≤17 contract test_agent_first enforces)."""
-    from virturoid.services.agent_tools import TOOLS, tool_specs
+    cross-client budget (`MCP_TOOL_VIEW_MAX`; this file used to restate it as 17 while test_agent_first said 15,
+    which is exactly the drift a named constant removes)."""
+    from virturoid.services.agent_tools import MCP_TOOL_VIEW_MAX, TOOLS, tool_specs
     view = tool_specs(view="mcp")
-    assert len(view) <= 17, f"MCP core menu must stay lean, got {len(view)}"
+    assert len(view) <= MCP_TOOL_VIEW_MAX, f"MCP core menu must stay lean, got {len(view)}"
     blob = " ".join(s["description"] for s in view)
     for t in ("train_reward", "generate_fusion", "generate_control_scripts"):
         assert t in TOOLS, f"{t} not registered/callable"

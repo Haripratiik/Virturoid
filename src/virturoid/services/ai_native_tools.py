@@ -1532,10 +1532,64 @@ def edit_ops(_args: dict) -> dict:
     return {"ok": True, "operators": op_specs()}
 
 
+def _render_stamp(gene, view: str, azimuth: float, elevation: float) -> str:
+    """A short, deterministic name for ONE picture: this BODY, from this angle, in this view.
+
+    Every input that changes the image is in here, and nothing that does not. Deterministic rather than a clock
+    or a counter, which is the same rule ``sysid.tools._run_tag`` follows for its bench logs and for the same
+    reason: re-rendering an unchanged robot should land on its own file and overwrite nothing else, while any
+    edit whatsoever gets its own file. It also makes ``op:'undo'`` come back to the render it left.
+    """
+    import hashlib
+    import json
+    try:
+        body = json.dumps(gene.to_dict(), sort_keys=True, default=str)
+    except Exception:  # noqa: BLE001 - a body we cannot serialize still deserves a stable-ish name
+        body = repr(gene)
+    key = f"{body}|{view}|{azimuth:.4f}|{elevation:.4f}"
+    return hashlib.sha1(key.encode("utf-8", "replace")).hexdigest()[:10]
+
+
+def _slug(text: str, limit: int = 24) -> str:
+    return "".join(c if (c.isalnum() or c in "-_") else "_" for c in str(text)).strip("_")[:limit]
+
+
+#: How many earlier pictures of the same robot a render hands back. A before/after needs one; a few more make
+#: an iterate loop reviewable. Bounded because this rides in an MCP tool result, which clients cap.
+_EARLIER_RENDERS_MAX = 8
+
+
+def _earlier_renders(robot_id: str, *, skip: str) -> list[str]:
+    """Absolute paths to this robot's OTHER renders, newest first. Never raises: it is a convenience.
+
+    The id is escaped before it becomes a glob PATTERN. It has already passed ``session_state``'s id filter, so
+    this is not a traversal question -- it is that ``[`` and ``?`` are pattern syntax, and an id carrying one
+    would silently match the wrong set (or nothing) rather than fail."""
+    import glob as _glob
+    try:
+        d = _render_dir()
+        found = [p for p in d.glob(f"{_glob.escape(robot_id)}_*.png") if p.name != skip and p.is_file()]
+        found.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        return [str(p) for p in found[:_EARLIER_RENDERS_MAX]]
+    except OSError:
+        return []
+
+
 def render_view(args: dict) -> dict:
     """Render the held robot. ``view``: ``visual`` (default — the detailed surface) or ``collision`` (the exact
     bodies the physics verdict is computed on). Either way the payload DISCLOSES which model was drawn and
-    proves the two share one set of colliders — see :func:`render_parity`."""
+    proves the two share one set of colliders — see :func:`render_parity`.
+
+    EVERY RENDER IS ADDRESSABLE. This used to write one filename per (robot, view) and overwrite it, so the
+    single most common thing anyone does with a render — put the before next to the after — was impossible
+    without copying files by hand. An engineer lost their "before" twice on one Go2: once to the ``add_limb``
+    they were inspecting, and once to a second ``add_limb`` that destroyed the first attempt's picture. The
+    filename now carries a stamp of the BODY and the CAMERA (:func:`_render_stamp`), so an edit cannot land on
+    an earlier render, an unchanged robot re-renders idempotently onto its own file, and the earlier pictures
+    of this robot come back in the payload so the comparison does not need a filesystem tool to find them.
+    ``label`` is there for humans reading the directory; it never replaces the stamp, because a label that
+    replaced it would put the loss straight back.
+    """
     from virturoid.services import session_state as S
     gene = S.get_robot(args["robot_id"])
     if gene is None:
@@ -1543,9 +1597,14 @@ def render_view(args: dict) -> dict:
     view = str(args.get("view", "visual")).lower()
     if view not in ("visual", "collision"):
         return {"ok": False, "error": f"unknown view '{view}'; choose 'visual' or 'collision'"}
-    img, why = _render_gene_detail(gene, f"{args['robot_id']}_{'collision' if view == 'collision' else 'view'}",
-                                   azimuth=float(args.get("azimuth", 50.0)),
-                                   elevation=float(args.get("elevation", -16.0)),
+    azimuth, elevation = float(args.get("azimuth", 50.0)), float(args.get("elevation", -16.0))
+    label = _slug(args.get("label") or "")
+    stamp = _render_stamp(gene, view, azimuth, elevation)
+    tag = "_".join(p for p in (str(args["robot_id"]),
+                               "collision" if view == "collision" else "view", label, stamp) if p)
+    existed = (_render_dir() / f"{tag}.png").is_file()
+    earlier = _earlier_renders(str(args["robot_id"]), skip=f"{tag}.png")
+    img, why = _render_gene_detail(gene, tag, azimuth=azimuth, elevation=elevation,
                                    collision=(view == "collision"))
     # THE PATH IS THE PRODUCT. This is the tool an engineer calls to SEE the robot, so it either hands back one
     # absolute path to a file that opens, or it says why not in words someone can act on. It used to report the
@@ -1561,6 +1620,17 @@ def render_view(args: dict) -> dict:
                 "error": f"the renderer reported {p} but no file is there", "robot_id": args["robot_id"]}
     out = {"ok": True, "path": str(p), "artifacts": [str(p)], "bytes": p.stat().st_size, "view": view,
            "error": None, "robot_id": args["robot_id"]}
+    # ADDRESSABILITY, reported rather than implied. `state_id` is what makes two renders comparable (same id =
+    # same body, same camera, same view); `reused_existing_file` answers "did anything actually change since I
+    # last looked?" without a diff; `earlier_renders` hands back the pictures of THIS robot that this call did
+    # not touch, newest first, which is the before/after the tool exists to support.
+    out["state_id"] = stamp
+    out["label"] = label or None
+    out["reused_existing_file"] = existed
+    out["earlier_renders"] = earlier
+    out["naming"] = ("the filename carries this robot's state and camera, so an edit never lands on an earlier "
+                     "render and re-rendering an unchanged robot reuses its own file. Pass label to add a "
+                     "readable word of your own; it is added, never substituted.")
     # SAY WHICH ROBOT THIS PICTURE IS. The visual render adds detailed surface meshes that the gait sim does not
     # build, so "is the thing I'm looking at the thing you verified?" is a fair question with a measurable
     # answer. Attach it rather than leaving the customer to trust a comment in the source.
@@ -2306,10 +2376,18 @@ AI_NATIVE_TOOLS: dict[str, dict] = {
     "render_view": {"description": "Render a held robot to a PNG (an agent should SEE what it built). "
                     "view='visual' (default) draws the detailed surface; view='collision' draws the EXACT bodies "
                     "the physics verdict is computed on. Returns `path` — an ABSOLUTE path to a PNG that exists on "
-                    "disk — plus a measured render/sim parity read; on failure ok=false and `error` says why.",
+                    "disk — plus a measured render/sim parity read; on failure ok=false and `error` says why. "
+                    "Every picture is KEPT: the filename carries the body and the camera it was drawn from, so a "
+                    "later edit writes a new file instead of destroying the one you were comparing against, and "
+                    "re-rendering an unchanged robot reuses its own. The earlier pictures of this robot come back "
+                    "with the result, newest first, so before/after needs no bookkeeping. Optional `label` adds a "
+                    "readable word of your own (e.g. 'before') without replacing any of that.",
                     "heavy": True, "handler": render_view, "parameters": {"type": "object", "required": ["robot_id"],
                     "properties": {"robot_id": {"type": "string"}, "azimuth": {"type": "number"},
                                    "elevation": {"type": "number"},
+                                   "label": {"type": "string", "description": "a readable word added to this "
+                                             "render's filename (e.g. 'before'); optional — renders are already "
+                                             "kept apart by body and camera, so nothing is lost without it"},
                                    "view": {"type": "string", "enum": ["visual", "collision"]}}}},
     "simulate_gait": {"description": "Run the general scripted gait on a held robot; returns the HONEST verdict "
                       "(survived/cadence/support/upright/forward). Real MuJoCo.", "heavy": True, "handler": simulate_gait,

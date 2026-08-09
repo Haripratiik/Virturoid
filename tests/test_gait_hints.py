@@ -344,6 +344,57 @@ class PseudoReplicationCannotCarryAGateTests(unittest.TestCase):
         self.assertTrue(body_arm["deduped_by_body"])
 
 
+class AuditArmTests(unittest.TestCase):
+    """``scripts/audit_gait_bank.gates`` — the three dedup arms an audit reports side by side.
+
+    Body dedup answers "how many ROBOTS is this claim made of". It does NOT answer "how many CONTROLLERS",
+    and on a corpus grown by warm-starting every fit from the same bank those are different questions: distinct
+    bodies converging on one operating point are one observation of that point counted many times, and the
+    replication lands on all five parameters at once. ``gait_hints._DEDUP_RULE`` records that check dissolving
+    ``knee_amp`` on the live bank; it was done by hand there, and this pins it as an arm the audit always runs.
+    """
+    def _audit(self):
+        import sys
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+        import audit_gait_bank as A
+        return A
+
+    def _row(self, i, params, forward):
+        return {"skill_id": f"gait::quadruped::b{i}", "params": params, "gene": None,
+                "base_config": {"gait_params": params, "forward_m": forward}}
+
+    def test_the_op_point_arm_sees_replication_the_body_arm_cannot(self):
+        A = self._audit()
+        # Twenty DISTINCT bodies -- so the body arm collapses nothing -- that between them shipped only two
+        # operating points. Every parameter reads as a razor-tight "region" that is really n=2.
+        pts = [{"freq": 1.5, "hip_amp": 0.9, "knee_amp": 1.0, "kp": 32.0, "kd": 1.5},
+               {"freq": 1.52, "hip_amp": 0.91, "knee_amp": 1.01, "kp": 33.0, "kd": 1.55}]
+        rows = [self._row(i, dict(pts[i % 2]), 2.0 + 0.01 * i) for i in range(20)]
+        out = A.gates(rows, None)
+        by_arm = {k.split(", ", 1)[1]: v for k, v in out.items()}
+        self.assertEqual(set(by_arm), {"rows as observations", "ONE ROW PER DISTINCT BODY",
+                                       "ONE ROW PER DISTINCT OP-POINT"})
+        self.assertEqual(by_arm["rows as observations"]["freq"]["support"], 20)
+        self.assertEqual(by_arm["ONE ROW PER DISTINCT BODY"]["freq"]["support"], 20)
+        self.assertEqual(by_arm["ONE ROW PER DISTINCT OP-POINT"]["freq"]["support"], 2)
+        for key in ("freq", "kp", "kd"):
+            ev = by_arm["ONE ROW PER DISTINCT OP-POINT"][key]
+            self.assertFalse(ev["ok"], ev)
+            self.assertIn("too few", ev["why"])
+
+    def test_the_selection_panel_tally_is_reported_not_just_the_verdict(self):
+        """``ok`` and ``selections_ok`` answer different questions, so the audit prints both. A one-row-per-group
+        corpus never exercises the panel and must report null rather than a manufactured 5/5."""
+        A = self._audit()
+        rows = [self._row(i, {"freq": 1.4 + 0.02 * i, "hip_amp": 0.9, "knee_amp": 1.0,
+                              "kp": 30.0 + i, "kd": 1.5}, 2.0 + 0.01 * i) for i in range(12)]
+        ev = A.gates(rows, None)["whole bank, ONE ROW PER DISTINCT BODY"]["freq"]
+        self.assertIn("selections_ok", ev)
+        self.assertIsNone(ev["selections_ok"])
+        self.assertIn("center", ev)
+        self.assertIn("band", ev)
+
+
 @unittest.skipUnless(_MUJOCO, "adaptation runs a short gait search in MuJoCo")
 class GaitHintsAdaptationTests(unittest.TestCase):
     def test_two_bodies_get_two_gaits_from_the_same_hints(self):

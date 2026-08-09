@@ -175,12 +175,13 @@ def test_the_three_dispatch_over_MCP_tools_call(held_dog):
 
 @pytest.mark.skipif(not _MUJOCO, reason="the MCP registry import needs MuJoCo")
 def test_the_three_are_discoverable_in_the_tools_list_payload():
-    """`MCP_TOOL_VIEW` is at its documented cross-client cap of 15 (test_agent_first asserts it), so these are
-    advertised on the anchor tool they belong to -- the same treatment the ingest importers and the advanced
-    authoring compilers get. A client reading tools/list therefore SEES all three names and can call them."""
+    """`MCP_TOOL_VIEW` is at its documented cross-client cap (`MCP_TOOL_VIEW_MAX`), so these are advertised on
+    the anchor tool they belong to -- the same treatment the ingest importers and the advanced authoring
+    compilers get. A client reading tools/list therefore SEES all three names and can call them."""
     from virturoid.mcp_server import _handle
+    from virturoid.services.agent_tools import MCP_TOOL_VIEW_MAX
     listed = _handle("tools/list", {})["tools"]
-    assert len(listed) <= 15, "the lean menu must not grow past its budget"
+    assert len(listed) <= MCP_TOOL_VIEW_MAX, "the lean menu must not grow past its budget"
     blob = " ".join(t["description"] for t in listed)
     for name in _THREE:
         assert name in blob, f"{name} dispatches but no tools/list entry names it -- undiscoverable"

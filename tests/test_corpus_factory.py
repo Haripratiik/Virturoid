@@ -261,6 +261,66 @@ def test_night_proposer_dedups_structurally_before_paying_to_verify(monkeypatch)
     assert propose.stats["duplicate_drafts"] == 2 and propose.stats["finalized"] == 1
 
 
+def test_the_night_narrates_every_slot_and_the_journal_survives_a_kill(tmp_path):
+    """A gait-corpus night spends 24-200 s per body inside VERIFY and, until this landed, printed nothing until
+    it was over. MEASURED 2026-08-08 on a real night: the only way to tell an honest search from a hang was to
+    sample the process's CPU counter from outside the program.
+
+    The journal is the durable half. ``run_factory_night`` checkpoints ADMITS to the manifest after each one but
+    counts REJECTIONS in memory and writes them only after the loop — so a night that is killed (a long night
+    usually is) loses exactly the evidence for why its corpus came out small. One flushed line per candidate
+    fixes that, and it records the VERIFY verdict, which is not the admission: a body can verify credible and
+    still be rejected downstream for novelty.
+    """
+    night = _night_module()
+    journal = tmp_path / "j.jsonl"
+    seen = []
+
+    def inner(gene):
+        seen.append(gene)
+        if len(seen) == 2:
+            raise RuntimeError("this body exploded")
+        return {"credible": True, "fitness": 1.5, "gait_source": "fitted", "robustness_rel": 0.1,
+                "verdict": "CREDIBLE WALK", "schema_valid": True, "compiles": True}
+
+    verify = night.narrated(inner, journal)
+    verify(_legged(4, "A"))
+    with pytest.raises(RuntimeError):
+        verify(_legged(4, "B"))
+    verify(_legged(5, "C"))
+
+    lines = [json.loads(x) for x in journal.read_text(encoding="utf-8").splitlines()]
+    assert [r["slot"] for r in lines] == [1, 2, 3]              # the RAISING candidate is journalled too
+    assert lines[0]["credible"] is True and lines[0]["robustness_rel"] == 0.1
+    assert "this body exploded" in lines[1]["error"] and "credible" not in lines[1]
+    assert lines[2]["segments"] == len(_legged(5, "C").segments)
+    assert all(r["wall_s"] >= 0 for r in lines)
+
+
+def test_the_night_reports_gated_rows_separately_from_all_rows(tmp_path):
+    """The night's headline used to be one number, and one number overstates it.
+
+    ``gait_fit_verify_fn`` calls ``_compiles_and_credible`` FIRST, and that is the ordinary product verify path
+    (``verify_robot`` -> ``_auto_bank_gait`` -> ``bank_gait(ungated_reason=...)``), so a body whose shipped
+    default already walks leaves an UNGATED row in the night's own bank before the gate stack has ruled on it.
+    MEASURED on the 2026-08-08 night: 1 of the first 11 rows. Ungated rows are what made the old 103-row bank
+    unusable as evidence (99 of 103 of them) and ``mine_gait_hints`` filters them out the moment a gated row
+    exists — so they are ballast, and the night has to say how much of its output is the real thing.
+    """
+    from virturoid.services.gait_flywheel import BANK_GATE, LOCOMOTION
+    from virturoid.services.memory_db import MemoryDB
+    night = _night_module()
+    with MemoryDB(tmp_path / "virturoid_memory.db") as db:
+        db.record_skill("gait::quadruped::a", "quadruped", LOCOMOTION, success_rate=0.9,
+                        base_config={"gait_params": {"freq": 1.5}, "bank_gate": BANK_GATE})
+        db.record_skill("gait::quadruped::b", "quadruped", LOCOMOTION, success_rate=0.9,
+                        base_config={"gait_params": {"freq": 1.5}, "bank_gate": "ungated_declared"})
+        db.record_skill("gait::quadruped::c", "quadruped", LOCOMOTION, success_rate=0.9,
+                        base_config={"gait_params": {"freq": 1.5}})            # no stamp at all
+    assert night.gait_rows(tmp_path) == (3, 1)
+    assert night.gait_rows(tmp_path / "nope") == (-1, -1)      # a missing bank is reported, never guessed at
+
+
 @pytest.mark.slow
 def test_gait_search_verify_is_physics_tagged_and_can_solve(tmp_path):
     """The §10.2 VERIFY-BUILD: a gait search returns a physics-sourced verdict; a walkable body can be solved."""

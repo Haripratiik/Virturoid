@@ -199,11 +199,16 @@ def test_the_gait_fitters_are_registered_and_carry_an_apply_contract():
 def test_the_gait_fitters_are_discoverable_in_the_tools_list_payload():
     """They dispatched fine through ``call_tool`` and were absent from ``tools/list`` AND from the server
     ``instructions``, so a customer's agent could only find them by grepping our source. ``MCP_TOOL_VIEW`` is at
-    its documented cap of 15, so they are advertised on the anchor tool — the same treatment the ingest
-    importers and the authoring compilers get, and the same standard ``test_tool_registration`` holds them to."""
+    its documented cap, so they are advertised on the anchor tool — the same treatment the ingest
+    importers and the authoring compilers get, and the same standard ``test_tool_registration`` holds them to.
+
+    The budget is read from ``MCP_TOOL_VIEW_MAX`` rather than repeated as a literal here: it is a share of a
+    CLIENT-side limit that gets re-argued when a capability earns a slot, and a second copy of the number in a
+    test about gait discoverability turns that decision into an unrelated red."""
     from virturoid.mcp_server import _handle
+    from virturoid.services.agent_tools import MCP_TOOL_VIEW_MAX
     listed = _handle("tools/list", {})["tools"]
-    assert len(listed) <= 15, "the lean menu must not grow past its budget"
+    assert len(listed) <= MCP_TOOL_VIEW_MAX, "the lean menu must not grow past its budget"
     blob = " ".join(t["description"] for t in listed)
     for name in _FITTERS:
         assert name in blob, f"{name} dispatches but no tools/list entry names it -- undiscoverable"
@@ -277,3 +282,219 @@ def test_train_reward_rejects_a_bad_reward_before_running_any_physics(held_dog):
     env = call_tool("train_reward", {"robot_id": held_dog, "reward": "os.system('x')"})
     assert env["ok"] is False and "did not compile" in env["error"]
     assert time.monotonic() - t0 < 5.0, "a syntax refusal must not cost a physics search"
+
+
+# ---------------------------------------------------------------- the door 248afca MISSED: train_held
+#
+# 248afca closed this exact defect for ``train_reward``, ``learn_gait`` and ``adapt_gait``. It missed
+# ``train_held`` — the tool an engineer reaches for first, the only training tool in ``MCP_TOOL_VIEW``, and the
+# only one named in the MCP server ``instructions``. Re-measured on a real Menagerie Go2 through ``call_tool``:
+#
+#     train_held      15.0 s   status "succeeded"
+#     verify_robot    0.36 m   gait_source "flywheel_hint"                       <- BYTE-IDENTICAL
+#     apply_gait      0.01 s   (the same numbers train_held had just returned)
+#     verify_robot    0.466 m  gait_source "tuned_for_this_body::train_held..."  <- it landed
+#
+# So the tests below go through ``call_tool`` and the JOB, not through ``apply_trained_gait``: a test that
+# called the write side directly passed at HEAD while the product discarded the result.
+
+_LEARNED = {"params": dict(_GOOD), "forward_m": 1.4, "default_forward_m": 0.2, "beats_default": True,
+            "survived": True, "n_evals": 2, "stopped_reason": "credible_walk", "reused_prior": False,
+            "banked_skill": None, "height_ratio": 0.9, "robustness_rel": 0.2}
+
+
+def _stub_flywheel(monkeypatch, tmp_path, **over):
+    """Replace the physics search with a canned result: the SUBJECT is where the result goes, not the search."""
+    learned = {**_LEARNED, **over}
+    monkeypatch.setattr("virturoid.services.gait_flywheel.learn_gait_flywheel",
+                        lambda *a, **k: dict(learned))
+    monkeypatch.setattr("virturoid.services.agent_tools.safe_build_path", lambda *a, **k: tmp_path)
+    return learned
+
+
+def _await_job(job_id: str, timeout: float = 60.0) -> dict:
+    import time
+    from virturoid.services import job_registry as J
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        view = J.get(job_id)
+        if view and view["status"] in J.TERMINAL_STATUSES:
+            return view
+        time.sleep(0.05)
+    raise AssertionError(f"job {job_id} never finished")
+
+
+@pytest.mark.skipif(not _MUJOCO, reason="composing a body needs MuJoCo")
+def test_train_held_commits_its_controller_to_the_held_robot(held_dog, tmp_path, monkeypatch):
+    """The whole finding in one test, on the engineer's surface: train through ``call_tool``, then read the
+    held gene back. Before this, the gene was byte-identical here."""
+    from virturoid.services import session_state as S
+    from virturoid.services.agent_tools import call_tool
+    _stub_flywheel(monkeypatch, tmp_path)
+    before = dict((getattr(S.get_robot(held_dog), "metadata", None) or {}).get("gait_params") or {})
+    env = call_tool("train_held", {"robot_id": held_dog, "max_evals": 2})
+    assert env["ok"], env
+    view = _await_job(env["result"]["job_id"])
+    rep = view["result"]["applied_to_robot"]
+    assert rep["applied"] is True, rep
+    assert rep["gait_source_after"] == "tuned_for_this_body::train_held"
+    md = getattr(S.get_robot(held_dog), "metadata", None) or {}
+    assert md["gait_params"] == _GOOD and md["gait_params"] != before
+    assert md["gait_provenance"]["door"] == "train_held"
+    assert view["status"] == "succeeded"
+
+
+@pytest.mark.skipif(not _MUJOCO, reason="composing a body needs MuJoCo")
+def test_train_held_is_an_edit_so_undo_gives_the_previous_controller_back(held_dog, tmp_path, monkeypatch):
+    from virturoid.services import session_state as S
+    from virturoid.services.agent_tools import call_tool
+    _stub_flywheel(monkeypatch, tmp_path)
+    _await_job(call_tool("train_held", {"robot_id": held_dog})["result"]["job_id"])
+    assert (getattr(S.get_robot(held_dog), "metadata", None) or {}).get("gait_params") == _GOOD
+    assert call_tool("edit_robot", {"robot_id": held_dog, "ops": [{"op": "undo"}]})["ok"]
+    assert not (getattr(S.get_robot(held_dog), "metadata", None) or {}).get("gait_params")
+
+
+@pytest.mark.skipif(not _MUJOCO, reason="composing a body needs MuJoCo")
+def test_a_train_held_run_that_changed_nothing_does_not_finish_succeeded(held_dog, tmp_path, monkeypatch):
+    """``status: succeeded`` on top of a byte-identical robot is the defect, not just a symptom of it. A
+    non-credible run keeps the old controller (correct) — and must SAY so at the job level, where the engineer
+    was reading a green chip."""
+    from virturoid.services import session_state as S
+    from virturoid.services.agent_tools import call_tool
+    _stub_flywheel(monkeypatch, tmp_path, survived=False, beats_default=False, stopped_reason="CROUCH")
+    view = _await_job(call_tool("train_held", {"robot_id": held_dog})["result"]["job_id"])
+    rep = view["result"]["applied_to_robot"]
+    assert rep["applied"] is False and "CROUCH" in rep["reason"]
+    assert rep["apply_with"]["tool"] == "apply_gait"          # ...and how to land it anyway
+    assert view["status"] == "no_output", "a train job that landed nothing must not read SUCCEEDED"
+    assert not (getattr(S.get_robot(held_dog), "metadata", None) or {}).get("gait_params")
+
+
+@pytest.mark.skipif(not _MUJOCO, reason="composing a body needs MuJoCo")
+def test_train_held_honours_never_and_always_like_every_other_door(held_dog, tmp_path, monkeypatch):
+    from virturoid.services import session_state as S
+    from virturoid.services.agent_tools import call_tool
+    _stub_flywheel(monkeypatch, tmp_path, survived=False, beats_default=False, stopped_reason="FELL")
+    dry = _await_job(call_tool("train_held", {"robot_id": held_dog, "apply": "never"})["result"]["job_id"])
+    assert dry["result"]["applied_to_robot"]["params"] == _GOOD
+    assert dry["status"] == "succeeded", "apply='never' asked for an artifact and got one — that is a success"
+    assert not (getattr(S.get_robot(held_dog), "metadata", None) or {}).get("gait_params")
+    forced = _await_job(call_tool("train_held", {"robot_id": held_dog, "apply": "always"})["result"]["job_id"])
+    assert forced["result"]["applied_to_robot"]["applied"] is True
+    assert "FELL" in forced["result"]["applied_to_robot"]["override"]
+    assert (getattr(S.get_robot(held_dog), "metadata", None) or {}).get("gait_params") == _GOOD
+
+
+def test_a_train_job_whose_worker_refused_is_not_a_success():
+    """``run_train_gene_job`` returns ``{"error": ...}`` for a robot that is not held; the job used to store
+    that dict and finish SUCCEEDED, so a client checking the status could not see the refusal at all."""
+    from virturoid.services import job_registry as J
+    job = {"kind": "train_gene", "error": None, "result": {"error": "no robot 'nope' held"}}
+    assert J._terminal_status(job) == J.FAILED
+    assert job["error"]
+
+
+@pytest.mark.skipif(not _MUJOCO, reason="the GPU arm still composes a gene")
+def test_the_gpu_arm_banks_its_policy_or_says_it_did_not(held_dog, tmp_path, monkeypatch):
+    """The gpu_rl arm's artifact is a neural policy, not five scalars, so it lands in the POLICY bank — which
+    ``verify_robot`` consults. Nothing in ANY agent path called ``bank_morph_policy`` (the repo's only caller
+    was ``desktop.py``), so a GPU run wrote an .npz into a build dir no verdict path reads and reported
+    ``trained: true``. Same defect, one artifact type over."""
+    from virturoid.services.agent_design_tools import run_train_gene_job
+    monkeypatch.setattr("virturoid.services.gpu_trainer.gpu_available", lambda **k: True)
+    monkeypatch.setattr("virturoid.services.gpu_trainer.train_gene_on_gpu",
+                        lambda *a, **k: str(tmp_path / "policy.npz"))
+    monkeypatch.setattr("virturoid.services.agent_tools.safe_build_path", lambda *a, **k: tmp_path)
+    monkeypatch.setattr("virturoid.services.policy_flywheel.bank_morph_policy",
+                        lambda *a, **k: {"banked": True, "skill_id": "morph_legged_locomotion",
+                                         "verdict": "CREDIBLE WALK", "forward": 1.1})
+    out = run_train_gene_job({"robot_id": held_dog, "mode": "gpu_rl"})
+    assert out["applied_to_robot"]["applied"] is True
+    assert out["applied_to_robot"]["skill_id"] == "morph_legged_locomotion"
+
+    monkeypatch.setattr("virturoid.services.policy_flywheel.bank_morph_policy",
+                        lambda *a, **k: {"banked": False, "skill_id": None, "verdict": "FELL", "forward": 0.1})
+    refused = run_train_gene_job({"robot_id": held_dog, "mode": "gpu_rl"})
+    assert refused["trained"] is True                          # the artifact exists...
+    assert refused["applied_to_robot"]["applied"] is False     # ...and the report does not pretend it deployed
+    assert "FELL" in refused["applied_to_robot"]["reason"]
+
+
+# ---------------------------------------------------------------- the sweep: every controller door, one rule
+
+#: tool -> the function that must carry the apply contract. A door that fits or improves a controller for a
+#: HELD robot and does not appear here is the next ``train_held``: two of three were wired in 248afca and the
+#: third was not noticed for two weeks. ``design_search`` is deliberately absent — it searches a body composed
+#: from a prompt and holds nothing — and is covered by the honesty test below instead.
+_CONTROLLER_DOORS = {
+    "train_reward": "virturoid.services.reward_loop._land_on_robot",
+    "learn_gait": "virturoid.services.input_training_tools._learn_gait",
+    "adapt_gait": "virturoid.services.gait_hints._adapt_gait",
+    "apply_gait": "virturoid.services.gait_hints._apply_gait",
+    "train_held": "virturoid.services.agent_design_tools.run_train_gene_job",
+    "adopt_control_script": "virturoid.services.input_training_tools._adopt_control_script",
+}
+
+
+@pytest.mark.parametrize("tool,target", sorted(_CONTROLLER_DOORS.items()))
+def test_every_controller_door_is_registered_and_wired_to_the_apply_contract(tool, target):
+    import importlib
+    import inspect
+    from virturoid.services.agent_tools import TOOLS
+    assert tool in TOOLS, f"{tool} is not registered — an unreachable door is the same as a missing one"
+    assert "apply" in TOOLS[tool]["parameters"]["properties"], f"{tool} does not advertise its apply contract"
+    mod, fn = target.rsplit(".", 1)
+    src = inspect.getsource(getattr(importlib.import_module(mod), fn))
+    assert "apply_trained_gait" in src, f"{target} produces a controller and never lands one"
+
+
+@pytest.mark.skipif(not _MUJOCO, reason="composing a body needs MuJoCo")
+def test_adopt_control_script_lands_the_improvement_it_claims(held_dog, monkeypatch):
+    """Found by the same sweep. It fits a controller to the held body WARM-STARTED FROM THE CUSTOMER'S OWN
+    parameters, said "improved the user's controller", and wrote nothing — so the next verify_robot re-measured
+    what the robot had before. The gate is its own honest bar (``beat_imported``): an improvement that failed it
+    must never overwrite what the customer shipped."""
+    from virturoid.services import session_state as S
+    from virturoid.services.agent_tools import call_tool
+    canned = {"utilised": {"forward_m": 0.34, "credible": False},
+              "improved": {"forward_m": 0.62, "credible": True},
+              "imported_params": dict(_GOOD), "improved_params": dict(_GOOD), "beat_imported": True,
+              "verdict": "improved the user's controller (credible walk, further travel)"}
+    monkeypatch.setattr("virturoid.services.control_adopter.adopt_control_script", lambda *a, **k: dict(canned))
+    res = call_tool("adopt_control_script", {"robot_id": held_dog, "params": {"freq": 1.0}})["result"]
+    assert res["applied_to_robot"]["applied"] is True
+    assert (getattr(S.get_robot(held_dog), "metadata", None) or {}).get("gait_params") == _GOOD
+
+    monkeypatch.setattr("virturoid.services.control_adopter.adopt_control_script",
+                        lambda *a, **k: {**canned, "beat_imported": False,
+                                         "verdict": "ran the user's controller; kept it"})
+    kept = call_tool("adopt_control_script", {"robot_id": held_dog, "params": {"freq": 1.0}})["result"]
+    assert kept["applied_to_robot"]["applied"] is False and "kept it" in kept["applied_to_robot"]["reason"]
+
+
+def test_a_controller_search_with_no_robot_to_land_on_says_so():
+    """Rule 3 of the sweep: a tool that produces something and cannot apply it must SAY so, not report bare
+    success. ``design_search`` composes a body from a prompt and holds nothing, which is a fine contract — but
+    only when stated. Asserted on the source because running it costs a real physics search."""
+    import inspect
+    from virturoid.services.agent_tools import _design_search
+    src = inspect.getsource(_design_search)
+    assert "applied_to_robot" in src and "applied to nothing" in src
+
+
+@pytest.mark.skipif(not _MUJOCO, reason="composing a body needs MuJoCo")
+def test_landing_over_a_controller_that_was_already_fitted_says_what_it_replaced(held_dog):
+    """The module claimed a landing "can never make a robot verify WORSE than it did before". Measured through
+    ``call_tool`` on an authored horse, it can: verify 3.305 m CREDIBLE WALK -> train_held (auto, gated on
+    beats_default over a 600-step deploy horizon) -> verify 2.107 m FELL by YAW-DRIFT -> undo -> 3.305 m again.
+    Verify's deploy-select guards a landing against the SHIPPED DEFAULT, not against whatever the body was
+    already carrying. So when there IS a previous fitted controller, the report has to name it."""
+    from virturoid.services.trained_controller import apply_trained_gait
+    first = apply_trained_gait(held_dog, _GOOD, door="learn_gait", credible=True)
+    assert "replaced" not in first, "nothing was replaced on a body with no controller of its own"
+    other = {**_GOOD, "freq": 1.8}
+    second = apply_trained_gait(held_dog, other, door="train_held", credible=True)
+    assert second["applied"] is True
+    assert second["previous_params"] == _GOOD
+    assert "undo" in second["replaced"] and "SHIPPED DEFAULT" in second["replaced"]

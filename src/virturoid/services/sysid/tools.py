@@ -766,6 +766,92 @@ def sim_to_real_transfer(args: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------------------------------------
+# 7. the DOOR to the door: one discoverable entry point for the whole journey
+# ---------------------------------------------------------------------------------------------------------
+
+#: The six steps this entry point dispatches, in journey order. An explicit tuple rather than ``SYSID_TOOLS``'
+#: keys because the entry point is itself registered there, and ``step:'calibrate_to_hardware'`` would recurse.
+STEPS: tuple[str, ...] = ("plan_bench_experiment", "simulate_bench_log", "measure_sim_to_real_gap",
+                          "fit_actuators", "calibration_status", "sim_to_real_transfer")
+
+
+def _where_this_robot_stands(rid: str, gene) -> dict:
+    """What has already happened to THIS robot, so the next call is obvious rather than guessed."""
+    from virturoid.services.sysid.calibration import calibration_of
+    d = _artifact_dir(rid)
+    plan = d / "excitation_plan.json"
+    logs = sorted(p.name for p in d.glob("bench_log_*.json"))
+    cal = None
+    try:
+        cal = calibration_of(gene)
+    except Exception:  # noqa: BLE001 - a status read must never be the thing that fails
+        pass
+    if cal is None:
+        nxt = ("measure_sim_to_real_gap" if (plan.exists() and logs) else
+               "simulate_bench_log" if plan.exists() else "plan_bench_experiment")
+    else:
+        nxt = "calibration_status"
+    return {
+        "ok": True,
+        "robot_id": rid,
+        "about": "the sim-to-real journey for this robot: how far our simulator is from YOUR machine, and how "
+                 "to close the difference on the robot you hold.",
+        "journey": list(JOURNEY),
+        "steps": list(STEPS),
+        "you_are_here": {
+            "has_an_experiment_plan": plan.exists(),
+            "bench_logs_on_disk": logs,
+            "calibration_attached": cal is not None,
+        },
+        "next_step": nxt,
+        "how_to_call": "pass step:'<one of steps>' to this tool, with that step's own arguments under "
+                       "step_args. Each step is equally callable as a tool in its own right, under the same "
+                       "name and the same arguments.",
+        "the_two_paths": {
+            "you_have_the_robot": ["plan_bench_experiment", "measure_sim_to_real_gap", "fit_actuators",
+                                   "calibration_status"],
+            "you_do_not": ["plan_bench_experiment", "simulate_bench_log", "measure_sim_to_real_gap",
+                           "fit_actuators", "calibration_status"],
+        },
+    }
+
+
+def calibrate_to_hardware(args: dict) -> dict:
+    """ONE menu entry for the whole sim-to-real journey, because six were more than the menu could carry.
+
+    The six tools below dispatch perfectly by name and always did. What they were not was DISCOVERABLE: the MCP
+    ``tools/list`` view is capped at a cross-client tool COUNT (see ``agent_tools.MCP_TOOL_VIEW``), so all six
+    were advertised only as names inside ``verify_robot``'s description -- a door a careful reader finds and a
+    model's tool-selection step does not, which for an agent-driven product is the same as not existing.
+    Measured: six first-class entries cost 10,761 bytes of ``tools/list`` payload and 6 of Cursor's ~40-tool
+    cross-server budget; this one entry costs ~1.2 kB and one slot, and names all six in its own ``step`` enum.
+
+    With no ``step`` it answers "where am I?" for the robot you hold rather than guessing a step for you.
+    """
+    rid = str(args.get("robot_id") or "").strip()
+    gene, refusal = _held(rid)
+    if refusal:
+        return {**refusal, "steps": list(STEPS), "journey": list(JOURNEY)}
+    step = str(args.get("step") or "").strip().lower()
+    if not step:
+        return _where_this_robot_stands(rid, gene)
+    if step not in STEPS:
+        return {"ok": False, "robot_id": rid, "error": f"'{step}' is not a step of this journey",
+                "steps": list(STEPS), "journey": list(JOURNEY),
+                "how": "omit step to be told which one this robot is ready for"}
+    # Forward BOTH spellings: the step's own arguments nested under `step_args` (what the schema advertises, and
+    # what a strict client validates cleanly), and any extra top-level key, because that is how an agent writes
+    # it when it already knows the step's signature. Nested wins on a collision -- it is the more specific one.
+    forwarded = {k: v for k, v in (args or {}).items() if k not in ("step", "step_args")}
+    forwarded.update(dict(args.get("step_args") or {}))
+    out = SYSID_TOOLS[step]["handler"](forwarded)
+    if isinstance(out, dict):
+        out.setdefault("step", step)
+        out.setdefault("steps", list(STEPS))
+    return out
+
+
+# ---------------------------------------------------------------------------------------------------------
 # the registry
 # ---------------------------------------------------------------------------------------------------------
 
@@ -796,6 +882,32 @@ _LOG_ARGS_TEMPLATE = {
 }
 
 SYSID_TOOLS: dict[str, dict] = {
+    "calibrate_to_hardware": {
+        "description": "SIM-TO-REAL: how far is our simulator from YOUR physical robot, and close the "
+                       "difference on the robot you hold. This is the entry point for the whole journey; each "
+                       "step below is equally callable as a tool in its own right, under the same name and the "
+                       "same arguments. Steps, in order: plan_bench_experiment (author a short, safe experiment "
+                       "bounded by this robot's own joint limits and its motors' datasheets) -> "
+                       "simulate_bench_log (NO HARDWARE? run that experiment on a deliberately perturbed copy of "
+                       "the model; the result is labelled a SIMULATION and can raise no fidelity rung) -> "
+                       "measure_sim_to_real_gap (hand back the log: per joint, in rad / ms / N.m, never a scalar "
+                       "score) -> fit_actuators (fit damping / reflected inertia / dry friction with an interval "
+                       "each, and write the identified ones into the robot you hold) -> calibration_status (what "
+                       "is attached, what was refused, and the one-call undo). sim_to_real_transfer is the "
+                       "related PURE-SIM probe: how much of a trained policy survives dynamics it never saw. "
+                       "Call with no step to be told where this robot already stands in the journey.",
+        "parameters": {"type": "object", "required": ["robot_id"], "properties": {
+            "robot_id": _robot_id(),
+            "step": {"type": "string", "enum": list(STEPS),
+                     "description": "which step to run. Omit it to get the journey plus this robot's own "
+                                    "position in it (does it have an experiment plan, a log, a calibration) "
+                                    "and the step to call next"},
+            "step_args": {"type": "object",
+                          "description": "that step's own arguments, exactly as its own schema declares them "
+                                         "(e.g. {\"apply\": true} for fit_actuators). Top-level extras are "
+                                         "forwarded too, so either spelling works"}}},
+        "handler": calibrate_to_hardware, "heavy": True,
+    },
     "plan_bench_experiment": {
         "description": "SIM-TO-REAL, step 1 of 5. Author the short, safe, information-rich bench experiment to "
                        "run on a held robot's real hardware -- amplitudes bounded by its own declared joint "

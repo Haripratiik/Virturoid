@@ -22,9 +22,10 @@ SERVER_INFO = {"name": "virturoid", "version": "0.1.0"}
 
 def _tools_list() -> dict:
     from virturoid.services.agent_tools import tool_specs
-    # G-G: advertise the CONSOLIDATED <=15-tool workflow view (Cursor caps ~40 tools across servers and silently
-    # drops the rest; a lean menu keeps every client — incl. Codex/Cursor — working). Every other registry tool
-    # stays callable by name via tools/call. MCP uses `inputSchema`; our registry stores it under `parameters`.
+    # G-G: advertise the CONSOLIDATED workflow view (Cursor caps ~40 tools across servers and silently drops the
+    # rest; a lean menu keeps every client — incl. Codex/Cursor — working). The count budget, what it protects
+    # and the measurement behind its size live on `agent_tools.MCP_TOOL_VIEW`; this is just the transport. Every
+    # other registry tool stays callable by name via tools/call. MCP uses `inputSchema`; ours is `parameters`.
     return {"tools": [{"name": t["name"], "description": t["description"], "inputSchema": t["parameters"]}
                       for t in tool_specs(view="mcp")]}
 
@@ -208,6 +209,17 @@ def _handle(method: str, params: dict):
                     "the real skills, and scores it (list_skills for the vocabulary; submit_task to author the "
                     "sequence yourself). Long runs: train_held returns a job_id -> poll get_job. export_held "
                     "writes real MJCF/CAD.\n"
+                    "IS IT TRUE OF THE PHYSICAL ROBOT? calibrate_to_hardware {robot_id} is the sim-to-real "
+                    "journey and its own menu entry: call it with no step to be told where this robot already "
+                    "stands, then step:'plan_bench_experiment' (a short, safe experiment bounded by this "
+                    "robot's own joint limits and its motors' datasheets), 'simulate_bench_log' if you have no "
+                    "hardware yet (a SIMULATION, labelled as one, that can raise no fidelity rung), "
+                    "'measure_sim_to_real_gap' (per joint, in rad/ms/N.m, never a scalar score), "
+                    "'fit_actuators' (damping/reflected-inertia/dry-friction with an interval each, applied "
+                    "only where the identifiability and tracking gates allow) and 'calibration_status' (what is "
+                    "attached, and the one-call undo). step:'sim_to_real_transfer' is the related PURE-SIM "
+                    "probe — how much of a trained policy survives dynamics it never saw — and is never a "
+                    "statement about a physical machine. Every step is equally callable by its own name.\n"
                     "MEASURE, DON'T GUESS (folded — call by name): probe_robot {robot_id, fields} answers "
                     "questions off the COMPILED model, so an answer cannot disagree with the physics the verdict "
                     "uses — per-joint static torque vs the actuator's rating, reach, ground clearance, mass/CoM/"

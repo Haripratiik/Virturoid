@@ -30,8 +30,23 @@ a controller to deploy for the verdict — ahead of the mined flywheel hint and 
 landing here is not a bookkeeping entry: it is what the next ``verify_robot`` actually runs. ``gait_provenance``
 rides alongside it, and verify reports it, so ``gait_source`` names the door that produced the controller
 (``tuned_for_this_body::train_reward``) instead of leaving "fitted to this body" to stand for four different
-origins. The verdict's own deploy-select safety net still runs the shipped default alongside and keeps whichever
-is credible, so landing a trained gait can never make a robot verify WORSE than it did before.
+origins.
+
+**WHAT THE SAFETY NET DOES AND DOES NOT COVER** — this paragraph used to claim "landing a trained gait can
+never make a robot verify WORSE than it did before", and that is FALSE, measured 2026-08-08 through
+``call_tool`` on an authored horse:
+
+    verify (before)             3.305 m   tuned_for_this_body            CREDIBLE WALK
+    train_held apply="auto"     solved, beats_default (0.868 vs 0.471 at the search's 600-step deploy horizon)
+    verify (after)              2.107 m   tuned_for_this_body::train_held  FELL by YAW-DRIFT
+    edit_robot op:"undo"        3.305 m   tuned_for_this_body            CREDIBLE WALK
+
+Verify's deploy-select re-runs the SHIPPED DEFAULT alongside the landed gait and keeps whichever is credible —
+so a landing can never lose to the default. It does not re-run whatever the body was carrying BEFORE, and every
+door's own gate is judged at a search-length horizon (600 steps) while the verdict is judged at the settling
+horizon (6000): a point can genuinely beat the default over 600 steps and fall at 2000. So a robot that already
+carried a fitted controller CAN come out behind, and the two protections that make that recoverable are the
+ones this module provides — the report names the ``previous_params`` it replaced, and ``undo`` restores them.
 """
 from __future__ import annotations
 
@@ -152,6 +167,16 @@ def apply_trained_gait(robot_id: str, params, *, door: str, apply: str = "auto",
             "gait_source_after": src,
             "reason": (f"committed to the held robot as its deployed controller; verify_robot now runs THESE "
                        f"parameters and reports gait_source '{src}'")}
+    if base["previous_params"]:
+        # IT REPLACED SOMETHING THAT WAS ALSO FITTED TO THIS BODY. Verify's deploy-select guards the landing
+        # against the shipped DEFAULT, not against the controller the body was already carrying, and the gate
+        # that admitted this one was judged over a search-length horizon rather than the settling one — so this
+        # particular replacement is the case where a landing can leave the robot verifying worse. Measured on an
+        # authored horse: 3.305 m CREDIBLE -> 2.107 m FELL, and undo put it back. Saying so is the difference
+        # between an engineer who re-verifies and one who does not.
+        out["replaced"] = (f"this robot already carried a controller fitted to it "
+                           f"({base['previous_params']}); re-verify, and undo if the new one is worse — "
+                           f"verify's deploy-select only guards the landing against the SHIPPED DEFAULT")
     if mode == "always" and credible is False:
         # ``credible is False`` and ``credible is None`` are different facts: one run measured a verdict and it
         # was not a walk, the other never took one (``apply_gait`` runs no physics). Only the first is an
