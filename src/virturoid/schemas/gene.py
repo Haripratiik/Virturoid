@@ -26,6 +26,34 @@ BASE_MOUNTS = {"floor", "table", "torso", "free"}  # "free" = a floating base (m
 END_EFFECTORS = {"gripper", "suction", "spray_nozzle", "hook", "none"}
 
 
+def _detached(value):
+    """A copy of ``value`` that shares no mutable container with the original.
+
+    ``to_dict``/``from_dict`` are this repo's copy idiom -- ``RobotGene.from_dict(gene.to_dict())`` is what
+    three call sites use to get "a COPY, because ground_gene mutates". They only ever copied the TOP level:
+    ``dict(self.metadata)`` is a new outer dict whose VALUES are the gene's own live nested dicts. So the copy
+    and the original shared ``metadata["embodied_mass"]``, and a re-ground of the copy reached back into the
+    original.
+
+    MEASURED, on ``submit_design`` of the taught quadruped: ``validate_gene_design`` (gene_validation.py:96)
+    grounds such a copy AFTER ``put_robot`` has written the session file. Grounding the copy rewrote the shared
+    ledger in place, so the held gene ended with ``balance_of_system_kg == {}`` while still carrying that
+    3.675 kg of battery/wiring on its torso -- the exact double-billing the ledger exists to prevent, since
+    ``structural_link_masses`` then reports the balance of system as aluminium a fabricator must buy. The
+    session file, written before the aliasing write, was the correct copy; the LIVE gene was the corrupted one.
+
+    Containers are copied recursively; anything else (numbers, strings, arrays, objects) is passed through --
+    a snapshot must not depend on deep-copying whatever a caller parked in ``metadata``.
+    """
+    if isinstance(value, dict):
+        return {k: _detached(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_detached(v) for v in value]
+    if isinstance(value, tuple):                        # keep the type: a tuple was already immutable-shaped
+        return tuple(_detached(v) for v in value)
+    return value
+
+
 @dataclass
 class GeneSegment:
     """One rigid link in the body, with the joint that attaches it to its parent."""
@@ -232,9 +260,12 @@ class RobotGene:
             "composition_notes": list(self.composition_notes),
             # Round-trips, because the species tree persists genes through here — a field that vanishes on
             # to_dict is a field the flywheel silently loses.
-            "loop_closures": [dict(lc) for lc in (self.loop_closures or [])],
-            "coupled_joints": [dict(cj) for cj in (self.coupled_joints or [])],
-            "metadata": dict(self.metadata),
+            # DETACHED, not shallow-copied: this dict is a SNAPSHOT. The session writer persists it, the undo
+            # stack keeps it as history, and `from_dict(to_dict())` is how callers get an isolated copy — all
+            # three are wrong if a later in-place write to a nested value shows through (see :func:`_detached`).
+            "loop_closures": [_detached(lc) for lc in (self.loop_closures or [])],
+            "coupled_joints": [_detached(cj) for cj in (self.coupled_joints or [])],
+            "metadata": _detached(self.metadata),
             "segments": [
                 {"name": s.name, "parent": s.parent, "shape": s.shape, "length_m": s.length_m,
                  "radius_m": s.radius_m, "mass_kg": s.mass_kg, "joint_type": s.joint_type,
@@ -243,7 +274,8 @@ class RobotGene:
                  "actuator_torque_nm": s.actuator_torque_nm, "torque_req_nm": s.torque_req_nm,
                  "is_end_effector": s.is_end_effector,
                  "cross_section": list(s.cross_section) if s.cross_section else None,
-                 "geometry": s.geometry, "material": s.material}
+                 # A shape program is a nested dict on the segment; hand out a snapshot of it too.
+                 "geometry": _detached(s.geometry), "material": s.material}
                 for s in self.segments
             ],
         }
@@ -257,9 +289,11 @@ class RobotGene:
             base_height_m=(None if d.get("base_height_m") is None else float(d["base_height_m"])),
             design_source=str(d.get("design_source", "unknown")),
             composition_notes=list(d.get("composition_notes", [])),
-            loop_closures=[dict(lc) for lc in (d.get("loop_closures") or [])],
-            coupled_joints=[dict(cj) for cj in (d.get("coupled_joints") or [])],
-            metadata=dict(d.get("metadata", {})),
+            # Detached for the mirror-image reason: a gene built from a dict the caller still holds (or from
+            # one already handed to another gene) must not write through into it when it is re-grounded.
+            loop_closures=[_detached(lc) for lc in (d.get("loop_closures") or [])],
+            coupled_joints=[_detached(cj) for cj in (d.get("coupled_joints") or [])],
+            metadata=_detached(d.get("metadata", {})),
             segments=[
                 GeneSegment(
                     name=s["name"], parent=s.get("parent"), shape=s.get("shape", "capsule"),
@@ -271,7 +305,7 @@ class RobotGene:
                     actuator_torque_nm=s.get("actuator_torque_nm"), torque_req_nm=s.get("torque_req_nm"),
                     is_end_effector=s.get("is_end_effector", False),
                     cross_section=(tuple(s["cross_section"]) if s.get("cross_section") else None),
-                    geometry=s.get("geometry"), material=s.get("material"),
+                    geometry=_detached(s.get("geometry")), material=s.get("material"),
                 )
                 for s in d["segments"]
             ],

@@ -28,11 +28,19 @@ Three rules, all learned from packages that actually shipped:
    selection, peak torque, and the structural mass the walk was verified at. A package once shipped two
    different motor selections; a spec sheet that quietly averages over a contradiction is worse than none.
 
-MASS IS TWO NUMBERS, ON PURPOSE. ``mass_kg`` is the AS-BUILT parts mass from the BOM (structure + motors +
-electronics + power). The physics verdict is measured on the simulated body, which carries the STRUCTURE only
--- the sim body does not embody the actuators or the battery. Those two numbers legitimately differ (often
-~2x), so both are printed, labelled, and the ratio is stated. Reporting only one of them is how a spec sheet
-implies a robot was verified at a mass it will never have.
+MASS IS THREE NUMBERS, ON PURPOSE — AND TWO OF THEM SHOULD NOW AGREE. ``mass_kg`` is the AS-BUILT parts mass
+from the BOM; ``structure_mass_kg`` is the raw stock a fabricator buys (its material lines); ``simulated_body_kg``
+is what the physics verdict was measured on. On a body we composed, ``grounded_physics.embody_component_masses``
+bolts the parts list's own battery, compute and sensors onto the links that carry them, so AS-BUILT and SIMULATED
+are the same robot and ``as_built_over_simulated`` reads 1.0. Print all three anyway, and say when they diverge:
+an IMPORTED robot is deliberately left at the customer's own masses, so its parts list is their machine PLUS
+whatever this BOM proposes adding, and the ratio is a real difference rather than a bookkeeping one.
+
+This paragraph used to say the sim body "carries the STRUCTURE only ... does not embody the actuators or the
+battery", and ``structure_mass_kg`` was read off material lines that had every link's motor inside them. Both
+halves were wrong in the same direction: grounding has embodied actuator mass for some time, and summing
+finished link masses under "material" billed those motors a second time (measured: an authored horse simulated
+at 15.951 kg with a 29.212 kg parts list, 10.410 kg of it its own motors, counted twice).
 """
 from __future__ import annotations
 
@@ -176,8 +184,9 @@ def _bom_facts(bom: dict) -> dict:
                            if ln.get("category") in _SENSOR_CATEGORIES and ln.get("part")}),
         "compute": sorted({str(ln["part"]) for ln in lines
                            if ln.get("category") == "compute" and ln.get("part")}),
-        # the STRUCTURE-only mass: this, not the full parts mass, is what the simulated body weighs, so it is
-        # the number that must agree with the certificate. See the module docstring on mass.
+        # The STRUCTURE-only mass — raw stock, no motors, no electronics. It is NOT the number the certificate
+        # has to match: the simulated body carries its parts too, so the full parts mass is. See the module
+        # docstring on mass.
         "structure_mass_kg": (round(sum(float(ln.get("mass_kg") or 0.0)
                                         for ln in lines if ln.get("category") == "material"), 3)
                               if any(ln.get("category") == "material" for ln in lines) else None),
@@ -338,11 +347,19 @@ def _mass_breakdown(totals: dict, facts: dict, cert: dict) -> dict:
                  "structure_only_kg": facts["structure_mass_kg"],
                  "simulated_body_kg": sim}
     if totals.get("mass_kg") and sim:
-        out["as_built_over_simulated"] = round(float(totals["mass_kg"]) / float(sim), 2)
-        out["note"] = ("The physics verdict in this package was measured on the SIMULATED body "
-                       f"({sim} kg = structure only); the robot you build weighs {totals['mass_kg']} kg once "
-                       "motors, electronics and power are bolted on. Treat the verdict as a structural result "
-                       "until the actuator masses are embodied.")
+        ratio = round(float(totals["mass_kg"]) / float(sim), 2)
+        out["as_built_over_simulated"] = ratio
+        if abs(float(totals["mass_kg"]) - float(sim)) <= max(0.05, 0.01 * float(sim)):
+            out["note"] = (f"The physics verdict in this package was measured on a body weighing {sim} kg, and "
+                           f"the parts list adds up to {totals['mass_kg']} kg — THE SAME ROBOT. The motors, "
+                           f"electronics and power below are on the simulated links that carry them, so the "
+                           f"verdict is not a structural result standing in for a heavier machine.")
+        else:
+            out["note"] = (f"The physics verdict in this package was measured on a {sim} kg body, while its "
+                           f"parts list adds up to {totals['mass_kg']} kg ({ratio}x). On an IMPORTED robot that "
+                           f"is expected — the simulated body is the customer's own machine and the parts list "
+                           f"is that machine PLUS what this BOM proposes adding. Anywhere else it means the "
+                           f"body was not re-grounded after its parts changed.")
     elif not sim and not cert:
         out["note"] = ("no verification certificate in this package, so there is no simulated-body mass to "
                        "compare the as-built parts mass against")

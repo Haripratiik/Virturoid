@@ -14,11 +14,24 @@ Anatomy graph schema (one part per dict):
   {name, role, parent (null=root body), attach (semantic anchor on the parent),
    aim (semantic world direction the part extends), size (m, long axis), girth (m, optional cross-section),
    joint ("fixed"|"revolute"), symmetry ("none"|"left_right")}
-Roles (reusable vocabulary): body, neck, head, snout, jaw, ear, eye, horn, tail, leg_upper, leg_lower, paw,
-  foot, arm_upper, arm_lower, hand, wing, fin, flipper, claw, beak, antenna, shell, fang. Unknown -> a generic
-  tapered limb. attach tokens: front/rear/back, left/right, top/bottom, mid, tip (combine: front_top,
-  front_bottom, rear_top, tip). aim tokens: forward/back, up/down, left/right, out (combine: forward_up,
-  down, back_up, down_out).
+Roles (reusable vocabulary): body, segment, neck, head, snout, jaw, ear, eye, horn, tail, leg_upper,
+  leg_lower, paw, foot, arm_upper, arm_lower, hand, wing, fin, flipper, claw, beak, antenna, shell, fang.
+  Unknown -> a generic tapered limb. attach tokens: front/rear/back, left/right, top/bottom, mid, tip
+  (combine: front_top, front_bottom, rear_top, tip). aim tokens: forward/back, up/down, left/right, out
+  (combine: forward_up, down, back_up, down_out).
+
+TWO BODY AXES, NOT ONE. A body used to be a single rigid trunk with everything radiating off it, because
+``attach`` was read ONLY when the parent was the root: any part whose parent was another PART was welded to
+that part's chain TIP at offset (0,0,0), whatever its ``attach`` said. Measured (task #213): a segmented graph
+of 6 trunk links carrying 6 leg pairs compiled with all TWELVE leg chains parented to ``trunk_5`` -- the last
+link -- at a single point. So a many-legged body had exactly one expressible topology, a radial fan from one
+disc, and "centipede" built an urchin. Two additions close that, and neither is a species:
+  * role ``segment`` -- a BODY-AXIS link (short, wider than tall, machined) so a trunk can be a serial CHAIN
+    of body blocks rather than one rigid barrel or a distally-tapering tail;
+  * a STATION on any parent -- ``attach: {"along": 0..1, "lateral": -1..1, "height": 0..1}`` addresses a point
+    along a non-root parent's own segment chain, so limbs mount at intervals down a trunk and on its SIDES.
+``along`` runs the parent's OWN axis, proximal (0) to distal (1), and picks both which link and where on it.
+Everything that omits the dict form keeps the old tip-weld exactly.
 """
 
 from __future__ import annotations
@@ -56,9 +69,15 @@ def _R_to_euler(R):
     return (math.atan2(R[2, 1], R[1, 1]), b, 0.0)
 
 # Roles whose joint is revolute by default (the articulated appendages) — others weld unless the graph says so.
-_ARTICULATED = {"leg_upper", "leg_lower", "arm_upper", "arm_lower", "tail", "wing", "fin", "flipper", "claw", "neck", "tentacle", "trunk"}
+_ARTICULATED = {"leg_upper", "leg_lower", "arm_upper", "arm_lower", "tail", "wing", "fin", "flipper", "claw",
+                "neck", "tentacle", "trunk", "segment", "body_segment", "spine"}
 # Roles that hang/extend DOWN by default when the graph doesn't say (legs).
 _DOWN_ROLES = {"leg_upper", "leg_lower", "paw", "foot"}
+# BODY-AXIS roles: a link of the trunk itself, not an appendage hanging off it. They differ from limbs in two
+# ways that matter — they are WIDER THAN TALL (a body carries organs/electronics side to side; a limb is a
+# beam), and they do NOT taper distally (a limb thins toward its tip because it carries less load; a trunk
+# does not thin because it is not cantilevered off anything).
+_BODY_AXIS_ROLES = {"segment", "body_segment", "spine"}
 
 
 def _role_geometry(role: str, size: float, girth: float, aspect: str = "", *, authored: bool = False):
@@ -199,6 +218,22 @@ def _role_geometry(role: str, size: float, girth: float, aspect: str = "", *, au
         th = max(0.004, 0.09 * w)
         return ({"family": "extrude", "height": round(L, 4), "fillet": round(0.12 * w, 4),
                  "profile": [[-th, -0.5 * w], [th, -0.46 * w], [th, 0.46 * w], [-th, 0.5 * w]]}, L, w)
+    if role in _BODY_AXIS_ROLES:
+        # A BODY-AXIS LINK: one block of a segmented trunk. ``size`` is its length ALONG the body axis and
+        # ``girth`` its lateral half-width, and it is extruded along local +z like every other link — which is
+        # what lets a chain of them run head-to-tail through the same aim/mount machinery limbs use.
+        #
+        # The cross-section is the whole point. `_aim_R` guarantees local +y is HORIZONTAL, so for a trunk
+        # aimed along the ground local y is LATERAL and local x is VERTICAL. A body block is therefore
+        # half_y = g (wide) and half_x = 0.62*g (low) — wider than tall, with a flat underside, which is how
+        # every segmented animal and every modular robot train is actually built. A limb's `leg` profile is
+        # the opposite (deeper fore-aft than wide) and a `tail`'s is a distally-shrinking spindle; neither
+        # reads as a body, which is why a segmented trunk built out of them looked like a string of sausages.
+        hy = max(0.008, g)
+        hx = max(0.006, 0.62 * hy)
+        return ({"family": "extrude", "height": round(L, 4), "fillet": round(0.34 * hx, 4),
+                 "chamfer": round(0.18 * hx, 5),
+                 "profile": [[-hx, -0.88 * hy], [0.86 * hx, -hy], [0.86 * hx, hy], [-hx, 0.88 * hy]]}, L, hy)
     if role in ("tentacle", "trunk", "pseudopod"):
         # A continuum-like appendage is represented honestly as an articulated
         # tapered rigid chain.  It is not a walking leg: it keeps its requested
@@ -361,6 +396,62 @@ def _anchor_on_body(attach: str, half_len: float, half_w: float, height: float, 
     return (x, y, z)
 
 
+def _station_on_chain(links, attach, sign_y, world_R_of):
+    """Where on a NON-ROOT parent a child mounts. ``links`` is that parent part's OWN segment chain in order,
+    as ``(seg_name, length_m, radius_m)``; ``world_R_of`` maps a segment name to its world rotation. Returns
+    ``(seg_name, (dx, dy, dz))``, or ``None`` to keep the historical tip-weld.
+
+    THIS IS THE PRIMITIVE A SEGMENTED BODY WAS MISSING. ``_anchor_on_body`` gives the ROOT five longitudinal
+    stations and two sides, which is how a quadruped gets shoulders and hips; every other parent got
+    ``mount_offset = (0, 0, 0)`` — its chain tip — no matter what its ``attach`` said. So a trunk built as a
+    chain could carry limbs at exactly one place: the end of it. Measured on a 6-link trunk with 6 leg pairs,
+    all twelve legs came out parented to the last link at one point.
+
+    The address mixes two frames on purpose, because the two questions live in different ones:
+      ``along``   0 = the chain's proximal base, 1 = its distal tip — the parent's OWN axis, the only frame in
+                  which "how far down the parent" means anything. Picks BOTH which link and where on it.
+      ``lateral`` -1..+1 out to the side, and ``height`` 0 (underside) .. 1 (top), which are WORLD ±y and ±z.
+    Those two are world-framed because ``symmetry: left_right`` mirrors a part's AIM in world y, and the mount
+    has to end up on the same flank the limb points at. Measured while building this: expressing ``lateral`` in
+    the parent's local +y instead put every left leg's mount on the RIGHT flank of a trunk aimed backwards
+    (``_aim_R`` sends local +y to world -y there), so the pair crossed underneath the body and the foot spread
+    collapsed from a sprawled 0.22 m to 0.058 m — narrower than the body itself. The world offset is projected
+    off the parent's own axis first, so ``along`` stays the sole author of the longitudinal position however
+    the parent is oriented.
+
+    Offsets are 0.9x the half-extent so the child ROOTS INSIDE the parent's surface and the joint is covered,
+    the same overlap rule ``_anchor_on_body`` uses. The returned dz is measured from the chosen link's TIP,
+    matching this compiler's convention that ``(0,0,0)`` means "at the parent's tip".
+    """
+    if not links:
+        return None
+    try:
+        along = min(1.0, max(0.0, float(attach.get("along", 0.5))))
+        lateral = min(1.0, max(-1.0, float(attach.get("lateral", 0.0))))
+        frac_h = min(1.0, max(0.0, float(attach.get("height", 0.5))))
+    except (TypeError, ValueError):
+        return None
+    if sign_y:                                   # a mirrored pair defaults to the SIDES, not the centreline
+        lateral = abs(lateral) if lateral else 1.0
+        lateral *= sign_y
+    total = sum(max(0.0, l) for _, l, _ in links) or 1e-9
+    want = along * total
+    acc = 0.0
+    for idx, (name, L, r) in enumerate(links):
+        last = idx == len(links) - 1
+        if want <= acc + L or last:
+            f = 0.0 if L <= 0 else min(1.0, max(0.0, (want - acc) / L))
+            R = world_R_of(name)
+            off_w = np.array([0.0, lateral * 0.9 * r, (frac_h - 0.5) * 2.0 * 0.9 * r])
+            zw = np.asarray(R)[:, 2]
+            off_w = off_w - float(off_w @ zw) * zw          # `along` owns the longitudinal position, not this
+            off_l = np.asarray(R).T @ off_w
+            return name, (round(float(off_l[0]), 6), round(float(off_l[1]), 6),
+                          round(float(off_l[2]) + f * L - L, 6))
+        acc += L
+    return None
+
+
 _AIM_VEC = {
     "forward": (1.0, 0.0, 0.0), "back": (-1.0, 0.0, 0.0), "rear": (-1.0, 0.0, 0.0),
     "up": (0.0, 0.0, 1.0), "down": (0.0, 0.0, -1.0),
@@ -431,6 +522,7 @@ _ROLE_MATERIAL = {
     "wing": "carbon_fiber", "fin": "carbon_fiber", "flipper": "carbon_fiber",
     "leg": "skeleton", "arm": "skeleton", "leg_upper": "skeleton", "leg_lower": "skeleton",
     "arm_upper": "skeleton", "arm_lower": "skeleton", "limb": "skeleton",
+    "segment": "shell", "body_segment": "shell", "spine": "shell",   # trunk links are body, not load path
     "wheel": "rubber",
     "neck": "frame", "tail": "frame", "antenna": "frame", "ear": "frame", "shell": "shell",
 }
@@ -609,6 +701,10 @@ def build_from_anatomy(graph: dict) -> RobotGene:
     # a symmetric child (foot) attach to the correct side of its symmetric parent (leg) — the bug a naive
     # _l/_r split caused: a foot referencing 'front_leg_pair' must resolve to 'front_leg_pair_l_2' on the left.
     leaf: dict = {(rname, ""): rname}
+    # chain registry: (part_name, side) -> that part's FULL ordered segment list as (name, length_m, radius_m).
+    # ``leaf`` records only the TIP, which is why a child naming a multi-segment parent could reach nothing but
+    # its last link. A station address (`_station_on_chain`) needs the whole chain to find which link it lands on.
+    chain_of: dict = {}
     # accumulated WORLD rotation per segment, so a child's aim (a world direction) can be solved relative to
     # its parent's frame. The root body sits axis-aligned at rest -> identity.
     world_R: dict = {rname: np.eye(3)}
@@ -622,12 +718,21 @@ def build_from_anatomy(graph: dict) -> RobotGene:
         # resolve the parent segment to attach to, for THIS side (same-side symmetric parent first, then a
         # shared/unmirrored parent like the body).
         if (pname, side) in leaf:
-            parent_seg = leaf[(pname, side)]
+            parent_seg, parent_key = leaf[(pname, side)], (pname, side)
         elif (pname, "") in leaf:
-            parent_seg = leaf[(pname, "")]
+            parent_seg, parent_key = leaf[(pname, "")], (pname, "")
         else:
             return  # parent not built (bad graph order) -> skip this part rather than crash
         body_attached = parent_seg == rname
+        # A STATION ON A NON-ROOT PARENT (see `_station_on_chain`). Resolved BEFORE the emit loop because it can
+        # re-point the parent onto an INTERMEDIATE link of the parent's chain -- the whole difference between a
+        # trunk that carries limbs along its length and one that can only carry them off its tail.
+        station_offset = None
+        if not body_attached and isinstance(part.get("attach"), dict):
+            _st = _station_on_chain(chain_of.get(parent_key) or [], part["attach"], sign_y,
+                                    lambda nm: world_R.get(nm, np.eye(3)))
+            if _st is not None:
+                parent_seg, station_offset = _st
         role = str(part.get("role") or "limb").lower()
         size = float(part.get("size") or 0.12)
         girth = float(part.get("girth") or 0) or 0.18 * size
@@ -675,12 +780,18 @@ def build_from_anatomy(graph: dict) -> RobotGene:
         seg_len = size / n if n > 1 else size
         prev = parent_seg
         prev_world_R = world_R.get(parent_seg, np.eye(3))
+        built_links: list = []
+        # DISTAL TAPER IS A LIMB FACT, NOT A BODY FACT. 0.82 per link thins a 4-link leg to 0.55x by the foot,
+        # which is right: a limb carries less load the further out it goes. A TRUNK is not cantilevered off
+        # anything, so the same rule turns an 8-link segmented body into a cone (0.82**7 = 0.25x) — a tail, not
+        # a torso. Body-axis links taper only gently, head to tail, the way a real segmented animal does.
+        _taper = 0.97 if role in _BODY_AXIS_ROLES else 0.82
         for i in range(n):
             last = i == n - 1
             is_foot = role == "leg" and last and n > 1     # only a walking leg receives a foot
             seg_role = ("foot" if is_foot else role)
             is_wheel = seg_role == "wheel"
-            g_i = girth * (0.82 ** i)
+            g_i = girth * (_taper ** i)
             geo, length_m, radius_m = _role_geometry(seg_role, seg_len * (1.0 if not last or n == 1 else 0.6), g_i,
                                                      authored=(seg_role == role))
             geo = _apply_detail(geo, detail, length_m, g_i, part_chamfer)
@@ -758,6 +869,8 @@ def build_from_anatomy(graph: dict) -> RobotGene:
                     else:
                         ay = sign_y * abs(pdim["half_w"]) * 0.9 if sign_y else ay
                         mount_offset = (ax, ay, az - pdim["length_m"])
+                elif station_offset is not None:
+                    mount_offset = station_offset    # an addressed station along a non-root parent's chain
                 else:
                     mount_offset = (0.0, 0.0, 0.0)   # attach at the parent segment's tip
             elif is_foot:
@@ -863,11 +976,13 @@ def build_from_anatomy(graph: dict) -> RobotGene:
                     pose[f"{seg_name}_joint"] = curl / (n - 1)
                 else:
                     pose[f"{seg_name}_joint"] = 0.0
+            built_links.append((seg_name, float(length_m), float(max(0.006, radius_m))))
             prev = seg_name
             prev_world_R = seg_world_R
         # register this part's chain tip under its ORIGINAL name + side, so a child (e.g. a foot) referencing
         # the part by name resolves to the correct side's leaf segment.
         leaf[(part.get("name") or base_name, side)] = prev
+        chain_of[(part.get("name") or base_name, side)] = built_links
 
     for part in parts:
         if part is root:
@@ -1026,6 +1141,100 @@ def _generic_legged_graph(*, n_pairs: int, body=0.58, girth=0.13, leg=0.42, tail
                         "quadruped" if n_legs_total == 4 else "legged"))
     return {"robot_class": body_class,
             "name": "creature", "parts": parts}
+
+
+# A RIGID trunk offers five longitudinal stations (front / front_mid / mid / rear_mid / rear), so it can carry
+# at most four leg pairs before they start colliding at one anchor -- which is exactly where
+# `_generic_legged_graph`'s layout table stops. Past that the trunk itself has to articulate. This is a
+# STRUCTURAL capacity rule, not a species: a hexapod and an octopod are unaffected, and a 14-legged request is
+# segmented whether the prompt said "centipede", "millipede" or "fourteen-legged".
+RIGID_TRUNK_MAX_PAIRS = 4
+# ... and a chain is bounded above too, by the appendage discovery that has to read the result:
+# ``appendage_map.main_paths`` recurses past a branching one-token stub with ``depth < 8``, so a trunk deeper
+# than 8 links stops being descended and the leg pairs hanging off its tail silently stop being found as legs.
+SEGMENTED_MAX_PAIRS = 8
+
+
+def _segmented_crawler_graph(*, n_pairs: int, seg_len: float = 0.092, seg_width: float = 0.055,
+                             leg: float = 0.280, leg_girth_mult: float = 1.0) -> dict:
+    """A SEGMENTED CHAIN-WITH-LEGS: a head block, an articulated trunk of ``n_pairs`` body-axis links, and one
+    leg pair mounted at the middle of EACH link. The second body plan this compiler can express, and the one a
+    many-legged body actually needs.
+
+    NOT A CENTIPEDE FUNCTION. It takes a pair count and nothing else about any animal; the caller decides when
+    a request needs more leg stations than a rigid trunk has (``RIGID_TRUNK_MAX_PAIRS``). The same plan is what
+    a modular snake-robot-with-feet, a caterpillar, an articulated pipe crawler or a bogied train is: repeated
+    identical modules along a flexing spine. What makes it possible at all is the station attach
+    (``_station_on_chain``) -- without it every pair would weld to the trunk's last link at one point, which is
+    precisely how "centipede" used to compile.
+
+    The trunk hinges in YAW (local +x is vertical for a level link, so a hinge about it swings side to side),
+    which is how a long body steers and how a segmented animal actually flexes as it walks; the range is kept
+    narrow so the chain cannot fold back on itself and knot.
+    """
+    n = max(2, min(SEGMENTED_MAX_PAIRS, int(n_pairs)))
+    head = 1.15 * seg_len
+    parts = [
+        # named "forebody", not "head": ``morphology_priors`` reads any segment whose NAME contains "head" as a
+        # sensor head and compares its extent to the trunk, so a root module called "head" was measured against
+        # itself and failed its own gate at 1.33x. This part is the front BODY module, which is what it is.
+        {"name": "forebody", "role": "body", "size": round(head, 4), "girth": round(2.0 * seg_width, 4),
+         "aspect": "wide"},
+        {"name": "antenna", "role": "antenna", "parent": "forebody", "attach": "front_top", "aim": "forward_up",
+         "size": round(1.1 * seg_len, 4), "girth": round(0.16 * seg_width, 4), "symmetry": "left_right"},
+        {"name": "trunk", "role": "segment", "parent": "forebody", "attach": "rear_mid", "aim": "back",
+         "size": round(n * seg_len, 4), "girth": round(seg_width, 4), "segments": n,
+         "joint": "revolute", "axis": [1.0, 0.0, 0.0], "lower": -0.35, "upper": 0.35, "detail": "paneled"},
+    ]
+    for i in range(n):
+        parts.append({
+            "name": f"leg{i + 1}", "role": "leg", "parent": "trunk",
+            # the MIDDLE of link i, on both flanks, just below the body's mid-height: one pair per body segment.
+            "attach": {"along": (i + 0.5) / n, "lateral": 1.0, "height": 0.30},
+            "aim": "down_out", "size": leg, "girth": round(0.045 * leg * leg_girth_mult, 5),
+            "segments": 4, "symmetry": "left_right", "joint": "revolute"})
+    return {"robot_class": "legged", "name": "segmented_crawler", "parts": parts}
+
+
+def segmented_crawler_gene(n_legs: int, prompt: str = ""):
+    """A many-legged body as a SEGMENTED CHAIN. Returns a ``RobotGene``, or ``None`` if it does not build.
+
+    This is the offline answer for any request whose leg count exceeds what a rigid trunk can station
+    (``RIGID_TRUNK_MAX_PAIRS``). It used to be answered by the radial spider archetype at the requested leg
+    count -- 14 legs fanned around one 75 mm disc -- which is a body plan no many-legged animal or machine has
+    and which gave the metachronal wave gait no fore-aft leg ordering to work with.
+
+    Odd counts round DOWN to whole pairs here, deliberately: a segmented body is built out of modules and a
+    module carries a pair. The count actually built is reported by the caller's coercion note.
+    """
+    from virturoid.services.animal_proportions import size_scale
+    from virturoid.services.morphology_priors import body_proportions
+    ask = body_proportions(prompt or "")
+    s, _ = size_scale(prompt or "")
+    pairs = max(2, min(SEGMENTED_MAX_PAIRS, int(n_legs) // 2))
+    # THE LEG LENGTH IS A CLEARANCE BUDGET, NOT A LOOK. A real centipede's legs are ~0.12x its body length,
+    # and at that ratio the shipped many-leg wave gait cannot walk this body: `crawl_gait_rollout` caps
+    # ``knee_amp`` at 0.35 for a >=10-leg body, so foot lift is about 0.35 x the shank, and on a 0.165 m leg
+    # (shank 0.041) that is 14 mm — less than the auto foot pad's own thickness, so the feet never clear.
+    # Swept on the grounded body at 1500 steps: leg 0.165 -> 0.118 m travelled, 0.28 -> 0.179 m, 0.34 -> 0.124 m
+    # (past 0.28 the actuator mass grounding adds outruns the extra reach: 57 kg -> 83 kg). 0.28 it is, which
+    # puts the foot span at 2.9x the body width — house-centipede (Scutigera) proportions rather than
+    # Scolopendra's, and the leggier of the two is the one that can actually be driven.
+    try:
+        g = build_from_anatomy(_segmented_crawler_graph(
+            n_pairs=pairs,
+            seg_len=round(0.092 * ask["torso"] * s, 4),
+            seg_width=round(0.055 * ask["girth"] * s, 4),
+            leg=round(0.280 * ask["leg"] * s, 4),
+            leg_girth_mult=ask["thick"]))
+    except Exception:  # noqa: BLE001
+        return None
+    if g.validate():
+        return None
+    g.composition_notes = [
+        f"Segmented body plan: {pairs} articulated trunk links, one leg pair on each ({2 * pairs} legs). "
+        "A rigid trunk carries at most 4 pairs, so the trunk itself articulates."]
+    return g
 
 
 # A walker prompt = a named legged MORPHOLOGY (quadruped/hexapod/…) OR locomotion INTENT (walk/trot/gait/…).

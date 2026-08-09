@@ -35,11 +35,19 @@ _GROUNDING_MARGIN = 1.3
 class BomLine:
     part: str
     category: str                    # actuator | material | camera | lidar | imu | force_torque | compute |
-    #                                  power | wheel | drive_motor | gripper
+    #                                  power | wheel | drive_motor | gripper | balance_of_system
     qty: int
     unit_mass_kg: float
     unit_price_usd: float
     detail: str
+    #: Does this line's mass ADD to the robot, or is this part already inside another line's mass?
+    #:
+    #: It is not always a new part. On an IMPORTED robot the link masses are the manufacturer's and already
+    #: contain that machine's motors; our actuator lines are catalog EQUIVALENTS for hardware the customer
+    #: already owns, so adding them again claimed a real Unitree G1 -- 33.341 kg, preserved verbatim -- weighs
+    #: 94.176 kg. The line still ships (you need the part number, the torque and the price); it just does not
+    #: get counted a second time, and ``totals.mass_note`` says so.
+    in_mass_total: bool = True
 
     @property
     def mass_kg(self) -> float:
@@ -808,15 +816,23 @@ def build_bom(gene: RobotGene, *, capabilities=None, task: str = "", pins: dict 
 
     # 2) STRUCTURE — resolve each part's material for the TASK, then one line PER material actually used
     # (a coloured shell, an aluminium/steel/carbon skeleton, metal hands/feet) with its links + mass + cost.
+    # A MATERIAL LINE IS THE RAW STOCK A FABRICATOR BUYS, not the finished link. This summed ``s.mass_kg``,
+    # which on a grounded body is structure + the motor grounding folded into it (and, after
+    # ``embody_component_masses``, the battery and compute too) -- while every one of those parts ALSO has its
+    # own line above. So the same hardware was billed twice and the totals were fiction: an authored horse
+    # simulated at 15.951 kg carried a 29.212 kg parts list, 10.410 kg of it its own motors counted again.
+    # ``structural_link_masses`` subtracts exactly what was folded in, per link, and floors at zero.
     ensure_materials(gene)
     refine_materials_for_task(gene, task)
+    from virturoid.services.grounded_physics import structural_link_masses
+    struct_kg = structural_link_masses(gene)
     groups: dict = {}
     for s in gene.segments:
         m = _material_for_key(s.material)
         if m is None:
             continue
         g = groups.setdefault(m.name, [m, 0.0, 0])
-        g[1] += s.mass_kg
+        g[1] += float(struct_kg.get(s.name, s.mass_kg))
         g[2] += 1
     for mname, (m, mass, cnt) in sorted(groups.items(), key=lambda kv: -kv[1][1]):
         lines.append(BomLine(mname, "material", cnt, round(mass / max(1, cnt), 4),
@@ -895,10 +911,41 @@ def build_bom(gene: RobotGene, *, capabilities=None, task: str = "", pins: dict 
         if pc is not None:
             lines.append(BomLine(pc.name, pc.category, pqty, pc.mass_kg, pc.price_usd, f"{pc.spec} - {pdetail}"))
 
+    # 8) THE BALANCE OF SYSTEM THAT HAS NO PART NUMBER — wiring harness, fasteners, covers. It is on the body
+    # (``grounded_physics._apply_balance_of_system`` puts it on the trunk so the class band is met), so a parts
+    # list that omits it cannot add up to the robot the customer will lift. Priced at zero and labelled an
+    # ESTIMATE, because pretending to a price would be the same invention one level along.
+    bos_kg = sum(float(v or 0.0) for v in
+                 (((gene.metadata or {}).get("embodied_mass") or {}).get("balance_of_system_kg") or {}).values())
+    if bos_kg > 1e-6:
+        lines.append(BomLine("Wiring, fasteners and covers (estimate)", "balance_of_system", 1,
+                             round(bos_kg, 4), 0.0,
+                             "NOT a part number: the residue of a finished machine that this parts list does "
+                             "not itemise, carried on the trunk so the simulated mass matches the built mass"))
+
+    # ONE PART, COUNTED ONCE. On an imported robot the link masses are the manufacturer's and already contain
+    # that machine's motors, so our actuator lines are equivalents for hardware the customer already owns.
+    preserved = str((gene.metadata or {}).get("mass_source") or "") == "source_model"
+    if preserved:
+        for ln in lines:
+            if ln.category == "actuator":
+                ln.in_mass_total = False
+                ln.detail += (" - EQUIVALENT for a motor already fitted to your robot; its mass is already "
+                              "inside your model's link masses and is not added again")
+
     # TOTALS. ``est_power_w`` IS ``power_budget.total_draw_w`` and IS the number the power line was sized against —
     # one figure, quoted in three places, instead of three figures quoted once each.
-    total_mass = round(sum(ln.mass_kg for ln in lines), 3)
+    total_mass = round(sum(ln.mass_kg for ln in lines if ln.in_mass_total), 3)
     total_price = round(sum(ln.price_usd for ln in lines), 2)
+    _embodied = ((gene.metadata or {}).get("embodied_mass") or {}).get("component_kg") or {}
+    mass_note = ("every part counted once: material lines are STRUCTURE only (the motors, electronics and "
+                 "balance of system folded into the link masses are billed on their own lines)")
+    if preserved:
+        mass_note = ("your robot's own per-link masses, plus the parts this list proposes ADDING. The actuator "
+                     "lines are catalog equivalents for motors already fitted and are not counted again")
+    elif not _embodied:
+        mass_note += ("; the simulated body does NOT yet carry the sensors, compute or power below — call "
+                      "grounded_physics.embody_component_masses to bolt them on")
     return {
         "robot_class": gene.robot_class,
         "dof": len(joints),
@@ -908,7 +955,7 @@ def build_bom(gene: RobotGene, *, capabilities=None, task: str = "", pins: dict 
         "power_budget": budget.to_dict(),
         "lines": [asdict(ln) | {"mass_kg": ln.mass_kg, "price_usd": ln.price_usd} for ln in lines],
         "totals": {"line_items": len(lines), "actuators": len(joints), "mass_kg": total_mass,
-                   "price_usd": total_price, "est_power_w": budget.total_w},
+                   "price_usd": total_price, "est_power_w": budget.total_w, "mass_note": mass_note},
         "cost_drivers": _cost_drivers(lines, total_price),
         **({"pins": {"applied": pins_applied, "rejected": pins_rejected}} if (pins_applied or pins_rejected) else {}),
         "note": ("Representative real-world components (manufacturer datasheets, ~2024); verify exact specs "
@@ -1023,7 +1070,12 @@ def build_bom_from_genome(genome: dict, *, task: str = "", capabilities=None) ->
             "actuator_policy": actuator_policy, "power_budget": budget.to_dict(),
             "lines": [asdict(ln) | {"mass_kg": ln.mass_kg, "price_usd": ln.price_usd} for ln in lines],
             "totals": {"line_items": len(lines), "actuators": len(joints), "mass_kg": total_mass,
-                       "price_usd": total_price, "est_power_w": budget.total_w},
+                       "price_usd": total_price, "est_power_w": budget.total_w,
+                       # Same key as ``build_bom``, so both paths' totals answer the same question. No double
+                       # count to correct for here: the material line is a 0.35 kg/link ESTIMATE, not a sum of
+                       # finished link masses, because a template genome's links carry no mass at all.
+                       "mass_note": ("every part counted once; the structure line is a 0.35 kg/link estimate, "
+                                     "not a measured body — a template genome carries no link masses")},
             "cost_drivers": _cost_drivers(lines, total_price),
             "note": ("Template-path BOM derived from the genome's joint effort limits + class suite. "
                      "Structural masses are estimates; gene-path packages carry measured link masses.")}

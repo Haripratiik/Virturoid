@@ -273,7 +273,7 @@ def grounding_config(gene: RobotGene) -> dict:
     }
 
 
-def ground_and_repair(gene: RobotGene) -> dict:
+def ground_and_repair(gene: RobotGene, *, task: str = "") -> dict:
     """GROUND a body to real actuators + material mass, then structurally repair under-margined links and
     re-ground so mass tracks the fix. This is the SINGLE grounding path both exit doors share -- the
     package builder (``build_gene_package``) and the agent's ``export_held`` -- so one prompt ships the SAME
@@ -387,6 +387,26 @@ def ground_and_repair(gene: RobotGene) -> dict:
             pass
     except Exception as _ge:  # noqa: BLE001
         report = {"error": f"{type(_ge).__name__}: {_ge}"}
+    # ...AND THEN BOLT ON THE PARTS THE PARTS LIST ALREADY SPECIFIES. Grounding gives a link its structure and
+    # its motor; the battery, the compute and the sensors were still weightless, so the verdict, the actuator
+    # sizing and the torque margins were all signed against a body lighter than the machine the customer would
+    # build (MEASURED: an authored hexapod 15.043 kg simulated vs 17.894 kg of real parts, 19%). It runs LAST,
+    # after every re-ground above, because a re-ground re-derives link masses and would drop what it added --
+    # and it declines outright on an imported body, whose manufacturer masses already include their own
+    # electronics. Fail-open, like everything else here: a parts list that cannot be built is reported.
+    #
+    # ``task`` MATTERS HERE and must be the one the shipped parts list is built with. The sensor suite is
+    # task-adaptive -- a navigator gets a LiDAR, an inspector a thermal camera -- so embodying against a
+    # task-neutral BOM and then shipping ``_emit_bom(task=prompt)`` puts different hardware in the two, and the
+    # sim/BOM equality this exists to establish quietly fails by the difference (measured on a warehouse rover:
+    # 0.655 kg of LiDAR and drive hardware the body never carried).
+    try:
+        from virturoid.services.grounded_physics import embody_component_masses
+        _emb = embody_component_masses(gene, task=task)
+        if isinstance(report, dict):
+            report["component_embodiment"] = _emb
+    except Exception:  # noqa: BLE001 - embodiment is a fidelity pass, never a build blocker
+        pass
     if isinstance(report, dict):
         report["geometry_preserved"] = _hold_shape
         report.update(_findings)
@@ -412,7 +432,7 @@ def build_gene_package(gene: RobotGene, prompt: str, output_dir: Path, scene_cou
     composed gene (no genome->gene reconstruction), so the gate scores exactly the robot that was built.
     """
     output_dir = Path(output_dir)
-    _ground_report = ground_and_repair(gene)
+    _ground_report = ground_and_repair(gene, task=prompt)
     try:                                                   # persist grounding + the executable-on-BOM certificate
         import json as _json
         _rep_dir = output_dir / "reports"

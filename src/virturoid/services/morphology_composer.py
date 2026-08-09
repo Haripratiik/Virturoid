@@ -1116,7 +1116,14 @@ def _fallback_gene(prompt: str, heuristic_spec: dict, *, target_height_m: float 
     novel = novel_archetype_gene(prompt)
     if novel is not None:
         novel.design_source = "archetype"
-        novel.composition_notes = ["Deterministic archetype selected for a supported specialist body plan."]
+        # DO NOT CLOBBER A BUILDER'S OWN ACCOUNT OF WHAT IT BUILT. This used to overwrite unconditionally, which
+        # was harmless while every builder here was a silent named archetype and became wrong the moment one of
+        # them stopped being one: a many-legged request now routes to the general compiler's SEGMENTED plan,
+        # which reports how many trunk links and leg pairs it chose and WHY (a rigid trunk stations at most
+        # four pairs) -- and that, the only sentence explaining the body's structure, was being replaced by
+        # "a supported specialist body plan".
+        if not novel.composition_notes:
+            novel.composition_notes = ["Deterministic archetype selected for a supported specialist body plan."]
         return novel
     try:
         from virturoid.services.anatomy_compiler import generic_creature_gene

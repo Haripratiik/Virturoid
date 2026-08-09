@@ -241,5 +241,20 @@ def test_the_spec_sheet_does_not_deny_a_certificate_it_is_reading():
     assert "DOES carry a verification certificate" in void["note"]
     assert "VOID" in void["note"] and void["certificate_valid"] is False
 
-    good = _mass_breakdown(totals, facts, {"valid": True, "model_sanity": {"ok": True, "total_mass_kg": 2.0}})
-    assert good["as_built_over_simulated"] == 2.57 and "SIMULATED body" in good["note"]
+    # A certificate that DID produce a simulated mass. The property is the same one -- the note may not talk as
+    # if the certificate were absent -- plus the reason the note exists at all: a reader must be able to tell
+    # WHICH of the two masses the verdict was signed on. Assert those facts, not the sentence that carries
+    # them: this line previously pinned the literal phrase "SIMULATED body" and went red when the note was
+    # reworded to name the two masses outright, which is strictly more informative, not less.
+    for cert, ratio in ((({"valid": True, "model_sanity": {"ok": True, "total_mass_kg": 2.0}}), 2.57),
+                        # ...and the same-robot case, where parts and simulated body agree. It is a separate
+                        # branch of the note, so it can deny the certificate independently of the one above.
+                        (({"valid": True, "model_sanity": {"ok": True, "total_mass_kg": 5.146}}), 1.0)):
+        good = _mass_breakdown(totals, facts, cert)
+        assert good["as_built_over_simulated"] == ratio
+        assert good["simulated_body_kg"] == cert["model_sanity"]["total_mass_kg"]
+        assert "no verification certificate" not in good["note"], (
+            "the sheet is denying the certificate it just read")
+        # Both masses named, so the ratio is checkable and the verdict's own mass is not left implicit.
+        assert str(cert["model_sanity"]["total_mass_kg"]) in good["note"] and "5.146" in good["note"], (
+            f"the note must say which mass the verdict was measured on: {good['note']!r}")

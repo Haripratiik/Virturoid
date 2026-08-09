@@ -1240,6 +1240,100 @@ def default_gait_for(gene) -> dict:
             "kd": round(min(18.0, max(1.0, 1.5 * stiff)), 3)}
 
 
+def _foot_geom_id(model, data, tip_body: int):
+    """The geom that IS the foot: the lowest-riding geom on the leg's tip body, resolved ONCE at rest so the
+    same physical point is tracked across a probe.
+
+    Chosen over the tip body's frame ORIGIN because the origin is not the foot and measurably is not: a
+    revolute joint's anchor frequently coincides with the frame origin of the body it drives, in which case
+    rotating that joint moves ``xpos[tip_body]`` by exactly zero. MEASURED on a real Menagerie Go2 -- probing
+    ``FL_calf_joint`` by +-0.3 rad moved the tip body's origin (+0.0000, +0.0000, +0.0000) m while the foot
+    geom on that same body swept 0.041 m vertically. Anything that ranks joints by their effect on the foot
+    and reads the origin is reading a column of zeros."""
+    gs = [gi for gi in range(int(model.ngeom)) if int(model.geom_bodyid[gi]) == int(tip_body)]
+    if not gs:
+        return None
+    return min(gs, key=lambda gi: float(data.geom_xpos[gi][2]))
+
+
+def lift_joint_for_leg(model, data, qadr, act_u, leg, hip_tok: int, *, delta: float = 0.3):
+    """WHICH JOINT ON THIS LEG ACTUALLY LIFTS THE FOOT -- by measured kinematic role, not by depth index.
+
+    THE DEFECT THIS REPLACES. The rule was ``knee_k = stride[-1]``: take the DEEPEST fore-aft joint. On a
+    two-link animal leg (abduction + hip + knee) that is the knee and it is right, because after the hip is
+    spoken for there is exactly ONE fore-aft joint left and no choice is being made at all. On a three-joint
+    humanoid leg (hip-pitch + knee + ankle-pitch) the deepest fore-aft joint is the ANKLE PITCH, so the gait
+    drove the ankle and left the KNEE frozen at its PD default. MEASURED on a real Menagerie Unitree G1: the
+    crawl actuated 4 of 29 DOF and held 25 rigid -- both knees, both hip-rolls (its only lateral-balance
+    authority) and both ankle-rolls -- which is visible in the render as legs that stay rigid poles through
+    the whole fall.
+
+    THE RULE. Among the leg's fore-aft (stride/lift) joints, the hip is already committed to striding, so the
+    lift joint is whichever of the REMAINING fore-aft joints has the most FOOT-RAISE AUTHORITY: perturb it
+    +-``delta`` rad off the rest pose and take the best vertical excursion of the foot contact point, per
+    radian. Ties break toward the deeper joint, so the result is deterministic. Abduction joints are not
+    candidates -- the crawl deliberately holds them for lateral balance ("hips stride fore-aft; knee lifts;
+    abduction held") and on a fanned quad the abduction has MORE vertical authority than the knee, so a rule
+    that scored every joint would hand the gait the stance width and roll the body over.
+
+    THE BLAST RADIUS IS STRUCTURAL, NOT INCIDENTAL. With one candidate the pick is forced, so this returns the
+    same token the depth rule did, byte for byte. Swept over the legged MuJoCo Menagerie: all EIGHT quadrupeds
+    (Go2, Go1, A1, ANYmal B, ANYmal C, Spot, Barkour v0, Barkour vB) have exactly one fore-aft candidate per
+    leg and are untouched; the NINE bipeds/humanoids (G1, H1, Talos, Cassie, Booster T1, Fourier N1, Berkeley
+    Humanoid, Adam Lite, OP3) have two or three, and the pick MOVES on five of the seven measured -- G1, H1 and
+    OP3 to the knee, Booster T1, Fourier N1 and Adam Lite to the shank/shin, Talos to leg_4 (its knee).
+
+    IT DOES NOT ALWAYS MOVE, AND THAT IS THE POINT OF MEASURING RATHER THAN RENAMING. On Cassie the distal
+    ``tarsus`` wins on its merits (0.389 m/rad of foot raise against the knee's 0.204) -- Cassie's foot hangs
+    off a four-bar and the tarsus is the segment that carries it, so the depth rule happened to be right there.
+    Berkeley Humanoid keeps its ankle too, but only 1.23x over its knee (0.069 vs 0.056), which is close enough
+    that it should be re-examined if that body ever matters.
+
+    THIS IS NOT A BIPED WALK FIX and must not be sold as one. A counterfactual sweep (729 operating points x 3
+    arms) measured the true-knee pick at best alive 1174 steps against the shipped ankle's 1018 -- +15%
+    survival and still no walk. Re-measured end to end here at each body's own fitted operating point, the G1
+    goes 450 -> 521 steps alive and the H1 642 -> 592, and BOTH still print CROUCH. It is here because a
+    controller that holds a customer's knees rigid is wrong on its own terms.
+
+    Returns ``(token, disclosure)``; ``disclosure`` is None when no choice was available."""
+    import mujoco
+
+    stride = list(leg.stride_tokens)
+    depth_pick = (stride[-1] if len(stride) >= 2
+                  else (leg.tokens[-1] if leg.tokens[-1] != stride[0] else stride[-1]))
+    cands = [t for t in stride if t != hip_tok]
+    if len(cands) < 2:
+        # Nothing to choose between. One fore-aft joint below the hip -> it IS the lift joint; none at all
+        # (a RADIAL spider/crab leg whose knee reads as world-x) -> the existing deepest-token fallback, which
+        # is what raises that leg's foot. Both are exactly what the depth rule returned.
+        return depth_pick, None
+    fg = _foot_geom_id(model, data, int(leg.tip_body))
+
+    def _foot_z() -> float:
+        return float(data.geom_xpos[fg][2]) if fg is not None else float(data.xpos[int(leg.tip_body)][2])
+
+    ranked = []
+    for depth, t in enumerate(cands):
+        qa = int(qadr[t]); q0 = float(data.qpos[qa]); z0 = _foot_z()
+        raise_per_rad = -1e18
+        for step in (delta, -delta):
+            data.qpos[qa] = q0 + step; mujoco.mj_forward(model, data)
+            raise_per_rad = max(raise_per_rad, (_foot_z() - z0) / abs(step))
+        data.qpos[qa] = q0; mujoco.mj_forward(model, data)
+        # The probe is UNCLAMPED by joint limits on purpose: it asks a geometric question -- is this joint's
+        # axis placed so that turning it picks the foot up -- and clamping turns it into a question about
+        # range of motion. Measured on the G1, clamping the knee to its 0.087 rad of negative travel while the
+        # ankle keeps a full 0.3 rad shrinks the knee's per-radian score ~3.4x purely because the raise is
+        # second-order in a small angle, and hands the pick straight back to the ankle.
+        ranked.append((round(float(raise_per_rad), 6), depth, int(t)))
+    ranked.sort(reverse=True)                                 # score first, then DEPTH -> a tie goes deeper
+    pick = ranked[0][2]
+    disclosure = {"picked": pick, "depth_rule_picked": int(depth_pick),
+                  "changed": bool(pick != depth_pick),
+                  "raise_per_rad": {int(t): s for (s, _d, t) in ranked}}
+    return pick, disclosure
+
+
 def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float | None = None, hip_amp: float | None = None,
                        knee_amp: float | None = None, duty: float = 0.25, kp: float | None = None,
                        kd: float | None = None, record_qpos: bool = False, frame_every: int = 5,
@@ -1282,7 +1376,17 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float | None = None, hi
 
     ``live_duty`` — make the ``duty`` argument actually reach the controller (see the note at the parameter
       defaults below: it is INERT today). ON, ``duty`` replaces the structurally-derived swing fraction. The
-      >=10-leg stability cap still applies afterwards as a ``min``, so a centipede's duty is still bounded."""
+      >=10-leg stability cap still applies afterwards as a ``min``, so a centipede's duty is still bounded.
+
+    TWO RESULT KEYS APPEAR ONLY WHEN THE BODY EARNS THEM, and both are disclosures of a decision this function
+    used to take silently:
+      * ``lift_joints`` — the leg's lift joint is NOT the deepest fore-aft joint (see
+        :func:`lift_joint_for_leg`). Present on multi-jointed legs, i.e. bipeds/humanoids; absent on every
+        quadruped, where the pick is forced.
+      * ``direction_probe`` — the wave-REVERSAL arm of the direction/frequency probe was degenerate on this
+        body, so it ran once and the freed rollouts went to a wider frequency ladder. Present on bipeds and on
+        hexapods; absent on quadrupeds and octopods.
+    A body that triggers neither gets exactly the dict it always got, key for key."""
     import math as _math
 
     import mujoco
@@ -1350,6 +1454,7 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float | None = None, hi
     xs = sorted({round(lg.tip_xy[0], 2) for lg in legs_list})
     rank_of = {x: i for i, x in enumerate(xs)}
     hip_k: dict = {}; knee_k: dict = {}; seg_of: dict = {}; is_right: dict = {}; hip_sign: dict = {}
+    lift_choice: dict = {}
     max_seg = max((rank_of[round(lg.tip_xy[0], 2)] for lg in legs_list), default=0)
     for i, lg in enumerate(legs_list):
         stride = lg.stride_tokens
@@ -1357,10 +1462,13 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float | None = None, hi
             continue
         seg_of[i] = rank_of[round(lg.tip_xy[0], 2)]; is_right[i] = 1.0 if lg.side < 0 else 0.0
         hip_k[i] = stride[0]
-        # LIFT joint: the deepest STRIDE joint normally (a proper knee); but a RADIAL leg (spider/crab) may have
-        # only ONE stride joint -> hip==knee -> no foot lift -> it crouches. Fall back to the leg's DEEPEST token
-        # (which raises the foot) so every leg gets a distinct lift joint and can step.
-        knee_k[i] = stride[-1] if len(stride) >= 2 else (lg.tokens[-1] if lg.tokens[-1] != stride[0] else stride[-1])
+        # LIFT joint: the joint that MEASURABLY raises this leg's foot, among the fore-aft joints below the hip
+        # (see `lift_joint_for_leg`). Was `stride[-1]` -- the DEEPEST fore-aft joint -- which is the knee on a
+        # two-link animal leg and the ANKLE PITCH on a three-joint humanoid leg, leaving the knee frozen.
+        # Identical to the old pick whenever the leg offers only one candidate, which is every quadruped.
+        knee_k[i], _disc = lift_joint_for_leg(model, data, qadr, act_u, lg, hip_k[i])
+        if _disc is not None and _disc["changed"]:
+            lift_choice[i] = _disc
         # PROPULSION SIGN (general, MEASURED): +stride swings the foot FORWARD (+x) on some bodies, BACK on
         # others (hexapod +0.035 vs dog -0.026). Perturb the hip, measure the foot's dx, set the sign so the
         # planted foot pushes BACKWARD during stance -> forward propulsion for every leg on any body.
@@ -1375,6 +1483,9 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float | None = None, hi
     # which contact friction breaks). The probe picks whichever actually carries the body +x.
     ph_fwd = {i: (seg_of[i] * (1.0 - beta) + 0.5 * is_right[i]) % 1.0 for i in hip_k}
     ph_rev = {i: ((max_seg - seg_of[i]) * (1.0 - beta) + 0.5 * is_right[i]) % 1.0 for i in hip_k}
+    # ... EXCEPT WHEN THE REVERSAL IS THE IDENTITY MAP, which it is on a body with one fore-aft leg station and
+    # on any hexapod. See the `_dir_collapsed` test at the direction/frequency probe below, which is where the
+    # duplicated budget was actually being spent.
     # MANY-LEG METACHRONAL CRAWL (>=10 legs, e.g. a centipede): the default phase formula CLUSTERS a long body's
     # legs into few distinct phases, so at beta=0.5 (lift_duty ~0.5) HALF the legs swing at once -> the body
     # loses support and collapses (measured: a 14-leg body stands statically but sinks in ~65 steps under the
@@ -1546,13 +1657,59 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float | None = None, hi
     # near 0, never masked). This is the scripted PRIOR; the learned residual (GEN-8) refines it further.
     if not hip_k:
         return _run(ph_fwd, freq, steps, record_qpos, turn_bias, steer_fn, rec_ctrl=record_ctrl)
+    # THE DIRECTION ARM CAN BE DEGENERATE, and when it is, half this budget used to buy nothing. Reversing the
+    # metachronal wave shifts leg `i` by `(max_seg - 2*seg_i) * (1 - beta)` cycles -- which is a WHOLE number of
+    # cycles, i.e. nothing at all, on two shapes of body that we ship:
+    #   * ONE fore-aft station (any biped, and any four-legged body whose legs sit at one x): `seg` and
+    #     `max_seg` are both 0, so `ph_rev` IS `ph_fwd` term for term. VERIFIED: a composed biped and a real
+    #     Menagerie G1 both give {0: 0.0, 1: 0.5} in "both" directions.
+    #   * an ODD number of stations at the tripod duty beta = 0.5 -- which is EVERY HEXAPOD. Three stations
+    #     means `max_seg` = 2 and `(1 - beta)` = 0.5, so the reversal shifts every leg by exactly 1.0 cycle.
+    #     This one was found by MEASURING the fix, not by reading the code: a hexapod looks like it has a wave.
+    # So two of every four probe rollouts were byte-identical re-runs, on every evaluation of such a body, and
+    # silently. Detected structurally rather than by leg count, because neither shape above IS a leg count.
+    #
+    # The freed half is spent, not saved: the frequency ladder extends from two points to four, one step of the
+    # same 1.7x ratio in each direction, so the search is a STRICT SUPERSET of the shipped one at an unchanged
+    # four rollouts. Frequency is the axis worth spending it on -- it is the one probe coordinate this gait is
+    # measurably sensitive to (a hexapod nets +0.47 m at 2.5 Hz and -0.15 m at 1.5 Hz on the same body).
+    #
+    # MEASURED BLAST RADIUS of spending it (48 body x operating-point cells, full result dicts compared):
+    # 45 byte-identical; the 3 that move are all the authored hexapod at operating points AWAY from its own
+    # fitted one, and all 3 move FORWARD (-0.098 -> +0.191 m, -0.105 -> +0.057 m, +0.015 -> +0.046 m; two are
+    # sign flips from backward to forward). At its FITTED point the hexapod is byte-identical. The cost is
+    # support: it wins those metres at a higher stride frequency, so `support_frac` falls (0.907 -> 0.577 at
+    # the shipped default) -- fewer feet planted at once. Better travel, thinner static margin, stated here so
+    # nobody has to rediscover it.
+    _dir_collapsed = all(abs(ph_fwd[i] - ph_rev[i]) < 1e-9 for i in hip_k)
+    _dirs = (ph_fwd,) if _dir_collapsed else (ph_fwd, ph_rev)
+    _fqs = ((freq / 1.7, freq, freq * 1.7, freq * 1.7 * 1.7) if _dir_collapsed else (freq, freq * 1.7))
     best_phd, best_fq, best_fwd = ph_fwd, freq, -1e9
-    for phd in (ph_fwd, ph_rev):
-        for fq in (freq, freq * 1.7):
+    for phd in _dirs:
+        for fq in _fqs:
             f = _run(phd, fq, min(350, steps), False)["forward"]   # direction/freq probe is straight (turn_bias 0)
             if f > best_fwd:
                 best_fwd, best_phd, best_fq = f, phd, fq
     out = _run(best_phd, best_fq, steps, record_qpos, turn_bias, steer_fn, rec_ctrl=record_ctrl)
+    if _dir_collapsed:
+        # SAY SO. A result that silently ran half the search it claims to have run is the defect; a result that
+        # names the arm it dropped and why is the fix. Present only on bodies where the collapse is real, so
+        # every existing consumer of a quadruped/hexapod result sees the dict it always saw, key for key.
+        out["direction_probe"] = {
+            "arms": 1,
+            "reason": (f"reversing the metachronal wave shifts every leg by a whole number of cycles on this "
+                       f"body ({len(xs)} fore-aft leg station(s) at duty beta={beta:.2f}), so the reversed "
+                       f"wave is phase-identical to the forward one -- there is no wave to reverse"),
+            "stations": int(len(xs)),
+            "beta": round(float(beta), 4),
+            "budget_spent_on": "frequency",
+            "frequencies_hz": [round(float(v), 4) for v in _fqs],
+        }
+    if lift_choice:
+        # SAY SO, likewise, when the lift joint is not the one a reader of the old code would expect.
+        out["lift_joints"] = {int(i): {"picked": int(d["picked"]),
+                                       "deepest_fore_aft": int(d["depth_rule_picked"])}
+                              for i, d in sorted(lift_choice.items())}
     if return_control_plan:
         # Freeze the measured direction/frequency probe and the structural leg
         # map.  Deployment must never repeat a physics probe: this plan is the

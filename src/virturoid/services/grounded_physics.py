@@ -54,7 +54,22 @@ class PhysicalPrior:
 # machines of these classes it is roughly a quarter of the finished mass (a ~15 kg mid-size quadruped carries
 # ~1.5 kg of battery plus compute, harness and shell), and — the point — it is a FRACTION of the robot, not a
 # constant that happens to make every robot weigh the same. See the clamp in ``ground_gene``.
+#
+# It is an ESTIMATE OF THE RESIDUE, not of the whole. Once :func:`embody_component_masses` has bolted the parts
+# list's own battery/compute/sensors onto the body, those are named parts with datasheet masses and this fraction
+# no longer has to guess at them — see ``_apply_balance_of_system``'s ``itemised_kg``, which is subtracted out so
+# the same finished mass is reached with more of it itemised and less of it estimated.
 _BALANCE_OF_SYSTEM_FRACTION = 0.25
+
+#: BOM line categories that are NOT a bolt-on component: the motors grounding already folded into their links,
+#: the raw structure the links already are, and the residual estimate this module itself applies.
+_NON_COMPONENT_CATEGORIES = frozenset({"actuator", "material", "balance_of_system"})
+
+#: Where a part physically rides. Everything not named here (battery, compute, IMU, radios) goes on the trunk,
+#: which is where it goes on every machine of these classes.
+_HEAD_CATEGORIES = frozenset({"camera", "lidar", "thermal", "depth", "microphone", "gps"})
+_WHEEL_CATEGORIES = frozenset({"wheel", "drive_motor"})
+_TIP_CATEGORIES = frozenset({"gripper", "force_torque"})
 
 _QUADRUPED_PRIOR = PhysicalPrior("legged.quadruped", (12.0, 15.0), "commercial mid-size quadruped envelope")
 _COBOT_PRIOR = PhysicalPrior("manipulator.cobot", (17.0, 21.0), "6/7-axis collaborative-arm envelope")
@@ -94,7 +109,28 @@ def physical_prior_for(gene) -> PhysicalPrior | None:
 
 
 def _required_joint_loads(gene, structural_mass: dict[str, float], *, total_mass_hint: float | None = None) -> dict[str, float]:
-    """Derive joint requirements from distal mass, lever arm and support role—not chain position."""
+    """Derive joint requirements from distal mass, lever arm and support role—not chain position.
+
+    KNOWN AND MEASURED: ``total_mass_hint`` IS NOT THE MASS OF THE FINISHED ROBOT, so a leg's support torque is
+    sized against a lighter machine than the one that will stand on it. The hint is the class band's midpoint
+    when a prior applies and ``sum(structural_mass)`` otherwise — neither contains the motors, and since
+    :func:`embody_component_masses` neither contains the battery, the compute or the sensors either. On this
+    checkout, sized-against vs finished:
+
+        two-legged robot   13.500 -> 50.089 kg   3.71x   (was 3.43x before components were embodied)
+        six-legged robot    7.273 -> 17.894 kg   2.46x   (2.07x)
+        authored horse     13.500 -> 18.849 kg   1.40x   (1.18x)
+        authored cheetah   13.500 -> 17.872 kg   1.32x   (1.11x)
+        authored dog       13.500 -> 12.791 kg   0.95x   (0.95x)
+
+    This is a BOM FINDING — those actuators are undersized for the machine — and deliberately NOT closed here.
+    Making it right means the requirement rises, a bigger motor is selected, the body gets heavier and the
+    requirement rises again; the loop terminates (``torque_req_nm`` is pinned, so a re-ground never re-reads a
+    motor's peak as a demand) but it moves every actuator, every mass and therefore every gait verdict that
+    ships today. It needs its own change with its own walk gate. The wrong answer would be to shave the body
+    back until the existing motors look adequate — see [[make-it-learn-dont-teach-it]]: a robot is not made
+    buildable by making the spec sheet agree with itself.
+    """
     by = {s.name: s for s in gene.segments}
     children: dict[str, list[str]] = {}
     for seg in gene.segments:
@@ -320,6 +356,7 @@ def ground_gene(gene, *, material: str = "aluminum", fill: float = 0.3, margin: 
     target_mass = (sum(prior.mass_band_kg) / 2.0) if prior else None
     derived_loads = _required_joint_loads(gene, structural_mass, total_mass_hint=target_mass)
     total = 0.0
+    embodied_actuator: dict[str, float] = {}
     for s in gene.segments:
         struct = structural_mass[s.name]
         act_mass = 0.0
@@ -369,6 +406,7 @@ def ground_gene(gene, *, material: str = "aluminum", fill: float = 0.3, margin: 
                             **_source_torque_note(s, keep, torque_where)})
                 if _mass_is_ours(s):
                     s.mass_kg = round(max(0.02, struct + act_mass), 3)
+                    embodied_actuator[s.name] = act_mass
                 total += s.mass_kg
                 continue
             # rated torque must cover the sustained requirement (with margin) -> thermal headroom; peak then has
@@ -383,46 +421,31 @@ def ground_gene(gene, *, material: str = "aluminum", fill: float = 0.3, margin: 
                         **_source_torque_note(s, keep, torque_where)})
         if _mass_is_ours(s):
             s.mass_kg = round(max(0.02, struct + act_mass), 3)  # grounded mass = structure + actuator
+            embodied_actuator[s.name] = act_mass
         total += s.mass_kg
+    # WHAT THIS CALL FOLDED INTO WHICH LINK, so the parts list can stop selling the same motor twice. Each
+    # ``s.mass_kg`` above is structure + its actuator, and ``bom_builder`` groups those link masses into the
+    # "material" lines while ALSO listing every motor as an actuator line -- so the BOM totals counted the
+    # actuators a second time. Measured at HEAD: an authored horse simulated at 15.951 kg had a parts list
+    # claiming 29.212 kg, of which 10.410 was its own motors billed twice; an imported Unitree G1 whose real
+    # 33.341 kg we preserve exactly shipped a 94.176 kg parts list. The ledger below is what makes each part
+    # countable once. Links whose mass this call did NOT derive are absent: nothing was folded into them here.
+    by_name = {s.name: s for s in gene.segments}
+    embodied = _embodiment_record(gene)
+    embodied["actuator_kg"] = {k: round(v, 6) for k, v in embodied_actuator.items() if v > 0.0}
+    # A re-ground REPLACED every mass it derived, so whatever ``embody_component_masses`` had bolted onto those
+    # links is gone from the body and must go from the ledger too -- otherwise the BOM would keep subtracting a
+    # battery the link no longer carries and report a negative structure.
+    for key in ("component_kg", "balance_of_system_kg"):
+        embodied[key] = {n: v for n, v in (embodied.get(key) or {}).items()
+                         if n in by_name and not _mass_is_ours(by_name[n])}
+    if not embodied.get("component_kg"):
+        embodied.pop("components", None)
+    total = sum(float(s.mass_kg) for s in gene.segments)
     balance_mass = 0.0
-    if prior and total < prior.mass_band_kg[0] and not preserve_mass:
-        lo, hi = float(prior.mass_band_kg[0]), float(prior.mass_band_kg[1])
-        # CLAMP INTO THE BAND — do not SNAP TO ITS MIDPOINT.
-        #
-        # What the band protects: a body grounded from geometry + actuators alone has no battery, no compute, no
-        # wiring, no fasteners and no covers, so it is a styrofoam twin of the robot the customer would actually
-        # build. Sizing actuators and signing a walk verdict against that mass is the split-brain this branch
-        # exists to close, and lifting an implausibly light body to the class floor still closes it.
-        #
-        # What it ALSO did, and should not have: `target = mid(band)` made the balance-of-system mass "whatever it
-        # takes to reach one number", so EVERY under-band quadruped came out at EXACTLY 13.500 kg. Measured on
-        # this checkout, the authored dog grounds to 9.593 kg of its own structure+actuators and the cat to
-        # 10.577 -- a real 1 kg difference the design earned -- and both then shipped as 13.500. A dog and a cat
-        # were literally the same robot on the spec sheet. The band was written to stop a body being too light,
-        # not to erase what the body is.
-        #
-        # So: take the balance of system as the FRACTION of finished mass it really is on a commercial machine of
-        # this class (~25%: battery, compute, harness, shell), apply it to the body's OWN grounded mass, and clamp
-        # the result into the band. Lighter body in, lighter body out; nothing escapes the floor.
-        #
-        # Known and deliberately NOT changed here: a body that grounds ABOVE the floor gets no balance-of-system
-        # mass at all, so the mapping still steps at `lo`. Fixing that means giving every prior-classed body its
-        # balance of system, which moves masses that ship today (horse 15.951, cheetah 14.974) and re-sizes their
-        # actuators. That is its own change with its own gate.
-        target = min(hi, max(lo, total / (1.0 - _BALANCE_OF_SYSTEM_FRACTION)))
-        balance_mass = max(0.0, target - total)
-        root = gene.root()
-        if root is not None:
-            root.mass_kg = round(root.mass_kg + balance_mass, 3)
-            total = sum(float(s.mass_kg) for s in gene.segments)
-            gene.metadata["physical_prior"] = {
-                "id": prior.id, "mass_band_kg": list(prior.mass_band_kg), "source": prior.source,
-                "balance_of_system_mass_kg": round(balance_mass, 3),
-                "balance_of_system_fraction": _BALANCE_OF_SYSTEM_FRACTION,
-                "own_mass_kg": round(total - balance_mass, 3),
-                "clamped_to_band": bool(target in (lo, hi)),
-                "balance_of_system": ["battery", "compute", "wiring", "fasteners", "covers"],
-            }
+    if not preserve_mass:
+        balance_mass = _apply_balance_of_system(gene, prior, own_total=total)
+        total = sum(float(s.mass_kg) for s in gene.segments)
     # RECORD WHAT THESE MASSES WERE DERIVED AT. Without this, a downstream re-ground has no way to reproduce
     # the body it was handed and simply picks its own density -- which is how export shipped a robot 30% lighter
     # than the one the customer watched walk. ``preserve_mass`` runs leave any existing record alone: the masses
@@ -444,7 +467,300 @@ def ground_gene(gene, *, material: str = "aluminum", fill: float = 0.3, margin: 
             "torque_preserved_joints": sorted(declared),
             "actuator_count": len(bom), "physical_prior": (prior.id if prior else None),
             "mass_band_kg": (list(prior.mass_band_kg) if prior else None),
-            "balance_of_system_mass_kg": round(balance_mass, 3)}
+            "balance_of_system_mass_kg": round(balance_mass, 3),
+            # The motor mass that is now INSIDE the link masses above. ``bom_builder`` subtracts it when it
+            # groups links into material lines, so a motor is billed once.
+            "actuator_mass_embodied_kg": round(sum(embodied_actuator.values()), 3),
+            # Named parts the SIM BODY still does not carry. Zero once ``embody_component_masses`` has run.
+            "component_mass_embodied_kg": round(sum((_embodiment_record(gene).get("component_kg") or {}).values()), 3)}
+
+
+def _embodiment_record(gene) -> dict:
+    """The per-link ledger of everything grounding/embodiment folded INTO a link mass, created on first use.
+
+    Three buckets, because a reader of ``sum(seg.mass_kg)`` otherwise cannot tell structure from the parts
+    bolted to it, and ``bom_builder`` cannot bill a part once:
+
+      ``actuator_kg``           the motor :func:`ground_gene` folded into the link it drives
+      ``component_kg``          the BOM's own battery/compute/sensors/wheels :func:`embody_component_masses` added
+      ``balance_of_system_kg``  the residual ESTIMATE (wiring, fasteners, covers) the class band applies
+
+    Everything left over is STRUCTURE — the material a fabricator actually buys.
+    """
+    meta = getattr(gene, "metadata", None)
+    if not isinstance(meta, dict):
+        meta = {}
+        gene.metadata = meta
+    rec = meta.get("embodied_mass")
+    if not isinstance(rec, dict):
+        rec = {}
+        meta["embodied_mass"] = rec
+    for key in ("actuator_kg", "component_kg", "balance_of_system_kg"):
+        if not isinstance(rec.get(key), dict):
+            rec[key] = {}
+    return rec
+
+
+def structural_link_masses(gene) -> dict[str, float]:
+    """``{segment: kg}`` of STRUCTURE ONLY — the link mass minus every part folded into it.
+
+    This is the number a materials line on a bill of materials means: the aluminium/carbon a fabricator buys.
+    ``sum(seg.mass_kg)`` is not that number on a grounded body — it already contains the motor, and after
+    :func:`embody_component_masses` the battery and the compute too. Billing those again under "material" is
+    how a 15.951 kg horse acquired a 29.212 kg parts list.
+
+    Floors at zero per link: :func:`ground_gene` applies a 0.02 kg minimum link mass, so a tiny link carrying a
+    0.6 kg motor would otherwise report negative structure.
+    """
+    # Deliberately READ-ONLY (no ``_embodiment_record``): this runs from ``build_bom``, which a certificate, a
+    # compliance report and a spec sheet all call on bodies they are only inspecting. A reader that quietly
+    # adds a key to the gene's metadata is a reader that changes what gets serialised into robot_genome.json.
+    rec = (getattr(gene, "metadata", None) or {}).get("embodied_mass")
+    rec = rec if isinstance(rec, dict) else {}
+    folded: dict[str, float] = {}
+    for key in ("actuator_kg", "component_kg", "balance_of_system_kg"):
+        for name, kg in (rec.get(key) or {}).items():
+            folded[str(name)] = folded.get(str(name), 0.0) + float(kg or 0.0)
+    return {s.name: max(0.0, float(s.mass_kg or 0.0) - folded.get(s.name, 0.0)) for s in gene.segments}
+
+
+def _apply_balance_of_system(gene, prior: PhysicalPrior | None, *, own_total: float,
+                             itemised_kg: float = 0.0) -> float:
+    """Put the UN-ITEMISED balance of system on the trunk and return what it added.
+
+    CLAMP INTO THE BAND — do not SNAP TO ITS MIDPOINT.
+
+    What the band protects: a body grounded from geometry + actuators alone has no battery, no compute, no
+    wiring, no fasteners and no covers, so it is a styrofoam twin of the robot the customer would actually
+    build. Sizing actuators and signing a walk verdict against that mass is the split-brain this exists to
+    close, and lifting an implausibly light body to the class floor still closes it.
+
+    What it ALSO did, and should not have: ``target = mid(band)`` made the balance-of-system mass "whatever it
+    takes to reach one number", so EVERY under-band quadruped came out at EXACTLY 13.500 kg. Measured, the
+    authored dog grounds to 9.593 kg of its own structure+actuators and the cat to 10.577 -- a real 1 kg
+    difference the design earned -- and both then shipped as 13.500. A dog and a cat were literally the same
+    robot on the spec sheet. The band was written to stop a body being too light, not to erase what the body is.
+
+    So: take the balance of system as the FRACTION of finished mass it really is on a commercial machine of this
+    class (~25%: battery, compute, harness, shell), apply it to the body's OWN grounded mass, and clamp the
+    result into the band. Lighter body in, lighter body out; nothing escapes the floor.
+
+    ``itemised_kg`` IS THE PART OF THAT FRACTION WE NO LONGER HAVE TO GUESS. Once
+    :func:`embody_component_masses` has bolted the parts list's own battery, compute and sensors onto the body,
+    those are named parts with datasheet masses sitting on real links, and continuing to estimate them as well
+    would bill them twice. The FINISHED-mass target is unchanged -- what changes is how much of it is a part
+    number and how much is still an estimate of the wiring, fasteners and covers no parts list names.
+
+    Known and deliberately NOT changed here: a body that grounds ABOVE the floor gets no estimate at all, so
+    the mapping still steps at ``lo``. Those bodies now get their ITEMISED components (see
+    :func:`embody_component_masses`), which is the half of the hole that can be closed with real numbers;
+    giving them an estimated residue as well moves masses that ship today and is its own change with its own
+    gate.
+
+    IDEMPOTENT: strips whatever a previous call put on the trunk before re-applying, so ground -> embody ->
+    ground leaves one estimate on the body, not three.
+    """
+    rec = _embodiment_record(gene)
+    by_name = {s.name: s for s in gene.segments}
+    for name, kg in list((rec.get("balance_of_system_kg") or {}).items()):
+        seg = by_name.get(str(name))
+        if seg is not None:
+            seg.mass_kg = round(max(0.001, float(seg.mass_kg or 0.0) - float(kg or 0.0)), 3)
+        own_total -= float(kg or 0.0)
+    rec["balance_of_system_kg"] = {}
+    root = gene.root()
+    if prior is None or root is None or own_total >= float(prior.mass_band_kg[0]):
+        return 0.0
+    lo, hi = float(prior.mass_band_kg[0]), float(prior.mass_band_kg[1])
+    target = min(hi, max(lo, own_total / (1.0 - _BALANCE_OF_SYSTEM_FRACTION)))
+    balance_mass = max(0.0, target - own_total - float(itemised_kg))
+    if balance_mass > 0.0:
+        root.mass_kg = round(float(root.mass_kg or 0.0) + balance_mass, 3)
+        rec["balance_of_system_kg"] = {root.name: round(balance_mass, 6)}
+    gene.metadata["physical_prior"] = {
+        "id": prior.id, "mass_band_kg": [lo, hi], "source": prior.source,
+        "balance_of_system_mass_kg": round(balance_mass, 3),
+        "balance_of_system_fraction": _BALANCE_OF_SYSTEM_FRACTION,
+        # How much of the balance of system is a PART NUMBER rather than this fraction's guess.
+        "itemised_component_mass_kg": round(float(itemised_kg), 3),
+        "own_mass_kg": round(own_total, 3),
+        "clamped_to_band": bool(target in (lo, hi)),
+        "balance_of_system": ["battery", "compute", "wiring", "fasteners", "covers"],
+    }
+    return balance_mass
+
+
+def _component_host(gene, category: str) -> str:
+    """Which LINK a bolt-on part rides on. Placement is inertia, not bookkeeping: a 2.6 kg battery put on a
+    foot is a different robot from one put on the trunk."""
+    root = gene.root()
+    root_name = root.name if root is not None else (gene.segments[0].name if gene.segments else "")
+    cat = str(category or "").lower()
+    if cat in _WHEEL_CATEGORIES:
+        wheels = [s.name for s in gene.segments if s.shape == "cylinder" and s.joint_type == "revolute"]
+        if wheels:
+            return wheels[0]
+    if cat in _TIP_CATEGORIES:
+        tip = gene.end_effector()
+        if tip is not None:
+            return tip.name
+    if cat in _HEAD_CATEGORIES:
+        head = next((s for s in gene.segments
+                     if any(w in s.name.lower() for w in ("head", "skull", "sensor", "mast", "camera"))), None)
+        if head is not None:
+            return head.name
+    return root_name
+
+
+def _align_actuator_masses(gene, bom: dict) -> float:
+    """Move each link's embodied motor mass onto the part the BOM's ``actuator_map`` actually ORDERS.
+
+    Returns the net kilograms moved. The co-design loop the mass work was parked on in 2026-07 asked for
+    exactly this direction of causality -- heavier robot -> bigger motor -> heavier robot -- and it terminates
+    here rather than spiralling because the joint's REQUIREMENT is pinned (``torque_req_nm``): re-grounding a
+    heavier body re-selects from the same requirement, never from the last motor's peak.
+    """
+    from virturoid.services.component_catalog import resolve_part
+    amap = bom.get("actuator_map")
+    if not isinstance(amap, dict) or not amap:
+        return 0.0
+    rec = _embodiment_record(gene)
+    act = rec.get("actuator_kg") or {}
+    moved = 0.0
+    by_name = {s.name: s for s in gene.segments}
+    for joint, part_name in amap.items():
+        seg = by_name.get(str(joint))
+        if seg is None or str(joint) not in act:      # not a link whose motor mass WE folded in
+            continue
+        part = resolve_part(str(part_name))
+        mass = float(getattr(part, "mass_kg", 0.0) or 0.0) if part is not None else 0.0
+        if mass <= 0.0:
+            continue
+        delta = mass - float(act[str(joint)] or 0.0)
+        if abs(delta) < 1e-9:
+            continue
+        seg.mass_kg = round(max(0.02, float(seg.mass_kg or 0.0) + delta), 3)
+        act[str(joint)] = round(mass, 6)
+        moved += delta
+    rec["actuator_kg"] = act
+    return moved
+
+
+def embody_component_masses(gene, bom: dict | None = None, *, task: str = "") -> dict:
+    """Put the parts list's OWN battery, compute, sensors, wheels and gripper ONTO the simulated body.
+
+    The gap this closes, MEASURED on this checkout before the change (per-body table in the task #211 report):
+    an authored hexapod that simulates at 15.043 kg has 2.851 kg of named electronics -- an Intel RealSense, a
+    Jetson Orin Nano, an IMU and a 2.6 kg LiPo -- that no link carries, so the walk verdict, the actuator sizing
+    and the torque margins are all signed against a robot 19% lighter than the one a customer would bolt
+    together. That is a sim-to-real gap we manufacture ourselves, and unlike the modelling gaps it is free to
+    close: every one of those parts is already in ``bom.lines`` with a datasheet mass.
+
+    IT IS NOT A CONSTANT. Each part goes on the link it physically rides on (:func:`_component_host`) -- battery
+    and compute on the trunk, cameras on a head if the body has one, wheels on the wheels, the gripper on the
+    end effector -- because a 2.6 kg pack on the trunk and the same pack on a foot are different robots.
+
+    NOT ON AN IMPORTED ROBOT. A customer's model carries their manufacturer's per-link masses, which already
+    include their battery and their compute; adding ours on top would silently re-weigh the machine they
+    handed us, which is the guarantee ``preserve_mass`` exists to keep. Those bodies get ``applied: False`` with
+    the reason, and their total is untouched (delta 0.0).
+
+    IDEMPOTENT: a previous call's components are stripped before the new ones are added, and
+    :func:`ground_gene` clears the ledger for every link whose mass it re-derived, so ground -> embody ->
+    ground -> embody converges instead of ratcheting.
+
+    Returns a disclosure dict: what was added, where, and what it did to the total. Never raises -- a parts list
+    that cannot be built is reported as ``applied: False``, never as a body that silently weighs less.
+    """
+    out: dict = {"applied": False, "reason": "", "components_kg": 0.0, "total_mass_kg": [None, None],
+                 "delta_kg": 0.0, "n_parts": 0, "parts": []}
+    try:
+        before = round(sum(float(s.mass_kg or 0.0) for s in gene.segments), 3)
+        out["total_mass_kg"] = [before, before]
+        meta = getattr(gene, "metadata", None) or {}
+        if str(meta.get("mass_source") or "") == "source_model":
+            out["reason"] = ("this robot's per-link masses are the CUSTOMER'S OWN (mass_source=source_model), "
+                             "and a manufacturer's link mass already includes that machine's battery, compute "
+                             "and sensors -- bolting ours on top would re-weigh their robot")
+            out["mass_preserved"] = True
+            return out
+        from virturoid.services.bom_builder import build_bom
+        rec = _embodiment_record(gene)
+        # REMEMBER WHICH TASK THE SUITE WAS CHOSEN FOR. ``build_bom``'s sensor selection is task-adaptive, so
+        # the same body embodied for "navigate a warehouse" and re-embodied with no task carries different
+        # hardware -- and the export door re-grounds WITHOUT a task and then compares physical fingerprints to
+        # decide whether it is shipping the body the verdict was signed on. A silent LiDAR swap there would
+        # read as "this is not the same robot". So a caller that does not say keeps the last thing that did.
+        task = str(task or rec.get("task") or "")
+        rec["task"] = task
+        by_name = {s.name: s for s in gene.segments}
+        realigned, itemised = 0.0, 0.0
+        added: dict[str, float] = {}
+        manifest: list[dict] = []
+        # RUN TO A FIXED POINT, at most twice. ``build_bom`` selects the sensor suite from the body's SIZE
+        # (``scale_kg``), so bolting 2.9 kg of hardware on can in principle move a body across a threshold and
+        # buy it a different LiDAR -- a parts list that no longer describes the body it was applied to. Measured
+        # on today's archetypes the first pass is already stable; the second exists so that a body near a
+        # threshold converges instead of alternating, and it costs one BOM build (~0.4 ms).
+        for _pass in range(2):
+            for name, kg in list((rec.get("component_kg") or {}).items()):    # undo the previous pass first
+                seg = by_name.get(str(name))
+                if seg is not None:
+                    seg.mass_kg = round(max(0.02, float(seg.mass_kg or 0.0) - float(kg or 0.0)), 3)
+            rec["component_kg"], rec["components"] = {}, []
+            if bom is None:
+                bom = build_bom(gene, task=task)
+            # THE BODY CARRIES THE MOTOR THE PARTS LIST ORDERS. ``ground_gene`` sizes each joint on its own and
+            # folds THAT motor's mass into the link; ``bom_builder._standardize_actuators`` then rolls small
+            # groups up onto fewer part numbers, and a roll-up only ever goes UP. So the robot a customer
+            # procures is slightly heavier than the one sizing embodied -- measured: an authored horse 10.363 kg
+            # of fitted motors against a 10.410 kg parts list, a 6-axis arm 1.658 against 1.978 (+19%). Small,
+            # and exactly the kind of unexplained residue that makes "sim == BOM" a slogan instead of a check.
+            realigned += _align_actuator_masses(gene, bom)
+            added, manifest = {}, []
+            for ln in (bom.get("lines") or []):
+                if str(ln.get("category") or "") in _NON_COMPONENT_CATEGORIES:
+                    continue
+                try:
+                    kg = float(ln.get("mass_kg") or 0.0)
+                except (TypeError, ValueError):
+                    continue
+                if not (math.isfinite(kg) and kg > 0.0):
+                    continue
+                host = _component_host(gene, str(ln.get("category") or ""))
+                if host not in by_name:
+                    continue
+                added[host] = added.get(host, 0.0) + kg
+                manifest.append({"part": str(ln.get("part") or ""), "category": str(ln.get("category") or ""),
+                                 "qty": int(ln.get("qty") or 1), "mass_kg": round(kg, 4), "link": host})
+            for host, kg in added.items():
+                by_name[host].mass_kg = round(float(by_name[host].mass_kg or 0.0) + kg, 3)
+            rec["component_kg"] = {n: round(v, 6) for n, v in added.items()}
+            rec["components"] = manifest
+            itemised = sum(added.values())
+            # The estimate and the itemised parts are two readings of the SAME quantity. Re-strike the estimate
+            # so the finished mass is reached with more part numbers in it and less guesswork -- see
+            # ``_apply_balance_of_system``. ``own_total`` is passed WITH any previous estimate still in it; the
+            # helper strips its own record.
+            own = sum(float(s.mass_kg or 0.0) for s in gene.segments) - itemised
+            _apply_balance_of_system(gene, physical_prior_for(gene), own_total=own, itemised_kg=itemised)
+            recheck = build_bom(gene, task=task)
+            if abs(sum(float(ln.get("mass_kg") or 0.0) for ln in (recheck.get("lines") or [])
+                       if str(ln.get("category") or "") not in _NON_COMPONENT_CATEGORIES) - itemised) < 1e-6:
+                break
+            bom = recheck                            # the suite moved with the mass -- settle on the new one
+        after = round(sum(float(s.mass_kg or 0.0) for s in gene.segments), 3)
+        out.update({"applied": True, "components_kg": round(itemised, 3), "n_parts": len(manifest),
+                    "parts": manifest, "total_mass_kg": [before, after], "delta_kg": round(after - before, 3),
+                    "hosts": {n: round(v, 3) for n, v in sorted(added.items())},
+                    "actuator_realigned_kg": round(realigned, 3),
+                    "reason": (f"{len(manifest)} parts from the bill of materials ({round(itemised, 3)} kg of "
+                               f"battery, compute, sensors and drive hardware) now ride on the links that "
+                               f"carry them, so the simulated body weighs what the built robot weighs")})
+    except Exception as exc:  # noqa: BLE001 - a body that cannot be embodied is reported, never silently light
+        out["reason"] = f"{type(exc).__name__}: {exc}"
+        out["error"] = True
+    return out
 
 
 def _source_torque_note(seg, keep: float, where: dict) -> dict:

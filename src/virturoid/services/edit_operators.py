@@ -163,6 +163,13 @@ def _reground_and_gate(gene, *, material: str, original=None, respec=None) -> di
                         derive_mass_links=derive)
         else:
             ground_gene(gene, material=material, fill=0.25)
+            # ...and put the parts list's own battery/compute/sensors back on. A re-ground re-derives every
+            # link mass from geometry + motor, which DROPS what ``embody_component_masses`` had bolted on, so
+            # without this an amend quietly took ~2.9 kg of real hardware off the robot and the mass ledger
+            # below would report the loss as if the customer's edit had caused it. Skipped on a preserved body
+            # for the same reason embodiment declines there: those masses are the manufacturer's.
+            from virturoid.services.grounded_physics import embody_component_masses
+            embody_component_masses(gene)
     except Exception:  # noqa: BLE001 - grounding is value-add; a mutated gene can still be scored/rendered
         pass
     issues = gene.validate()

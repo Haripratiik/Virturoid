@@ -206,8 +206,14 @@ def test_spec_sheet_markdown_prints_the_reason_not_the_word_none():
 
 
 def test_spec_sheet_separates_as_built_mass_from_the_mass_the_verdict_was_measured_at():
-    """The BOM's 14.9 kg includes motors and electronics; the certified body is the 6.4 kg of structure.
-    Printing one number implies the robot was verified at a mass it will never have."""
+    """A package whose parts list is 2.33x its verified body must say so with both numbers.
+
+    This fixture is the DIVERGENT case, which since task #211 means one of two things: an imported robot (the
+    simulated body is the customer's own machine and the parts list is that machine plus what the BOM proposes
+    adding) or a body whose parts changed without a re-ground. Either way, printing one number implies the
+    robot was verified at a mass it will never have. On a body we compose the two now agree; that case is
+    covered in ``tests/test_mass_embodiment.py``.
+    """
     with tempfile.TemporaryDirectory() as tmp:
         d = _make_package(tmp, bom_rel="bom.json")
         (d / "verification_certificate.json").write_text(json.dumps(_certificate()), encoding="utf-8")
@@ -217,7 +223,9 @@ def test_spec_sheet_separates_as_built_mass_from_the_mass_the_verdict_was_measur
     assert mb["structure_only_kg"] == 6.4
     assert mb["simulated_body_kg"] == 6.4
     assert mb["as_built_over_simulated"] == 2.33
-    assert "SIMULATED" in mb["note"]
+    # both masses named in the prose, not just in the fields above it
+    assert "6.4 kg" in mb["note"] and "14.9 kg" in mb["note"]
+    assert "2.33x" in mb["note"]
 
 
 def test_spec_sheet_flags_a_package_that_ships_two_motor_selections():

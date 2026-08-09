@@ -1201,7 +1201,9 @@ def create_robot(args: dict) -> dict:
     # and still covers imported/amended ones. Fail-open: a grounding error must never block a build.
     try:
         from virturoid.services.gene_build import ground_and_repair
-        ground_and_repair(gene)
+        # ``task=prompt``: grounding also bolts on the parts list's own battery/compute/sensors, and that suite
+        # is task-adaptive, so it has to be selected from the SAME prompt the shipped BOM is built from.
+        ground_and_repair(gene, task=prompt)
     except Exception:  # noqa: BLE001 - grounding is the fidelity layer, never a build blocker
         pass
     # Walk-tune the gait per body AFTER grounding, so the cached op-point is tuned for the REAL mass the body
