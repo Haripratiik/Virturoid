@@ -2019,8 +2019,10 @@ def _reframe_for_imported_body(res: dict, gene, kind: str) -> None:
             "whose": "ours, fitted to this body",
             "what": src,
             "verdict_is_about": "your body under the controller we produced for it — not your own controller",
-            "note": "if you have your own controller, import it (import_onnx_policy / sandbox_policy / "
-                    "import_control_script) and re-verify: this number is our best, not your machine's ceiling"}
+            "note": "this number is our best, not your machine's ceiling. If your own controller is "
+                    "parameterised, adopt_control_script runs it on this body and re-verify then describes "
+                    "YOURS; a .onnx can be inspected and validated (import_onnx_policy) but NOT deployed, so "
+                    "that route does not change this verdict — see its `deployment` block"}
         return
 
     original = str(res.get("verdict") or "")
@@ -2112,9 +2114,21 @@ def _reframe_for_imported_body(res: dict, gene, kind: str) -> None:
     }
     res["imported"] = prov
     res["to_get_a_real_verdict"] = [
-        {"if": "you already have a controller for this robot",
-         "do": "import_onnx_policy (a .onnx policy), sandbox_policy (inline Python), or import_control_script — "
-               "then verify_robot again; the verdict then describes YOUR controller on YOUR body"},
+        # THIS ROUTE USED TO NAME THREE TOOLS AND PROMISE ALL THREE CHANGED THE VERDICT. Only one does.
+        # ``adopt_control_script`` runs the customer's parameters on their body and commits an improvement;
+        # ``import_onnx_policy`` and ``sandbox_policy`` inspect and validate ONE inference and have no deployment
+        # path anywhere in the repo, so re-verifying after them measures OUR controller exactly as before. (The
+        # third name, ``import_control_script``, was not a registered tool at all.) Telling a customer to import
+        # their policy and re-verify was telling them to do something that could not work.
+        {"if": "you already have a controller for this robot, expressed as PARAMETERS (gains, gait scalars)",
+         "do": "adopt_control_script {robot_id, params | params_path} — it runs YOURS on your body, fits an "
+               "improvement warm-started from it, and commits it, so the next verify_robot verdict is about "
+               "your controller"},
+        {"if": "your controller is a trained NETWORK (.onnx) or a Python script",
+         "do": "import_onnx_policy / sandbox_policy will load and VALIDATE it (IO contract, one inference, "
+               "dimensions, limits) — but neither deploys it: we cannot read the observation layout, joint "
+               "order or action convention off the file, so re-verifying afterwards still measures OUR "
+               "controller. Their `deployment` block names what to do instead"},
         {"if": "you want US to produce one for this body",
          "do": "adapt_gait fits an operating point to this specific gene, and train_held learns a policy on it. "
                "Either makes the verdict a claim about a controller measured on YOUR robot"},

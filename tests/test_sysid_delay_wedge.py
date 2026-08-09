@@ -501,3 +501,174 @@ def test_at_twice_the_realistic_delay_the_metric_regains_range_but_the_verdict_i
         "the old scoring point should still be pinned at ~1.0 here -- that is the ceiling effect")
     assert traj["improvement_x"] > 1.3, (
         f"only {traj['improvement_x']}x at 40 ms; measured 1.484x (full plan) and 1.502x (this plan)")
+
+
+# =========================================================================================================
+# THE POSITION-ONLY LOG. The coverage limit section 10 recorded as open -- "the estimate requires tau_meas,
+# and a log with position only cannot do this" -- and it is closed. Most of a delay-wedge customer base does
+# not have a joint torque sensor; a good part of it does not populate ROS 2's `effort` either.
+# =========================================================================================================
+
+@pytest.fixture(scope="module")
+def gap_at(go2, plan):
+    """``gap_at(delay_ticks, **synthetic_hardware_log kwargs)`` -- measure_gap, memoised per configuration."""
+    from virturoid.services.sysid import measure_gap
+    from virturoid.services.sysid.synthetic_hardware import DEFAULT_PERTURBATION, synthetic_hardware_log
+
+    cache: dict = {}
+
+    def _get(delay_ticks: int, **kw):
+        key = (int(delay_ticks), tuple(sorted((k, str(v)) for k, v in kw.items())))
+        if key not in cache:
+            kw.setdefault("perturbation", DEFAULT_PERTURBATION)
+            _, log = synthetic_hardware_log(go2, delay_ticks=int(delay_ticks), plan=plan, **kw)
+            cache[key] = (log, measure_gap(go2, log, plan=plan, measure_noise_floor=False))
+        return cache[key]
+
+    return _get
+
+
+@pytest.mark.parametrize("delay_ticks", [0, 2, 4])
+def test_the_delay_is_recovered_from_a_log_with_no_torque_channel_at_all(gap_at, delay_ticks):
+    """THE LIFT. 0 / 20 / 40 ms, exactly, from ``q_cmd`` and ``q_meas`` -- no torque, no motor current.
+
+    The applied torque is not in the log but its EFFECT is, so ``_delay_from_motion`` reads it back out of the
+    motion by inverse dynamics and aligns that against the declared control law. The three parameters Stage 2
+    fits are left free at every candidate lag, so the estimate does not lean on our priors for them.
+
+    Why this was not obviously possible: every naive attempt reads ONE CONTROL TICK HIGH, on the oracle model
+    as well as the prior, which looks exactly like a property of the experiment. It is not -- see the test
+    below. Tolerance is EXACT, for the same reason it is exact on the torque channel: the delay lives on the
+    control-tick grid, so a neighbouring tick is a different answer rather than a noisy one.
+    """
+    _log, gap = gap_at(delay_ticks, channel="position_only")
+    lat = gap["latency"]
+    assert lat["identified"] is True, lat.get("not_identified_because")
+    assert lat["source"] == "motion_reconstruction"
+    assert lat["delay_ms"] == pytest.approx(delay_ticks * MS_PER_TICK), (
+        f"injected {delay_ticks * MS_PER_TICK} ms, recovered {lat['delay_ms']} ms")
+    assert lat["margin_over_next_best_tick"] >= 0.15
+
+
+def test_the_position_only_estimate_is_a_SAMPLING_problem_not_an_identifiability_one(rig, plan):
+    """WHY it took a fix rather than an implementation, measured on the ORACLE model so it cannot be blamed on
+    the prior.
+
+    The applied torque is a zero-order hold across ``ctrl_every`` physics steps. A central difference of the
+    logged velocity taken AT a tick boundary averages the acceleration under the OLD torque with the
+    acceleration under the NEW one, so the reconstruction it feeds looks one tick late -- and the estimator
+    faithfully reports a delay one tick too large. Sampled INSIDE the interval, the same objective is exact.
+
+    This is the whole difference between "a position-only log cannot see the delay" and "we were reading it at
+    the wrong instant", and it is the reason the boundary variant below is measured here rather than argued.
+    """
+    import numpy as np
+
+    from virturoid.services.sysid.bench_rig import inverse_torque, torque_ceiling
+    from virturoid.services.sysid.gap_report import _delay_from_motion, _windows
+
+    ticks = int(DEFAULT_DELAY_MS / MS_PER_TICK)
+    hw, log = _hardware(rig, ticks)
+    ce, dt = rig["ctrl_every"], rig["dt"]
+
+    def _boundary_variant(model):
+        """The same estimator with the acceleration taken across the tick BOUNDARY. Nothing else differs."""
+        q, qd = log["q"], log["qd"]
+        qacc = np.zeros_like(qd)
+        qacc[1:-1] = (qd[2:] - qd[:-2]) / (2.0 * dt)
+        idt = inverse_torque(model, q, qd, qacc)
+        ceil = torque_ceiling(model)
+        want = np.clip(rig["kp"] * (rig["q_cmd"] - q) - rig["kd"] * qd, -ceil, ceil)
+        wins = _windows(plan, q.shape[0], rig["dofs"], 1.0 / dt)
+        out = {}
+        for name in ONLY_JOINTS:
+            adr = rig["dofs"][name]
+            a, b = wins[name]
+            rows = np.arange(a + ((-a) % ce), b, ce)
+            grid = []
+            for d in range(0, 9):
+                n = rows.size - d
+                src, dst = rows[:n], rows[d:d + n]
+                y = want[src, adr] - idt[dst, adr]
+                X = np.column_stack([qacc[dst, adr], qd[dst, adr], np.sign(qd[dst, adr]), np.ones(n)])
+                th, *_ = np.linalg.lstsq(X, y, rcond=None)
+                grid.append((d, float(np.sqrt(np.mean((y - X @ th) ** 2)))))
+            out[name] = min(grid, key=lambda g: g[1])[0] * ce * dt * 1000.0
+        return out
+
+    on_prior = _boundary_variant(rig["model"])
+    on_oracle = _boundary_variant(hw)
+    for name in ONLY_JOINTS:
+        assert on_prior[name] == pytest.approx(DEFAULT_DELAY_MS + MS_PER_TICK), (
+            f"the boundary-sampled variant is meant to read exactly one tick HIGH on {name}; got "
+            f"{on_prior[name]} ms for a {DEFAULT_DELAY_MS} ms injection. If this stopped biasing, the "
+            f"mechanism recorded in gap_report.MOTION_MODEL_CAVEAT is no longer the one that was fixed")
+        assert on_oracle[name] == pytest.approx(DEFAULT_DELAY_MS + MS_PER_TICK), (
+            f"...and it must bias on the ORACLE model too ({name}: {on_oracle[name]} ms) -- that is what "
+            f"shows the bias is the sampling and not the prior")
+
+    shipped = _delay_from_motion(rig["model"], _aligned(rig, log), rig["dofs"], plan, kp=rig["kp"],
+                                 kd=rig["kd"], ctrl_every=ce, max_ticks=8, dt=dt)
+    assert shipped["identified"] is True, shipped.get("not_identified_because")
+    assert shipped["delay_ms"] == pytest.approx(DEFAULT_DELAY_MS), (
+        "sampled inside the hold interval the SAME objective must be exact")
+
+
+def test_a_log_sampled_below_the_control_rate_is_refused_rather_than_guessed(go2, plan, gap_at):
+    """The trap that makes this gate load-bearing, and it is not the obvious one.
+
+    One control tick is 10 ms; a 50 Hz log has 20 ms between samples, so the delay is simply not in the data.
+    The danger is not that the estimate degrades -- it is that ``_align_log`` INTERPOLATES the log back up to
+    the physics rate before the estimator sees it, which smooths the discontinuity the estimator reads and
+    hands back a confident margin on a wrong answer. MEASURED at 20 ms injected before the gate existed: 30 ms,
+    ``identified: true``. The refusal reads the NATIVE timestamps, which interpolation cannot fake.
+    """
+    from virturoid.services.sysid import measure_gap
+
+    log, _ = gap_at(2, channel="position_only")
+    keep = 10                                          # 500 Hz -> 50 Hz, half the 100 Hz control rate
+    idx = list(range(0, len(log["t"]), keep))
+    slow = {**log, "t": [log["t"][i] for i in idx],
+            "q_cmd": [log["q_cmd"][i] for i in idx], "q_meas": [log["q_meas"][i] for i in idx],
+            "qd_meas": [log["qd_meas"][i] for i in idx]}
+    lat = measure_gap(go2, slow, plan=plan, measure_noise_floor=False)["latency"]
+    assert lat["identified"] is False, (
+        f"a 50 Hz log against a 100 Hz loop claimed {lat['delay_ms']} ms; one control tick is not in this data")
+    assert "sampled at" in (lat.get("not_identified_because") or ""), lat
+
+
+def test_an_error_the_free_parameters_cannot_express_costs_the_position_only_margin(gap_at):
+    """The control on the new estimator, and the price of having a plant in it at all.
+
+    ``_delay_from_command_response`` has no plant, so a +30% link mass and inertia error cannot move it. This
+    one reads the torque out of the motion, so it can -- and the question is whether it DEGRADES GRACEFULLY.
+    MEASURED: still exact at 0 ms (margin 0.887) and 20 ms (0.287), and at 40 ms the reconstruction collapses
+    and it REFUSES. Degrading into a refusal is the required behaviour; degrading into a confident wrong tick
+    is what the trajectory sweep does and why it may never claim.
+    """
+    _log, gap = gap_at(4, channel="position_only", perturbation={}, link_scale=1.30)
+    lat = gap["latency"]
+    assert lat["identified"] is False, (
+        f"a +30% link mass/inertia error at 40 ms was CLAIMED at {lat['delay_ms']} ms on a position-only log; "
+        f"the free frictionloss/damping/armature columns cannot absorb that error and must not appear to")
+    _log0, gap0 = gap_at(0, channel="position_only", perturbation={}, link_scale=1.30)
+    assert gap0["latency"]["delay_ms"] == 0.0 and gap0["latency"]["identified"] is True, (
+        "...and it should still be right where the misspecification is not yet fatal: 0 ms, identified")
+
+
+def test_a_position_only_log_still_cannot_fit_a_parameter_and_says_what_it_can(go2, plan, gap_at):
+    """The limit that did NOT move, stated so the lift is not read as more than it is.
+
+    The delay is now reachable without a torque channel. The PARAMETERS are not, and no estimator can change
+    that: the quantity being regressed is a torque residual and there is no torque. What must not happen is a
+    refusal that reads as "this log is useless" when it just yielded the residual Hwangbo et al. call dominant.
+    """
+    from virturoid.services.sysid import fit_parameters
+
+    log, gap = gap_at(2, channel="position_only")
+    fit = fit_parameters(go2, log, plan=plan, n_boot=16)
+    assert fit["ok"] is False
+    assert "tau_meas" in fit["error"]
+    assert "actuation delay" in fit["what_is_still_available"]
+    assert gap["attribution"]["available"] is False
+    assert gap["latency"]["identified"] is True, "the delay is the thing this log CAN still give"

@@ -269,10 +269,30 @@ def build_excitation(gene, *, budget_s: float = DEFAULT_BUDGET_S, control_hz: fl
         "log_schema": {
             "log_hz": round(log_hz, 3),
             "required": ["t_s", "q_cmd_rad", "q_meas_rad", "measured_on"],
-            "strongly_recommended": ["tau_meas_nm"],
+            "strongly_recommended": ["tau_meas_nm  OR  i_meas_a (per-joint motor current)"],
             "optional": ["qd_meas_radps"],
-            "note": "without tau_meas only the trajectory gap can be reported -- no parameter can be "
-                    "attributed, because the residual that carries the attribution is a TORQUE residual",
+            "note": "one of tau_meas / i_meas is what buys the PARAMETERS, because the residual that carries "
+                    "the attribution is a TORQUE residual. Either works: current is multiplied by the joint's "
+                    "torque constant and the conversion is reported rather than assumed (pass "
+                    "torque_constant_nm_per_a with your datasheet value -- without it the constant is derived "
+                    "from the catalog actuator the BOM SIZES for the joint, which is a stand-in part and can "
+                    "be out by a FACTOR, not a percentage). Log the SIGNED current -- a "
+                    "magnitude-only channel is refused, because kt*|I| is an actuator that only pushes one "
+                    "way. With NEITHER channel the trajectory gap and the ACTUATION DELAY are still reported "
+                    "(the delay is read out of the motion) and no parameter may be named",
+            "sample_rate": f"log at or above the control rate ({round(control_hz_actual, 3)} Hz). MEASURED: "
+                           f"the position-only delay estimate is exact at 5x, 2.5x and 1x the control rate "
+                           f"and fails its own margin gate below it, which is Nyquist on a delay that lives "
+                           f"on the control-tick grid",
+            "where_these_live_in_a_real_stack": {
+                "ROS 2": "sensor_msgs/JointState carries position / velocity / effort; ros2_control's "
+                         "joint_state_broadcaster publishes whichever of those the hardware exposes, and "
+                         "effort is only populated when the driver reports it. q_cmd is the COMMAND that was "
+                         "sent -- from your controller's command interface, not from JointState",
+                "if effort is empty": "log the driver's per-joint current instead (i_meas). It is the same "
+                                      "measurement one constant earlier, and on most robots it is the channel "
+                                      "the effort field would have been computed from anyway",
+            },
             "measured_on": "'hardware' if this log came off a physical robot, 'sim2sim' if it came from a "
                            "simulated stand-in. Required, and not a formality: the actuator-fidelity ladder "
                            "reserves its L2 rung for a BENCH-identified actuator, so a fit is only allowed to "

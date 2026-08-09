@@ -1086,44 +1086,14 @@ def run_train_gene_job(args: dict, progress=None) -> dict:
 
 
 def _land_gpu_policy(rid: str, gene, npz: str | None, *, apply: str, say) -> dict:
-    """Where the ``gpu_rl`` arm's artifact goes — and an honest report when it goes nowhere.
+    """Where the ``gpu_rl`` arm's artifact goes: ``policy_flywheel.land_gpu_policy``, which owns the contract.
 
-    A neural policy is not five CPG scalars, so it cannot land through ``trained_controller``; it deploys through
-    the POLICY bank, which ``verify_robot`` consults (``ai_native_tools._learned_gait_attempt`` ->
-    ``policy_flywheel.recall_morph_policy``) when the scripted gait is not credible. But nothing in any agent
-    path ever CALLED ``bank_morph_policy`` — the only caller in the repo was ``desktop.py`` — so a GPU run wrote
-    an ``.npz`` into a build directory that no verdict path reads, and reported ``trained: true``. That is the
-    same defect as the scripted arm's, one artifact type over. ``bank_morph_policy`` re-rolls the policy on THIS
-    body and banks it only when it is a credible deployed walk, which is exactly the ``apply='auto'`` gate, so
-    the gating is the bank's and is not re-implemented here.
+    It moved there because ``train_reward``'s GPU arm had the SAME hole and needed the same landing — it told the
+    agent its ``.npz`` "deploys through the POLICY bank (verify recalls it)" while no agent-reachable path had
+    ever called ``bank_morph_policy``. Two doors, one channel, one implementation.
     """
-    base = {"applied": False, "robot_id": rid, "door": "train_held", "apply_mode": str(apply),
-            "channel": "policy_bank", "policy_npz": npz}
-    if not npz:
-        return {**base, "reason": "GPU training produced no policy artifact, so there was nothing to apply"}
-    if str(apply) == "never":
-        return {**base, "reason": "apply='never' — the policy .npz is returned as an artifact and neither the "
-                                  "held robot nor the policy bank was touched"}
-    try:
-        from virturoid.services.memory_db import DEFAULT_DB_PATH, MemoryDB
-        from virturoid.services.policy_flywheel import bank_morph_policy
-        with MemoryDB(DEFAULT_DB_PATH) as db:
-            rep = bank_morph_policy(npz, gene, db, task_type="locomotion")
-    except Exception as exc:  # noqa: BLE001 - a banking failure must be reported, never swallowed into "trained"
-        return {**base, "reason": f"could not bank the trained policy: {type(exc).__name__}: {exc}",
-                "error": f"{type(exc).__name__}: {exc}"}
-    if not rep.get("banked"):
-        say("apply", f"policy NOT deployable: {rep.get('verdict')}")
-        return {**base, "reason": (f"the trained policy was re-rolled on this exact body and its own un-gameable "
-                                   f"verdict was {rep.get('verdict')!r}, so it was not banked and verify_robot "
-                                   f"will not deploy it — the robot keeps the controller it had"),
-                "verdict": rep.get("verdict"), "forward_m": rep.get("forward")}
-    say("apply", f"policy banked as {rep['skill_id']} — verify_robot can now deploy it on this body")
-    return {**base, "applied": True, "skill_id": rep.get("skill_id"), "verdict": rep.get("verdict"),
-            "forward_m": rep.get("forward"), "gait_source_after": "learned_policy",
-            "reason": ("banked as a reusable MorphPolicy skill after a credible deployed rollout ON THIS BODY; "
-                       "verify_robot deploys it (gait_source 'learned_policy') when the scripted gait is not "
-                       "credible")}
+    from virturoid.services.policy_flywheel import land_gpu_policy
+    return land_gpu_policy(rid, gene, npz, apply=apply, door="train_held", say=say)
 
 
 def list_skills(_args: dict) -> dict:

@@ -483,6 +483,209 @@ def test_a_controller_search_with_no_robot_to_land_on_says_so():
     assert "applied_to_robot" in src and "applied to nothing" in src
 
 
+# =========================================================================================================
+# THE SECOND SWEEP (2026-08-09). The first found four doors that discarded a controller. This one asks the
+# adjacent question — does any tool's TEXT promise an effect its code does not produce? — and found two.
+
+_CANNED_REWARD_RUN = {
+    "ok": True, "reward_source": "templates", "reward_name": "template_0", "reward_expr": "forward_vel",
+    "n_candidates": 1, "n_gamed": 0, "ranked": [], "verdict": "CREDIBLE WALK", "credible": True,
+    "forward_m": 1.2, "height_ratio": 0.9, "gait_params": dict(_GOOD), "reflection": {},
+    "iterations_run": 1, "iteration_log": [], "reward_hints_recalled": 0, "seeded_from_flywheel": False,
+}
+
+
+def _stub_reward_run(monkeypatch, npz, **over):
+    """Replace the whole reward loop with a canned CREDIBLE result that also 'trained' a GPU policy.
+
+    The subject is the SECOND artifact's channel, not the reward search — which costs hundreds of rollouts and
+    a GPU box. ``run_intelligent_reward_loop`` is called as a module global by ``_train_reward``, so this is
+    still the real tool, entered through ``call_tool``.
+    """
+    out = {**_CANNED_REWARD_RUN, **over,
+           "gpu_training": {"attempted": True, "trained": bool(npz), "policy": npz, "backend": "mjx_ppo_gpu"}}
+    monkeypatch.setattr("virturoid.services.reward_loop.run_intelligent_reward_loop", lambda *a, **k: dict(out))
+    return out
+
+
+@pytest.mark.skipif(not _MUJOCO, reason="composing a body needs MuJoCo")
+def test_train_reward_gpu_arm_banks_its_policy_or_says_it_did_not(held_dog, tmp_path, monkeypatch):
+    """``train_reward`` told the agent its GPU ``.npz`` "deploys through the POLICY bank (verify recalls it)".
+
+    It did not. No agent-reachable path anywhere called ``bank_morph_policy`` — the repo's only caller was
+    ``desktop.py:480`` — so ``recall_morph_policy`` could never find the file and the GPU training the customer
+    paid minutes for reached nothing. The sentence was the whole implementation. It now goes through
+    ``policy_flywheel.land_gpu_policy``, the same helper ``train_held``'s GPU arm uses, and the bank's own
+    credible-rollout screen on THIS body is the gate.
+    """
+    from virturoid.services.agent_tools import call_tool
+    _stub_reward_run(monkeypatch, str(tmp_path / "reward_policy.npz"))
+    monkeypatch.setattr("virturoid.services.policy_flywheel.bank_morph_policy",
+                        lambda *a, **k: {"banked": True, "skill_id": "morph_legged_locomotion",
+                                         "verdict": "CREDIBLE WALK", "forward": 1.4})
+    res = call_tool("train_reward", {"robot_id": held_dog, "train_backend": "gpu"})["result"]
+    pol = res["applied_to_robot"]["policy"]
+    assert pol["applied"] is True and pol["skill_id"] == "morph_legged_locomotion"
+    assert pol["channel"] == "policy_bank" and pol["door"] == "train_reward"
+    assert pol["gait_source_after"] == "learned_policy"
+
+    monkeypatch.setattr("virturoid.services.policy_flywheel.bank_morph_policy",
+                        lambda *a, **k: {"banked": False, "skill_id": None, "verdict": "FELL", "forward": 0.1})
+    refused = call_tool("train_reward", {"robot_id": held_dog, "train_backend": "gpu"})["result"]
+    assert refused["gpu_training"]["trained"] is True         # the artifact exists...
+    assert refused["applied_to_robot"]["policy"]["applied"] is False   # ...and nothing pretends it deployed
+    assert "FELL" in refused["applied_to_robot"]["policy"]["reason"]
+
+
+@pytest.mark.skipif(not _MUJOCO, reason="composing a body needs MuJoCo")
+def test_the_policy_channel_honours_never_and_cannot_be_forced_by_always(held_dog, tmp_path, monkeypatch):
+    """The two apply modes the policy channel does NOT treat like the gait channel, both said out loud.
+
+    ``never`` must touch neither the robot nor the bank. ``always`` must NOT override the bank's screen: a
+    MorphPolicy is keyed by morphology KIND, so admitting an uncredible one would hand it to every other legged
+    build on recall. ``train_reward``'s description promises 'always commits it regardless' for the gait; the
+    refusal has to say why that promise stops at this channel instead of quietly not applying.
+    """
+    from virturoid.services.agent_tools import call_tool
+    _stub_reward_run(monkeypatch, str(tmp_path / "reward_policy.npz"))
+    banked = []
+    monkeypatch.setattr("virturoid.services.policy_flywheel.bank_morph_policy",
+                        lambda *a, **k: banked.append(a) or {"banked": False, "verdict": "CROUCH",
+                                                             "skill_id": None, "forward": 0.0})
+    dry = call_tool("train_reward", {"robot_id": held_dog, "train_backend": "gpu", "apply": "never"})["result"]
+    assert dry["applied_to_robot"]["policy"]["applied"] is False
+    assert "apply='never'" in dry["applied_to_robot"]["policy"]["reason"]
+    assert banked == [], "apply='never' must not even offer the policy to the bank"
+
+    forced = call_tool("train_reward", {"robot_id": held_dog, "train_backend": "gpu", "apply": "always"})["result"]
+    reason = forced["applied_to_robot"]["policy"]["reason"]
+    assert forced["applied_to_robot"]["policy"]["applied"] is False and "CROUCH" in reason
+    assert "does not override" in reason and "recalled by every other legged build" in reason
+
+
+#: The GPU doors and the function that must route their neural artifact into the one channel that deploys it.
+#: Both were written independently and both shipped the same hole; a third GPU arm that lands its ``.npz``
+#: anywhere else — or nowhere, with a sentence — is the next one of these.
+_POLICY_DOORS = {
+    "train_reward": "virturoid.services.reward_loop._land_on_robot",
+    "train_held": "virturoid.services.agent_design_tools._land_gpu_policy",
+}
+
+
+@pytest.mark.parametrize("tool,target", sorted(_POLICY_DOORS.items()))
+def test_every_gpu_door_routes_its_policy_through_the_bank_that_deploys_it(tool, target):
+    import importlib
+    import inspect
+    from virturoid.services.agent_tools import TOOLS
+    assert tool in TOOLS
+    mod, fn = target.rsplit(".", 1)
+    src = inspect.getsource(getattr(importlib.import_module(mod), fn))
+    assert "land_gpu_policy" in src, f"{target} produces a neural policy and never lands one"
+
+
+def test_the_only_caller_of_the_policy_bank_is_no_longer_the_desktop_app():
+    """The shape of the original defect, as a standing assertion. ``bank_morph_policy`` existed, was tested, and
+    had exactly one caller in the whole repo — ``desktop.py`` — which no agent, MCP client or tool can reach. A
+    write path with no agent-reachable caller is indistinguishable from no write path at all."""
+    import inspect
+    from virturoid.services import policy_flywheel as PF
+    assert "bank_morph_policy" in inspect.getsource(PF.land_gpu_policy)
+
+
+# ---------------------------------------------------------------- a tool's NAME is a claim too
+
+def test_import_onnx_policy_says_plainly_that_it_does_not_deploy(tmp_path):
+    """``import_onnx_policy`` never claimed to deploy — the word "import" did, and "bring your own trained
+    policy" is a stated priority use case. Nothing in the repo can make an imported ONNX policy a held robot's
+    controller: the bank takes MorphPolicy ``.npz``, and an ``.onnx`` declares tensor names/shapes only — not
+    the observation layout, the joint order, or whether the outputs are torques or position targets. So the
+    tool says so, in the result and in its description, and names the doors that DO deploy.
+    """
+    from virturoid.services.agent_tools import TOOLS, call_tool
+    p = tmp_path / "customer_policy.onnx"
+    p.write_bytes(b"not-a-real-onnx-graph")                   # the disclosure must not depend on a valid model
+    res = call_tool("import_onnx_policy", {"path": str(p)})["result"]
+    assert res["deployed"] is False
+    dep = res["deployment"]
+    assert dep["deployable"] is False
+    assert "does not" in dep["what_this_tool_does"]
+    assert "our generic scripted controller" in dep["verify_robot_still_measures"]
+    routes = " ".join(f"{r['if']} {r['do']}" for r in dep["instead"])
+    for door in ("train_held", "train_reward", "adopt_control_script", "import_controller_interface"):
+        assert door in routes, f"{door} not named as what the customer should do instead"
+    desc = TOOLS["import_onnx_policy"]["description"]
+    assert "DOES NOT DEPLOY" in desc and "INSPECT and VALIDATE" in desc
+
+
+@pytest.mark.skipif(not _MUJOCO, reason="counting actuators compiles the gene")
+def test_import_onnx_policy_validates_the_action_width_against_the_customers_own_robot(held_dog, tmp_path):
+    """What we CAN do for a customer who brings their own policy, made concrete: ``robot_id`` turns "the action
+    is dimension-correct" from a statement about an abstract vector into one about THEIR robot's actuator
+    count, and a contradicting ``action_dim`` is refused rather than silently preferred."""
+    from virturoid.services.agent_tools import call_tool
+    p = tmp_path / "customer_policy.onnx"
+    p.write_bytes(b"not-a-real-onnx-graph")
+    res = call_tool("import_onnx_policy", {"path": str(p), "robot_id": held_dog})["result"]
+    assert res["action_dim_checked_against"]["robot_id"] == held_dog
+    assert res["action_dim_checked_against"]["n_actuators"] > 0
+    clash = call_tool("import_onnx_policy", {"path": str(p), "robot_id": held_dog, "action_dim": 999})
+    assert "contradicts" in (clash["result"].get("error") or clash.get("error") or "")
+    missing = call_tool("import_onnx_policy", {"path": str(p), "robot_id": "no_such_robot"})
+    assert "no held robot" in (missing["result"].get("error") or missing.get("error") or "")
+
+
+def test_no_tool_RESULT_offers_a_route_to_a_tool_that_does_not_exist():
+    """``test_tool_registration.test_no_agent_facing_text_names_a_tool_that_does_not_exist`` already checks the
+    MCP handshake, the prompts, the design schema and every tool DESCRIPTION. Its corpus stops there — and the
+    defect had moved one step downstream, into what a tool RETURNS. ``verify_robot`` on an imported body told
+    the customer to use ``import_control_script``, which is not a registered tool and never was (the real one is
+    ``adopt_control_script``); the same route also promised that importing an ONNX policy and re-verifying would
+    make the verdict describe their controller, which no code anywhere can do. An agent reads a result far more
+    often than it re-reads a description, so results are held to the same bar here.
+
+    Same identifier rule as the registry guard, including its ``(?!\\s*=)`` skip so ``mode='gpu_rl'`` reads as
+    the keyword argument it is. STRING LITERALS ONLY: a source scan would also flag the comment that explains
+    this very defect.
+    """
+    import ast
+    import inspect
+    import re
+    import textwrap
+    from virturoid.services import ai_native_tools as AIT
+    from virturoid.services.agent_tools import TOOLS
+    from virturoid.services.policy_native_adapter import DEPLOYMENT
+
+    def _literals(fn) -> str:
+        tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
+        doc = ast.get_docstring(tree.body[0])
+        return " ".join(n.value for n in ast.walk(tree)
+                        if isinstance(n, ast.Constant) and isinstance(n.value, str) and n.value is not doc)
+
+    def _values(obj) -> str:
+        """The prose a customer READS. Field NAMES are a separate namespace (``verify_robot_still_measures`` is
+        a key, not a route), so only values are scanned — the same distinction ``_NOT_A_TOOL`` draws."""
+        if isinstance(obj, str):
+            return obj
+        if isinstance(obj, dict):
+            return " ".join(_values(v) for v in obj.values())
+        if isinstance(obj, (list, tuple)):
+            return " ".join(_values(v) for v in obj)
+        return ""
+
+    verbs = {"import", "adopt", "train", "apply", "adapt", "verify", "export", "render", "probe", "sandbox",
+             "learn", "generate", "ingest", "inspect", "amplify", "calibrate", "measure"}
+    ident = re.compile(r"\b([a-z][a-z0-9]*(?:_[a-z0-9]+)+)\b(?!\s*=)")
+    results = {"verify_robot: the imported-body routes": _literals(AIT._reframe_for_imported_body),
+               "import_onnx_policy: the deployment disclosure": _values(DEPLOYMENT)}
+    bad: dict[str, set[str]] = {}
+    for where, blob in results.items():
+        for name in set(ident.findall(blob)):
+            if name not in TOOLS and name.split("_")[0] in verbs:
+                bad.setdefault(name, set()).add(where)
+    assert not bad, ("a tool RESULT routes the customer to something that does not dispatch: "
+                     + "; ".join(f"{k} (in {sorted(v)})" for k, v in sorted(bad.items())))
+
+
 @pytest.mark.skipif(not _MUJOCO, reason="composing a body needs MuJoCo")
 def test_landing_over_a_controller_that_was_already_fitted_says_what_it_replaced(held_dog):
     """The module claimed a landing "can never make a robot verify WORSE than it did before". Measured through

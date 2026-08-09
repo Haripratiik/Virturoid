@@ -59,7 +59,14 @@ LOG_ALIASES: dict[str, tuple[str, ...]] = {
     "q_cmd": ("q_cmd", "q_cmd_rad", "cmd", "q_des", "q_desired", "q_target", "position_cmd"),
     "q_meas": ("q_meas", "q_meas_rad", "q", "q_actual", "position", "position_meas"),
     "qd_meas": ("qd_meas", "qd_meas_radps", "qd", "dq", "velocity", "velocity_meas"),
-    "tau_meas": ("tau_meas", "tau_meas_nm", "tau", "torque", "torque_meas", "effort"),
+    "tau_meas": ("tau_meas", "tau_meas_nm", "tau", "torque", "torque_meas", "effort", "tau_est",
+                 "effort_meas", "measured_torque_nm"),
+    # Motor CURRENT, in amps. Most robots have no joint torque sensor and every one of them has a current
+    # sense: ROS 2's JointState carries `effort` but a driver that has only current often leaves it empty,
+    # Unitree's MotorState reports `tau_est` (itself current-derived), Dynamixel exposes `Present Current`,
+    # and ODrive/moteus report `Iq`. `sysid.torque_channel` converts it through a torque constant, out loud.
+    "i_meas": ("i_meas", "i_meas_a", "current", "current_a", "current_meas", "motor_current",
+               "motor_current_a", "iq", "iq_a", "iq_measured", "present_current", "amps"),
     "joints": ("joints", "joint_names", "names", "joint_order"),
     "control_hz": ("control_hz", "ctrl_hz", "control_rate_hz"),
     "measured_on": ("measured_on", "provenance_class", "source"),
@@ -137,7 +144,7 @@ def _normalize_log(raw: dict, *, measured_on=None, source: str = "inline") -> tu
         raw = raw["log"]
 
     log = {}
-    for key in ("t", "q_cmd", "q_meas", "qd_meas", "tau_meas", "joints", "control_hz"):
+    for key in ("t", "q_cmd", "q_meas", "qd_meas", "tau_meas", "i_meas", "joints", "control_hz"):
         v = _pick(raw, key)
         if v is not None:
             log[key] = v
@@ -149,9 +156,13 @@ def _normalize_log(raw: dict, *, measured_on=None, source: str = "inline") -> tu
             "found_keys": sorted(str(k) for k in raw)[:40],
             "required": {k: list(LOG_ALIASES[k]) for k in ("t", "q_cmd", "q_meas", "joints")},
             "strongly_recommended": {"tau_meas": list(LOG_ALIASES["tau_meas"]),
+                                     "or_motor_current": list(LOG_ALIASES["i_meas"]),
                                      "why": "the residual that attributes a gap to a PARAMETER is a torque "
-                                            "residual. Without measured torque (or motor current) only the "
-                                            "trajectory gap can be reported and no parameter may be named"},
+                                            "residual. Either channel works -- current is converted through "
+                                            "a torque constant and the conversion is reported. Without "
+                                            "either, the trajectory gap and the ACTUATION DELAY are still "
+                                            "reported (the delay comes out of the motion) but no parameter "
+                                            "may be named"},
             "how": "plan_bench_experiment returns the exact schema under log_format",
         }
     stated = str(measured_on or _pick(raw, "measured_on") or "").strip().lower()
@@ -182,8 +193,8 @@ def _load_csv(path, *, measured_on=None) -> tuple:
     headers = [h for h in (rows[0].keys() or []) if h]
 
     field_of = {a: key for key, aliases in LOG_ALIASES.items()
-                for a in aliases if key in ("q_cmd", "q_meas", "qd_meas", "tau_meas")}
-    field_of.update({"tau_nm": "tau_meas", "q_rad": "q_meas", "qd_radps": "qd_meas"})
+                for a in aliases if key in ("q_cmd", "q_meas", "qd_meas", "tau_meas", "i_meas")}
+    field_of.update({"tau_nm": "tau_meas", "q_rad": "q_meas", "qd_radps": "qd_meas", "i_a": "i_meas"})
 
     t_col = next((h for h in headers if h.strip().lower() in LOG_ALIASES["t"]), None)
     cols: dict = {}                                        # field -> {joint: header}
@@ -331,7 +342,8 @@ def _load_plan(gene, plan_path=None, *, robot_id: str, log=None) -> tuple:
     return plan, f"the plan saved for this robot ({saved})"
 
 
-def _run_tag(injected: dict, ticks: int, ctrl_hz: float, link_scale: float, plan: dict, hold_only: bool) -> str:
+def _run_tag(injected: dict, ticks: int, ctrl_hz: float, link_scale: float, plan: dict, hold_only: bool,
+             channel: str = "torque") -> str:
     """A short, readable, deterministic name for ONE synthetic configuration.
 
     Readable rather than a hash because the engineer reads it off disk later and has to know which run it was;
@@ -347,6 +359,8 @@ def _run_tag(injected: dict, ticks: int, ctrl_hz: float, link_scale: float, plan
         bits.append("hold")
     if link_scale != 1.0:
         bits.append(f"link{link_scale:g}")
+    if channel and channel != "torque":
+        bits.append(str(channel))
     return "_".join(bits).replace(" ", "")
 
 
@@ -456,9 +470,13 @@ def simulate_bench_log(args: dict) -> dict:
         injected = dict(perturbation or DEFAULT_PERTURBATION)
         # NAMED, not positional. The underlying helper returns a bare 2-tuple and an engineer guessed the order
         # wrong, burning a 143 s run to find out; nothing crosses this boundary without a key on it.
+        channel = str(args.get("channel", "torque") or "torque").strip().lower()
         plan, log = synthetic_hardware_log(gene, perturbation=injected, delay_ticks=ticks, plan=plan,
                                            budget_s=budget_s, hold_only=bool(args.get("hold_only", False)),
-                                           link_scale=float(args.get("link_scale", 1.0)))
+                                           link_scale=float(args.get("link_scale", 1.0)),
+                                           channel=channel,
+                                           torque_constant_error=float(
+                                               args.get("torque_constant_error", 1.0)))
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": f"could not simulate a bench log for '{rid}': {type(exc).__name__}: {exc}"}
 
@@ -470,7 +488,7 @@ def simulate_bench_log(args: dict) -> dict:
     # withheld fit as a regression. Deterministic rather than a counter, so re-running the SAME configuration
     # is idempotent and reuses the file, while any different one gets its own.
     hold = bool(args.get("hold_only", False))
-    tag = _run_tag(injected, ticks, ctrl_hz, link_scale, plan, hold)
+    tag = _run_tag(injected, ticks, ctrl_hz, link_scale, plan, hold, channel)
     log_path = _write_json(d / f"bench_log_synthetic_{tag}.json", log)
     plan_path = _write_json(d / "excitation_plan.json", plan)
     return {
@@ -509,7 +527,17 @@ def simulate_bench_log(args: dict) -> dict:
         "log_summary": {
             "n_rows": len(log["t"]), "n_joints": len(log["joints"]), "joints": log["joints"],
             "duration_s": round(float(log["t"][-1]) - float(log["t"][0]), 3),
+            "channel": log.get("channel", "torque"),
             "carries_measured_torque": "tau_meas" in log,
+            "carries_motor_current": "i_meas" in log,
+            "what_this_channel_reaches": {
+                "torque": "everything: the trajectory gap, the actuation delay, and a fitted parameter with "
+                          "an interval per joint",
+                "current": "everything, with the current converted through a torque constant. The delay is "
+                           "insensitive to that constant; the fitted parameters scale with it",
+                "position_only": "the trajectory gap and the ACTUATION DELAY (read out of the motion). NO "
+                                 "parameter -- the residual that attributes one is a torque residual",
+            }[log.get("channel", "torque")],
             "measured_on": log["measured_on"],
         },
         "what_this_does_not_prove": WHAT_SIM2SIM_DOES_NOT_PROVE,
@@ -537,7 +565,8 @@ def measure_sim_to_real_gap(args: dict) -> dict:
         from virturoid.services.sysid.gap_report import measure_gap
         gap = measure_gap(gene, log, plan=plan,
                           delay_max_ticks=_max_ticks(args.get("max_delay_ms"), plan),
-                          measure_noise_floor=bool(args.get("noise_floor", True)))
+                          measure_noise_floor=bool(args.get("noise_floor", True)),
+                          torque_constant_nm_per_a=args.get("torque_constant_nm_per_a"))
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": f"could not measure the gap for '{rid}': {type(exc).__name__}: {exc}"}
     if not gap.get("ok"):
@@ -549,6 +578,10 @@ def measure_sim_to_real_gap(args: dict) -> dict:
     worst = gap.get("worst_joints_by_position_rad") or []
     lat = gap.get("latency") or {}
     lines = [prov["headline"]]
+    channel = gap.get("torque_channel")
+    if channel and (channel.get("headline") or channel.get("why")):
+        lines.append(_sentence(channel.get("headline") or ("The motor-current channel was NOT used: "
+                                                           + str(channel.get("why")))))
     if worst:
         w = joints[worst[0]]
         lines.append(f"Worst joint: {w['joint']} at {w['position_rms_deg']:.3f} deg RMS position error"
@@ -573,6 +606,7 @@ def measure_sim_to_real_gap(args: dict) -> dict:
         "joints": joints,
         "worst_joints_by_position_rad": worst,
         "latency": lat,
+        "torque_channel": channel,
         "attribution": gap.get("attribution"),
         "implicated_parameters": implicated,
         "joints_with_an_identified_gap": gap.get("joints_with_an_identified_gap"),
@@ -605,7 +639,8 @@ def fit_actuators(args: dict) -> dict:
         from virturoid.services.sysid.fit import MIN_TRACKING_IMPROVEMENT_X, fit_parameters
         fit = fit_parameters(gene, log, plan=plan, iterations=int(args.get("iterations", 6)),
                              seed=int(args.get("seed", 0)),
-                             delay_max_ticks=_max_ticks(args.get("max_delay_ms"), plan))
+                             delay_max_ticks=_max_ticks(args.get("max_delay_ms"), plan),
+                             torque_constant_nm_per_a=args.get("torque_constant_nm_per_a"))
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": f"could not fit '{rid}': {type(exc).__name__}: {exc}"}
     if not fit.get("ok"):
@@ -643,8 +678,12 @@ def fit_actuators(args: dict) -> dict:
                   else "NOT a measurement of your robot -- " + prov["class"]),
         "provenance": prov,
         # The deliverable is the paragraph, not a summary of one; the tables behind every clause come with it.
-        "headline": prov["headline"] + " " + brief["sentence"],
+        "headline": (prov["headline"] + " "
+                     + (_sentence((fit.get("torque_channel") or {}).get("headline") or "") + " "
+                        if (fit.get("torque_channel") or {}).get("headline") else "")
+                     + brief["sentence"]),
         "brief": brief,
+        "torque_channel": fit.get("torque_channel"),
         "pinned": brief["pinned"],
         "not_pinned": brief["not_pinned"],
         "next_experiment": brief.get("next_experiment"),
@@ -879,6 +918,15 @@ _LOG_ARGS_TEMPLATE = {
     "plan_path": {"type": "string",
                   "description": "the excitation plan this log was recorded under (default: the one saved for "
                                  "this robot, used only if it matches the log)"},
+    "torque_constant_nm_per_a": {
+        "type": ["number", "object"],
+        "description": "your motor's torque constant kt at the JOINT OUTPUT, in N.m per amp -- one number for "
+                       "the whole robot, or {joint: value}. Only used when the log carries motor CURRENT "
+                       "(i_meas) instead of torque: current x kt is torque, and this is the datasheet number "
+                       "that makes the conversion real. Without it the constant is derived from the catalog "
+                       "actuator the BOM sized for each joint, which is a stand-in part and is labelled as "
+                       "one (+/-40%). The delay is insensitive to it (measured: exact from 0.5x to 2.0x); the "
+                       "fitted PARAMETERS scale with it directly"},
 }
 
 SYSID_TOOLS: dict[str, dict] = {
@@ -962,6 +1010,18 @@ SYSID_TOOLS: dict[str, dict] = {
             "link_scale": {"type": "number", "default": 1.0,
                            "description": "multiply every link's mass and inertia -- the adversarial case for "
                                           "the FIT, an error no fitted parameter can express"},
+            "channel": {"type": "string", "enum": ["torque", "current", "position_only"], "default": "torque",
+                        "description": "which of the three real log flavours to emit. 'torque' is per-joint "
+                                       "N.m (ROS 2 effort, Franka tau_J); 'current' is amps and no torque "
+                                       "field, the common case on a robot with no torque sensor; "
+                                       "'position_only' is what a driver that never populates effort gives "
+                                       "you -- it still yields the actuation delay, but no fitted parameter"},
+            "torque_constant_error": {
+                "type": "number", "default": 1.0,
+                "description": "with channel:'current', generate the amps using a torque constant this many "
+                               "times the one the reader will derive -- i.e. make the customer's real motor "
+                               "differ from our catalog stand-in by this factor. The adversarial case for the "
+                               "conversion"},
             "out_dir": {"type": "string", "description": "where to write plan + log, confined under build/"}}},
         "handler": simulate_bench_log, "heavy": True,
     },
@@ -972,11 +1032,13 @@ SYSID_TOOLS: dict[str, dict] = {
                        "inverse dynamics from the measured torque and regresses what is left on the model's own "
                        "sensitivity, so it names WHICH joints and WHICH parameters are implicated. Actuation "
                        "delay is identified OPEN-LOOP, by aligning the control law the plan declares against "
-                       "the applied torque in your log -- so it needs tau_meas (motor current is enough) and "
-                       "it does not depend on how good our dynamics model is. Every "
-                       "attribution is put past an identifiability gate first: a parameter the experiment "
-                       "could not load is reported as unidentified rather than guessed. Real MuJoCo; ~1 min "
-                       "on a quadruped.",
+                       "the applied torque in your log -- so with tau_meas it does not depend on how good our "
+                       "dynamics model is. Motor CURRENT works too and is converted through a torque constant, "
+                       "reported not assumed. A POSITION-ONLY log still gets the delay, read out of the motion "
+                       "instead, with the model dependency that buys stated in its caveat -- what it cannot "
+                       "get is a parameter. Every attribution is put past an identifiability gate first: a "
+                       "parameter the experiment could not load is reported as unidentified rather than "
+                       "guessed. Real MuJoCo; ~1 min on a quadruped.",
         "parameters": {"type": "object", "required": ["robot_id"], "properties": {
             "robot_id": _robot_id(), **_log_args(),
             "max_delay_ms": {"type": "number",

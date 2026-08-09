@@ -53,11 +53,33 @@ def perturbed_model(model, perturbation: dict):
     return hw
 
 
+#: What a customer's log actually carries, and the three cases the estimators have to serve. Which one you get
+#: is a property of their DRIVER, not of their robot, and it decides which answers are reachable:
+#:
+#:   "torque"         per-joint torque in N.m. ROS 2 JointState.effort / ros2_control's effort state interface
+#:                    when the driver populates it; Franka's tau_J (real link-side sensors); ANYdrive's
+#:                    spring-deflection torque. Everything works.
+#:   "current"        per-joint motor current in amps, no torque field. The common case: a current sense
+#:                    resistor is in every motor driver and a torque sensor is in almost none. Converted
+#:                    through a torque constant by ``sysid.torque_channel``, out loud.
+#:   "position_only"  q_cmd and q_meas (and usually velocity) and nothing else. The PARAMETERS are unreachable
+#:                    -- their residual is a torque residual -- but the ACTUATION DELAY is not, and is
+#:                    recovered by ``gap_report._delay_from_motion``.
+LOG_CHANNELS = ("torque", "current", "position_only")
+
+
 def synthetic_hardware_log(gene, *, perturbation: dict | None = None, delay_ticks: int = DEFAULT_DELAY_TICKS,
                            plan: dict | None = None, budget_s: float = 120.0,
-                           hold_only: bool = False, link_scale: float = 1.0) -> tuple:
+                           hold_only: bool = False, link_scale: float = 1.0,
+                           channel: str = "torque", torque_constant_error: float = 1.0) -> tuple:
     """Run the excitation on a perturbed model and return ``(plan, log)`` in the exact schema a real bench log
     would arrive in -- so ``measure_gap`` cannot tell the difference, which is the point of the harness.
+
+    ``channel`` picks which of the three real log flavours to emit (see ``LOG_CHANNELS``). ``current`` divides
+    the applied torque by each joint's torque constant and ships amps instead of newton-metres;
+    ``torque_constant_error`` then multiplies the constant used to GENERATE it, so the customer's real motor
+    differs from the catalog stand-in the reader will assume by exactly that factor -- which is the adversarial
+    case for the conversion, and the reason the reader reports its constant instead of assuming one.
 
     ``hold_only`` replaces the excitation with a constant hold: the robot is perturbed exactly as before but
     never moves. It is the adversarial case for the EXPERIMENT -- a real gap exists, and NOTHING in the data
@@ -108,6 +130,9 @@ def synthetic_hardware_log(gene, *, perturbation: dict | None = None, delay_tick
 
     names = list(dofs)
     cols = [dofs[n] for n in names]
+    chan = str(channel or "torque").strip().lower()
+    if chan not in LOG_CHANNELS:
+        raise ValueError(f"unknown log channel {channel!r} (expected one of {', '.join(LOG_CHANNELS)})")
     log = {
         "joints": names,
         "control_hz": float(plan["controller"]["control_hz"]),
@@ -116,7 +141,6 @@ def synthetic_hardware_log(gene, *, perturbation: dict | None = None, delay_tick
         "q_cmd": np.asarray(q_cmd)[:, cols].tolist(),
         "q_meas": q[:, cols].tolist(),
         "qd_meas": qd[:, cols].tolist(),
-        "tau_meas": tau[:, cols].tolist(),
         # MACHINE-READABLE, and required by the log schema. A prose provenance string can be read by a human
         # and by nothing else; Stage 2's actuator-fidelity rung turns on whether the log was measured on
         # hardware, and it must not have to infer that from an English sentence it could mis-parse.
@@ -126,7 +150,29 @@ def synthetic_hardware_log(gene, *, perturbation: dict | None = None, delay_tick
                       + (f" Its links carry {link_scale:g}x our mass and inertia -- an error no fitted "
                          f"parameter can express." if float(link_scale) != 1.0 else ""),
         "excitation": "hold_only (deliberately uninformative)" if hold_only else "full plan",
+        "channel": chan,
     }
+    if chan == "torque":
+        log["tau_meas"] = tau[:, cols].tolist()
+    elif chan == "current":
+        from virturoid.services.sysid.torque_channel import torque_constants
+        consts = torque_constants(gene)
+        kt = np.array([float((consts.get(n) or {}).get("nm_per_a") or 0.0) * float(torque_constant_error)
+                       for n in names])
+        if not np.all(kt > 0.0):
+            raise ValueError("no torque constant could be sized for every joint, so a current channel cannot "
+                             "be synthesised for this robot")
+        log["i_meas"] = (tau[:, cols] / kt).tolist()
+        log["torque_constant_used_to_generate_nm_per_a"] = {n: round(float(k), 6) for n, k in zip(names, kt)}
+        log["provenance"] += (
+            f" Its torque channel is MOTOR CURRENT: tau / kt per joint, with kt "
+            + ("as the catalog derivation" if float(torque_constant_error) == 1.0 else
+               f"deliberately {torque_constant_error:g}x the catalog derivation, so the reader's constant is "
+               f"wrong by that factor")
+            + ".")
+    else:
+        log["provenance"] += (" It carries NO torque and NO current channel: position and velocity only, which "
+                              "is what a driver that does not populate effort gives you.")
     return plan, log
 
 

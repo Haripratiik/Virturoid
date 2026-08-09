@@ -31,9 +31,29 @@ Stage 2 FITS, and APPLIES:
 
 On that dominant residual specifically: the CONTROL-SIGNAL DELAY half of it is measured OPEN-LOOP, off the log,
 by ``gap_report._delay_from_command_response`` -- the shift that aligns the declared PD law evaluated on the
-logged state with the torque the log says was applied. It requires ``tau_meas`` (motor current is enough) and
-it does not involve the plant, which is the point: the closed-loop delay sweep this package shipped first is
-biased toward zero whenever the plant is wrong, and on the Menagerie Go2 it read a 40 ms delay as 10 ms.
+logged state with the torque the log says was applied. It does not involve the plant, which is the point: the
+closed-loop delay sweep this package shipped first is biased toward zero whenever the plant is wrong, and on
+the Menagerie Go2 it read a 40 ms delay as 10 ms.
+
+**And it no longer needs a torque sensor, because almost no robot has one.** Surveying the common stacks: ROS 2
+``JointState`` defines ``effort`` and ``ros2_control`` only publishes it for joints whose hardware exposes an
+effort interface; Franka's ``tau_J`` and ANYdrive's spring deflection are genuine torque measurements and are
+the exception; Unitree reports a current-derived ``tau_est``; Dynamixel's ``Present Load`` is a PWM proxy while
+``Present Current`` is real; ODrive and moteus report ``Iq``. So two more channels are served, and each with
+its own honesty:
+
+  * **motor current** -- ``torque_channel`` converts it through a torque constant that is STATED, never
+    assumed: the customer's datasheet value, else one identified from their own log, else one derived from the
+    catalog actuator the BOM sized (and labelled a stand-in, because on the Go2 that part's constant is 2.5x
+    the real motor's). MEASURED, the delay is insensitive to it -- exact from 0.5x to 2.0x, because a lag does
+    not move when a channel is rescaled -- while the fitted PARAMETERS scale with it directly, and the tracking
+    gate refuses a fit taken through a constant 1.35x out.
+  * **position only** -- ``gap_report._delay_from_motion`` reads the applied torque back out of the MOTION, by
+    integrating the equation of motion over one zero-order-hold interval with the three fitted parameters free
+    at every candidate lag. 0 / 20 / 40 ms exactly on the Go2. It has a plant in it, so it ranks below the
+    torque channel and states what that costs. What a position-only log still cannot do is name a PARAMETER:
+    that residual is a torque residual, and no estimator changes it.
+
 Actuation delay STILL cannot be applied to the compiled model -- MuJoCo has no transport delay and our emitter
 sets no ``dyntype`` -- so it is reported, held in the replay that scores the tracking gate, and blocked from
 the L2 rung by ``calibration.model_represents_actuation_delay``.
@@ -68,12 +88,15 @@ from virturoid.services.sysid.fit import (
 from virturoid.services.sysid.gap_report import measure_gap
 from virturoid.services.sysid.identifiability import identifiability_report
 from virturoid.services.sysid.synthetic_hardware import (
+    LOG_CHANNELS,
     WHAT_SIM2SIM_DOES_NOT_PROVE,
     recovery_table,
     synthetic_hardware_log,
 )
+from virturoid.services.sysid.torque_channel import convert_current_to_torque, torque_constants
 
 __all__ = [
+    "LOG_CHANNELS",
     "MIN_TRACKING_IMPROVEMENT_X",
     "WHAT_SIM2SIM_DOES_NOT_PROVE",
     "application_gate",
@@ -81,6 +104,7 @@ __all__ = [
     "build_excitation",
     "calibration_of",
     "calibration_report",
+    "convert_current_to_torque",
     "coverage_table",
     "engineer_brief",
     "excitation_command_series",
@@ -94,4 +118,5 @@ __all__ = [
     "recovery_table",
     "revert_calibration",
     "synthetic_hardware_log",
+    "torque_constants",
 ]

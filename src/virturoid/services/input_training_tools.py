@@ -155,18 +155,57 @@ def _sandbox_policy(args: dict) -> dict:
         timeout=float(args.get("timeout", 10.0)))
 
 
+def _actuator_count(robot_id: str):
+    """``(n_actuators, "")`` for a held robot, or ``(None, why_not)``. Compiles the gene — MuJoCo's own count."""
+    from virturoid.services import session_state as _S
+    gene = _S.get_robot(str(robot_id or ""))
+    if gene is None:
+        return None, f"no held robot '{robot_id}'; create_robot / submit_design / ingest_project first"
+    try:
+        import mujoco
+        from virturoid.services.gene_compiler import compile_gene_to_mjcf
+        return int(mujoco.MjModel.from_xml_string(compile_gene_to_mjcf(gene)).nu), ""
+    except Exception as exc:  # noqa: BLE001 - no MuJoCo / a body that will not compile: say so, never guess
+        return None, f"could not count actuators on '{robot_id}': {type(exc).__name__}: {exc}"
+
+
 def _import_onnx_policy(args: dict) -> dict:
-    from virturoid.services.policy_native_adapter import inspect_onnx, run_onnx_policy
+    """INSPECT + VALIDATE an inbound ONNX policy. Deliberately NOT a deployment — see ``policy_native_adapter``.
+
+    ``robot_id`` is what makes "validated" mean something about the customer's robot rather than about an
+    abstract vector: the action width is checked against the actuator count MuJoCo reports for THAT body, so a
+    policy trained for a 12-DOF quadruped and pointed at an 18-DOF hexapod is caught here instead of later.
+    """
+    from virturoid.services.policy_native_adapter import DEPLOYMENT, inspect_onnx, run_onnx_policy
     args = args or {}
     path = args.get("path", "")
     if not path:
         return {"error": "path is required (a .onnx policy file)"}
     if not os.path.exists(path):
         return {"error": f"path not found: {path}"}
+    action_dim, checked_against = args.get("action_dim"), None
+    if args.get("robot_id"):
+        n, why = _actuator_count(args["robot_id"])
+        if n is None:
+            return {"error": why}
+        if action_dim is not None and int(action_dim) != n:
+            return {"error": f"action_dim={int(action_dim)} contradicts robot '{args['robot_id']}', which has {n} "
+                             f"actuators — drop action_dim and the robot's own count is used"}
+        action_dim, checked_against = n, {"robot_id": args["robot_id"], "n_actuators": n}
     if args.get("observation") is None:                        # no obs -> just inspect the IO contract
-        return inspect_onnx(path)
-    return run_onnx_policy(path, args["observation"], action_dim=args.get("action_dim"),
-                           safety_limits=args.get("safety_limits"))
+        out = inspect_onnx(path)
+    else:
+        out = run_onnx_policy(path, args["observation"], action_dim=action_dim,
+                              safety_limits=args.get("safety_limits"))
+    if checked_against:
+        out["action_dim_checked_against"] = checked_against
+    # SAY IT AT THE TOP LEVEL TOO. An agent that reads only the headline of a tool called "import_onnx_policy"
+    # must not come away believing the robot now runs this policy; the nested block is the detail, this is the
+    # sentence. Nothing in the repo can deploy an imported ONNX policy, and pretending otherwise by omission is
+    # the same defect as train_reward's GPU arm claiming a bank nothing wrote to.
+    out["deployed"] = False
+    out["deployment_note"] = DEPLOYMENT["what_this_tool_does"] + " " + DEPLOYMENT["verify_robot_still_measures"]
+    return out
 
 
 def _import_controller_interface(args: dict) -> dict:
@@ -1322,13 +1361,23 @@ INPUT_TRAINING_TOOLS: dict[str, dict] = {
         "handler": _sandbox_policy, "heavy": False,
     },
     "import_onnx_policy": {
-        "description": "PolicyImporter Tier P3: load an inbound ONNX policy and (given an observation) run one "
-                       "inference, validating the action's dimension/finiteness/limits. ONNX is a computation "
-                       "GRAPH (safe to load, unlike a torch pickle). Without an observation, returns the model's "
-                       "declared input/output tensor contract. No physics.",
+        "description": "PolicyImporter Tier P3: INSPECT and VALIDATE an inbound ONNX policy -- load it (a "
+                       "computation GRAPH, safe, unlike a torch pickle), read its declared input/output tensor "
+                       "contract, and, given an observation, run ONE inference and check the action's "
+                       "dimension/finiteness/safety-limits. Pass robot_id and the action width is checked "
+                       "against that held robot's actual actuator count. IT DOES NOT DEPLOY THE POLICY: nothing "
+                       "here makes it the robot's controller, verify_robot afterwards still measures OUR "
+                       "scripted controller on your body, and the result says so (`deployed: false` + a "
+                       "`deployment` block naming what an .onnx cannot tell us -- observation layout, joint "
+                       "order, torque-vs-position, action scale). To get a controller that DOES deploy: "
+                       "train_held with mode='gpu_rl' / train_reward with train_backend='gpu' (a native "
+                       "MorphPolicy, banked and then deployed by verify_robot), or adopt_control_script if your "
+                       "controller is parameterised. No physics.",
         "parameters": {"type": "object", "required": ["path"], "properties": {
             "path": {"type": "string", "description": "a .onnx policy file"},
             "observation": {"type": "array", "description": "one observation vector (omit to just inspect IO)"},
+            "robot_id": {"type": "string", "description": "a held robot to validate the action width against "
+                                                          "(its MuJoCo actuator count becomes action_dim)"},
             "action_dim": {"type": "integer"}, "safety_limits": {"type": "object"}}},
         "handler": _import_onnx_policy, "heavy": False,
     },

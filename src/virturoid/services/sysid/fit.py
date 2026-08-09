@@ -332,7 +332,8 @@ def fit_parameters(gene, log: dict, *, plan: dict | None = None,
                    measure_noise_floor: bool = True,
                    measure_trajectory: bool = True,
                    measure_delay: bool = True,
-                   delay_max_ticks: int = 8) -> dict:
+                   delay_max_ticks: int = 8,
+                   torque_constant_nm_per_a=None) -> dict:
     """Fit each joint's dissipative/inertial parameters to ``log`` and return a POSTERIOR per parameter.
 
     ``log`` is the schema ``build_excitation(...)['log_schema']`` describes and ``synthetic_hardware_log``
@@ -364,8 +365,14 @@ def fit_parameters(gene, log: dict, *, plan: dict | None = None,
         _windows,
     )
     from virturoid.services.sysid.identifiability import _effective_n, _ols, identifiability_report
+    from virturoid.services.sysid.torque_channel import convert_current_to_torque
 
     t_wall = time.perf_counter()
+    # A motor-current channel becomes the torque channel here, through a torque constant, and the conversion
+    # rides on the result. It matters MORE at this stage than at Stage 1: the delay is a lag and survives a
+    # wrong constant, but every parameter below comes out of a torque residual, so an error in kt is an error
+    # of the same fraction in frictionloss, damping and armature. See ``torque_channel``.
+    log, torque_channel = convert_current_to_torque(gene, log, explicit=torque_constant_nm_per_a)
     model, rig = bench_model(gene)
     kp, kd, _ = bench_gains(model)
     dofs = joint_dof_map(model, gene)
@@ -377,10 +384,18 @@ def fit_parameters(gene, log: dict, *, plan: dict | None = None,
         return {**meta, "robot": getattr(gene, "id", ""), "stage": 2}
     if aligned.get("tau_meas") is None:
         return {"ok": False, "robot": getattr(gene, "id", ""), "stage": 2,
-                "error": "the log carries no tau_meas",
-                "why": "the quantity being fitted is a TORQUE residual. Without measured torque (or motor "
-                       "current) there is nothing to regress, and a fit against the trajectory alone would "
-                       "be an unidentifiable mixture of every parameter at once."}
+                "error": "the log carries neither tau_meas nor a usable motor-current channel",
+                "why": "the quantity being fitted is a TORQUE residual. Without measured torque there is "
+                       "nothing to regress, and a fit against the trajectory alone would be an unidentifiable "
+                       "mixture of every parameter at once.",
+                "what_is_still_available": "measure_gap on this same log still reports the per-joint "
+                                           "trajectory gap AND the actuation delay -- the delay is read out "
+                                           "of the motion rather than out of a torque channel. Only the "
+                                           "PARAMETERS need torque.",
+                "how": "log the per-joint effort (ROS 2 JointState.effort / ros2_control's effort state "
+                       "interface) or the per-joint motor current under i_meas, and pass "
+                       "torque_constant_nm_per_a if you have the datasheet value",
+                "torque_channel": torque_channel}
 
     q, tau = aligned["q_meas"], aligned["tau_meas"]
     qd = aligned["qd_meas"] if aligned["qd_meas"] is not None else central_derivative(q, dt)
@@ -649,6 +664,8 @@ def fit_parameters(gene, log: dict, *, plan: dict | None = None,
     # l2_requirements, engineer_brief -- rules on the same field rather than each re-deriving it or, as before,
     # none of them reading it at all.
     out["application"] = application_gate(out.get("trajectory"), len(identified_pairs))
+    if torque_channel.get("converted") or torque_channel.get("per_joint"):
+        out["torque_channel"] = torque_channel
     out["wall_clock_s"] = round(time.perf_counter() - t_wall, 3)
     return out
 

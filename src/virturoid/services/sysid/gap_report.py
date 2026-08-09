@@ -37,7 +37,15 @@ dynamics error fills the hole in and leaves the argmin at zero. MEASURED on the 
 **0.0000** / 0.1759 across 0-50 ms, and the prior-model sweep reads 0.1093 / **0.1061** / 0.1172 / ... -- a 3%
 win for the wrong answer. Replacing RMS with a normalised cross-correlation was tried and has the same shape,
 because incoherent ringing decorrelates just as fast as it de-superposes. The trajectory sweep is kept as
-``_delay_search``, for logs with no measured torque, and it is NOT allowed to claim a delay it merely won on.
+``_delay_search``, reported beside the others, and it is NOT allowed to claim a delay it merely won on.
+
+A log with no torque channel at all is no longer handed to that sweep. ``_delay_from_motion`` reads the applied
+torque out of the MOTION instead -- inverse dynamics evaluated POINTWISE on the logged trajectory rather than
+forward-simulated, so a model error stays local, with reflected inertia / damping / dry friction / offset free
+at every candidate lag. It recovers 0 / 20 / 40 ms exactly on the Go2 and it is what a position-only customer
+gets; it has a plant in it, so ``_merge_latency`` ranks it below the torque channel and above the sweep, by how
+much plant is in each. And a log carrying motor current is converted to torque by ``sysid.torque_channel``
+before any of this, through a constant that is reported rather than assumed.
 
 Everything here is CPU MuJoCo and non-iterative: four inverse-dynamics passes plus a small delay grid. It is a
 measurement, not a fit -- fitting is Stage 2.
@@ -97,6 +105,29 @@ TORQUE_CHANNEL_CAVEAT = (
     "leaves the estimate exact, and one at 40 Hz biases it a full control tick HIGH. Log the least-filtered "
     "current you have, and read a one-tick disagreement between joints as a filtering difference before "
     "reading it as an actuator difference."
+)
+
+# ---- the POSITION-ONLY estimator. Same three gates; one extra dependency, stated. -------------------------
+#: A log with neither measured torque nor motor current used to get no latency number at all -- the fallback
+#: was the closed-loop trajectory sweep, which is biased toward zero and is not allowed to claim. It is
+#: recoverable, and the reason the obvious attempts fail is a SAMPLING artefact rather than a property of the
+#: experiment: the applied torque is a zero-order hold across ``ctrl_every`` physics steps, so a central
+#: difference taken AT a control-tick boundary straddles two different applied torques and biases the answer a
+#: full tick HIGH. MEASURED on the Go2 (2 joints, 12 s, prior model, injections 0/20/40 ms): a central
+#: difference at the boundary gives 10 / 30 / 50 ms with margins of 0.03, a BACKWARD difference gives the same
+#: +1 tick, and both a forward difference at the boundary and a central difference at the interval MIDPOINT
+#: give 0 / 20 / 40 ms exactly with margins of 0.90-0.99. This estimator therefore integrates the equation of
+#: motion over ONE hold interval, where the applied torque is constant by construction.
+MOTION_MODEL_CAVEAT = (
+    "this estimate reads the applied torque out of the MOTION, through our own inverse dynamics, so unlike the "
+    "tau_meas estimate it DOES depend on the dynamics model -- the three parameters this package fits "
+    "(frictionloss / damping / armature) are left free at every candidate lag, but an error outside that set "
+    "is not absorbed. MEASURED on the Go2 with +30% link mass and inertia -- an error no fitted parameter can "
+    "express -- the lag is still recovered exactly at 0 and 20 ms (margins 0.89 and 0.72) and at 40 ms the "
+    "margin collapses to 0.00 and it REFUSES. It also needs the log sampled at or above the control rate: at "
+    "500 / 250 / 100 Hz against a 100 Hz loop it is exact (margins 0.66-0.93), and at 50 Hz -- below the loop "
+    "-- it is wrong by a tick and the margin falls to 0.03-0.19, so the gate refuses. Prefer a log with "
+    "tau_meas or motor current; that estimate has no plant in it at all."
 )
 
 
@@ -400,31 +431,215 @@ def _delay_from_command_response(model, aligned, dofs, plan, *, kp, kd, ctrl_eve
     }
 
 
-def _merge_latency(cmd: dict, traj: dict, lag_note: str) -> dict:
-    """One latency verdict from the two estimators, with the open-loop one in charge when it can answer.
+def _delay_from_motion(model, aligned, dofs, plan, *, kp, kd, ctrl_every, max_ticks, dt,
+                       native_log_hz=None) -> dict:
+    """The actuation delay from a POSITION-ONLY log: no measured torque, no motor current, no re-simulation.
 
-    Precedence is not a preference, it is what the measurements support. The command/response estimate does not
-    depend on the plant, so it is right whether or not the parameter fit is; the trajectory sweep depends on the
-    plant entirely and its argmin is biased TOWARD ZERO whenever the plant is wrong, because under-shooting a
-    delay saturates while over-shooting does not. Measured on the Go2 at 20 ms injected: the prior-model sweep
-    puts 0 ms 49% ahead of the runner-up -- a confident, wrong answer -- so the trajectory sweep is never
-    allowed to promote itself on a margin. It keeps its original, stricter rule and is reported alongside.
+    The torque the actuator applied is not in the log, but its EFFECT is. Over one control tick the applied
+    torque is a zero-order hold, so integrating the equation of motion across that interval gives
+
+        tau_applied[j]  =  ID(q_j, qd_j, qacc_j) + a*qacc_j + b*qd_j + c*sign(qd_j) + d
+
+    where ``qacc_j = (qd[(j+1)*ce] - qd[j*ce]) / (ce*dt)`` is the MEAN acceleration while that one torque was
+    applied, ``ID`` is our model's inverse dynamics evaluated pointwise on the logged motion, and the four free
+    coefficients are re-fitted AT EVERY CANDIDATE LAG so that reflected inertia, viscous damping, dry friction
+    and a torque offset -- the exact set Stage 2 fits -- cannot bias the lag. The delay is then the shift that
+    aligns that against the declared control law, exactly as ``_delay_from_command_response`` does.
+
+    Two things distinguish this from ``_delay_search``, which is the estimator it replaces on these logs:
+
+      * inverse dynamics is evaluated POINTWISE on the logged trajectory, so a model error stays local. The
+        sweep FORWARD-SIMULATES, so a model error compounds along the rollout and fills in the objective's
+        one-grid-point minimum -- that is the whole defect, and it is why the sweep is biased toward zero.
+      * the parameters most likely to be wrong are free here rather than fixed at our prior. With them fixed,
+        MEASURED, the same objective reads 0 / 70 / 20 ms for injections of 0 / 20 / 40 (margins 0.00-0.15);
+        with them free it reads 0 / 20 / 40 exactly with margins of 0.91-0.93.
+
+    The sampling is load-bearing and was the whole difficulty. Everything is evaluated INSIDE one hold
+    interval: the acceleration as a difference across it, the configuration at its midpoint. A central
+    difference taken at the interval BOUNDARY mixes the torque before the boundary with the torque after it and
+    biases every answer one control tick high -- measured, on the oracle model as well as the prior, which is
+    what showed it was ours and not the experiment's. See ``MOTION_MODEL_CAVEAT`` for what this still costs.
+    """
+    import numpy as np
+
+    from virturoid.services.sysid.bench_rig import central_derivative, inverse_torque, torque_ceiling
+
+    q, q_cmd = aligned["q_meas"], aligned["q_cmd"]
+    if q is None or q_cmd is None or q.shape[0] < 4:
+        return {"available": False, "why": "the log is too short to integrate one control interval"}
+    qd = aligned["qd_meas"] if aligned.get("qd_meas") is not None else central_derivative(q, dt)
+    ce = max(1, int(ctrl_every))
+    n_rows = int(q.shape[0])
+    if n_rows <= ce + 1:
+        return {"available": False, "why": "the log holds fewer than two control ticks"}
+    # The NATIVE sample rate, not the aligned one, and this gate is load-bearing. The delay lives on the
+    # control-tick grid, so a log sampled slower than one tick cannot resolve one -- and the danger is not that
+    # the estimate degrades, it is that ``_align_log`` INTERPOLATES the log back up to the physics rate first,
+    # which smooths the very discontinuity the estimator reads and restores a confident margin on a wrong
+    # answer. MEASURED on the Go2 at 20 ms injected: a raw 50 Hz log against a 100 Hz loop returned 30 ms with
+    # a margin that cleared the gate. Refused here instead, by the one number the interpolation cannot fake.
+    ctrl_hz = 1.0 / (ce * dt)
+    if native_log_hz is not None and float(native_log_hz) < ctrl_hz * 0.99:
+        return {"available": True, "identified": False, "delay_ms": None, "delay_ticks": None,
+                "method": "motion reconstruction on the log (open loop)",
+                "per_joint": {}, "joints_identified": 0, "joints_scored": 0,
+                "not_identified_because": (
+                    f"this log is sampled at {float(native_log_hz):.1f} Hz and the control loop runs at "
+                    f"{ctrl_hz:.1f} Hz, so one control tick is shorter than the gap between samples and the "
+                    f"delay cannot be resolved from the motion. Re-log at or above the control rate, or log "
+                    f"tau_meas / motor current -- that estimate does not differentiate and survives this"),
+                "caveat": MOTION_MODEL_CAVEAT}
+
+    ceil = torque_ceiling(model)
+    want_full = np.clip(np.asarray(kp) * (q_cmd - q) - np.asarray(kd) * qd, -ceil, ceil)
+    tick0 = np.arange(0, n_rows - ce, ce)              # first row of each COMPLETE hold interval
+    tick1 = tick0 + ce
+    mid = tick0 + ce // 2
+    qacc_i = (qd[tick1] - qd[tick0]) / (ce * dt)
+    q_i, qd_i = q[mid], 0.5 * (qd[tick0] + qd[tick1])
+    id_i = inverse_torque(model, q_i, qd_i, qacc_i)
+    want_i = want_full[tick0]
+
+    wins = _windows(plan, n_rows, dofs, 1.0 / dt)
+    tick_ms = ce * dt * 1000.0
+    log_scale = max(float(np.max(np.std(want_i, axis=0))) if want_i.size else 0.0, 1e-6)
+
+    per_joint, agreed = {}, []
+    for name, adr in dofs.items():
+        a, b = wins[name]
+        sel = np.nonzero((tick0 >= a) & (tick1 < b))[0]
+        swing = float(np.std(want_i[sel, adr])) if sel.size else 0.0
+        scale = float(ceil[adr]) if float(ceil[adr]) < 1e6 else log_scale
+        floor = max(DELAY_MIN_TORQUE_SWING_FRAC * scale, 1e-6)
+        if sel.size < 32:
+            per_joint[name] = {"identified": False, "delay_ms": None, "delay_ticks": None,
+                               "commanded_torque_swing_nm": round(swing, 6),
+                               "not_identified_because": "this joint's window holds fewer than 32 complete "
+                                                         "control intervals, which is too few to resolve a "
+                                                         "shift"}
+            continue
+        grid = []
+        for d in range(0, int(max_ticks) + 1):
+            n = sel.size - d
+            if n < 16:
+                break
+            src, dst = sel[:n], sel[d:d + n]
+            y = want_i[src, adr] - id_i[dst, adr]
+            X = np.column_stack([qacc_i[dst, adr], qd_i[dst, adr], np.sign(qd_i[dst, adr]), np.ones(n)])
+            theta, *_ = np.linalg.lstsq(X, y, rcond=None)
+            grid.append({"delay_ticks": d, "delay_ms": round(d * tick_ms, 3),
+                         "motion_residual_nm": round(float(np.sqrt(np.mean((y - X @ theta) ** 2))), 8)})
+        if len(grid) < 2:
+            per_joint[name] = {"identified": False, "delay_ms": None, "delay_ticks": None,
+                               "commanded_torque_swing_nm": round(swing, 6),
+                               "not_identified_because": "this joint's window is too short to shift"}
+            continue
+        best = min(grid, key=lambda r: r["motion_residual_nm"])
+        nxt = min(r["motion_residual_nm"] for r in grid if r["delay_ticks"] != best["delay_ticks"])
+        explained = 1.0 - best["motion_residual_nm"] / swing if swing > floor else 0.0
+        margin = 1.0 - best["motion_residual_nm"] / nxt if nxt > 1e-12 else 0.0
+        why = None
+        if swing <= floor:
+            why = (f"this joint's commanded torque varied by only {swing:.4g} N.m over its window (floor "
+                   f"{floor:.4g} N.m): it was not driven hard enough for a one-tick shift to show")
+        elif explained < DELAY_MIN_EXPLAINED:
+            why = (f"the motion accounts for only {explained:.1%} of the commanded torque at the best lag "
+                   f"(need {DELAY_MIN_EXPLAINED:.0%}); either the log was not produced by the controller the "
+                   f"plan specifies, or our dynamics model is too far off this joint to read the torque out "
+                   f"of the motion. A log carrying tau_meas or motor current does not have this dependency")
+        elif margin < DELAY_MIN_MARGIN:
+            why = (f"the best lag beats the next-best by only {margin:.1%} (need {DELAY_MIN_MARGIN:.0%}); this "
+                   f"log cannot separate {best['delay_ms']:g} ms from its neighbour. A log sampled below the "
+                   f"control rate lands here, and so does a model error the free parameters cannot absorb")
+        row = {"identified": why is None, "delay_ms": best["delay_ms"], "delay_ticks": best["delay_ticks"],
+               "commanded_torque_swing_nm": round(swing, 6),
+               "fraction_of_commanded_torque_explained": round(float(explained), 4),
+               "margin_over_next_best_tick": round(float(margin), 4),
+               "at_grid_edge": bool(best["delay_ticks"] == grid[-1]["delay_ticks"]),
+               "not_identified_because": why, "grid": grid}
+        per_joint[name] = row
+        if why is None:
+            agreed.append(row)
+
+    method = ("motion reconstruction on the log (open loop): the shift that aligns the declared PD law with "
+              "the torque our inverse dynamics says the logged motion required, integrated over one "
+              "zero-order-hold interval, with reflected inertia / damping / dry friction / offset re-fitted at "
+              "every candidate lag")
+    if not agreed:
+        reasons = sorted({r.get("not_identified_because") for r in per_joint.values()
+                          if r.get("not_identified_because")})
+        moved = sorted(r["delay_ticks"] for r in per_joint.values()
+                       if r.get("delay_ticks") is not None
+                       and "not driven hard enough" not in (r.get("not_identified_because") or ""))
+        guess = int(moved[len(moved) // 2]) if moved else None
+        return {
+            "available": True, "identified": False,
+            "delay_ms": None if guess is None else round(guess * tick_ms, 3), "delay_ticks": guess,
+            "method": method, "per_joint": per_joint,
+            "joints_identified": 0, "joints_scored": len(per_joint),
+            "at_grid_edge": bool(guess is not None and guess == int(max_ticks)),
+            "reported_but_not_claimed": ("the argmin over the joints that moved, shown so the refusal can be "
+                                         "read; it is NOT an estimate of the delay"),
+            "not_identified_because": "no joint could resolve a lag: " + "; ".join(reasons[:3]),
+            "caveat": MOTION_MODEL_CAVEAT,
+        }
+
+    ticks = sorted(r["delay_ticks"] for r in agreed)
+    best_ticks = int(ticks[len(ticks) // 2])
+    return {
+        "available": True, "identified": True,
+        "delay_ms": round(best_ticks * tick_ms, 3), "delay_ticks": best_ticks,
+        "method": method,
+        "per_joint": per_joint,
+        "joints_identified": len(agreed), "joints_scored": len(per_joint),
+        "joint_agreement": {"ticks_min": int(ticks[0]), "ticks_max": int(ticks[-1]),
+                            "unanimous": bool(ticks[0] == ticks[-1]),
+                            "note": ("every joint that could resolve a lag returned the same one"
+                                     if ticks[0] == ticks[-1] else
+                                     f"joints disagree across {ticks[0]}-{ticks[-1]} ticks; the MEDIAN is "
+                                     f"reported. Read the per-joint table")},
+        "fraction_of_commanded_torque_explained": round(
+            float(min(r["fraction_of_commanded_torque_explained"] for r in agreed)), 4),
+        "margin_over_next_best_tick": round(float(min(r["margin_over_next_best_tick"] for r in agreed)), 4),
+        "at_grid_edge": bool(any(r["at_grid_edge"] for r in agreed)),
+        "not_identified_because": None,
+        "caveat": MOTION_MODEL_CAVEAT,
+    }
+
+
+def _merge_latency(cmd: dict, traj: dict, lag_note: str, motion: dict | None = None) -> dict:
+    """One latency verdict from up to three estimators, with the least model-dependent one in charge.
+
+    Precedence is not a preference, it is what the measurements support, and it ranks by HOW MUCH PLANT is in
+    the estimate:
+
+      1. ``command_response`` -- the log's own applied torque against the declared law. No plant at all, so it
+         is right whether or not the parameter fit is. Needs ``tau_meas`` (motor current converted through a
+         torque constant counts; the argmin is scale-invariant, MEASURED exact from 0.5x to 2.0x on it).
+      2. ``motion_reconstruction`` -- the applied torque read out of the motion by inverse dynamics evaluated
+         POINTWISE, with the fitted parameters free. Some plant, bounded and stated in ``MOTION_MODEL_CAVEAT``.
+         This is what a position-only log gets, and it recovers 0 / 20 / 40 ms exactly on the Go2.
+      3. ``trajectory_sweep`` -- a forward re-simulation, so the plant is in it end to end and its errors
+         COMPOUND. Its argmin is biased TOWARD ZERO whenever the plant is wrong, because under-shooting a delay
+         saturates while over-shooting does not. Measured on the Go2 at 20 ms injected: the prior-model sweep
+         puts 0 ms 49% ahead of the runner-up -- a confident, wrong answer -- so it is never allowed to promote
+         itself on a margin. It keeps its original, stricter rule and is reported alongside.
     """
     out = {
         "delay_ms": traj.get("delay_ms"), "delay_ticks": traj.get("delay_ticks"),
         "identified": bool(traj.get("identified")),
         "source": "trajectory_sweep",
-        "method": "closed-loop trajectory sweep (no measured torque in this log to align against)",
+        "method": "closed-loop trajectory sweep (nothing better was available on this log)",
         "not_identified_because": traj.get("not_identified_because"),
         "at_grid_edge": traj.get("at_grid_edge"),
         "caveat": lag_note,
         "trajectory_sweep": traj,
     }
-    if not cmd.get("available"):
-        out["command_response"] = cmd
-        return out
+    if motion is not None and motion.get("available"):
+        out["motion_reconstruction"] = motion
     out["command_response"] = cmd
-    if cmd.get("identified"):
+    if cmd.get("available") and cmd.get("identified"):
         out.update({
             "delay_ms": cmd["delay_ms"], "delay_ticks": cmd["delay_ticks"], "identified": True,
             "source": "command_response", "method": cmd["method"], "not_identified_because": None,
@@ -435,14 +650,31 @@ def _merge_latency(cmd: dict, traj: dict, lag_note: str) -> dict:
             "caveat": lag_note + " " + TORQUE_CHANNEL_CAVEAT,
         })
         return out
-    # The open-loop estimate could not resolve it. The trajectory sweep is not a second opinion here -- it is a
-    # weaker experiment on the same log -- so the refusal stands and says which one refused. The argmin is
-    # still carried, disclaimed, the way the sweep's always was.
-    out.update({"delay_ms": cmd.get("delay_ms"), "delay_ticks": cmd.get("delay_ticks"), "identified": False,
-                "source": "command_response", "method": cmd["method"],
-                "at_grid_edge": cmd.get("at_grid_edge"),
-                "reported_but_not_claimed": cmd.get("reported_but_not_claimed"),
-                "not_identified_because": cmd["not_identified_because"]})
+    if motion is not None and motion.get("available") and motion.get("identified"):
+        # No measured torque, or the torque channel could not resolve it. Inverse dynamics on the logged motion
+        # is a WEAKER experiment than the torque channel and a strictly STRONGER one than the sweep, and it is
+        # allowed to claim on its own margin because -- unlike the sweep -- its objective is not zero-biased.
+        out.update({
+            "delay_ms": motion["delay_ms"], "delay_ticks": motion["delay_ticks"], "identified": True,
+            "source": "motion_reconstruction", "method": motion["method"], "not_identified_because": None,
+            "at_grid_edge": motion["at_grid_edge"],
+            "fraction_of_commanded_torque_explained": motion["fraction_of_commanded_torque_explained"],
+            "margin_over_next_best_tick": motion["margin_over_next_best_tick"],
+            "joint_agreement": motion["joint_agreement"],
+            "caveat": lag_note + " " + MOTION_MODEL_CAVEAT,
+        })
+        return out
+    # Nothing that is allowed to claim could resolve it. The refusal stands and says which estimator refused;
+    # the argmin is still carried, disclaimed, the way the sweep's always was.
+    ran = cmd if cmd.get("available") else (motion if (motion or {}).get("available") else None)
+    if ran is None:
+        return out
+    src = "command_response" if cmd.get("available") else "motion_reconstruction"
+    out.update({"delay_ms": ran.get("delay_ms"), "delay_ticks": ran.get("delay_ticks"), "identified": False,
+                "source": src, "method": ran["method"],
+                "at_grid_edge": ran.get("at_grid_edge"),
+                "reported_but_not_claimed": ran.get("reported_but_not_claimed"),
+                "not_identified_because": ran["not_identified_because"]})
     return out
 
 
@@ -488,14 +720,53 @@ def _attribute(model, aligned, plan, dofs, log_hz, noise_floor):
     return rows, raw
 
 
+def _cross_check_torque_constant(model, aligned, dofs, plan, *, kp, kd, ctrl_every, dt, delay_ticks) -> dict:
+    """Re-derive kt from the log and set it beside the one the conversion used.
+
+    Only meaningful once the lag is known, which is why it runs after the delay: the current a motor drew at
+    tick ``k`` answers the torque the controller commanded at tick ``k - D``, and comparing them at the wrong
+    shift would report the correlation of two misaligned signals as a calibration.
+    """
+    import numpy as np
+
+    from virturoid.services.sysid.bench_rig import central_derivative, torque_ceiling
+    from virturoid.services.sysid.torque_channel import identify_from_command
+
+    tau = aligned.get("tau_meas")
+    if tau is None:
+        return {}
+    q_cmd, q = aligned["q_cmd"], aligned["q_meas"]
+    qd = aligned["qd_meas"] if aligned.get("qd_meas") is not None else central_derivative(q, dt)
+    ceil = torque_ceiling(model)
+    want = np.clip(np.asarray(kp) * (q_cmd - q) - np.asarray(kd) * qd, -ceil, ceil)
+    ce = max(1, int(ctrl_every))
+    d = max(0, int(delay_ticks or 0))
+    wins = _windows(plan, q.shape[0], dofs, 1.0 / dt)
+    out = {}
+    for name, adr in dofs.items():
+        a, b = wins[name]
+        first = a + ((-a) % ce)
+        rows = np.arange(first, b, ce)
+        n = rows.size - d
+        if n < 16:
+            continue
+        out[name] = identify_from_command(want[rows[:n], adr], tau[rows[d:d + n], adr], kt_used=1.0)
+    return {k: v for k, v in out.items() if v}
+
+
 def measure_gap(gene, log: dict, *, plan: dict | None = None,
                 delay_max_ticks: int = DEFAULT_DELAY_MAX_TICKS,
-                measure_noise_floor: bool = True) -> dict:
+                measure_noise_floor: bool = True,
+                torque_constant_nm_per_a=None) -> dict:
     """Measure how far our simulator is from ``log``, per joint, in units an engineer recognises.
 
-    ``log`` carries ``joints``, ``t``, ``q_cmd``, ``q_meas`` and (to attribute anything) ``tau_meas``; see
-    ``build_excitation(...)['log_schema']``. ``plan`` is that same excitation plan, and supplying it is what lets
-    each joint be scored over its OWN excitation window instead of over the whole run.
+    ``log`` carries ``joints``, ``t``, ``q_cmd``, ``q_meas`` and, to attribute anything, either ``tau_meas`` or
+    a motor-current channel ``i_meas``; see ``build_excitation(...)['log_schema']``. A current channel is
+    converted through a torque constant by ``torque_channel`` and the conversion is reported, never silent --
+    ``torque_constant_nm_per_a`` is the datasheet value (one number, or ``{joint: value}``) and without it the
+    constant is derived from the catalog actuator the BOM sized, with a wide stated band. ``plan`` is that same
+    excitation plan, and supplying it is what lets each joint be scored over its OWN excitation window instead
+    of over the whole run.
     """
     import time
 
@@ -508,8 +779,10 @@ def measure_gap(gene, log: dict, *, plan: dict | None = None,
         pd_replay,
         start_pose,
     )
+    from virturoid.services.sysid.torque_channel import convert_current_to_torque
 
     t_wall = time.perf_counter()
+    log, torque_channel = convert_current_to_torque(gene, log, explicit=torque_constant_nm_per_a)
     model, rig = bench_model(gene)
     kp, kd, _ = bench_gains(model)
     dofs = joint_dof_map(model, gene)
@@ -522,6 +795,12 @@ def measure_gap(gene, log: dict, *, plan: dict | None = None,
 
     ctrl_hz = float(log.get("control_hz") or (plan or {}).get("controller", {}).get("control_hz") or 100.0)
     ctrl_every = max(1, int(round(log_hz / ctrl_hz)))
+    # The rate the log ARRIVED at, before `_align_log` interpolated it onto the physics grid. Read off the raw
+    # timestamps rather than trusted from a `log_hz` field, because a field can be stale and this number gates
+    # a claim (see `_delay_from_motion`).
+    t_raw = np.asarray(log.get("t") or [], dtype=float)
+    native_hz = (float(t_raw.size - 1) / (t_raw[-1] - t_raw[0])
+                 if t_raw.size > 1 and t_raw[-1] > t_raw[0] else None)
     q_cmd, q_hw = aligned["q_cmd"], aligned["q_meas"]
     # Start the replay where the LOG started, not where our own start-pose rule would have put the robot. On a
     # synthetic log the two are identical; on a real one they are not, and seeding from our own rule would
@@ -570,6 +849,11 @@ def measure_gap(gene, log: dict, *, plan: dict | None = None,
             joints.values(), key=lambda r: -r["position_rms_rad"])[:5]],
         "wall_clock_s": None,
     }
+    # Attached whether or not the conversion SUCCEEDED. A refusal is the more important message of the two:
+    # it is the difference between "your parameters carry a kt error" and "your current channel is a
+    # magnitude and nothing here read it".
+    if torque_channel.get("converted") or torque_channel.get("per_joint"):
+        out["torque_channel"] = torque_channel
     delay_kw = dict(kp=kp, kd=kd, q_start=q0, ctrl_every=ctrl_every,
                     max_ticks=int(delay_max_ticks), dt=dt)
     lag_note = ("per-joint 'output_phase_lag_ms' in the table above is the OBSERVABLE closed-loop output lag "
@@ -577,13 +861,21 @@ def measure_gap(gene, log: dict, *, plan: dict | None = None,
                 "40 ms injected showed as 18 ms of output lag). Use the identified figure as the parameter.")
 
     if tau_hw is None:
+        # A position-only log. The PARAMETERS still cannot be attributed -- that residual is a torque residual
+        # and there is nothing to regress -- but the DELAY can be, off the motion, and that is the term this
+        # package's opening paragraph names as dominant. See ``_delay_from_motion``.
+        motion = _delay_from_motion(model, aligned, dofs, plan, kp=kp, kd=kd, ctrl_every=ctrl_every,
+                                    max_ticks=int(delay_max_ticks), dt=dt, native_log_hz=native_hz)
         out["latency"] = _merge_latency({"available": False, "why": "the log carries no tau_meas"},
-                                        _delay_search(model, q_cmd, q_hw, **delay_kw), lag_note)
+                                        _delay_search(model, q_cmd, q_hw, **delay_kw), lag_note, motion)
         out["attribution"] = {
             "available": False,
             "why": "the log carries no tau_meas. The residual that attributes a gap to a parameter is a TORQUE "
-                   "residual; without measured torque (or motor current) only the trajectory gap above can be "
-                   "reported, and no parameter may be named.",
+                   "residual; without measured torque (or motor current) only the trajectory gap above and the "
+                   "actuation delay can be reported, and no parameter may be named.",
+            "what_is_still_available": "the actuation delay, from 'latency' above -- read out of the motion "
+                                       "rather than out of a torque channel, with the model dependency that "
+                                       "buys stated in its caveat.",
         }
         out["wall_clock_s"] = round(time.perf_counter() - t_wall, 3)
         return out
@@ -634,7 +926,46 @@ def measure_gap(gene, log: dict, *, plan: dict | None = None,
             traj["source"] = "after_parameter_correction"
     cmd = _delay_from_command_response(model, aligned, dofs, plan, kp=kp, kd=kd, ctrl_every=ctrl_every,
                                        max_ticks=int(delay_max_ticks), dt=dt)
-    out["latency"] = _merge_latency(cmd, traj, lag_note)
+    # The motion estimator is a fallback here, not a second opinion, and it runs ONLY when the torque channel
+    # could not resolve the lag -- it costs one inverse-dynamics pass and it has a plant in it, so it must not
+    # displace an answer that does not. It earns its place on exactly one case, and that case is common on a
+    # CURRENT channel: a torque constant far enough out fails the reconstruction gate, and the customer would
+    # otherwise get a refusal with nothing to act on. Measured on the Go2 with the constant 2.5x out -- the
+    # real Go2 part-substitution factor -- the torque channel refuses at "the declared PD law reconstructs only
+    # -5%" and this recovers the delay from the motion, which is what lets the cross-check below name the 2.5x.
+    motion = None
+    if not cmd.get("identified"):
+        motion = _delay_from_motion(model, aligned, dofs, plan, kp=kp, kd=kd, ctrl_every=ctrl_every,
+                                    max_ticks=int(delay_max_ticks), dt=dt, native_log_hz=native_hz)
+    out["latency"] = _merge_latency(cmd, traj, lag_note, motion)
+
+    # ---- and if the torque channel was a CURRENT channel, re-derive its constant from the log ---------------
+    # Runs here rather than at the conversion because the answer depends on the lag: the current at tick k
+    # answers the torque commanded at tick k - D. Reported as a cross-check, never silently substituted --
+    # a slope of 1.3 against a customer's own datasheet number is a finding about their drivetrain, not a
+    # licence for us to overwrite what they told us.
+    if torque_channel.get("converted"):
+        lat = out["latency"]
+        checks = _cross_check_torque_constant(
+            model, aligned, dofs, plan, kp=kp, kd=kd, ctrl_every=ctrl_every, dt=dt,
+            delay_ticks=(lat.get("delay_ticks") or 0) if lat.get("identified") else 0)
+        for name, chk in checks.items():
+            rec = torque_channel.get("per_joint", {}).get(name)
+            if not rec or not rec.get("used") or not chk.get("nm_per_a"):
+                continue
+            used = float(rec["nm_per_a"])
+            implied = float(chk["nm_per_a"]) * used     # identify_from_command ran with kt_used=1.0 on tau
+            rec["identified_from_this_log"] = {**chk, "nm_per_a": round(implied, 6)}
+            rec["ratio_identified_over_used"] = round(implied / used, 4) if used else None
+        torque_channel["cross_check"] = (
+            "'identified_from_this_log' per joint is the constant that would make the logged current match the "
+            "torque the controller commanded, measured at the identified lag. A ratio near 1 corroborates the "
+            "constant used; a ratio far from 1 says the constant, the current loop's torque tracking, or the "
+            "drivetrain efficiency is off by that factor -- and the fitted parameters carry that factor.")
+        if not lat.get("identified"):
+            torque_channel["cross_check_caveat"] = ("the actuation delay was NOT identified, so this "
+                                                    "cross-check was taken at zero lag and is weakened by "
+                                                    "however much delay the robot actually has")
     out["wall_clock_s"] = round(time.perf_counter() - t_wall, 3)
     return out
 

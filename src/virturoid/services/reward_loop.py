@@ -353,25 +353,36 @@ def _land_on_robot(rid: str, out: dict, args: dict, *, door: str) -> dict:
     """CLOSE THE LOOP: put the trained controller on the held robot so the next ``verify_robot`` measures IT.
 
     This tool read the gene with ``S.get_robot`` and never wrote one back — see ``trained_controller`` for the
-    full account and for why "apply by default, credible-gated, undoable" is the contract. The GPU arm's
-    artifact is a policy ``.npz``, which deploys through the POLICY bank (``policy_flywheel.recall_morph_policy``,
-    which verify already consults when the scripted gait is not credible) rather than through these five
-    scalars; the report says which of the two landed rather than letting one stand for both.
+    full account and for why "apply by default, credible-gated, undoable" is the contract.
+
+    TWO ARTIFACTS, TWO CHANNELS, AND THE SECOND ONE WAS A CLAIM RATHER THAN A CALL. The CPU arm produces five CPG
+    scalars, which land on the gene above. The GPU arm produces a neural policy ``.npz``, which cannot: its
+    deployment channel is the POLICY bank that ``verify_robot`` consults (``ai_native_tools._learned_gait_attempt``
+    -> ``policy_flywheel.recall_morph_policy``). This function used to SAY exactly that — "it deploys through the
+    POLICY bank (verify recalls it)" — and call nothing: no agent-reachable path anywhere had ever called
+    ``bank_morph_policy`` (the repo's only caller was ``desktop.py:480``), so recall could never find the file and
+    the agent was told its GPU training had landed when it had not. It now goes through
+    ``policy_flywheel.land_gpu_policy``, the same helper ``train_held``'s GPU arm uses, whose gate is the bank's
+    own credible-deployed-rollout screen ON THIS BODY — so an unbankable policy comes back as an honest refusal
+    naming its verdict instead of a sentence about where it would have gone.
     """
+    from virturoid.services import session_state as S
+    from virturoid.services.policy_flywheel import land_gpu_policy
     from virturoid.services.trained_controller import apply_trained_gait
+    mode = str(args.get("apply") or "auto").lower()
     ev = {"task": str(args.get("task") or "walk forward"), "reward_expr": out.get("reward_expr"),
           "reward_source": out.get("reward_source"), "forward_m": out.get("forward_m"),
           "robustness_rel": out.get("robustness_rel")}
-    rep = apply_trained_gait(rid, out.get("gait_params") or {}, door=door,
-                             apply=str(args.get("apply") or "auto").lower(),
+    rep = apply_trained_gait(rid, out.get("gait_params") or {}, door=door, apply=mode,
                              credible=bool(out.get("credible")), verdict=str(out.get("verdict") or ""),
                              evidence=ev)
     gpu = out.get("gpu_training") or {}
     if gpu.get("trained"):
         rep["policy_npz"] = gpu.get("policy")
-        rep["policy_note"] = ("MJX PPO also produced a neural policy; it deploys through the POLICY bank (verify "
-                              "recalls it when the scripted gait is not credible), not through the five CPG "
-                              "scalars applied above")
+        rep["policy"] = land_gpu_policy(rid, S.get_robot(rid), gpu.get("policy"), apply=mode, door=door)
+        rep["policy_note"] = ("MJX PPO also produced a neural policy. It does not ride on the five CPG scalars "
+                              "above — `policy` says whether it was BANKED (and so deployable by verify_robot as "
+                              "gait_source 'learned_policy'), or refused and why")
     return rep
 
 
@@ -458,7 +469,12 @@ REWARD_LOOP_TOOLS = {
                        "on real physics, NOT a neural policy and NOT PPO. Set train_backend='gpu' and the SAME "
                        "expression additionally steers MJX PPO on the GPU box (it replaces the shaped reward "
                        "outright) and you get a policy .npz back; if the box is unreachable the report says so "
-                       "and the CPU result stands. Returns the chosen reward, the resulting gait, its honest "
+                       "and the CPU result stands. THE POLICY LANDS TOO, on its own channel: a neural policy "
+                       "cannot ride on five CPG scalars, so it is re-rolled on THIS body and banked as a "
+                       "deployable MorphPolicy skill when that rollout is a credible walk -- verify_robot then "
+                       "reports gait_source 'learned_policy'. `applied_to_robot.policy` says whether it banked "
+                       "or was refused and with what verdict; that one gate is the bank's and apply:'always' "
+                       "does not override it. Returns the chosen reward, the resulting gait, its honest "
                        "verdict, `optimizer.steered_ppo`, and banks a credible result to the flywheel. Uses "
                        "your own LLM subscription when configured; heuristic templates otherwise.",
         "parameters": {"type": "object", "required": ["robot_id"], "properties": {

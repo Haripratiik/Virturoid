@@ -83,6 +83,62 @@ def recall_morph_policy(gene, db, *, task_type: str = "locomotion", with_rollout
         return miss
 
 
+def land_gpu_policy(robot_id: str, gene, npz: str | None, *, apply: str = "auto",
+                    door: str = "train_held", say=None) -> dict:
+    """Where a GPU-trained NEURAL policy goes — and an honest report when it goes nowhere.
+
+    A policy is not five CPG scalars, so it cannot land through ``trained_controller.apply_trained_gait``; its
+    deployment channel is THIS bank, which ``verify_robot`` consults (``ai_native_tools._learned_gait_attempt``
+    -> :func:`recall_morph_policy`) when the scripted gait is not credible. Until 2026-08-09 nothing in any
+    agent-reachable path CALLED :func:`bank_morph_policy` — the repo's only caller was ``desktop.py:480`` — so a
+    GPU run wrote an ``.npz`` into a build directory no verdict path reads, and both GPU doors reported it as
+    landed anyway (``train_held`` said ``trained: true``; ``train_reward`` said in so many words that the policy
+    "deploys through the POLICY bank (verify recalls it)"). Recall could never find it.
+
+    The gate is the BANK's and is deliberately not re-implemented here: :func:`bank_morph_policy` re-rolls the
+    policy on THIS body and admits it only on a credible deployed rollout, which is exactly what ``apply='auto'``
+    promises. ``apply='always'`` does NOT override it, and the refusal says so — a policy is keyed by morphology
+    KIND, so an uncredible one admitted here would be recalled by every other legged build too.
+    """
+    base = {"applied": False, "robot_id": str(robot_id or ""), "door": str(door), "apply_mode": str(apply),
+            "channel": "policy_bank", "policy_npz": npz}
+
+    def _say(msg: str) -> None:
+        if say is not None:
+            say("apply", msg)
+
+    if not npz:
+        return {**base, "reason": "GPU training produced no policy artifact, so there was nothing to apply"}
+    if str(apply) == "never":
+        return {**base, "reason": "apply='never' — the policy .npz is returned as an artifact and neither the "
+                                  "held robot nor the policy bank was touched"}
+    if gene is None:
+        return {**base, "reason": (f"no held robot '{robot_id}' to re-roll the trained policy on, so it could not "
+                                   f"be screened or banked — the .npz is returned as an artifact only")}
+    try:
+        from virturoid.services.memory_db import DEFAULT_DB_PATH, MemoryDB
+        with MemoryDB(DEFAULT_DB_PATH) as db:
+            rep = bank_morph_policy(npz, gene, db, task_type="locomotion")
+    except Exception as exc:  # noqa: BLE001 - a banking failure must be reported, never swallowed into "trained"
+        return {**base, "reason": f"could not bank the trained policy: {type(exc).__name__}: {exc}",
+                "error": f"{type(exc).__name__}: {exc}"}
+    if not rep.get("banked"):
+        _say(f"policy NOT deployable: {rep.get('verdict')}")
+        why = (f"the trained policy was re-rolled on this exact body and its own un-gameable verdict was "
+               f"{rep.get('verdict')!r}, so it was not banked and verify_robot will not deploy it — the robot "
+               f"keeps the controller it had")
+        if str(apply) == "always":
+            why += (". apply='always' does not override this one gate: the bank is keyed by morphology KIND, so "
+                    "an uncredible policy admitted here would be recalled by every other legged build")
+        return {**base, "reason": why, "verdict": rep.get("verdict"), "forward_m": rep.get("forward")}
+    _say(f"policy banked as {rep['skill_id']} — verify_robot can now deploy it on this body")
+    return {**base, "applied": True, "skill_id": rep.get("skill_id"), "verdict": rep.get("verdict"),
+            "forward_m": rep.get("forward"), "gait_source_after": "learned_policy",
+            "reason": ("banked as a reusable MorphPolicy skill after a credible deployed rollout ON THIS BODY; "
+                       "verify_robot deploys it (gait_source 'learned_policy') when the scripted gait is not "
+                       "credible")}
+
+
 def _feature_dim_for(gene) -> int:
     """The morphology-agnostic per-token feature width for ``gene`` (constant across bodies)."""
     import mujoco
