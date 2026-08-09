@@ -119,10 +119,20 @@ class GaitFlywheelTests(unittest.TestCase):
         bank_gait(db, gA, _Walk())
 
         gB = ensure_walkable_quad(compose_robot("a four legged walking robot"), "a four legged walking robot")
-        if getattr(gB, "species", None) != getattr(gA, "species", None):    # only meaningful if strings differ
-            recalled = recall_gait(db, gB)
-            self.assertIsNotNone(recalled, "morphology embedding should retrieve a structurally-similar prior")
-            self.assertAlmostEqual(recalled["kp"], 233.0, places=3)         # reused A's actual controller params
+        # THIS TEST ASSERTED NOTHING. It was guarded by `if gB.species != gA.species`, and MEASURED 2026-08-09
+        # both prompts compose to species "quadruped.anatomy" — so the guard was False, `recall_gait` was never
+        # called, and the moat's headline (recall keyed on MORPHOLOGY, not on a name) passed vacuously in CI.
+        #
+        # The guard was also the wrong question. Recall must NOT depend on the two bodies carrying different
+        # species STRINGS: that they carry the same one is the point — the retrieval key is the structural
+        # vector, and a name-keyed cache would be exactly the thing this test exists to rule out. So the recall
+        # is asserted unconditionally, and the species strings are asserted to be irrelevant to the answer by
+        # renaming gB before the lookup.
+        gB.species = "totally_different_name.v9"
+        recalled = recall_gait(db, gB)
+        self.assertIsNotNone(recalled, "morphology embedding should retrieve a structurally-similar prior")
+        self.assertAlmostEqual(recalled["kp"], 233.0, places=3)             # reused A's actual controller params
+        self.assertAlmostEqual(recalled["freq"], 1.42, places=3)            # ...the whole operating point, not a default
 
     def test_warm_start_provenance_names_the_actual_parent_at_deploy_horizon(self):
         """The flywheel edge must identify the recalled skill and compare controllers at one horizon."""

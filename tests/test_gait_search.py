@@ -194,7 +194,10 @@ class GaitSearchTests(unittest.TestCase):
         # it found an upright, surviving, forward gait...
         self.assertTrue(res.best_survived)
         self.assertGreaterEqual(res.best_height_ratio, 0.6)
-        self.assertGreater(abs(res.best_forward), 0.2)          # a real walk, not a shuffle
+        # SIGNED, not abs(). This file asserts fifty lines up that "a body that travelled BACKWARD must not
+        # report forward progress" — and then wrapped its own headline in abs(), so a search whose entire
+        # population only walked backward (best_forward -0.55) cleared a test named "learns a DEPLOYABLE walk".
+        self.assertGreater(res.best_forward, 0.2)               # a real FORWARD walk, not a shuffle or a reverse
         # ...and CEM improved (monotone non-decreasing best across generations).
         self.assertEqual(res.history, sorted(res.history))
         # the winning params are within the searched bounds (deployable by construction).
@@ -217,7 +220,7 @@ class GaitSearchTests(unittest.TestCase):
         res = search_gait(g, generations=4, pop=10, steps=700, seed=1, workers=1)
         self.assertTrue(res.best_survived)
         self.assertGreaterEqual(res.best_height_ratio, 0.6)
-        self.assertGreater(abs(res.best_forward), 0.3)          # a real 6-leg walk, deployable by construction
+        self.assertGreater(res.best_forward, 0.3)               # a real 6-leg FORWARD walk (see the abs() note above)
 
     def test_deterministic_for_seed(self):
         from virturoid.services.gait_search import search_gait

@@ -634,6 +634,78 @@ def test_import_onnx_policy_validates_the_action_width_against_the_customers_own
     assert "no held robot" in (missing["result"].get("error") or missing.get("error") or "")
 
 
+_RESULT_VERBS = frozenset({"import", "adopt", "train", "apply", "adapt", "verify", "export", "render", "probe",
+                           "sandbox", "learn", "generate", "ingest", "inspect", "amplify", "calibrate",
+                           "measure"})
+_RESULT_IDENT = __import__("re").compile(r"\b([a-z][a-z0-9]*(?:_[a-z0-9]+)+)\b(?!\s*=)")
+
+
+def _prose_literals(fn) -> str:
+    """Every PROSE string literal in ``fn``'s source that is not its docstring and not a dict key."""
+    import ast
+    import inspect
+    import textwrap
+    try:
+        tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
+    except (OSError, TypeError, SyntaxError):           # C-implemented / dynamically built handler
+        return ""
+    # clean=False: the cleaned form is a NEW string, so an identity test against it never matches and the
+    # docstring leaks back into the scan. That bug made the first widening report four DESCRIPTIONS as routes.
+    doc = ast.get_docstring(tree.body[0], clean=False) if tree.body else None
+    keys = {id(k) for n in ast.walk(tree) if isinstance(n, ast.Dict) for k in n.keys if k is not None}
+    return " ".join(n.value for n in ast.walk(tree)
+                    if isinstance(n, ast.Constant) and isinstance(n.value, str)
+                    and n.value is not doc and id(n) not in keys and " " in n.value)
+
+
+def _result_route_corpus(tools: dict) -> dict[str, str]:
+    """``{where: prose}`` for every registered tool's own RESULT text, plus the payloads built outside a
+    handler. DERIVED FROM THE REGISTRY: the corpus grows when the registry does, which is the whole point."""
+    from virturoid.services.policy_native_adapter import DEPLOYMENT
+
+    def _values(obj) -> str:
+        """The prose a customer READS. Field NAMES are a separate namespace (``verify_robot_still_measures``
+        is a key, not a route), so only values are scanned — the distinction ``_NOT_A_TOOL`` draws."""
+        if isinstance(obj, str):
+            return obj
+        if isinstance(obj, dict):
+            return " ".join(_values(v) for v in obj.values())
+        if isinstance(obj, (list, tuple)):
+            return " ".join(_values(v) for v in obj)
+        return ""
+
+    out = {f"{name}: the handler's result prose": _prose_literals(spec["handler"])
+           for name, spec in tools.items() if isinstance(spec, dict) and spec.get("handler") is not None}
+    out["import_onnx_policy: the deployment disclosure"] = _values(DEPLOYMENT)
+    return out
+
+
+def _not_a_route(tools: dict) -> set[str]:
+    """Names that share a tool verb but are passed INSIDE a call: edit operators + declared parameters."""
+    out: set[str] = set()
+    try:
+        from virturoid.services.edit_operators import OPERATORS
+        out |= {op for op in OPERATORS if op not in tools}
+    except Exception:  # noqa: BLE001
+        pass
+    for spec in tools.values():
+        props = ((spec.get("parameters") or {}).get("properties") or {}) if isinstance(spec, dict) else {}
+        out |= {p for p in props if p not in tools}
+    return out
+
+
+def _result_routes_that_do_not_dispatch(tools: dict) -> dict[str, set[str]]:
+    """The scanner itself, factored out of its test so ``test_..._has_teeth`` can run it against a registry
+    doctored to contain the historical defect — a guard nobody has seen fail is not evidence."""
+    not_a_route = _not_a_route(tools)
+    bad: dict[str, set[str]] = {}
+    for where, blob in _result_route_corpus(tools).items():
+        for name in set(_RESULT_IDENT.findall(blob)):
+            if name not in tools and name not in not_a_route and name.split("_")[0] in _RESULT_VERBS:
+                bad.setdefault(name, set()).add(where)
+    return bad
+
+
 def test_no_tool_RESULT_offers_a_route_to_a_tool_that_does_not_exist():
     """``test_tool_registration.test_no_agent_facing_text_names_a_tool_that_does_not_exist`` already checks the
     MCP handshake, the prompts, the design schema and every tool DESCRIPTION. Its corpus stops there — and the
@@ -646,44 +718,56 @@ def test_no_tool_RESULT_offers_a_route_to_a_tool_that_does_not_exist():
     Same identifier rule as the registry guard, including its ``(?!\\s*=)`` skip so ``mode='gpu_rl'`` reads as
     the keyword argument it is. STRING LITERALS ONLY: a source scan would also flag the comment that explains
     this very defect.
+
+    THE CORPUS IS EVERY REGISTERED TOOL, NOT A HAND-LIST. This guard shipped scanning exactly two objects —
+    ``_reframe_for_imported_body`` and ``DEPLOYMENT`` — i.e. 2 of 75 registered tools, which is the SAME defect
+    it was written to close one level up: a guard whose corpus stops before the surface that matters. PROVEN
+    2026-08-09 by construction: planting the original defect string ("call import_control_script with your own
+    script and re-verify to make the verdict describe your controller") into any third result surface left the
+    two-surface version GREEN, while the identical rule applied to that surface flagged it. The rule was never
+    the problem; the corpus was. So the corpus is now derived from ``TOOLS`` and grows when the registry does.
+
+    Four narrowings keep it on ROUTES and off the three OTHER namespaces that share tool verbs — each derived,
+    not listed, so none of them can go stale the way a denylist would:
+      * dict-KEY literals are skipped (``{"export_gate": ...}`` declares a field, it does not route anywhere);
+      * only literals containing whitespace are scanned, because a route is PROSE a customer reads
+        ("call ``adopt_control_script``…"), while a bare ``"render_px"`` is an identifier in a payload;
+      * the handler's own DOCSTRING is skipped — that is the tool DESCRIPTION, and
+        ``test_tool_registration``'s guard already holds descriptions to this bar, so scanning them here would
+        double-report one defect in two files;
+      * EDIT-OPERATOR names (``adopt_walkable_template``) and every tool's own declared PARAMETER names
+        (``train_backend``) are skipped, because both are namespaces an agent passes INSIDE a call rather than
+        dispatching — the same distinction ``_NOT_A_TOOL`` and the parameter scanners below already draw.
     """
-    import ast
-    import inspect
-    import re
-    import textwrap
-    from virturoid.services import ai_native_tools as AIT
     from virturoid.services.agent_tools import TOOLS
-    from virturoid.services.policy_native_adapter import DEPLOYMENT
 
-    def _literals(fn) -> str:
-        tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
-        doc = ast.get_docstring(tree.body[0])
-        return " ".join(n.value for n in ast.walk(tree)
-                        if isinstance(n, ast.Constant) and isinstance(n.value, str) and n.value is not doc)
-
-    def _values(obj) -> str:
-        """The prose a customer READS. Field NAMES are a separate namespace (``verify_robot_still_measures`` is
-        a key, not a route), so only values are scanned — the same distinction ``_NOT_A_TOOL`` draws."""
-        if isinstance(obj, str):
-            return obj
-        if isinstance(obj, dict):
-            return " ".join(_values(v) for v in obj.values())
-        if isinstance(obj, (list, tuple)):
-            return " ".join(_values(v) for v in obj)
-        return ""
-
-    verbs = {"import", "adopt", "train", "apply", "adapt", "verify", "export", "render", "probe", "sandbox",
-             "learn", "generate", "ingest", "inspect", "amplify", "calibrate", "measure"}
-    ident = re.compile(r"\b([a-z][a-z0-9]*(?:_[a-z0-9]+)+)\b(?!\s*=)")
-    results = {"verify_robot: the imported-body routes": _literals(AIT._reframe_for_imported_body),
-               "import_onnx_policy: the deployment disclosure": _values(DEPLOYMENT)}
-    bad: dict[str, set[str]] = {}
-    for where, blob in results.items():
-        for name in set(ident.findall(blob)):
-            if name not in TOOLS and name.split("_")[0] in verbs:
-                bad.setdefault(name, set()).add(where)
+    corpus = _result_route_corpus(TOOLS)
+    assert len(corpus) > 50, f"the corpus collapsed to {len(corpus)} surfaces; it must track the registry"
+    bad = _result_routes_that_do_not_dispatch(TOOLS)
     assert not bad, ("a tool RESULT routes the customer to something that does not dispatch: "
                      + "; ".join(f"{k} (in {sorted(v)})" for k, v in sorted(bad.items())))
+
+
+def test_the_tool_RESULT_guard_has_teeth():
+    """A guard nobody has seen fail is not evidence — the standard the parameter scanners next door are held
+    to. Register a handler whose RESULT carries the historical defect verbatim (``import_control_script``, the
+    route ``verify_robot`` used to offer) and require the SAME scanner, over the SAME derived corpus, to catch
+    it. This is what the two-surface version could not do: proven 2026-08-09, the plant left it green."""
+    from virturoid.services.agent_tools import TOOLS
+
+    def _handler_with_the_old_lie(args):
+        return {"ok": True, "next": ("this robot is now yours to control: call import_control_script with "
+                                     "your own script and re-verify to make the verdict describe your "
+                                     "controller")}
+
+    doctored = {**TOOLS, "verify_robot_regression_probe": {"handler": _handler_with_the_old_lie,
+                                                           "description": "x", "parameters": {}}}
+    bad = _result_routes_that_do_not_dispatch(doctored)
+    assert "import_control_script" in bad, f"the widened guard missed the planted route: {bad}"
+    assert any("verify_robot_regression_probe" in w for w in bad["import_control_script"]), bad
+    # ...and it is the CORPUS that found it, not luck: the same plant in a surface outside the registry is
+    # exactly what the old two-surface version could not see.
+    assert "adopt_control_script" in TOOLS, "the real route must exist, or the guard flags the wrong name"
 
 
 @pytest.mark.skipif(not _MUJOCO, reason="composing a body needs MuJoCo")

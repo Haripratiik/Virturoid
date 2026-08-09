@@ -22,6 +22,7 @@ Every body below was generated from a one-line prompt by the same pipeline — n
 - [Installation](#installation)
 - [Usage](#usage)
 - [Configuration](#configuration)
+- [Recent improvements](#recent-improvements)
 - [Roadmap](#roadmap)
 - [License](#license)
 
@@ -355,6 +356,49 @@ conversation. Setting `VIRTUROID_LLM_BACKEND=openai` does not configure this ass
 Bring your own subscription: set `VIRTUROID_LLM_BACKEND` to `openai`, `claude`, or `local` and supply the
 matching key/endpoint — the keys are yours and never leave your machine. Everything also runs fully offline
 (`off`), which is the default.
+
+## Recent improvements
+
+Every number below was measured on this checkout, most of them against real robots from the
+[MuJoCo Menagerie](https://github.com/google-deepmind/mujoco_menagerie).
+
+**Your robot arrives as your robot.** Ingesting a Unitree Go2 preserves its mass to three decimals
+(15.206 kg, `delta_kg 0.0`), its torque limits read from all three places MJCF can declare them, its own
+meshes, and its link placement verified against the source model — worst error across the corpus 0.000017 m,
+385× under budget. Closed kinematic loops carry the source's own solver reference, and coupled joints are
+emitted as native URDF `<mimic>` (24 of 24 across the corpus, validated by driving the joint the written file
+names and requiring it to reproduce what MuJoCo actually solves).
+
+**A robot that cannot be simulated cannot produce numbers.** Every import is compiled, settled and excited
+inside its own declared limits before anything downstream runs. Sweeping all 63 Menagerie packages found four
+multi-root models whose editable twin was silently broken — and three of them had been reporting success.
+
+**Training now reaches the robot.** Previously a trained controller was computed and discarded, and the
+product then re-measured the untrained one. Every training door (`train_held`, `train_reward`, `learn_gait`,
+`adapt_gait`, `apply_gait`, `adopt_control_script`) now lands its result — gated on the run's own un-gameable
+verdict, disclosed when it declines, and undoable. A job that produced nothing reports `no_output` rather than
+`succeeded`.
+
+**Amending keeps what you brought.** Adding a limb adds that limb's mass and nothing else
+(`n_existing_links_remassed: 0`), mounts where the request says, and names any finding it refuses on.
+
+**The parts list stopped double-counting.** Motors were being billed once as structure and again as
+actuators; a G1 whose real mass is 33.341 kg shipped a 94.176 kg BOM. Simulated mass and BOM mass now agree
+exactly on every generated body.
+
+**The walk verdict got harder to satisfy.** A robot travelling in a closed circle used to score CREDIBLE
+WALK. Verdicts now require sustained heading and net-over-path straightness, so circling and milling are
+named as what they are. A genuine 60° turn still passes.
+
+**Bodies differ because the prompt differs.** Proportion (leg length, limb thickness, stance width, trunk
+length and width) and leg counts from 1 to 12 are honoured, and limbs can attach anywhere along a parent —
+which is what makes a segmented crawler a chain of body segments rather than limbs radiating from one disc.
+Structurally distinct legged bodies: 20 → 189.
+
+**Sim-to-real has a front door.** Six tools cover the whole path — plan the bench experiment for your
+hardware, simulate a log if you have none, measure the per-joint gap, fit actuator parameters, and revert in
+one call. Actuation delay is identified exactly from a torque log, from a current log via the datasheet
+torque constant (stated, never silent), or from a position-only log.
 
 ## Roadmap
 

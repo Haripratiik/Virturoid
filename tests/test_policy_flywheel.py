@@ -1,5 +1,17 @@
-"""Policy flywheel (Theme 2): a trained MorphPolicy is banked once and REUSED across builds + across
-morphologies — a new hexapod build recalls the policy banked from a quadruped and walks with it.
+"""Policy flywheel (Theme 2): the GATE on the reusable policy bank — an UNVERIFIED artifact is refused entry,
+and a refused artifact is not handed to a different morphology.
+
+THE DOCSTRING HERE USED TO CLAIM THE OPPOSITE, and nothing tested it. It read "a trained MorphPolicy is banked
+once and REUSED across builds + across morphologies — a new hexapod build recalls the policy banked from a
+quadruped and walks with it", and the test below carried a bare ``return`` that made the last two assertions —
+the rollout and the forward check, i.e. the ONLY lines that could have supported that sentence — unreachable.
+What actually runs asserts the reverse: ``models/morph_quad_att.npz`` is a crouching residual policy, so
+``bank_morph_policy`` REFUSES it and ``recall_morph_policy`` returns None. That refusal is the correct and
+valuable behaviour; the sentence describing this file was simply describing a different one.
+
+Cross-body recall IS tested, on the gait bank, in ``test_gait_flywheel.test_recall_by_morphology_embedding_
+across_species`` and ``test_gait_recall_hygiene``. A live cross-morphology POLICY reuse test needs a bankable
+(credible-recipe) artifact this checkout does not ship — see the note on the dead block below.
 Gated on the GPU-trained policy file (models/morph_quad_att.npz) being present."""
 
 import importlib.util
@@ -40,7 +52,6 @@ def _radial(n):
 class PolicyFlywheelTests(unittest.TestCase):
     def test_bank_then_recall_across_build_and_morphology(self):
         from virturoid.services.memory_db import MemoryDB
-        from virturoid.services.morph_policy import rollout_morph
         from virturoid.services.morphology_composer import compose_from_spec, morphology_from_requirements
         from virturoid.services.policy_flywheel import bank_morph_policy, recall_morph_policy
 
@@ -52,18 +63,18 @@ class PolicyFlywheelTests(unittest.TestCase):
                 res = bank_morph_policy(str(_NPZ), quad, db)
                 self.assertFalse(res["banked"], "a crouching residual policy must not enter the reusable bank")
                 self.assertIn("UNVERIFIED", res["verdict"])
-                pol = recall_morph_policy(hexapod, db)                      # NEW legged build recalls it
+                pol = recall_morph_policy(hexapod, db)                      # a NEW legged build asks for it...
                 self.assertIsNone(pol, "a rejected policy must not be recalled by a different morphology")
-                return
-                r = rollout_morph(hexapod, pol, steps=400)                  # reused on a DIFFERENT body
-                self.assertGreater(r["forward"], 0.0)                       # the banked policy walks it FORWARD
-                # Zero-shot cross-morphology transfer (a QUAD policy driving a HEXAPOD) crouch-walks: it moves
-                # forward but in a low stance, so it need not clear the strict upright gate. We assert it stays
-                # substantially OFF the floor (didn't collapse) — the honest claim for un-fine-tuned transfer.
-                # (Before the standing-spawn fix this asserted upright, but the gate was vacuous: the body
-                # spawned penetrating at z0=0.1 so z>0.5*z0 was always true even while bouncing — see
-                # [[task-effectiveness-loop]].)
-                self.assertGreater(r["height_ratio"], 0.3)
+                # NOTHING FOLLOWED HERE BUT DEAD CODE. A bare `return` sat on this line with two assertions
+                # after it — `rollout_morph(hexapod, pol)` and `forward > 0.0`, the module docstring's whole
+                # claim — and `pol` is None on the line above, so they could never have run anyway. They were
+                # deleted rather than left as decoration: an unreachable assertion is not weaker evidence than
+                # a strong one, it is NO evidence, and it read as coverage for a claim nothing was checking.
+                #
+                # To restore a real cross-morphology POLICY reuse test, bank a CREDIBLE recipe-controlled
+                # artifact (assess_policy_rollout requires deployment_controller == "recipe_cpg") and then
+                # assert the recalled policy's SIGNED forward travel on the hexapod. That needs a bankable
+                # artifact this checkout does not ship, so it is named here rather than faked.
 
 
 if __name__ == "__main__":

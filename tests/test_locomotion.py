@@ -34,7 +34,15 @@ class LocomotionTests(unittest.TestCase):
         mj = mujoco.MjModel.from_xml_string(compile_gene_to_mjcf(g))
         r = run_locomotion_episode(mj)
         self.assertTrue(r["upright"])                             # legs point down -> it stands
-        self.assertGreater(r["distance_m"], 0.1)                 # it locomotes under the bare trot baseline
+        # `distance_m` IS NOT A WALK. It is norm(p1 - p0) — the UNSIGNED planar travel that
+        # `locomotion_status`'s own docstring, and `test_backward_or_sideways_progress_never_certifies_a_
+        # forward_walk` twenty lines above, both say cannot certify a forward walk. This line used to read
+        # `assertGreater(r["distance_m"], 0.1)` inside a test named `..._walks_forward`, and MEASURED
+        # 2026-08-09 the body it was passing on travels forward_m -0.793 with distance_m 0.793 and
+        # status 'stalled': the bare trot drives the AUTHORED quadruped BACKWARD, and the assertion could
+        # not tell. So this line now claims only what it can see — the trot machinery drives the body —
+        # and the FORWARD claim is made below, on signed travel, where it is true.
+        self.assertGreater(r["distance_m"], 0.1, "the bare trot must actually drive the body somewhere")
         # The PRODUCT verdict for a quadruped is the GAIT-AWARE evaluate_robot (trot, else the statically-stable
         # crawl), which is what verify_robot ships. B1 scales the fanned walkable template to the body's size for
         # per-prompt differentiation; that wide-stance body DRIFTS under the bare trot (direction is the learned
@@ -50,7 +58,13 @@ class LocomotionTests(unittest.TestCase):
         # decision moved to a caller that has one. This assertion is about the WALKABLE body, so it asks for one.
         from virturoid.services.task_matched_eval import evaluate_robot
         w = compose_robot("a quadruped walking robot", ensure_walkable=True)
-        self.assertGreaterEqual(float(evaluate_robot(w).get("value", 0.0)), 0.5,
+        ev = evaluate_robot(w)
+        # THE FORWARD CLAIM, and the one this test is named for. `evaluate_robot`'s locomotion branch scores
+        # `max(0.0, forward_m) if upright else 0.0` — SIGNED forward, clamped, upright-gated — so the metric
+        # name is asserted too: if it ever reverts to unsigned planar travel this line must fail, not pass.
+        self.assertEqual(ev["metric"], "forward_m",
+                         "the product's locomotion score must be SIGNED forward, never unsigned distance")
+        self.assertGreaterEqual(float(ev.get("value", 0.0)), 0.5,
                                 "the composed quadruped must walk under the product's gait-aware verdict")
 
     def test_leg_count_is_parametric(self):

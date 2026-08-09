@@ -56,15 +56,40 @@ class GeneralityBatteryTests(unittest.TestCase):
         from virturoid.services.anatomy_compiler import ensure_walkable_quad
         from virturoid.services.morph_policy import crawl_gait_rollout
         from scripts.verify_gait import classify
+        # THIS TEST USED TO BE SATISFIED BY A SLIDE. It asserted `forward > 0.0` and `height_ratio > 0.6`, and
+        # BOTH are cleared by a body dragged along the floor that never lifts a foot — which is how the #140
+        # "many-leg gait SOLVED" claim was published off a centipede that travelled 0.037 m in 6000 steps at
+        # cadence 0.0 and support_frac 0.000. The claim is retracted; this is the assertion that let it through.
+        #
+        # The fix is to judge with the ruler the PRODUCT judges with. `gait_quality.classify` returns SLIDE
+        # exactly when `cadence < 1.0 or support_frac < 0.25` — feet barely lift — and CIRCLE/MILLS/TURNS OFF
+        # COURSE when the body went round rather than anywhere. Both are asserted per body, so a regression to
+        # dragging or to circling FAILS instead of scoring a walk.
+        #
+        # MEASURED 2026-08-09 on this checkout, so a future reader can see the margin rather than guess it:
+        #   dog      forward 0.664  cadence 15.83  support 0.977  -> CREDIBLE WALK
+        #   hexapod  forward 1.121  cadence 50.42  support 0.981  -> CREDIBLE WALK
+        #   octopod  forward 0.119  cadence 42.50  support 0.978  -> FORWARD BUT SHORT
+        #   centipede forward 0.248 cadence 62.08  support 1.000  -> FORWARD BUT SHORT
+        # The octopod and the centipede are NOT credible walks, and this test does not claim they are. What it
+        # claims — and what its name claims — is that every legged body STEPS, travels forward, and stays up.
         walks = 0
         for p in ("a quadruped robot dog", "a hexapod", "an octopod", "a centipede"):
             g = ensure_walkable_quad(self._build(p), p)
             r = crawl_gait_rollout(g, steps=1200, record_qpos=True)
             net = r["qpos_frames"][-1][0] - r["qpos_frames"][0][0]
+            v = classify(r)
             self.assertLess(abs(r["forward"] - net), 0.06, f"{p}: reported forward must match actual displacement")
             self.assertGreater(r["forward"], 0.0, f"{p}: must travel FORWARD (+x), not backward/in-place")
             self.assertGreater(r["height_ratio"], 0.6, f"{p}: must stay upright, not collapse")
-            if classify(r).startswith("CREDIBLE"):
+            # ...and it must have WALKED there. A slide clears every line above.
+            self.assertNotIn("SLIDE", v, f"{p}: dragged along the floor, it did not step — {v}")
+            self.assertGreaterEqual(r["cadence"], 1.0, f"{p}: no stepping rhythm (cadence {r['cadence']}) — {v}")
+            self.assertGreaterEqual(r["support_frac"], 0.25, f"{p}: feet never planted ({r['support_frac']}) — {v}")
+            # ...and it must have gone SOMEWHERE. A closed loop books its far side as +x delta (test_gait_course_gate).
+            for bad in ("CIRCLE", "MILLS", "TURNS OFF COURSE"):
+                self.assertNotIn(bad, v, f"{p}: went round rather than anywhere — {v}")
+            if v.startswith("CREDIBLE"):
                 walks += 1
         self.assertGreaterEqual(walks, 1, "at least the fanned quad must be a CREDIBLE WALK (baseline was 0)")
 
