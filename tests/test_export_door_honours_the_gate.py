@@ -204,11 +204,23 @@ def test_a_certificate_does_not_claim_deploy_equals_measure_when_no_rollout_ran(
     assert "deploy==measure" not in dead["verified_with"]
     assert "NOTHING WAS MEASURED" in dead["verified_with"]
 
-    # ...and a real rollout is untouched: the claim it was always entitled to still reads exactly as before.
+    # ...and a real rollout is untouched: the claim it is entitled to still reads exactly as before -- once the
+    # CONTROLLER half of "the SAME rollout that deploys" is supplied too. deploy==measure is a claim about a
+    # rollout, and a rollout is a body AND a controller; the second half went unchecked until a real Menagerie
+    # Go2 shipped a trot-CPG control program under a certificate signing a crawl-gait rollout.
+    # ...and the operating point too: the export runs its OWN gait search, so matching the law is not enough.
+    op = {"freq": 1.5, "hip_amp": 0.9, "knee_amp": 1.0, "kp": 32.0, "kd": 1.5}
+    gene.metadata = {**(getattr(gene, "metadata", None) or {}), "gait_params": op}
+    shipped = {"policy_type": "crawl_wave_gait", "parameters_file": "software/control_program.json",
+               "program_fingerprint": "deadbeef", "sim_forward_m": 0.79, "sim_verdict": "CREDIBLE WALK",
+               "frequency_hz": op["freq"], "hip_amp": op["hip_amp"], "knee_amp": op["knee_amp"],
+               "kp": op["kp"], "kd": op["kd"]}
     live = build_certificate(gene, {"verdict": "CREDIBLE (trot, 0.83 m)", "survived": True, "forward_m": 0.83,
-                                    "cadence": 2.1}, body_parity=same)
+                                    "cadence": 2.1, "gait_source": "tuned_for_this_body"},
+                             body_parity=same, shipped_controller=shipped)
     assert live["rollout_ran"] is True and live["deploy_is_measure"] is True
     assert live["body_parity"] == same and "deploy==measure" in live["verified_with"]
+    assert live["controller_parity"]["same"] is True
 
 
 @pytest.mark.skipif(not _MUJOCO, reason="certificate v2 compiles the model")

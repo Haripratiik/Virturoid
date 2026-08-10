@@ -47,6 +47,20 @@ door's own gate is judged at a search-length horizon (600 steps) while the verdi
 horizon (6000): a point can genuinely beat the default over 600 steps and fall at 2000. So a robot that already
 carried a fitted controller CAN come out behind, and the two protections that make that recoverable are the
 ones this module provides — the report names the ``previous_params`` it replaced, and ``undo`` restores them.
+
+ONE MORE HOLE IN THAT NET IS NOW CLOSED, and it was the one nobody could see. A body with no op-point of its own
+does not deploy the shipped default — it deploys the mined FLYWHEEL HINT — and the instant an op-point lands,
+the hint stops being considered at all. So "guarded against the shipped default" guarded the landing against an
+alternative the body was not using. MEASURED 2026-08-10 through ``call_tool`` on a real Menagerie Go2::
+
+    verify (before)          flywheel_hint                1.019 m
+    apply_gait               applied, five in-range scalars
+    verify (after)           default_crawl                0.119 m      <- 9x worse, and named as if nothing landed
+
+``previous_params`` was ``null`` throughout (a hint is not metadata), so not even the ``replaced`` warning fired.
+``ai_native_tools._honest_gait`` now puts the mined hint back in the race whenever a controller is landed on a
+body that has one, and discloses the loser in a ``deploy_select`` block instead of overwriting ``gait_source``
+and leaving the engineer to conclude the apply never happened.
 """
 from __future__ import annotations
 
@@ -162,11 +176,40 @@ def apply_trained_gait(robot_id: str, params, *, door: str, apply: str = "auto",
     except Exception as exc:  # noqa: BLE001 - a landing failure must be reported, never swallowed into "applied"
         return {**base, "reason": f"could not commit the trained controller: {type(exc).__name__}: {exc}",
                 "error": f"{type(exc).__name__}: {exc}"}
+    # READ IT BACK OFF THE HELD ROBOT BEFORE SAYING "applied". ``commit_robot`` returning True says the store
+    # accepted a write, not that the next reader sees these five numbers — the store is file-backed and shared
+    # across processes, the gene round-trips through ``to_dict``/``from_dict`` on the way, and a caller-supplied
+    # id is sanitised at both ends. "applied: true when the parameters are not installed" is the exact defect
+    # class this repo has closed four times; a landing verb that cannot check its own landing must not claim one.
+    landed = held_gait(rid)["params"]
+    # ABSENCE FIRST, then the value. Written as one ``abs(landed.get(k, nan) - clean[k]) > 1e-9`` it passed a
+    # store that had kept NOTHING: every comparison against NaN is False, so a missing key read as "matches".
+    # A read-back that cannot fail is not a read-back, and this file exists because of claims like that.
+    missing = [k for k in GAIT_KEYS
+               if not isinstance(landed.get(k), (int, float)) or not math.isfinite(float(landed[k]))
+               or abs(float(landed[k]) - clean[k]) > 1e-9]
+    if missing:
+        return {**base, "reason": (f"the commit was accepted but re-reading the held robot does NOT show "
+                                   f"{', '.join(missing)} — the controller is NOT installed and this tool will "
+                                   f"not report that it is. Held: {landed or '{}'}; asked for: {clean}"),
+                "error": "landing could not be verified by read-back"}
     src = f"tuned_for_this_body::{door}"
     out = {**base, "applied": True, "undo": _UNDO_HINT,
             "gait_source_after": src,
-            "reason": (f"committed to the held robot as its deployed controller; verify_robot now runs THESE "
-                       f"parameters and reports gait_source '{src}'")}
+            "verified_by": "read-back: these five scalars were re-read off the held robot after the commit",
+            # WHAT THIS TOOL CAN AND CANNOT PROMISE. It can promise the controller is installed and that the
+            # next verdict RUNS it. It cannot promise the next verdict is NAMED after it: verify's deploy-select
+            # re-runs the shipped default — and, when this body has one, the mined flywheel hint — alongside it
+            # and reports whichever walked further. MEASURED 2026-08-10 on a real Menagerie Go2: this tool said
+            # ``gait_source_after: tuned_for_this_body::apply_gait`` and verify answered ``default_crawl``,
+            # which reads exactly like a landing that never happened. It was not; the controller lost.
+            "verify_may_report": (f"'{src}' when this controller wins verify's deploy-select, or 'default_crawl' "
+                                  f"/ 'flywheel_hint' when it loses to the shipped default or to this body's "
+                                  f"mined hint. A generic gait_source after this call is NOT a failed landing — "
+                                  f"verify's `deploy_select` block then names this controller, its own measured "
+                                  f"distance, and the arm that beat it"),
+            "reason": (f"committed to the held robot and re-read off it: verify_robot now RUNS these parameters. "
+                       f"It reports gait_source '{src}' when they win its deploy-select — see `verify_may_report`")}
     if base["previous_params"]:
         # IT REPLACED SOMETHING THAT WAS ALSO FITTED TO THIS BODY. Verify's deploy-select guards the landing
         # against the shipped DEFAULT, not against the controller the body was already carrying, and the gate
@@ -176,7 +219,8 @@ def apply_trained_gait(robot_id: str, params, *, door: str, apply: str = "auto",
         # between an engineer who re-verifies and one who does not.
         out["replaced"] = (f"this robot already carried a controller fitted to it "
                            f"({base['previous_params']}); re-verify, and undo if the new one is worse — "
-                           f"verify's deploy-select only guards the landing against the SHIPPED DEFAULT")
+                           f"verify's deploy-select guards the landing against the shipped default and this "
+                           f"body's mined hint, NOT against the fitted controller you just replaced")
     if mode == "always" and credible is False:
         # ``credible is False`` and ``credible is None`` are different facts: one run measured a verdict and it
         # was not a walk, the other never took one (``apply_gait`` runs no physics). Only the first is an

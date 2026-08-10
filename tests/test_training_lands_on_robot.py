@@ -298,9 +298,37 @@ def test_train_reward_rejects_a_bad_reward_before_running_any_physics(held_dog):
 # So the tests below go through ``call_tool`` and the JOB, not through ``apply_trained_gait``: a test that
 # called the write side directly passed at HEAD while the product discarded the result.
 
+#: A canned ``learn_gait_flywheel`` result for a run that GENUINELY PASSES the gate — the shape of a body that
+#: walked. Every field the door reads is present and mutually consistent, which is not decoration:
+#:
+#: ON 2026-08-10 THIS DICT WENT STALE AND TOOK TWO TESTS WITH IT. ``train_held``'s gate moved from ``survived and
+#: beats_default`` to ``credible_walk`` (survived is not a walk — measured True for a CROUCH on a real Go2), the
+#: canned result was never taught the new key, ``learned.get("credible_walk")`` read None, and the two tests
+#: NAMED for the commit and the undo started passing through the refusal branch. They asserted nothing: both
+#: would have gone green against a ``train_held`` that could not commit at all. A stub that answers fewer
+#: questions than the door asks does not fail — it silently changes which branch is under test, which is why
+#: ``test_the_canned_flywheel_result_answers_every_question_the_door_asks`` now holds it to the door's reads.
 _LEARNED = {"params": dict(_GOOD), "forward_m": 1.4, "default_forward_m": 0.2, "beats_default": True,
             "survived": True, "n_evals": 2, "stopped_reason": "credible_walk", "reused_prior": False,
-            "banked_skill": None, "height_ratio": 0.9, "robustness_rel": 0.2}
+            "banked_skill": None, "height_ratio": 0.9, "robustness_rel": 0.2,
+            # THE GATE, and the sentence that justifies it. ``credible`` is classify() at the 600-step horizon
+            # train_held searches over; ``credible_walk`` is that verdict CONFIRMED at the 6000-step horizon a
+            # walk is judged at, which is what may be landed on a customer's robot.
+            "credible": True, "verdict": "CREDIBLE WALK", "credible_walk": True,
+            "credible_walk_reason": "CREDIBLE WALK at 6000 steps (1.4 m)",
+            "horizon_steps": 600,
+            "settling_check": {"steps": 6000, "credible": True, "survived": True, "forward_m": 1.4,
+                               "verdict": "CREDIBLE WALK", "judged_at": 600},
+            "default_verdict": "CROUCH (low/unstable stance)", "not_banked_reason": None}
+
+#: The same result for the run MEASURED 2026-08-10 on the real Menagerie Go2 through ``call_tool`` (ingested from
+#: ``mujoco_menagerie/unitree_go2``, ``max_evals=4``): the body was still up at 600 steps and it was not walking.
+#: ``survived`` True beside ``credible_walk`` False is the exact pair the old gate collapsed into one word.
+_CROUCHED = {"survived": True, "credible": False, "credible_walk": False, "beats_default": False,
+             "forward_m": 0.141, "default_forward_m": 0.067, "stopped_reason": "max_evals",
+             "verdict": "CROUCH (low/unstable stance)", "settling_check": None,
+             "credible_walk_reason": "CROUCH (low/unstable stance) — the winning operating point survived its "
+                                     "600-step rollout but is not a walk (0.141 m)"}
 
 
 def _stub_flywheel(monkeypatch, tmp_path, **over):
@@ -310,6 +338,25 @@ def _stub_flywheel(monkeypatch, tmp_path, **over):
                         lambda *a, **k: dict(learned))
     monkeypatch.setattr("virturoid.services.agent_tools.safe_build_path", lambda *a, **k: tmp_path)
     return learned
+
+
+def test_the_canned_flywheel_result_answers_every_question_the_door_asks():
+    """The guard on the stub itself, because the stub going stale is how two commit tests went hollow.
+
+    ``run_train_gene_job`` reads the search result by name. A key it reads that the canned result does not carry
+    comes back None — no error, no skip, just a different branch under test — so every ``learned[...]`` and
+    ``learned.get(...)`` in the door must be answerable here. Derived from the door's SOURCE so it cannot drift
+    back out of date the next time the gate moves.
+    """
+    import inspect
+    import re
+    from virturoid.services.agent_design_tools import run_train_gene_job
+    src = inspect.getsource(run_train_gene_job)
+    asked = set(re.findall(r"""learned(?:\.get\(|\[)["']([a-z_]+)["']""", src))
+    assert asked, "the door reads the search result by name; this regex found none of those reads"
+    missing = sorted(asked - set(_LEARNED))
+    assert not missing, (f"the canned flywheel result cannot answer {missing}, which train_held reads — every "
+                         f"test using it silently tests whatever branch None selects")
 
 
 def _await_job(job_id: str, timeout: float = 60.0) -> dict:
@@ -327,7 +374,12 @@ def _await_job(job_id: str, timeout: float = 60.0) -> dict:
 @pytest.mark.skipif(not _MUJOCO, reason="composing a body needs MuJoCo")
 def test_train_held_commits_its_controller_to_the_held_robot(held_dog, tmp_path, monkeypatch):
     """The whole finding in one test, on the engineer's surface: train through ``call_tool``, then read the
-    held gene back. Before this, the gene was byte-identical here."""
+    held gene back. Before this, the gene was byte-identical here.
+
+    THE GATE HAS TO PASS FOR THIS TEST TO BE ABOUT ANYTHING, which is asserted rather than assumed: when the gate
+    silently refused (the canned result went stale, 2026-08-10) this test still went green — through the branch
+    that never commits — and would have stayed green against a ``train_held`` with the commit ripped out.
+    """
     from virturoid.services import session_state as S
     from virturoid.services.agent_tools import call_tool
     _stub_flywheel(monkeypatch, tmp_path)
@@ -335,12 +387,14 @@ def test_train_held_commits_its_controller_to_the_held_robot(held_dog, tmp_path,
     env = call_tool("train_held", {"robot_id": held_dog, "max_evals": 2})
     assert env["ok"], env
     view = _await_job(env["result"]["job_id"])
+    assert view["result"]["credible"] is True, "the gate must PASS here, or this is not a test about committing"
     rep = view["result"]["applied_to_robot"]
     assert rep["applied"] is True, rep
     assert rep["gait_source_after"] == "tuned_for_this_body::train_held"
     md = getattr(S.get_robot(held_dog), "metadata", None) or {}
     assert md["gait_params"] == _GOOD and md["gait_params"] != before
     assert md["gait_provenance"]["door"] == "train_held"
+    assert md["gait_provenance"]["credible"] is True          # the claim rides WITH the controller it admitted
     assert view["status"] == "succeeded"
 
 
@@ -349,7 +403,9 @@ def test_train_held_is_an_edit_so_undo_gives_the_previous_controller_back(held_d
     from virturoid.services import session_state as S
     from virturoid.services.agent_tools import call_tool
     _stub_flywheel(monkeypatch, tmp_path)
-    _await_job(call_tool("train_held", {"robot_id": held_dog})["result"]["job_id"])
+    view = _await_job(call_tool("train_held", {"robot_id": held_dog})["result"]["job_id"])
+    # Same guard: an undo test on a run that never applied is an undo test with nothing to undo.
+    assert view["result"]["applied_to_robot"]["applied"] is True, view["result"]["applied_to_robot"]
     assert (getattr(S.get_robot(held_dog), "metadata", None) or {}).get("gait_params") == _GOOD
     assert call_tool("edit_robot", {"robot_id": held_dog, "ops": [{"op": "undo"}]})["ok"]
     assert not (getattr(S.get_robot(held_dog), "metadata", None) or {}).get("gait_params")
@@ -359,13 +415,20 @@ def test_train_held_is_an_edit_so_undo_gives_the_previous_controller_back(held_d
 def test_a_train_held_run_that_changed_nothing_does_not_finish_succeeded(held_dog, tmp_path, monkeypatch):
     """``status: succeeded`` on top of a byte-identical robot is the defect, not just a symptom of it. A
     non-credible run keeps the old controller (correct) — and must SAY so at the job level, where the engineer
-    was reading a green chip."""
+    was reading a green chip.
+
+    The canned result is the REAL Go2 measurement: ``survived`` True, ``credible_walk`` False, a CROUCH. Written
+    with ``survived=False`` it could not have caught the defect it was closest to — the two facts had been
+    collapsed into one word, and the collapse is only visible when they DISAGREE.
+    """
     from virturoid.services import session_state as S
     from virturoid.services.agent_tools import call_tool
-    _stub_flywheel(monkeypatch, tmp_path, survived=False, beats_default=False, stopped_reason="CROUCH")
+    _stub_flywheel(monkeypatch, tmp_path, **_CROUCHED)
     view = _await_job(call_tool("train_held", {"robot_id": held_dog})["result"]["job_id"])
     rep = view["result"]["applied_to_robot"]
-    assert rep["applied"] is False and "CROUCH" in rep["reason"]
+    assert view["result"]["survived"] is True                 # the weak fact...
+    assert view["result"]["credible"] is False                # ...and the claim, no longer the same word
+    assert rep["applied"] is False and "CROUCH" in rep["reason"], rep["reason"]
     assert rep["apply_with"]["tool"] == "apply_gait"          # ...and how to land it anyway
     assert view["status"] == "no_output", "a train job that landed nothing must not read SUCCEEDED"
     assert not (getattr(S.get_robot(held_dog), "metadata", None) or {}).get("gait_params")
@@ -375,15 +438,115 @@ def test_a_train_held_run_that_changed_nothing_does_not_finish_succeeded(held_do
 def test_train_held_honours_never_and_always_like_every_other_door(held_dog, tmp_path, monkeypatch):
     from virturoid.services import session_state as S
     from virturoid.services.agent_tools import call_tool
-    _stub_flywheel(monkeypatch, tmp_path, survived=False, beats_default=False, stopped_reason="FELL")
+    _stub_flywheel(monkeypatch, tmp_path, **{**_CROUCHED, "verdict": "FELL by ROLL-OVER (roll 139 deg)",
+                                             "credible_walk_reason": "the winning operating point did not "
+                                             "survive its own 600-step rollout (FELL by ROLL-OVER (roll 139 "
+                                             "deg))", "survived": False})
     dry = _await_job(call_tool("train_held", {"robot_id": held_dog, "apply": "never"})["result"]["job_id"])
     assert dry["result"]["applied_to_robot"]["params"] == _GOOD
     assert dry["status"] == "succeeded", "apply='never' asked for an artifact and got one — that is a success"
     assert not (getattr(S.get_robot(held_dog), "metadata", None) or {}).get("gait_params")
     forced = _await_job(call_tool("train_held", {"robot_id": held_dog, "apply": "always"})["result"]["job_id"])
     assert forced["result"]["applied_to_robot"]["applied"] is True
+    # THE OVERRIDE HAS TO QUOTE WHAT IT OVERRODE. "landed an operating point whose own verdict was not credible"
+    # tells an engineer nothing about what is now on the robot; "FELL by ROLL-OVER" tells them to expect it on
+    # its side in the viewer.
     assert "FELL" in forced["result"]["applied_to_robot"]["override"]
     assert (getattr(S.get_robot(held_dog), "metadata", None) or {}).get("gait_params") == _GOOD
+
+
+@pytest.mark.skipif(not _MUJOCO, reason="composing a body needs MuJoCo")
+def test_a_run_that_survived_and_beat_the_default_but_is_not_a_walk_still_does_not_land(held_dog, tmp_path,
+                                                                                       monkeypatch):
+    """C1 ITSELF, as the one case the old gate got wrong in the DANGEROUS direction.
+
+    The gate was ``survived and beats_default``. Both are True here and the run is not a walk — a crouch that
+    shuffled further than a shipped default which also is not a walk — so the old rule would have committed it
+    to the customer's robot while printing a verdict that says CROUCH. Nothing else in the file covers this:
+    every other refusal case fails ``survived`` too, so they pass under either rule.
+    """
+    from virturoid.services import session_state as S
+    from virturoid.services.agent_tools import call_tool
+    _stub_flywheel(monkeypatch, tmp_path, **{**_CROUCHED, "beats_default": True})
+    view = _await_job(call_tool("train_held", {"robot_id": held_dog})["result"]["job_id"])
+    rep = view["result"]["applied_to_robot"]
+    assert view["result"]["survived"] is True and view["result"]["beats_default"] is True
+    assert rep["applied"] is False, "survived + beats_default is not a walk, and must not overwrite a controller"
+    assert "CROUCH" in rep["reason"]
+    assert view["result"]["solved"] is False and view["result"]["credible"] is False
+    assert not (getattr(S.get_robot(held_dog), "metadata", None) or {}).get("gait_params")
+
+
+@pytest.mark.skipif(not _MUJOCO, reason="composing a body needs MuJoCo")
+def test_a_credible_walk_that_lost_the_distance_race_still_lands_and_says_so(held_dog, tmp_path, monkeypatch):
+    """THE OTHER HALF OF C1, with the operands swapped: the old gate could print "did not produce a credible
+    walk" about a credible walk that merely came SECOND.
+
+    ``beats_default`` is a BANK criterion — is this row good enough to seed OTHER bodies' warm starts — and it
+    was doing duty as the landing gate. It is also the wrong question to settle here: verify's deploy-select
+    re-runs the shipped default (and this body's mined hint) against whatever is landed and keeps the credible
+    winner, so refusing at this door protects nothing the customer is not already protected from, while making
+    the refusal sentence false. The run now lands, and the race is DISCLOSED rather than dressed up as a failure.
+    """
+    from virturoid.services import session_state as S
+    from virturoid.services.agent_tools import call_tool
+    _stub_flywheel(monkeypatch, tmp_path, beats_default=False, forward_m=0.369, default_forward_m=0.471,
+                   default_verdict="CREDIBLE WALK",
+                   credible_walk_reason="CREDIBLE WALK at 6000 steps (0.369 m)",
+                   settling_check={"steps": 6000, "credible": True, "survived": True, "forward_m": 0.369,
+                                   "verdict": "CREDIBLE WALK", "judged_at": 600})
+    view = _await_job(call_tool("train_held", {"robot_id": held_dog})["result"]["job_id"])
+    r, rep = view["result"], view["result"]["applied_to_robot"]
+    assert r["credible"] is True and r["beats_default"] is False
+    assert r["solved"] is False, "not bankable for other bodies — which is a different claim from not landable"
+    assert r["default_beat_it"] is True
+    assert rep["applied"] is True, "a credible walk is a controller we can stand behind on this body"
+    assert "did not produce a credible walk" not in str(rep.get("reason") or "")
+    # ...and the loss is stated, in the provenance that rides with the controller.
+    said = (getattr(S.get_robot(held_dog), "metadata", None) or {})["gait_provenance"]["verdict"]
+    assert "0.471" in said and "0.369" in said and "NOT banked" in said, said
+
+
+@pytest.mark.skipif(not _MUJOCO, reason="composing a body needs MuJoCo")
+def test_a_refusal_names_the_verdict_from_the_horizon_it_was_judged_at(held_dog, tmp_path, monkeypatch):
+    """A winner refuted by the settling check carries TWO classify() strings, and quoting the wrong one prints
+    "did not produce a credible walk (CREDIBLE WALK)".
+
+    MEASURED on the real Go2: the same operating point reads ``CREDIBLE WALK, +0.233 m`` at 600 steps and
+    ``FELL by ROLL-OVER, -0.279 m`` at 6000 — the sign of the headline number flips. The refusal has to quote the
+    6000-step verdict, because that is the horizon the decision was taken at.
+    """
+    from virturoid.services.agent_tools import call_tool
+    _stub_flywheel(monkeypatch, tmp_path, survived=True, credible=True, credible_walk=False,
+                   beats_default=True, verdict="CREDIBLE WALK", forward_m=0.233,
+                   settling_check={"steps": 6000, "credible": False, "survived": False, "forward_m": -0.279,
+                                   "verdict": "FELL by ROLL-OVER (roll 139 / pitch 82 deg)", "judged_at": 600},
+                   credible_walk_reason="FELL by ROLL-OVER (roll 139 / pitch 82 deg) at the 6000-step horizon a "
+                                        "walk is judged at (-0.279 m) — it read credible only at the 600-step "
+                                        "horizon it was searched over (0.233 m)")
+    view = _await_job(call_tool("train_held", {"robot_id": held_dog})["result"]["job_id"])
+    said = view["result"]["applied_to_robot"]["reason"]
+    assert "FELL by ROLL-OVER" in said, said
+    assert "(CREDIBLE WALK)" not in said, "the 600-step verdict is not the verdict this refusal was taken on"
+
+
+@pytest.mark.skipif(not _MUJOCO, reason="composing a body needs MuJoCo")
+def test_a_refusal_never_degrades_to_a_verdict_free_sentence(held_dog, tmp_path, monkeypatch):
+    """The refusal must not go quiet when one upstream field is missing — which is exactly when something is
+    wrong and the engineer most needs the verdict. Written as ``credible_walk_reason`` alone it rendered "did not
+    produce a credible walk ()" against any result that did not carry that one key."""
+    from virturoid.services.agent_tools import call_tool
+    _stub_flywheel(monkeypatch, tmp_path, survived=True, credible_walk=False, beats_default=False,
+                   settling_check=None, credible_walk_reason=None, verdict="CROUCH (low/unstable stance)")
+    said = _await_job(call_tool("train_held", {"robot_id": held_dog})["result"]["job_id"]
+                      )["result"]["applied_to_robot"]["reason"]
+    assert "CROUCH" in said and "()" not in said, said
+    # ...and with no verdict reported AT ALL, it says so instead of printing an empty parenthetical.
+    _stub_flywheel(monkeypatch, tmp_path, survived=False, credible_walk=False, beats_default=False,
+                   settling_check=None, credible_walk_reason=None, verdict=None, stopped_reason=None)
+    said = _await_job(call_tool("train_held", {"robot_id": held_dog})["result"]["job_id"]
+                      )["result"]["applied_to_robot"]["reason"]
+    assert "no verdict" in said and "()" not in said, said
 
 
 def test_a_train_job_whose_worker_refused_is_not_a_success():
@@ -775,8 +938,14 @@ def test_landing_over_a_controller_that_was_already_fitted_says_what_it_replaced
     """The module claimed a landing "can never make a robot verify WORSE than it did before". Measured through
     ``call_tool`` on an authored horse, it can: verify 3.305 m CREDIBLE WALK -> train_held (auto, gated on
     beats_default over a 600-step deploy horizon) -> verify 2.107 m FELL by YAW-DRIFT -> undo -> 3.305 m again.
-    Verify's deploy-select guards a landing against the SHIPPED DEFAULT, not against whatever the body was
-    already carrying. So when there IS a previous fitted controller, the report has to name it."""
+    Verify's deploy-select guards a landing against the shipped default and (since 2026-08-10) against this
+    body's mined flywheel hint — but NOT against a fitted controller the body was already carrying. So when
+    there IS a previous fitted controller, the report has to name it and say what the net does not cover.
+
+    The hint half of that sentence was itself a measured defect: a body with no op-point of its own deploys the
+    MINED HINT, so "guarded against the shipped default" guarded the landing against an alternative the body was
+    not using. See ``tests/test_apply_gait_landing_is_visible.py``.
+    """
     from virturoid.services.trained_controller import apply_trained_gait
     first = apply_trained_gait(held_dog, _GOOD, door="learn_gait", credible=True)
     assert "replaced" not in first, "nothing was replaced on a body with no controller of its own"
@@ -784,4 +953,7 @@ def test_landing_over_a_controller_that_was_already_fitted_says_what_it_replaced
     second = apply_trained_gait(held_dog, other, door="train_held", credible=True)
     assert second["applied"] is True
     assert second["previous_params"] == _GOOD
-    assert "undo" in second["replaced"] and "SHIPPED DEFAULT" in second["replaced"]
+    said = second["replaced"]
+    assert "undo" in said
+    assert "shipped default" in said and "mined hint" in said     # what the net DOES cover
+    assert "NOT against the fitted controller you just replaced" in said   # ...and what it does not

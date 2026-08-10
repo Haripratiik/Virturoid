@@ -1224,25 +1224,236 @@ if __name__ == "__main__":
 '''
 
 
-def _verify_exported_gait(gene) -> dict:
-    """Run the EXPORTED bare feed-forward trot-CPG gait on the body (recipe rollout, ZERO learned residual = exactly
-    the exported control law) and classify it — so the control program can state HONESTLY whether this gait walks
-    the body, instead of unconditionally claiming it does. Same un-gameable principle as the flywheel bank: a
-    slide/crouch/fall is not a walk. Best-effort: an unverifiable body reports credible=False (conservative)."""
+#: THE RATE THE EXPORTED CONTROLLER IS DEPLOYED AT — and, by construction, the rate its own verification rollout
+#: samples it at. It used to be the bare literal ``20.0`` written onto every control program, with nothing behind
+#: it: the number beside it was produced by a rollout that recomputed the target EVERY PHYSICS STEP (dt 0.002 s =
+#: 500 Hz), so the file declared one rate and quoted a distance measured at another, 25x faster. That gap is not
+#: cosmetic — measured on a real Menagerie Unitree Go2, the same exported controller travels +0.035 m at 20 Hz,
+#: +0.311 m at 50 Hz and +0.330 m continuous, so 20 Hz throws away 89% of the travel the file was advertising.
+#: 50 Hz is where this body recovers 94% of the continuous-time result, and it is the rate
+#: ``control_script_compiler`` already declares for the OTHER controller a package can ship, so one package no
+#: longer names two deployment rates. ``_run_exported_controller`` decimates to exactly this rate, so whatever
+#: value stands here, the quoted distance is the distance AT it.
+_EXPORT_CONTROL_HZ = 50.0
+#: The downstream PD gains the quoted distance was produced with. The control law "a downstream PD loop tracks
+#: these targets" is not a controller until the gains are named: the same targets tracked at a different
+#: stiffness are a different machine. The crawl plan carries its own fitted ``kp``/``kd``; the trot program had
+#: none, and was silently measured at these.
+_EXPORT_PD_KP, _EXPORT_PD_KD = 32.0, 1.5
+
+
+#: Where the export writer records WHICH CONTROLLER the package ships and what it measured, so the verification
+#: certificate can say whether the rollout it signs is the rollout that deploys. The certificate is assembled from
+#: the gene (``build_certificate_v2(gene, verdict, ...)``) and never sees the output directory, so the gene is the
+#: channel; the stamp carries a ``program_fingerprint`` that also appears in ``software/control_program.json``, so
+#: a reader holding only the two files can confirm they describe the same controller.
+_CONTROLLER_STAMP_KEY = "exported_controller"
+
+
+def _stamp_exported_controller(gene, program: dict | None) -> None:
+    """Record (or CLEAR) the shipped-controller stamp on ``gene.metadata``. Cleared first on every write so a body
+    that ships no control program this time cannot carry one from a previous export — a stale stamp would make the
+    certificate name a controller that is not in the package, which is the exact class of defect this closes."""
     try:
-        from virturoid.services.gait_quality import classify
-        from virturoid.services.morph_graph import encode_robot
-        from virturoid.services.morph_policy import (CPG_DEFAULT, MorphPolicy, compiled_model,
-                                                     recipe_rollout_morph, robot_mjcf)
-        graph = encode_robot(compiled_model(robot_mjcf(gene)))
-        pol = MorphPolicy(graph.feature_dim, seed=0)
-        pol.cpg = CPG_DEFAULT                                    # zero residual + CPG prior == the exported bare gait
-        r = recipe_rollout_morph(gene, pol, steps=1200)
-        verdict = classify(r)
-        return {"credible": verdict.startswith("CREDIBLE"), "forward_m": abs(float(r.get("forward", 0.0))),
-                "survived": bool(r.get("survived", False)), "verdict": verdict}
-    except Exception:  # noqa: BLE001 - verification is best-effort; default to the conservative (non-credible) claim
-        return {"credible": False, "forward_m": 0.0, "survived": False, "verdict": "unverified"}
+        md = dict(getattr(gene, "metadata", None) or {})
+        if program is None:
+            md.pop(_CONTROLLER_STAMP_KEY, None)
+        else:
+            md[_CONTROLLER_STAMP_KEY] = {
+                "policy_type": program.get("policy_type"),
+                "entrypoint": program.get("entrypoint"),
+                "parameters_file": "software/control_program.json",
+                "program_fingerprint": program.get("program_fingerprint"),
+                "control_frequency_hz": program.get("control_frequency_hz"),
+                "pd_gains": program.get("pd_gains"),
+                "verified_walk": program.get("verified_walk"),
+                "sim_forward_m": program.get("sim_forward_m"),
+                "sim_verdict": program.get("sim_verdict"),
+                "measured_by": program.get("measured_by"),
+            }
+        gene.metadata = md
+    except Exception:  # noqa: BLE001 - the stamp is provenance; it must never break a package write
+        pass
+
+
+def exported_controller_stamp(gene) -> dict | None:
+    """The controller this body's package deploys, as recorded by :func:`_write_gait_control_program`, or None if
+    this body exports no control program. Read by ``verdict_certificate`` to judge deploy==measure."""
+    st = (getattr(gene, "metadata", None) or {}).get(_CONTROLLER_STAMP_KEY)
+    return dict(st) if isinstance(st, dict) else None
+
+
+def _program_fingerprint(program: dict) -> str:
+    """A stable content hash of the control program, so the certificate and ``software/control_program.json`` can
+    be checked against each other by a reader with nothing but the two files. Excludes the measurement fields
+    (which are ABOUT the program) so the fingerprint names the CONTROLLER, not the run that scored it."""
+    import hashlib
+    payload = {k: v for k, v in sorted(program.items())
+               if k not in ("verified_walk", "sim_forward_m", "sim_verdict", "notes", "measured_by",
+                            "program_fingerprint", "sim_cadence_hz", "sim_upright_frac")}
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
+
+
+def _run_exported_controller(gene, program: dict, controller_source: str, *, steps: int = 1200,
+                             control_hz: float = _EXPORT_CONTROL_HZ) -> dict:
+    """DRIVE THE CONTROLLER THIS PACKAGE SHIPS, and measure what it does. deploy==measure, made literal.
+
+    The exported gait used to be "verified" by ``recipe_rollout_morph(gene, MorphPolicy(seed=0), cpg=CPG_DEFAULT)``
+    under a comment reading "zero residual + CPG prior == the exported bare gait". Measured on a real Menagerie
+    Unitree Go2, that rollout is a different controller in four independent ways, and the number it produced was
+    wrong in a fifth:
+
+      1. **The residual is not zero.** ``MorphPolicy(feature_dim, seed=0)`` initialises its weights from
+         ``rng.normal(0, 0.3)``; ``morph_policy`` says so itself, and warns that such a rollout "measures the
+         SEED, not the body". Seeds 0/1/2 gave -0.488 / -0.572 / -0.475 m on the Go2 — a 0.10 m spread that
+         nothing in the package disclosed.
+      2. **The PD attractor is a different pose.** ``recipe_rollout_morph`` resets with ``mj_resetData`` (all
+         joints 0) while the exported ``default_pose`` is read after ``_reset_to_rest`` (the body's own home
+         keyframe). On the Go2 those differ by **1.8 rad** on 8 of 12 joints: the file tells the customer to hold
+         the crouched Unitree home stance and the verifying rollout drove the robot with its legs straight out.
+      3. **No position-limit clamp.** The shipped ``GaitController.infer`` clamps every target to the joint's
+         range; the recipe rollout did not.
+      4. **A different control rate** — every physics step (500 Hz) against a file declaring 20 Hz.
+      5. And the result was passed through ``abs()``, so a body walking BACKWARD reported forward travel. The Go2
+         moved **-0.488 m** and its shipped control program advertised ``sim_forward_m: 0.488``.
+
+    So this runs the real thing instead: ``exec`` the exact controller source the package writes to
+    ``software/gait_controller.py``, instantiate it on the exact ``program`` dict written to
+    ``software/control_program.json``, sample it at the declared ``control_hz`` (holding the target between
+    samples, as a real loop does), and track the targets with the program's own PD gains, clipped to the model's
+    actuator limits. Returns the anti-Goodhart metric dict ``gait_quality.classify`` consumes plus a
+    ``measured_by`` block naming every knob of the experiment. Same body, same controller, same file.
+    """
+    import mujoco
+    import numpy as np
+
+    from virturoid.services.gait_quality import classify
+    from virturoid.services.morph_graph import encode_robot
+    from virturoid.services.morph_policy import (_reset_to_rest, compiled_model, robot_mjcf,
+                                                 upright_height_ratio)
+
+    ns: dict = {}
+    exec(compile(controller_source, "<exported software/gait_controller.py>", "exec"), ns)   # noqa: S102
+    controller = ns["GaitController"](program)                   # the SHIPPED class on the SHIPPED parameters
+
+    model = compiled_model(robot_mjcf(gene), solver_iterations=20)
+    data = mujoco.MjData(model)
+    _reset_to_rest(model, data)                                  # the same reset the program's default_pose came from
+    mujoco.mj_forward(model, data)
+    graph = encode_robot(model)
+    if graph.base_jid < 0 or graph.n_tokens == 0:
+        raise ValueError("no floating base or no actuated joints: nothing to drive")
+    qadr = np.asarray(graph.qadr, dtype=int); vadr = np.asarray(graph.vadr, dtype=int)
+    act_u = np.asarray(graph.act_u, dtype=int); clamps = np.asarray(graph.clamps, dtype=float)
+    names = list(program["joint_names"])
+    if len(names) != graph.n_tokens:
+        raise ValueError(f"program covers {len(names)} joints, body has {graph.n_tokens}")
+    # RESOLVE BY NAME, not by position. Both emitters enumerate ``graph.act_u`` so the orders agree today, and a
+    # silent disagreement would apply the shoulder's target to the knee while still producing a plausible-looking
+    # distance — the exact failure class this whole function exists to remove. Names come from the same model, so
+    # a mismatch is a bug, not a degradation: it raises.
+    _jid_of = {mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, int(model.actuator_trnid[int(u), 0])): k
+               for k, u in enumerate(act_u)}
+    order = [_jid_of.get(n) for n in names]
+    if any(o is None for o in order):
+        raise ValueError(f"program names joints this body does not actuate: "
+                         f"{[n for n, o in zip(names, order) if o is None][:4]}")
+    order = np.asarray(order, dtype=int)
+    kp = float(program.get("kp", _EXPORT_PD_KP)); kd = float(program.get("kd", _EXPORT_PD_KD))
+    dt = float(model.opt.timestep)
+    # DECIMATE TO THE DECLARED RATE: recompute the target every `dec` physics steps and HOLD it between, which is
+    # what a `control_hz` loop physically does. dec>=1, so a declared rate above the physics rate degrades to
+    # every-step rather than pretending to sample faster than the simulator ticks.
+    dec = max(1, int(round(1.0 / (max(1e-6, float(control_hz)) * dt))))
+    bq = graph.base_qadr
+    x0 = float(data.qpos[bq]); z0 = float(data.qpos[bq + 2]) or 1.0
+    frame_every = max(5, int(steps) // 300)
+    tau_up = None
+    # foot set + cadence/support bookkeeping, mirroring recipe_rollout_morph so `classify` reads the same signals
+    gz0 = np.asarray(data.geom_xpos[:, 2], dtype=float)
+    body_g = [gi for gi in range(model.ngeom) if int(model.geom_bodyid[gi]) != 0]
+    if body_g:
+        zmin = min(float(gz0[gi]) for gi in body_g)
+        feet = [gi for gi in body_g if float(gz0[gi]) < zmin + 0.05] or body_g
+    else:
+        feet = []
+    feet_idx = np.asarray(feet, dtype=int)
+    fz0 = gz0[feet_idx] if len(feet_idx) else np.zeros(0)
+    c_prev = (np.asarray(data.geom_xpos[feet_idx, 2]) < fz0 + 0.02) if len(feet_idx) else np.zeros(0, bool)
+    tau_up = upright_height_ratio(len(feet_idx))
+    lifts = up_steps = support_steps = 0
+    alive = int(steps); hr = 1.0; qpos_frames = []; tgt = None
+    for t in range(int(steps)):
+        if t % dec == 0:
+            out = controller.infer(t * dt)                       # THE SHIPPED CONTROLLER, at the declared rate
+            tgt = np.empty(graph.n_tokens)
+            for n, k in zip(names, order):                       # name -> this body's own token index
+                tgt[k] = float(out[n])
+        for k in range(graph.n_tokens):
+            tau = kp * (float(tgt[k]) - float(data.qpos[qadr[k]])) - kd * float(data.qvel[vadr[k]])
+            data.ctrl[act_u[k]] = float(np.clip(tau, -clamps[k], clamps[k]))
+        mujoco.mj_step(model, data)
+        if not np.all(np.isfinite(data.qpos)):
+            alive = t; break
+        if t % frame_every == 0:
+            qpos_frames.append(data.qpos.copy())
+        q = data.qpos[bq + 3:bq + 7]
+        upr = 1.0 - 2.0 * (float(q[1]) ** 2 + float(q[2]) ** 2)
+        z = float(data.qpos[bq + 2]); hr = min(1.0, max(0.0, z / z0))
+        if z < 0.5 * z0:                                         # FALLEN -> terminate (same bar as the recipe rollout)
+            alive = t; break
+        if z > tau_up * z0 and upr > 0.6:
+            up_steps += 1
+        if len(feet_idx):
+            c_now = np.asarray(data.geom_xpos[feet_idx, 2]) < fz0 + 0.02
+            lifts += int(np.sum(c_prev & ~c_now))
+            ng = int(np.sum(c_now))
+            support_steps += int(0 < ng < len(feet_idx))
+            c_prev = c_now
+    forward = float(data.qpos[bq] - x0)                          # SIGNED: backward travel is not forward travel
+    r = {"finite": True, "forward": round(forward, 3), "height_ratio": round(hr, 3), "alive": alive,
+         "survived": bool(alive >= int(steps) and hr > 0.6),
+         "speed": round(forward / max(1, int(steps)) / dt, 3),
+         "cadence": round(lifts / max(1e-9, max(1, alive) * dt), 2),
+         "upright_frac": round(up_steps / max(1, alive), 3),
+         "support_frac": round(support_steps / max(1, alive), 3),
+         "n_feet": int(len(feet_idx)), "steps": int(steps), "frame_every": frame_every,
+         "qpos_frames": qpos_frames}
+    r["verdict"] = classify(r)
+    r["measured_by"] = {
+        "what_was_driven": "software/gait_controller.py (GaitController.infer) on software/control_program.json",
+        "control_law": str(program.get("policy_type")),
+        "control_hz": round(float(control_hz), 3),
+        "control_period_physics_steps": int(dec),
+        "physics_timestep_s": dt,
+        "physics_hz": round(1.0 / dt, 1),
+        "horizon_steps": int(steps),
+        "horizon_s": round(int(steps) * dt, 3),
+        "pd_kp": kp, "pd_kd": kd,
+        "torque_clamp": "per-joint, the compiled model's own actuator limits",
+        "initial_condition": "the body's rest keyframe (_reset_to_rest) — the pose default_pose was read at",
+        "note": ("deploy==measure for THIS file: the number beside it was produced by executing this exact "
+                 "controller source on these exact parameters. It is rate-dependent — reproduce it at "
+                 f"{round(float(control_hz), 3)} Hz with kp={kp}/kd={kd} or expect a different distance."),
+    }
+    return r
+
+
+def _verify_exported_gait(gene, program: dict, controller_source: str, *, steps: int = 1200) -> dict:
+    """Measure the exported control program by RUNNING IT (see :func:`_run_exported_controller`), and classify the
+    result — so the program can state honestly whether the controller it ships walks this body. Best-effort: a
+    body the rollout cannot run on reports credible=False (conservative) and says why."""
+    try:
+        r = _run_exported_controller(gene, program, controller_source, steps=steps)
+        return {"credible": str(r["verdict"]).startswith("CREDIBLE"), "forward_m": float(r["forward"]),
+                "survived": bool(r.get("survived", False)), "verdict": str(r["verdict"]),
+                "measured_by": r["measured_by"], "cadence_hz": r.get("cadence"),
+                "upright_frac": r.get("upright_frac"), "support_frac": r.get("support_frac")}
+    except Exception as exc:  # noqa: BLE001 - verification is best-effort; default to the conservative claim
+        return {"credible": False, "forward_m": 0.0, "survived": False,
+                "verdict": f"UNVERIFIED — the exported controller could not be run ({type(exc).__name__})",
+                "measured_by": {"what_was_driven": None,
+                                "note": f"no rollout: {type(exc).__name__}: {exc}"[:200]}}
 
 
 def _write_gait_control_program(gene: RobotGene, genome: dict, output_dir: Path) -> None:
@@ -1254,52 +1465,101 @@ def _write_gait_control_program(gene: RobotGene, genome: dict, output_dir: Path)
     HONESTY: the program VERIFIES the exported gait in sim and reports ``verified_walk`` + the measured distance,
     instead of unconditionally claiming the gait walks -- so a customer building from the package is never told a
     body walks when the bare feed-forward gait only crouches/slides on it (many composed bodies walk via a learned
-    residual or the crawl wave gait, NOT this bare trot-CPG)."""
+    residual or the crawl wave gait, NOT this bare trot-CPG).
+
+    ...and the verification now runs THIS FILE. Both branches used to quote a number from a DIFFERENT rollout than
+    the one the package deploys: the trot branch from ``recipe_rollout_morph`` under a random neural residual, a
+    zero-pose PD attractor, no limit clamp and no rate decimation (see :func:`_run_exported_controller` for the
+    five measured discrepancies), and the crawl branch from the tuning rollout inside
+    ``extract_crawl_gait_params`` rather than from the frozen target program that tuning produced. Both now go
+    through :func:`_verify_exported_gait`, which executes the exact controller source and parameter dict written
+    to disk. Whatever ``sim_forward_m`` says, that is what THIS controller did.
+    """
     from virturoid.services.morph_policy import extract_crawl_gait_params, extract_gait_params
 
+    # CLEAR FIRST. Whatever happens below — no legged gait, an exception, an early return — this body must not
+    # leave a previous export's controller stamp behind for the certificate to describe.
+    _stamp_exported_controller(gene, None)
     try:
         gait = extract_crawl_gait_params(gene)
     except Exception:  # noqa: BLE001 - retain the explicit legacy starter if extraction cannot run
         gait = None
     controller_source = _CRAWL_CONTROLLER_SOURCE if gait else _GAIT_CONTROLLER_SOURCE
+    tuned = None
     if gait:
-        v = {"credible": True, "forward_m": gait["sim_forward_m"], "verdict": gait["sim_verdict"]}
+        # What the TUNING rollout reported, kept for comparison but no longer quoted as the program's own result.
+        tuned = {"forward_m": gait.get("sim_forward_m"), "verdict": gait.get("sim_verdict")}
     else:
         gait = extract_gait_params(gene)
         if not gait:
+            _stamp_exported_controller(gene, None)
             return
-        v = _verify_exported_gait(gene)
-    walks = bool(v["credible"])
-    note = (f"Deterministic feed-forward trot gait from the Virturoid recipe CPG prior. VERIFIED: this bare gait "
-            f"produced a CREDIBLE walk in simulation ({v['forward_m']:.2f} m forward, upright). A learned residual "
-            f"policy (morph_policy npz) refines it further."
-            if walks else
-            f"Deterministic feed-forward trot gait from the Virturoid recipe CPG prior. NOTE: the bare feed-forward "
-            f"gait did NOT achieve a credible walk on this body in simulation ({v['verdict']}, {v['forward_m']:.2f} m) "
-            f"— it is a STARTING POINT. Train a closed-loop residual policy (Virturoid train) or tune the gait before "
-            f"relying on it to walk.")
-    if gait.get("policy_type") == "crawl_wave_gait":
-        note = (f"Frozen crawl-wave gait VERIFIED in simulation ({v['forward_m']:.2f} m forward; {v['verdict']}). "
-                "The exported controller uses this measured wave direction and structural joint map without a deployment-time probe.")
+    # The parameter dict the controller is constructed from must be complete BEFORE it is measured, or the
+    # measurement is of something other than the shipped file. Build it, run it, then fold the result back in.
+    is_crawl = gait.get("policy_type") == "crawl_wave_gait"
     program = {
         "id": f"gait_control_program_{genome.get('id', 'robot')}",
         "robot_genome_id": genome.get("id"),
         "entrypoint": "software/gait_controller.py",
         "control_law": ("frozen crawl-wave swing/stance targets over the exported structural leg map; downstream PD "
-                        "tracks the targets" if gait.get("policy_type") == "crawl_wave_gait" else
+                        "tracks the targets" if is_crawl else
                         "target[j] = default_pose[j] + amplitude[j]*sin(2*pi*frequency_hz*t + phase_offset[j]); "
                         "a downstream PD / ros2_control loop tracks these joint-position targets"),
-        "control_frequency_hz": 20.0,
-        "verified_walk": walks,                                 # did the EXPORTED gait credibly walk the body in sim?
-        "sim_forward_m": round(float(v["forward_m"]), 3),
-        "sim_verdict": v["verdict"],
+        # THE CONTROLLER'S OWN DEPLOYMENT RATE, and the rate the distance below was measured at. NOT the sysid
+        # bench's `control_hz` (100 Hz): that is the command rate of a hardware system-IDENTIFICATION experiment
+        # (`sysid.excitation.build_excitation`) which drives an excitation trajectory to fit actuator parameters.
+        # Two different rates for two different things; a package that names both must say which is which.
+        "control_frequency_hz": float(_EXPORT_CONTROL_HZ),
+        "control_frequency_hz_meaning": (
+            "the rate a downstream loop must call GaitController.infer(t) at. sim_forward_m below was measured at "
+            "exactly this rate and is rate-dependent. Distinct from the sysid excitation plan's `control_hz`, "
+            "which is a hardware identification EXPERIMENT's command rate, not this controller's."),
+        "pd_gains": {"kp": float(gait.get("kp", _EXPORT_PD_KP)), "kd": float(gait.get("kd", _EXPORT_PD_KD)),
+                     "note": "the downstream PD gains sim_forward_m was produced with; other gains, other robot"},
         **gait,
-        "notes": [note],
     }
+    v = _verify_exported_gait(gene, program, controller_source)
+    walks = bool(v["credible"])
+    if is_crawl and walks:
+        note = (f"Frozen crawl-wave gait, VERIFIED BY RUNNING THIS FILE ({v['forward_m']:+.2f} m; {v['verdict']}) "
+                f"at {_EXPORT_CONTROL_HZ:.0f} Hz. The exported controller uses this measured wave direction and "
+                "structural joint map without a deployment-time probe.")
+    elif is_crawl:
+        # The wave plan was CREDIBLE under the tuning rollout and is NOT credible as a frozen open-loop program
+        # on this body. That disagreement is the finding, not something to smooth over.
+        note = (f"Frozen crawl-wave gait. NOTE: RUNNING THIS FILE at {_EXPORT_CONTROL_HZ:.0f} Hz did NOT reproduce "
+                f"a credible walk ({v['verdict']}, {v['forward_m']:+.2f} m) even though the gait search that "
+                "produced these parameters did — it is a STARTING POINT. The frozen open-loop program is not the "
+                "closed-loop probe that tuned it; train a residual policy or re-tune before relying on it.")
+    elif walks:
+        note = (f"Deterministic feed-forward trot gait from the Virturoid recipe CPG prior. VERIFIED BY RUNNING "
+                f"THIS FILE: a CREDIBLE walk in simulation ({v['forward_m']:+.2f} m forward, upright) at "
+                f"{_EXPORT_CONTROL_HZ:.0f} Hz. A learned residual policy (morph_policy npz) refines it further.")
+    else:
+        note = (f"Deterministic feed-forward trot gait from the Virturoid recipe CPG prior. NOTE: RUNNING THIS FILE "
+                f"did NOT produce a credible walk on this body in simulation ({v['verdict']}, "
+                f"{v['forward_m']:+.2f} m at {_EXPORT_CONTROL_HZ:.0f} Hz) — it is a STARTING POINT. Train a "
+                "closed-loop residual policy (Virturoid train) or tune the gait before relying on it to walk.")
+    notes = [note]
+    if tuned and tuned.get("forward_m") is not None and abs(float(tuned["forward_m"]) - v["forward_m"]) > 0.05:
+        # The tuner and the frozen program disagreeing is a fact about this export, not something to hide: the
+        # tuning rollout is closed-loop over its own probe, the shipped program is a frozen open-loop target law.
+        notes.append(f"the gait SEARCH that produced these parameters reported {float(tuned['forward_m']):+.2f} m "
+                     f"({tuned['verdict']}); the frozen program shipped here measures {v['forward_m']:+.2f} m. The "
+                     "second number is the one this file can reproduce — it came from running this file.")
+    program.update({
+        "verified_walk": walks,                                 # did the SHIPPED controller credibly walk the body?
+        "sim_forward_m": round(float(v["forward_m"]), 3),       # SIGNED: backward travel is not forward travel
+        "sim_verdict": v["verdict"],
+        "measured_by": v.get("measured_by"),
+        "notes": notes,
+    })
+    program["program_fingerprint"] = _program_fingerprint(program)
     sw = output_dir / "software"
     sw.mkdir(parents=True, exist_ok=True)
     (sw / "control_program.json").write_text(json.dumps(program, indent=2), encoding="utf-8")
     (sw / "gait_controller.py").write_text(controller_source, encoding="utf-8")
+    _stamp_exported_controller(gene, program)
     # Also drop the controller into software/controller/ so the ROS2 exporter embeds it and its node RUNS the
     # gait (policy_type "trot_cpg_gait") instead of publishing a neutral pose.
     bundle = sw / "controller"

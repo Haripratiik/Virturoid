@@ -1182,8 +1182,15 @@ def _train_camera_policy(args: dict) -> dict:
     if gene is None:
         return {"error": f"no held robot {rid}"}
     from virturoid.services.camera_perception import robot_camera_part
+    from virturoid.services.sensor_provenance import camera_is_ours_to_add
     part = robot_camera_part(gene)
     if part is None:
+        # On the CUSTOMER'S imported machine the reason is a refusal, not a gap in their config — say which,
+        # or "give it a camera" reads as our tooling being unconfigured rather than their robot having none.
+        allowed, why = camera_is_ours_to_add(gene)
+        if not allowed:
+            return {"error": f"{why}. To train vision on a camera you intend to fit, pin_part it first "
+                             f"(pinned_parts.camera) — that records the camera as YOUR addition, not ours"}
         return {"error": "this robot carries no camera in its BOM; give it a camera (a nav/inspect task) or "
                          "pin_part a camera first, then train its vision"}
     from virturoid.services.robot_vision import train_robot_vision

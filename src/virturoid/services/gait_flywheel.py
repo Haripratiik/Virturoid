@@ -220,7 +220,15 @@ def bank_gait(db, gene, result, *, task: str = LOCOMOTION, cross_eval: bool = Fa
     than exotic. A write whose gate knows strictly LESS than the banked row's is therefore declined (the skill_id
     is still returned: the bank does hold this body's gait, it just did not take this weaker provenance).
     """
-    if not getattr(result, "best_survived", False) or abs(getattr(result, "best_forward", 0.0)) < 0.15:
+    # SIGNED, like ``gait_quality.classify``'s own ``fwd >= 0.3`` and unlike what stood here. ``forward`` is
+    # world-frame delta-x (+x forward), so ``abs`` admitted a body that walked 0.5 m BACKWARD and then scored it
+    # ``success_rate 1.0`` below — into the corpus, where the next morphologically-similar body recalls it as a
+    # warm start. The ``best_credible`` line under this one covers every caller that HAS a verdict, but it
+    # defaults to True for back-compat, so a result double built without one (``corpus_factory`` and ``r2prime``
+    # both build theirs by hand) was gated by this line alone. Sign-blind here is the same defect the deploy
+    # comparison in ``learn_gait_flywheel`` carried, one write further down the pipe and harder to see, because
+    # a corpus does not tell you which of its rows walked the wrong way.
+    if not getattr(result, "best_survived", False) or float(getattr(result, "best_forward", 0.0)) < 0.15:
         return None
     if not getattr(result, "best_credible", True):
         return None
@@ -229,7 +237,7 @@ def bank_gait(db, gene, result, *, task: str = LOCOMOTION, cross_eval: bool = Fa
     gene_id = getattr(gene, "id", None) or cls
     structure_key = structural_gait_key(gene)
     skill_id = f"gait::{cls}::{structure_key}"[:96]
-    success = min(1.0, abs(result.best_forward) / _FWD_NORM)
+    success = min(1.0, max(0.0, float(result.best_forward) / _FWD_NORM))
     # WHICH GATE THIS ROW GOT IN UNDER. Three distinguishable answers, because "measured and fragile" and "never
     # measured" are different facts and only one of them cost rollouts to learn.
     if robustness:
@@ -552,8 +560,74 @@ def learn_gait_flywheel(gene, db, *, generations: int = 10, pop: int = 20, steps
     # the decision robust to the deploy horizon: a non-credible slide can never win by accumulating raw distance.
     learned_ok = bool(learned["survived"]) and bool(learned.get("credible", False))
     default_credible = bool(default["survived"]) and bool(default.get("credible", False))
+    # SIGNED, never ``abs``. ``forward`` is world-frame delta-x and it is signed at every producer (+x forward,
+    # -x backward, ``gait_search.reward_features_from_rollout``), so an unsigned comparison ranks a gait that
+    # walks BACKWARD faster ABOVE one that walks forward. It was latent HERE — this branch is only reached when
+    # both arms are credible, and ``gait_quality.classify`` requires ``forward >= 0.3``, so both were positive by
+    # construction — but latent is not the same as harmless: the identical unsigned rule at
+    # ``ai_native_tools._honest_gait`` (the verify deploy-select) is NOT gated on credibility and does compare
+    # two backward numbers. Writing it signed here removes the pattern that gets copied.
     beats_default = learned_ok and (not default_credible
-                                    or abs(learned["forward"]) > abs(default["forward"]) + 0.02)
+                                    or float(learned["forward"]) > float(default["forward"]) + 0.02)
+
+    # ...AND THE HORIZON THE CLAIM IS MADE AT HAS TO BE ONE A WALK CAN BE JUDGED AT.
+    #
+    # ``credible`` above is ``gait_quality.classify`` at ``deploy_steps``, and below ``_SETTLE_MIN_STEPS`` the
+    # settling gate is OFF — so at a short horizon "credible" means "had gone somewhere by the time we stopped
+    # looking", not "walks". Callers judge at wildly different horizons (``fit_gait_for_body`` 6000,
+    # ``input_training_tools._learn_gait`` 1500, ``train_held`` 600) and every one of them prints the same word.
+    #
+    # MEASURED 2026-08-10 on the real Menagerie Go2, through ``train_held``'s own 600-step deploy horizon:
+    #
+    #     searched winner   600 steps   forward +0.233 m   CROUCH (low/unstable stance)
+    #     searched winner  6000 steps   forward -0.279 m   FELL by ROLL-OVER (roll 139 / pitch 82 deg)
+    #
+    # The sign of the headline number FLIPS between the two horizons. And it has already cost a customer's robot
+    # once: ``trained_controller``'s module docstring records an authored horse that trained "solved,
+    # beats_default (0.868 vs 0.471 at the search's 600-step deploy horizon)", landed, and then verified 3.305 m
+    # CREDIBLE WALK -> 2.107 m FELL by YAW-DRIFT. That is this exact gap, and undo was the only thing that saved it.
+    #
+    # So a winner that reads credible at a horizon too short to say gets ONE confirming rollout at the settling
+    # horizon. It is paid for only on the success path (a non-credible winner is already refused and skips it),
+    # it is free for callers that already judge at or above ``_SETTLE_MIN_STEPS``, and on a body that falls the
+    # rollout terminates at the fall — measured on the Go2, the 6000-step confirmation costs 0.77 s, LESS than
+    # the 600-step rollout it is checking. What it is NOT is a longer search: ``fit_gait_for_body``'s docstring
+    # records the ablation that judging longer than you search "just adopts nothing", and that ruling stands for
+    # the SEARCH. This is the last step before a claim reaches a customer's robot, where adopting nothing is the
+    # correct answer if nothing walks.
+    from virturoid.services.gait_quality import _SETTLE_MIN_STEPS
+    settling_check = None
+    if learned_ok and int(deploy_steps) < _SETTLE_MIN_STEPS:
+        _s = evaluate_gait(gene, res.best_params, steps=_SETTLE_STEPS)
+        settling_check = {"steps": int(_SETTLE_STEPS), "credible": bool(_s.get("credible", False)),
+                          "survived": bool(_s["survived"]), "forward_m": round(float(_s["forward"]), 4),
+                          "verdict": str(_s.get("verdict", "")),
+                          "judged_at": int(deploy_steps)}
+    # THE ONE BOOLEAN A DOOR SHOULD PRINT AS "credible", and the sentence that justifies it. ``credible`` is a
+    # measurement at one horizon, ``survived`` is a much weaker fact, and ``beats_default`` is a BANK criterion
+    # about other bodies — three different things that had all been printed under the same word by one door or
+    # another. This is the claim: it walked, at a horizon a walk can be judged at.
+    #
+    # IT LEADS WITH THE ``classify()`` VERDICT, every branch, because of where this sentence ENDS UP. Callers
+    # quote it inline — ``trained_controller`` renders "did not produce a credible walk (<this>)" and, for
+    # ``apply='always'``, "landed an operating point whose own verdict was <this>". Written explanation-first it
+    # produced, measured on the Go2: "whose own verdict was the winning operating point survived but is not a
+    # walk at 600 steps: CROUCH". The verdict is in there, and it is the last thing the sentence says. Leading
+    # with it costs nothing and makes the quote read as a verdict in both frames.
+    credible_walk = learned_ok and (settling_check is None or settling_check["credible"])
+    if credible_walk:
+        _cw_reason = (f"CREDIBLE WALK at {(settling_check or {}).get('steps', deploy_steps)} steps "
+                      f"({(settling_check or {}).get('forward_m', round(float(learned['forward']), 4))} m)")
+    elif not bool(learned["survived"]):
+        _cw_reason = (f"{learned.get('verdict')} — the winning operating point did not survive its own "
+                      f"{deploy_steps}-step rollout")
+    elif not learned_ok:
+        _cw_reason = (f"{learned.get('verdict')} — the winning operating point survived its {deploy_steps}-step "
+                      f"rollout but is not a walk ({round(float(learned['forward']), 4)} m)")
+    else:
+        _cw_reason = (f"{settling_check['verdict']} at the {_SETTLE_STEPS}-step horizon a walk is judged at "
+                      f"({settling_check['forward_m']} m) — it read credible only at the {deploy_steps}-step "
+                      f"horizon it was searched over ({round(float(learned['forward']), 4)} m)")
 
     # THE ERROR BAR IS PART OF THE DECISION, not a footnote printed beside it. A credible walk that no perturbed
     # copy of itself can repeat is one lucky float, and BANKING one is how the flywheel comes to serve a fall.
@@ -568,15 +642,20 @@ def learn_gait_flywheel(gene, db, *, generations: int = 10, pop: int = 20, steps
     # with a flat rate, while the 0/8 point falls at 8754. Chasing the horizon upward cannot be the answer —
     # every horizon ends somewhere — so the bank is gated on the MARGIN, not only on the verdict.
     rob: dict = {"robustness_rel": None, "probes": {}}
-    if beats_default:
+    if beats_default and credible_walk:
         # HELD-OUT DRAWS. ``robustness_margin`` defaults to ``_MARGIN_SEED``, which is not the seed the search
         # scored candidates under — so a robustness-aware search that overfitted its own probe draws is caught
         # here rather than confirmed here.
+        #
+        # ``and credible_walk`` is a COST guard, not a second gate: a point already refuted at the settling
+        # horizon cannot bank, and the ladder is up to 12 rollouts. Its consequence is that ``robustness_rel``
+        # reads ``None`` for such a point, which means "not measured — we had already declined", and
+        # ``not_banked_reason`` says which of the two it was.
         rob = robustness_margin(gene, res.best_params, steps=deploy_steps)
     sturdy = rob["robustness_rel"] is not None
 
     skill_id = None
-    if bank and beats_default and sturdy:
+    if bank and beats_default and sturdy and credible_walk:
         # ...and the margin RIDES WITH IT. A gate that leaves no trace on the row it admitted cannot be audited
         # afterwards, which is how a bank came to hold 97 rows nobody could sort into measured and unmeasured.
         skill_id = bank_gait(db, gene, _DeployResult(res.best_params, learned),   # bank the DEPLOY metrics
@@ -639,7 +718,21 @@ def learn_gait_flywheel(gene, db, *, generations: int = 10, pop: int = 20, steps
         "search_forward_m": round(res.best_forward, 4),
         "default_forward_m": round(default["forward"], 4),
         "beats_default": bool(beats_default),
+        # FOUR DIFFERENT FACTS, FOUR DIFFERENT KEYS. They were being collapsed into one word by the doors that
+        # print this dict, in both directions: ``train_held`` printed ``survived`` under the name ``credible``,
+        # and passed ``survived and beats_default`` into a parameter whose contract is "the run's own un-gameable
+        # verdict". Whoever reports one of these must be able to name which one.
+        #   survived        the body was still up when the rollout stopped
+        #   credible        classify() said CREDIBLE WALK -- AT ``horizon_steps``, which may be too short to say
+        #   credible_walk   THE CLAIM: credible, and not refuted at the horizon a walk is judged at
+        #   beats_default   a BANK criterion: credible AND better than the free shipped default (about OTHER bodies)
         "credible": bool(learned.get("credible", False)),
+        "verdict": str(learned.get("verdict", "")),          # the classify() STRING, so a decline can diagnose
+        "default_credible": bool(default_credible),
+        "default_verdict": str(default.get("verdict", "")),
+        "credible_walk": bool(credible_walk),
+        "credible_walk_reason": _cw_reason,
+        "settling_check": settling_check,                    # None = not needed (already judged long enough)
         "horizon_steps": int(deploy_steps),                  # how long anyone actually looked...
         "settled": learned.get("holds_rate") is not None,    # ...and whether that was long enough to judge
         # ...and how much of that horizon the winner's rollout ACTUALLY INTEGRATED. ``horizon_steps`` is the
@@ -651,7 +744,7 @@ def learn_gait_flywheel(gene, db, *, generations: int = 10, pop: int = 20, steps
         "robustness_rel": rob["robustness_rel"],
         "robustness_probes": rob["probes"],
         "robustness_per_param": rob.get("per_param_rel"),
-        "robustness_note": margin_sentence(rob) if beats_default else None,
+        "robustness_note": margin_sentence(rob) if (beats_default and credible_walk) else None,
         # The WHOLE margin measurement, carried intact. Rebuilding it field-by-field downstream is how
         # ``margin_sentence`` came to print "per parameter (n=None each)": the sample sizes were dropped on the
         # way out and the sentence lost the one number that makes its two halves comparable.
@@ -664,12 +757,19 @@ def learn_gait_flywheel(gene, db, *, generations: int = 10, pop: int = 20, steps
         # the prior's deploy check, and the margin ladder. ``n_evals`` counts CANDIDATES and is now smaller than
         # the work done, so reporting it alone would understate robustness-aware search precisely where it costs.
         "n_rollouts": (int(getattr(res, "n_rollouts", 0)) + 2 + (1 if prior_deploy_forward is not None else 0)
-                       + int(rob.get("n_rollouts") or 0)),
+                       + int(rob.get("n_rollouts") or 0) + (1 if settling_check is not None else 0)),
         "n_rollouts_margin": int(rob.get("n_rollouts") or 0),
-        "not_banked_reason": (None if skill_id or not (bank and beats_default) else
-                              f"the winning operating point does not survive a {min(_ROBUST_LADDER):g} relative "
-                              f"perturbation of its own parameters ({rob['probes']}) — a bank of controllers "
-                              f"must not hold one lucky float, which a later body would recall as a warm start"),
+        # WHICH gate refused, named. There are now two ways past ``beats_default`` to end with no row, and a
+        # sentence that names the wrong one is the defect this whole change is about.
+        "not_banked_reason": (
+            None if skill_id or not (bank and beats_default) else
+            (f"the winning operating point is credible at the {deploy_steps}-step horizon it was judged at and "
+             f"NOT at the {_SETTLE_STEPS}-step horizon a walk is judged at ({settling_check['verdict']}, "
+             f"{settling_check['forward_m']} m) — banking it is how a corpus comes to serve a fall as a warm start"
+             if not credible_walk else
+             f"the winning operating point does not survive a {min(_ROBUST_LADDER):g} relative "
+             f"perturbation of its own parameters ({rob['probes']}) — a bank of controllers "
+             f"must not hold one lucky float, which a later body would recall as a warm start")),
         "n_evals": int(getattr(res, "n_evals", 0)),
         "stopped_reason": getattr(res, "stopped_reason", "generation_limit"),
         "height_ratio": round(learned["height_ratio"], 3), "survived": bool(learned["survived"]),
@@ -1347,7 +1447,10 @@ def _rank(learned: dict) -> tuple:
     if not learned.get("beats_default"):
         return (-2.0, 0.0)
     rel = learned.get("robustness_rel")
-    return (float(rel) if rel is not None else -1.0, abs(float(learned.get("forward_m") or 0.0)))
+    # Signed, for the same reason as everywhere else in this file: a tie-break on |distance| ranks a backward
+    # walk above a forward one. Latent — this line is only reached once ``beats_default`` holds, and that now
+    # requires a signed win over the default by a credible winner — and written signed so it stays latent.
+    return (float(rel) if rel is not None else -1.0, float(learned.get("forward_m") or 0.0))
 
 
 def _one_search(gene, *, db, bank: bool, warm_evals: int, max_evals: int, out: dict, kw: dict):

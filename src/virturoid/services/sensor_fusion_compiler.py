@@ -7,7 +7,12 @@ A customer's robot carries an IMU, wheel/joint encoders, a camera, maybe a LiDAR
 odometry source, per robot, by hand. This module DERIVES that stack from the BOM the platform already built:
 
   * it reads the SAME sensor suite the BOM/render use (``bom_builder._sensor_suite``) — so the fusion config
-    references EXACTLY the sensors the robot has, never a fabricated one;
+    references EXACTLY the parts the BOM bills, never a different one. On a robot WE designed that suite IS the
+    robot's sensing. On a robot the CUSTOMER imported it is a PROPOSAL, and the config says so on every entry
+    rather than implying the topics already exist — see ``sensor_provenance`` and the block that sets
+    ``proposed`` below. (This bullet used to read "the sensors the robot has, never a fabricated one". Measured
+    2026-08-10 on a real Menagerie Go2, whose model compiles to ``ncam 0, nsensor 0``: the compiler emitted a
+    ready-to-run EKF fusing a Bosch BNO055 and a ``/camera/color/image_raw`` subscriber, with ``missing: []``.);
   * it places each sensor on the correct parent LINK using the same host-resolution as the render
     (``sensor_geometry._host``), so every TF frame points at a body part that exists;
   * it picks the estimator by what the robot physically IS (``task_matched_eval.robot_kind``): a wheeled base
@@ -90,12 +95,23 @@ def compile_sensor_fusion(gene, *, task: str = "") -> dict:
     from virturoid.services.bom_builder import _sensor_suite
     from virturoid.services.component_catalog import component
     from virturoid.services.sensor_geometry import _host
+    from virturoid.services.sensor_provenance import (SENSOR_CATEGORIES, carries_our_proposed_sensors,
+                                                      category_declared, declared)
     from virturoid.services.task_matched_eval import robot_kind
 
     kind = robot_kind(gene)
     scale_kg = sum(float(getattr(s, "mass_kg", 0.0) or 0.0) for s in gene.segments)
     caps = sorted(getattr(gene, "capabilities", []) or [])
     suite = _sensor_suite(gene.robot_class, caps, task, scale_kg)
+    # WHOSE SENSORS ARE THESE? ``_sensor_suite`` infers perception from ``robot_class``, which is the design on a
+    # body we composed and a QUOTE on the customer's own machine. A fusion stack is the surface where that
+    # distinction stops being bookkeeping: these files are wired up and launched, so a config that subscribes to
+    # ``/imu/data`` for a BNO055 the robot does not carry is a node that never receives a message. A part the
+    # customer PINNED is theirs to assert and counts as fitted.
+    _proposing = carries_our_proposed_sensors(gene)
+    _pinned = {str(v) for k, v in ((getattr(gene, "metadata", None) or {}).get("pinned_parts") or {}).items()
+               if k in SENSOR_CATEGORIES}
+    _inv = declared(gene)
 
     sensors: list[dict] = []
     imus: list[dict] = []
@@ -111,7 +127,12 @@ def compile_sensor_fusion(gene, *, task: str = "") -> dict:
         msg_type, topic = _TOPIC.get(cat, ("sensor_msgs/msg/Imu", "/sensor"))
         entry = {"part": name, "vendor": getattr(comp, "vendor", "") if comp else "", "category": cat,
                  "qty": int(qty), "mount": mount, "parent_frame": parent, "child_frame": child,
-                 "topic": topic, "msg_type": msg_type, "offset_xyz": _mounting_offset(host, cat, mount)}
+                 "topic": topic, "msg_type": msg_type, "offset_xyz": _mounting_offset(host, cat, mount),
+                 # ``category_declared`` keeps this in lockstep with the BOM's ``proposed`` flag. If the two
+                 # drifted, an IMU could be an equivalent-for-hardware-you-own on the invoice and a
+                 # not-fitted-yet subscriber in the launch file -- a fresh disagreement between two surfaces,
+                 # which is the exact failure this whole change exists to remove.
+                 "proposed": bool(_proposing and name not in _pinned and not category_declared(gene, cat)[0])}
         if cat == "imu":
             entry["ahrs"] = _imu_is_ahrs(comp)
             imus.append(entry)
@@ -130,6 +151,22 @@ def compile_sensor_fusion(gene, *, task: str = "") -> dict:
     fused: dict[str, list[str]] = {}          # state_name -> [sensor sources fusing it]
     missing: list[str] = []
     notes: list[str] = []
+
+    # THE HARDWARE PRECONDITION, FIRST IN ``missing`` BECAUSE IT GATES EVERYTHING BELOW IT. ``missing`` is this
+    # module's honesty channel -- "no odometry source, position WILL drift" -- and on the Go2 it read ``[]``
+    # while every topic in the stack belonged to a part the robot does not carry. An unobservable state and an
+    # unpopulated topic fail the same way at deploy (the filter never converges); they belong in the same list.
+    _proposed_now = [s for s in sensors if s["proposed"]]
+    if _proposed_now:
+        _where = (f"your model declares ncam {_inv.get('ncam')} / nsensor {_inv.get('nsensor')}"
+                  if _inv is not None else "your model's sensing was not read at import")
+        missing.append(
+            "HARDWARE NOT ON YOUR ROBOT: this stack is compiled for "
+            + ", ".join(f"{s['part']} -> {s['topic']}" for s in _proposed_now)
+            + f". {_where}, so those topics will have no publisher until the parts are fitted. The configs are "
+              "correct for the suite we RECOMMEND (see the BOM's proposed_additions_usd); they are a plan, not a "
+              "description of your machine. Fit the parts, or pin the ones you already have "
+              "(pinned_parts) and regenerate.")
 
     # --- the estimator, chosen by what the robot physically IS ---------------------------------------------
     two_d = kind in ("mobile", "aquatic")     # a ground/water base estimates a planar pose; a legged/aerial body is full-3D
@@ -251,14 +288,23 @@ def _madgwick_yaml(*, has_mag: bool) -> str:
 
 
 def _sensors_yaml(sensors) -> str:
-    L = ["# Sensor frames + topics — AUTO-GENERATED from the BOM. Each entry is a real part on a real link.",
-         "sensors:"]
+    """The frames/topics file. THE DISCLOSURE HAS TO BE IN HERE, not only in the manifest: this is the file an
+    engineer opens and wires up, and its header used to assert "Each entry is a real part on a real link" over a
+    list that, on an imported robot, was parts we had picked for a machine that carries none of them."""
+    proposed = [s for s in sensors if s.get("proposed")]
+    L = ["# Sensor frames + topics — AUTO-GENERATED from the BOM. Each entry is a catalog part on a real link."]
+    if proposed:
+        L += ["# NOT ALL OF IT IS FITTED. Entries marked `proposed: true` are hardware your own model does not",
+              "# declare — parts we RECOMMEND adding. Their topics have no publisher until you fit them."]
+    L.append("sensors:")
     for s in sensors:
         ox, oy, oz = s["offset_xyz"]
         L += [f"  - part: \"{s['part']}\"", f"    vendor: \"{s['vendor']}\"",
               f"    category: {s['category']}", f"    parent_frame: {s['parent_frame']}",
               f"    child_frame: {s['child_frame']}", f"    topic: {s['topic']}",
               f"    msg_type: {s['msg_type']}", f"    xyz: [{ox}, {oy}, {oz}]", "    rpy: [0.0, 0.0, 0.0]"]
+        if s.get("proposed"):
+            L.append("    proposed: true            # not on your robot: a part we recommend adding")
     return "\n".join(L) + "\n"
 
 

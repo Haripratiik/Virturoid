@@ -1006,6 +1006,12 @@ def _import_robot_uncached(source: str, *, robot_id: str | None = None, species:
         gene.metadata["torque_source"] = "source_model"
         gene.metadata["source_actuator_torque_nm"] = dict(src_torque)
         gene.metadata["source_actuator_torque_where"] = dict(src_torque_where)
+    # ``sensor_source`` is to PERCEPTION what ``mass_source`` and ``torque_source`` above are to mass and torque:
+    # a marker that what follows was READ, so every downstream surface can tell "your model declares no camera"
+    # apart from "we never looked". Recorded even when the model declares nothing -- an empty inventory is the
+    # load-bearing fact, and it is the one a Go2 supplies.
+    gene.metadata["sensor_source"] = "source_model"
+    gene.metadata["source_sensors"] = _source_sensor_inventory(mj, mujoco, body_name, segments)
     if src_dynamics:
         gene.metadata["source_joint_dynamics"] = dict(src_dynamics)
         gene.metadata["source_joint_dynamics_provenance"] = (
@@ -1588,6 +1594,47 @@ def _source_joint_dynamics(mj, j: int) -> dict | None:
     return {"armature": round(float(mj.dof_armature[adr]), 6),
             "damping": round(float(mj.dof_damping[adr]), 6),
             "frictionloss": round(float(mj.dof_frictionloss[adr]), 6)}
+
+
+def _source_sensor_inventory(mj, mujoco, body_name: dict, segments) -> dict:
+    """WHAT SENSING DOES THE CUSTOMER'S OWN FILE DECLARE? Read verbatim off their compiled model, so a later
+    surface can quote it instead of guessing.
+
+    This exists because nothing anywhere read it. ``bom_builder._sensor_suite`` picks perception from the robot's
+    CLASS alone, so a Menagerie Go2 -- ``ncam 0, nsensor 0`` -- was told it carries an Intel RealSense D435i and
+    billed $334 for it, and ``verify_robot.vision`` reported ``sees: true`` through a camera we had synthesized
+    onto their machine ourselves. The fix needs a fact to stand on, and this is the fact.
+
+    Two deliberate refusals in the shape of what is recorded:
+
+    * an MJCF ``<camera>`` is a RENDER VIEWPOINT, not a declared piece of hardware. Across all 63 MuJoCo
+      Menagerie packages 19 declare one and most of those are tracking/cinematic cams (``track@trunk`` on the
+      Go1, ``hero``/``side``/``bottom`` on the fruitfly). So each camera is recorded with its name and mount
+      body and NOTHING is inferred from the count -- ``ncam > 0`` never licenses a part number or a price.
+    * ``<sensor>`` elements ARE declared instrumentation, and they are recorded by MuJoCo type
+      (``mjSENS_GYRO``...), again with no mapping to a catalog part.
+    """
+    cams = []
+    for i in range(int(mj.ncam)):
+        bid = int(mj.cam_bodyid[i])
+        host = body_name.get(bid, "world") if bid else "world"
+        cams.append({"name": (mujoco.mj_id2name(mj, mujoco.mjtObj.mjOBJ_CAMERA, i) or f"camera{i}"),
+                     "mount_body": host,
+                     "mount_body_in_twin": any(getattr(s, "name", "") == host for s in segments),
+                     "fovy_deg": round(float(mj.cam_fovy[i]), 1)})
+    sens, by_type = [], {}
+    for i in range(int(mj.nsensor)):
+        t = int(mj.sensor_type[i])
+        tname = next((n for n in dir(mujoco.mjtSensor)
+                      if n.startswith("mjSENS_") and int(getattr(mujoco.mjtSensor, n)) == t), f"type{t}")
+        sens.append({"name": (mujoco.mj_id2name(mj, mujoco.mjtObj.mjOBJ_SENSOR, i) or f"sensor{i}"), "type": tname})
+        by_type[tname] = by_type.get(tname, 0) + 1
+    return {"ncam": int(mj.ncam), "nsensor": int(mj.nsensor),
+            "cameras": cams, "sensors": sens[:64], "sensor_types": by_type,
+            "read_from": "your compiled model (mjModel.ncam / mjModel.nsensor), verbatim",
+            "what_this_is_not": ("a parts list. An MJCF <camera> is a render viewpoint and a <sensor> is a "
+                                 "simulated signal; neither names a manufacturer, a price or a mass, so nothing "
+                                 "here is turned into a BOM line for hardware fitted to your machine")}
 
 
 # MuJoCo's own defaults for a constraint's solver reference (mjModel is populated with these when the file

@@ -48,6 +48,15 @@ class BomLine:
     #: 94.176 kg. The line still ships (you need the part number, the torque and the price); it just does not
     #: get counted a second time, and ``totals.mass_note`` says so.
     in_mass_total: bool = True
+    #: Is this part FITTED to the machine, or are we PROPOSING it?
+    #:
+    #: On a robot we designed the whole list is a proposal and this stays False (there is no machine yet to
+    #: contrast it with). On an IMPORTED robot the distinction is money: their model is the record of what they
+    #: own, and everything not in it is a quote for hardware to buy. A Menagerie Go2 compiles to ``ncam 0,
+    #: nsensor 0`` and we billed it $334 for an Intel RealSense D435i inside its headline price -- see
+    #: ``sensor_provenance``. A proposed line still ships (the recommendation is the value); its cost is broken
+    #: out in ``totals.proposed_additions_usd`` and its detail says it is not fitted.
+    proposed: bool = False
 
     @property
     def mass_kg(self) -> float:
@@ -933,10 +942,43 @@ def build_bom(gene: RobotGene, *, capabilities=None, task: str = "", pins: dict 
                 ln.detail += (" - EQUIVALENT for a motor already fitted to your robot; its mass is already "
                               "inside your model's link masses and is not added again")
 
+    # A SENSOR THE CUSTOMER'S MODEL DOES NOT DECLARE IS A QUOTE, NOT AN INVENTORY LINE. ``_sensor_suite`` picks
+    # perception from ``robot_class`` alone: every quadruped gets a RealSense + a BNO055 whether or not the file
+    # we were handed contains one. On a body we composed that is the design; on the customer's machine it was a
+    # $334 camera billed inside the price of a robot that has none (Menagerie Go2: ncam 0, nsensor 0). The line
+    # stays -- "you will need a depth camera, here is the one we would fit" is the useful part -- but it is
+    # marked, its detail says so, and its cost is broken out of the as-imported total below.
+    from virturoid.services.sensor_provenance import (SENSOR_CATEGORIES, carries_our_proposed_sensors,
+                                                      category_declared, declared, sensor_reality_table)
+    sensor_prov = None
+    if carries_our_proposed_sensors(gene):
+        inv = declared(gene) or {}
+        _where = (f"your model declares ncam {inv.get('ncam')} / nsensor {inv.get('nsensor')}"
+                  if inv else "your model's sensing was not read at import")
+        _pinned = {str(v) for k, v in ((gene.metadata or {}).get("pinned_parts") or {}).items()
+                   if k in SENSOR_CATEGORIES}
+        for ln in lines:
+            if ln.category not in SENSOR_CATEGORIES or ln.part in _pinned:
+                continue
+            # ...AND THE TABLE HAS TO BE RIGHT IN BOTH DIRECTIONS. A model that declares ``<gyro>`` and
+            # ``<accelerometer>`` HAS an IMU; quoting one as an addition would be the same failure to read their
+            # file, only cheaper. Where the model evidences the instrument, the line becomes what the actuator
+            # lines already are -- an EQUIVALENT part number for hardware already fitted, not a purchase.
+            _has, _ev = category_declared(gene, ln.category)
+            if _has:
+                ln.detail += (f" - EQUIVALENT for a {ln.category} your model already declares ({_ev}); a part "
+                              f"number for something you have, not an addition to buy")
+                continue
+            ln.proposed = True
+            ln.detail += (f" - PROPOSED ADDITION, not fitted to your robot: {_where}, so this is a part we "
+                          f"recommend buying, quoted separately in totals.proposed_additions_usd")
+        sensor_prov = sensor_reality_table(gene, _sensor_suite(gene.robot_class, capabilities, task, scale_kg))
+
     # TOTALS. ``est_power_w`` IS ``power_budget.total_draw_w`` and IS the number the power line was sized against —
     # one figure, quoted in three places, instead of three figures quoted once each.
     total_mass = round(sum(ln.mass_kg for ln in lines if ln.in_mass_total), 3)
     total_price = round(sum(ln.price_usd for ln in lines), 2)
+    proposed_price = round(sum(ln.price_usd for ln in lines if ln.proposed), 2)
     _embodied = ((gene.metadata or {}).get("embodied_mass") or {}).get("component_kg") or {}
     mass_note = ("every part counted once: material lines are STRUCTURE only (the motors, electronics and "
                  "balance of system folded into the link masses are billed on their own lines)")
@@ -955,7 +997,16 @@ def build_bom(gene: RobotGene, *, capabilities=None, task: str = "", pins: dict 
         "power_budget": budget.to_dict(),
         "lines": [asdict(ln) | {"mass_kg": ln.mass_kg, "price_usd": ln.price_usd} for ln in lines],
         "totals": {"line_items": len(lines), "actuators": len(joints), "mass_kg": total_mass,
-                   "price_usd": total_price, "est_power_w": budget.total_w, "mass_note": mass_note},
+                   "price_usd": total_price, "est_power_w": budget.total_w, "mass_note": mass_note,
+                   # THE MONEY SPLIT. Without it "$6,414" reads as the price of the machine in front of them,
+                   # and $334 of that was a camera their robot does not have.
+                   **({"proposed_additions_usd": proposed_price,
+                       "as_imported_price_usd": round(total_price - proposed_price, 2),
+                       "price_note": ("price_usd is the WHOLE list. proposed_additions_usd is the part of it "
+                                      "that is hardware your model does not declare — sensors we recommend "
+                                      "adding, not parts fitted to your robot")}
+                      if proposed_price > 0 else {})},
+        **({"sensor_provenance": sensor_prov} if sensor_prov else {}),
         "cost_drivers": _cost_drivers(lines, total_price),
         **({"pins": {"applied": pins_applied, "rejected": pins_rejected}} if (pins_applied or pins_rejected) else {}),
         "note": ("Representative real-world components (manufacturer datasheets, ~2024); verify exact specs "

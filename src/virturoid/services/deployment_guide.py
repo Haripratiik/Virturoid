@@ -100,9 +100,16 @@ def build_deployment_guide(output_dir) -> str:
         out.append("")
     if fusion:
         kind = fusion.get("kind", "robot")
-        n_sensors = len(fusion.get("sensors", []))
-        out.append(f"**Sensor fusion (state estimation)** — compiled from the BOM, not hand-written. This "
-                   f"{kind} carries {n_sensors} sensor(s); `fusion/` ships the deployable stack:")
+        sens = fusion.get("sensors", [])
+        # "CARRIES n SENSOR(S)" IS A CLAIM OF POSSESSION, and on an imported robot the suite is a QUOTE: a
+        # Menagerie Go2 (ncam 0, nsensor 0) was told it "carries 2 sensor(s)" it has none of. The proposed count
+        # comes straight off the compiler's per-entry flag, so this line cannot drift from the config it describes.
+        n_prop = sum(1 for s in sens if s.get("proposed"))
+        carries = (f"This {kind} carries {len(sens)} sensor(s)" if not n_prop else
+                   (f"{n_prop} of these {len(sens)} sensor(s) are PROPOSED ADDITIONS — hardware your own model "
+                    f"does not declare, so their topics have no publisher until you fit them"))
+        out.append(f"**Sensor fusion (state estimation)** — compiled from the BOM, not hand-written. {carries}; "
+                   f"`fusion/` ships the deployable stack:")
         out.append("")
         for f in fusion.get("files", []):
             out.append(f"- `fusion/{f}`")

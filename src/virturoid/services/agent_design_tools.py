@@ -1048,39 +1048,131 @@ def run_train_gene_job(args: dict, progress=None) -> dict:
             gene, db, generations=max_evals, pop=min(8, max_evals), steps=600, deploy_steps=600,
             seed=int(args.get("seed", 0)), workers=1, max_evals=max_evals, stop_on_credible=True,
         )
-    solved = bool(learned.get("survived")) and bool(learned.get("beats_default"))
-    say("done", f"searched {learned['n_evals']} configs; credible stop="
-                f"{learned['stopped_reason'] == 'credible_walk'}; beats default={learned['beats_default']}")
+    # THREE DIFFERENT FACTS, THREE DIFFERENT NAMES. ``gait_flywheel`` reports them separately because they are
+    # not the same claim and this door had been collapsing them:
+    #   survived        the body was still up when the rollout stopped. The weakest fact a rollout produces.
+    #   credible_walk   THE CLAIM: ``classify()`` said CREDIBLE WALK, at a horizon a walk can be judged at (the
+    #                   flywheel re-runs the winner at the settling horizon when the deploy horizon — 600 here —
+    #                   is too short to settle, and ``credible_walk_reason`` is the sentence that justifies it).
+    #   beats_default   a BANK criterion: credible AND further than the free shipped default. It is a question
+    #                   about the shared corpus — whether this row should seed OTHER bodies' warm starts.
+    #
+    # MEASURED 2026-08-10 on a real Menagerie Unitree Go2 through ``agent_tools.call_tool``, this door returned
+    # all of this in ONE object::
+    #
+    #     credible: true    forward_m: 0.233    default_forward_m: 0.067    beats_default: false
+    #     reason: "...did not produce a credible walk (max_evals; survived=True, beats_default=False ...)"
+    #
+    # ``credible: true`` was ``survived`` wearing the wrong word, while the gate consulted the real verdict. The
+    # flywheel's actual answer for that run was ``CROUCH (low/unstable stance)`` — for the searched winner AND
+    # for the default. The refusal was RIGHT; only the boolean printed beside it was wrong, and it was wrong in
+    # the dangerous direction: an agent reading ``credible: true`` next to a refusal reaches for
+    # ``apply='always'``, so the payload was arguing for landing a crouch on a customer's Go2.
+    survived = bool(learned.get("survived"))
+    credible_walk = bool(learned.get("credible_walk"))
+    beats_default = bool(learned.get("beats_default"))
+    say("done", f"searched {learned['n_evals']} configs; credible walk={credible_walk} "
+                f"({learned.get('credible_walk_reason')}); beats the shipped default={beats_default}")
     if learned.get("banked_skill"):
+        # SIGNED. ``forward_m`` is world-frame delta-x and it is signed at every producer, so ``abs`` scored a
+        # body that walked 0.5 m BACKWARD as a 1.0 success — the same unsigned-distance defect this pass fixed
+        # in the flywheel's own deploy-select. Latent here (banking already requires a credible walk, which
+        # requires forward >= 0.3) and written signed anyway, because latent is how it gets copied.
         _bank_to_flywheel(gene, prompt=f"[agent-trained] {gene.robot_class}", task="locomotion",
-                          success_rate=min(1.0, max(0.0, abs(float(learned["forward_m"])) / 0.5)),
+                          success_rate=min(1.0, max(0.0, float(learned["forward_m"]) / 0.5)),
                           source="agent_trained")
     # ...AND ONTO THE ROBOT. Banking the winner into the flywheel (above) made it available to the NEXT body and
     # left THIS one untouched: the gene was byte-identical after a 15 s train_held on a real Go2, and the next
     # verify_robot honestly reported it was still running ``flywheel_hint``. See ``trained_controller`` for the
     # contract; ``door='train_held'`` is what the verdict's ``gait_source`` names afterwards.
     from virturoid.services.trained_controller import apply_trained_gait
-    # The verdict string is what a refusal QUOTES, so it has to name the gate that refused. ``stopped_reason``
-    # alone produced "did not produce a credible walk (credible_walk)" — measured on a composed dog whose search
-    # early-stopped on a credible point that was the shipped default itself, i.e. a true statement of the gate
-    # printed as a contradiction. Both halves of ``solved`` are reported instead, with the two distances.
-    _verdict = (f"{learned.get('stopped_reason')}; survived={bool(learned.get('survived'))}, "
-                f"beats_default={bool(learned.get('beats_default'))} "
-                f"({learned.get('forward_m')} m vs the shipped default's {learned.get('default_forward_m')} m)")
+    # WHAT THE GATE IS FOR: "is this a controller we can stand behind on this body?" — not "does it win a
+    # distance race?". ``apply_trained_gait``'s ``credible=`` is documented as "the training run's OWN
+    # un-gameable verdict", and its refusal sentence is worded for exactly that one question. This door was
+    # handing it ``survived and beats_default``, and both halves are the wrong question to answer with it:
+    #
+    #   * ``survived`` is not a walk. On the Go2 above it was True for a crouch.
+    #   * ``beats_default`` is a race against an alternative VERIFY RE-RUNS ANYWAY. ``ai_native_tools._honest_gait``
+    #     deploy-selects: it runs the shipped default alongside whatever is landed, keeps whichever is credible,
+    #     and (since a body with no op-point deploys the mined hint, not the default) puts that hint back in the
+    #     race too, disclosing the loser. Settling that race here protects nothing the customer is not already
+    #     protected from — while making it possible to print "did not produce a credible walk" about a credible
+    #     walk that merely came second, which is this defect again with the operands swapped. It is also measured
+    #     at ``deploy_steps`` = 600, the horizon ``trained_controller``'s docstring records an authored horse
+    #     "beating the default, 0.868 vs 0.471" at, right before it verified FELL at 6000.
+    #
+    # So the gate is ``credible_walk`` — confirmed at the horizon a walk is judged at — and nothing else, which
+    # makes the refusal sentence TRUE whenever it fires. ``beats_default`` stays what ``gait_flywheel`` uses it
+    # for (whether the row enters the shared bank) and is REPORTED either way, including the case where a
+    # credible walk lands that the default out-travelled: ``default_beat_it`` says so out loud rather than
+    # dressing it up as a run that failed.
+    landed_claim = credible_walk
+    default_beat_it = credible_walk and not beats_default
+    # NAME THE VERDICT. This string is the ONLY thing ``apply_trained_gait`` quotes — into the auto-refusal
+    # ("did not produce a credible walk (<verdict>)") and into the ``apply='always'`` override ("landed an
+    # operating point whose own verdict was <verdict>") — and the verdict is the single most useful word in
+    # either sentence: it is what tells an engineer WHY, and whether to spend more budget or change the body.
+    # Written as ``credible_walk_reason`` alone it degraded to "did not produce a credible walk" with an EMPTY
+    # parenthetical the moment that one key was absent — and a door that can only be honest when every upstream
+    # field is present is a door that goes quiet exactly when something upstream is wrong.
+    #
+    # ``credible_walk_reason`` already embeds the ``classify()`` string on every branch that builds it, so the
+    # verdict is prepended only when the sentence does NOT already contain it: real runs read unchanged, and a
+    # degraded result still names a verdict instead of shrugging. ``stopped_reason`` is the last resort — it is
+    # not a verdict ("max_evals"), but "we stopped on max_evals" beats saying nothing at all.
+    #
+    # WHICH verdict: the one from the horizon the DECISION was made at. A winner refuted by the settling check
+    # carries TWO classify() strings — "CREDIBLE WALK" at 600 steps and "FELL by ROLL-OVER" at 6000 — and naming
+    # the 600-step one would print "did not produce a credible walk (CREDIBLE WALK)", which is this whole defect
+    # again one field over. ``settling_check['verdict']`` is the final word whenever one was taken.
+    _sc = learned.get("settling_check") or {}
+    _reason = str(learned.get("credible_walk_reason") or "").strip()
+    _named = (str(_sc.get("verdict") or "").strip() or str(learned.get("verdict") or "").strip()
+              or str(learned.get("stopped_reason") or "").strip())
+    _verdict = _reason if (_named and _named in _reason) else "; ".join(x for x in (_named, _reason) if x)
+    _verdict = _verdict or "the search reported no verdict for its own winner"
+    if default_beat_it:
+        _verdict += (f" — but the shipped default measured further at the {learned.get('horizon_steps')}-step "
+                     f"horizon ({learned.get('default_forward_m')} m vs {learned.get('forward_m')} m), so this "
+                     f"point is NOT banked and verify's deploy-select may well report the default")
     applied = apply_trained_gait(
         rid, learned.get("params") or {}, door="train_held", apply=apply_mode,
-        credible=solved, verdict=_verdict,
+        credible=landed_claim, verdict=_verdict,
         evidence={"forward_m": learned.get("forward_m"), "default_forward_m": learned.get("default_forward_m"),
+                  "credible_walk": credible_walk, "beats_default": beats_default,
+                  "judged_at_steps": learned.get("horizon_steps"), "settling_check": learned.get("settling_check"),
                   "n_evals": learned.get("n_evals"), "robustness_rel": learned.get("robustness_rel"),
                   "banked_gait": learned.get("banked_skill")})
     say("apply", (f"committed to the held robot — verify_robot now reports "
                   f"gait_source '{applied.get('gait_source_after')}'") if applied.get("applied")
         else f"NOT applied: {applied.get('reason')}")
-    return {"mode": "gait_search", "solved": solved, "credible": bool(learned.get("survived")),
+    # THE CONTROLLER THE ROBOT ENDS UP WITH, named — because "we refused to land ours" does not say what it is
+    # now running, and on the Go2 the answer was a gait that is not a walk either. Read off the held robot rather
+    # than inferred: ``applied`` reports the write, ``held_gait`` reports the state.
+    from virturoid.services.trained_controller import held_gait
+    _held = held_gait(rid)
+    _door_now = ((_held.get("provenance") or {}) if isinstance(_held.get("provenance"), dict) else {}).get("door")
+    _now = ("the shipped default, or this body's mined flywheel hint — verify_robot names which" if not
+            _held.get("params") else
+            f"tuned_for_this_body{f'::{_door_now}' if _door_now else ''}")
+    return {"mode": "gait_search",
+            # ``solved`` = the run produced a walk AND it is good enough to seed other bodies. It is the
+            # conjunction, so it can never be True while either half below is False.
+            "solved": credible_walk and beats_default,
+            "credible": credible_walk,                          # THE claim, and the only key allowed this word
+            "credible_reason": learned.get("credible_walk_reason"),
+            "survived": survived,                               # the weaker fact, no longer wearing the word
+            "verdict": learned.get("verdict"),                  # the classify() string for the searched winner
+            "judged_at_steps": learned.get("horizon_steps"),    # ...and the horizon it was judged at
+            "settling_check": learned.get("settling_check"),    # None = the horizon was already long enough
             "n_evals": learned["n_evals"], "stopped_reason": learned["stopped_reason"],
             "reused_prior": learned["reused_prior"], "banked_gait": learned["banked_skill"],
-            "default_forward_m": learned["default_forward_m"], "beats_default": learned["beats_default"],
+            "not_banked_reason": learned.get("not_banked_reason"),
+            "default_forward_m": learned["default_forward_m"], "beats_default": beats_default,
+            "default_verdict": learned.get("default_verdict"),  # the default is not automatically a walk either
+            "default_beat_it": default_beat_it,
             "forward_m": learned["forward_m"], "applied_to_robot": applied,
+            "controller_now": _now,
             "best": {"params": learned["params"], "forward_m": learned["forward_m"],
                      "height_ratio": learned["height_ratio"]}}
 

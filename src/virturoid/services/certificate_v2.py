@@ -505,13 +505,28 @@ def _scope_block(*, sanity: dict, act: dict, credible: bool, verdict_str: str,
 
 def build_certificate_v2(gene, verdict: dict, *, gait_params=None, task: str = "", robot_id: str | None = None,
                          memory_dir: str = "build/memory", run_dr: bool = True, dr_draws: int = 12,
-                         run_margins: bool = True, body_parity: dict | None = None) -> dict:
+                         run_margins: bool = True, body_parity: dict | None = None,
+                         shipped_controller: dict | None = None) -> dict:
     """Assemble the tiered NASA-STD-7009-mapped certificate. Always computes the cheap Tier-1 (model_sanity,
     actuator level); the DR sweep + margins (bounded rollouts) are on by default but can be disabled for a fast
-    export. VOID (``valid: False``) unless model_sanity is green — every downstream claim depends on it."""
+    export. VOID (``valid: False``) unless model_sanity is green — every downstream claim depends on it.
+
+    ``shipped_controller`` is the export writer's record of the control program the package DEPLOYS (see
+    ``verdict_certificate.build_certificate``). It defaults to whatever ``gene_build`` stamped on the gene when it
+    wrote ``software/control_program.json`` — the export writes the URDF/ROS2/controller bundle before it builds
+    the certificate, so by the time this runs the stamp is there. That default is what lets the certificate judge
+    deploy==measure on the CONTROLLER as well as the body without every caller having to be rewired; pass the
+    argument explicitly to override, or ``{}`` to force "unknown".
+    """
     from virturoid.services.verdict_certificate import build_certificate
+    if shipped_controller is None:
+        try:
+            from virturoid.services.gene_build import exported_controller_stamp
+            shipped_controller = exported_controller_stamp(gene)
+        except Exception:  # noqa: BLE001 - no stamp -> controller_parity reads "unknown", never "matches"
+            shipped_controller = None
     base = build_certificate(gene, verdict, task=task, robot_id=robot_id, memory_dir=memory_dir,
-                             body_parity=body_parity)
+                             body_parity=body_parity, shipped_controller=shipped_controller or None)
     sanity = model_sanity(gene)
     act = actuator_fidelity_level(gene)
     # RUN THE EVIDENCE FIRST, then describe it. The scope/honesty block is derived from which of these actually
@@ -531,8 +546,12 @@ def build_certificate_v2(gene, verdict: dict, *, gait_params=None, task: str = "
                      "n_segments": len(gene.segments), "dof": len(gene.actuated_joints())},
         # ``rollout_ran`` travels with the rest: without it a reader has to infer "never measured" from a null
         # ``deploy_is_measure``, and the null is exactly what used to be a confident ``true``.
+        # ``controller_parity`` travels with ``body_parity`` for the same reason ``rollout_ran`` travels with
+        # ``deploy_is_measure``: the flag is a conjunction, and a reader who sees it go null or false has to be
+        # able to see WHICH half moved without leaving the file.
         "verdict": {k: base.get(k) for k in ("verdict", "credible", "checks", "gait_source", "verified_with",
-                                             "deploy_is_measure", "rollout_ran", "body_parity")},
+                                             "deploy_is_measure", "deploy_is_measure_parts", "rollout_ran",
+                                             "body_parity", "controller_parity")},
         "model_sanity": sanity,
         "actuator_fidelity_level": act,
         "flywheel_provenance": base.get("flywheel_provenance"),

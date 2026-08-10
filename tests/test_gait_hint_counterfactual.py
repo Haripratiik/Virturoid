@@ -53,6 +53,11 @@ def test_default_arm_does_not_inherit_the_bodys_tuned_cache(quad, monkeypatch):
 
     monkeypatch.setattr(MP, "crawl_gait_rollout", fake_crawl)
     monkeypatch.setattr(AIT, "_record_gait_hint_outcome", lambda *a, **k: None)
+    # NO MINED HINT for this body. Deploy-select runs a THIRD arm when a controller is landed on a body the
+    # flywheel has a hint region for (see ``_honest_gait``), and whether this session's scratch bank has banked
+    # two walks near a composed quadruped depends on which other tests ran first. Pinning it empty keeps this
+    # test measuring the thing it names — that arm 2 is the SHIPPED DEFAULT and not the metadata fallback.
+    monkeypatch.setattr(AIT, "_mined_hint_params", lambda _g: {})
 
     AIT._honest_gait(gene, steps=600)
 

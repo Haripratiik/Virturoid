@@ -540,7 +540,8 @@ def _record_gait_lesson(gene, failure_code: str, operator: str, *, improvement: 
 
 
 def _record_gait_hint_outcome(gene, hint_rollout: dict, default_rollout: dict, *, selected_default: bool,
-                              source: str) -> None:
+                              source: str, shipped_rollout: dict | None = None,
+                              shipped_source: str = "") -> None:
     """Record every attempted recall deployment, including wins, losses and ties.
 
     Lessons remain useful diagnosis for losses; this provenance event is the unbiased denominator needed to tell
@@ -558,6 +559,12 @@ def _record_gait_hint_outcome(gene, hint_rollout: dict, default_rollout: dict, *
     (this body's OWN fitted op-point) are different claims and were being pooled under ``gait_hint_deploy``,
     where 1598 rows of the latter diluted the former's mean by roughly 4x. They are banked apart now; both are
     still recorded, so no series is lost, only separated.
+
+    ``shipped_rollout`` / ``shipped_source`` NAME THE WINNER EXPLICITLY. ``shipped_forward_m`` used to be
+    INFERRED as "the default if the default was selected, else the recalled arm" — sound while there were
+    exactly two arms. There can now be a third (the mined hint re-entering the race against a controller landed
+    on the body; see ``_honest_gait``), and an inference that cannot name it would have recorded a rollout that
+    did not happen. Omitted -> the old inference, unchanged, for every caller that still runs two arms.
     """
     try:
         from virturoid.services.gait_flywheel import structural_gait_key
@@ -567,7 +574,8 @@ def _record_gait_hint_outcome(gene, hint_rollout: dict, default_rollout: dict, *
         DEFAULT_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
         hint_forward = abs(float(hint_rollout.get("forward", 0.0)))
         default_forward = abs(float(default_rollout.get("forward", 0.0)))
-        shipped_forward = default_forward if selected_default else hint_forward
+        shipped_forward = (abs(float(shipped_rollout.get("forward", 0.0))) if shipped_rollout is not None
+                           else (default_forward if selected_default else hint_forward))
         structure_key = structural_gait_key(gene)
         kind = "gait_hint_deploy" if source == "flywheel_hint" else "gait_own_point_deploy"
         with MemoryDB(DEFAULT_DB_PATH) as db:
@@ -581,11 +589,50 @@ def _record_gait_hint_outcome(gene, hint_rollout: dict, default_rollout: dict, *
                       "default_credible": classify(default_rollout).startswith("CREDIBLE"),
                       # what the robot ACTUALLY walked away with, vs the same body's shipped default
                       "shipped_forward_m": shipped_forward,
+                      "shipped_source": shipped_source or ("default_crawl" if selected_default else source),
                       "shipped_delta": round(shipped_forward - default_forward, 6),
                       "delta_is_counterfactual": True},
             )
     except Exception:  # noqa: BLE001 - measurement must never break a deploy verdict
         pass
+
+
+def _mined_hint_params(gene) -> dict:
+    """The mined flywheel HINT region's five scalars for this body, or ``{}`` when there is no usable hint.
+
+    FLYWHEEL = HINTS, NOT COPY-PASTE. Rather than deploy one banked body's exact params verbatim (a trap on a
+    slightly-different body), this returns the mined HINT REGION's centre — where credible walks CLUSTER across
+    bodies, auto-derived from data (``gait_hints``). ``{}`` whenever the region is not real: fewer than two
+    banked walks near this body, no bank on disk, hints switched off, or any failure at all (the flywheel is an
+    accelerant; a miss must degrade to the shipped default and never break a verdict).
+
+    ``VIRTUROID_DISABLE_GAIT_HINTS=1`` skips the recall entirely. Design-Bench sets it so the REGRESSION GATE is
+    hermetic: measured 2026-07-22, verdict@1 read 0.50 on an empty DB and 0.55 on a banked one — the gate number
+    floated with whatever the session had banked, which made CI flicker at the floor. The PRODUCT keeps hints
+    on; the BENCH measures the composer+compiler alone, deterministically.
+
+    IT IS A FUNCTION BECAUSE ``_honest_gait`` NOW ASKS TWICE, at two different moments and for two different
+    reasons: once to pick a controller for a body that has none of its own, and once to make sure a controller
+    LANDED on the body has not silently cost it the better one it was already deploying. Never called twice in
+    one verdict — the two sites are mutually exclusive — so the mining cost is unchanged for any body that had
+    no op-point of its own.
+    """
+    import os as _os
+    if _os.environ.get("VIRTUROID_DISABLE_GAIT_HINTS") == "1":
+        return {}
+    try:
+        from virturoid.services.gait_hints import mine_gait_hints
+        from virturoid.services.memory_db import DEFAULT_DB_PATH, MemoryDB
+        if not DEFAULT_DB_PATH.exists():
+            return {}
+        with MemoryDB(DEFAULT_DB_PATH) as _db:
+            hints = mine_gait_hints(_db, gene=gene)               # VECTOR-nearest robots seed the deploy hint
+        if int(hints.get("n", 0)) < 2:                            # <2 banked walks -> no real region to hint from
+            return {}
+        prior = hints.get("prior") or {}
+        return {k: float(prior[k]) for k in ("freq", "hip_amp", "knee_amp", "kp", "kd") if k in prior}
+    except Exception:  # noqa: BLE001 - the flywheel is an accelerant; a miss just uses the shipped default gait
+        return {}
 
 
 def _honest_serpentine(gene, *, steps: int = 2000, render: bool = False, tag: str = "serpentine") -> dict:
@@ -753,44 +800,30 @@ def _honest_gait(gene, *, steps: int = 1200, render: bool = False, tag: str = "g
                 gait_source = f"tuned_for_this_body::{_prov['door']}"
     except Exception:  # noqa: BLE001 - a malformed cache must never block the verdict
         gait_params = {}
-    try:
-        if gait_params:
-            raise LookupError("this body has its own measured op-point; no cross-body hint needed")
-        # FLYWHEEL = HINTS, NOT COPY-PASTE. Rather than deploy one banked body's exact params verbatim (a trap on a
-        # slightly-different body), start from the mined HINT REGION — where credible walks CLUSTER across bodies,
-        # auto-derived from data (gait_hints). A quick verify uses this data-driven prior; the ``adapt_gait`` tool
-        # runs the full per-body fit from the same hints. The deploy-select below still guards it vs the default.
-        #
-        # VIRTUROID_DISABLE_GAIT_HINTS=1 skips the recall entirely. Design-Bench sets it so the REGRESSION GATE
-        # is hermetic: measured 2026-07-22, verdict@1 read 0.50 on an empty DB and 0.55 on a banked one — the
-        # gate number floated with whatever the session had banked, which made CI flicker at the floor. The
-        # PRODUCT keeps hints on; the BENCH measures the composer+compiler alone, deterministically.
-        import os as _os
-        from virturoid.services.gait_hints import mine_gait_hints
-        from virturoid.services.memory_db import DEFAULT_DB_PATH, MemoryDB
-        if _os.environ.get("VIRTUROID_DISABLE_GAIT_HINTS") == "1":
-            raise LookupError("gait hints disabled for hermetic benchmarking")
-        if DEFAULT_DB_PATH.exists():
-            with MemoryDB(DEFAULT_DB_PATH) as _db:
-                _h = mine_gait_hints(_db, gene=gene)              # VECTOR-nearest robots seed the deploy hint
-            if _h.get("n", 0) >= 2:                              # ≥2 banked walks -> a real mined region to hint from
-                _p = _h["prior"]
-                gait_params = {k: float(_p[k]) for k in ("freq", "hip_amp", "knee_amp", "kp", "kd")
-                               if k in _p}
-                gait_source = "flywheel_hint"                    # a data-driven hint region, not a copied policy
-    except Exception:  # noqa: BLE001 - the flywheel is an accelerant; a miss just uses the default gait
-        # ``startswith``, not ``==``: a controller landed by a training door carries the door as a ``::`` suffix,
-        # and this guard is reached on EVERY body that has its own op-point (the ``raise LookupError`` above is
-        # how that case exits). Under exact equality a trained body fell through and had ``gait_params`` wiped —
-        # which does not change the rollout (``crawl_gait_rollout`` re-reads the same dict off the metadata) but
-        # silently skips the deploy-select safety net below and banks the walk under an EMPTY parameter set.
-        if not gait_source.startswith("tuned_for_this_body"):    # never discard THIS body's own measured op-point
-            gait_params = {}
+    # A CROSS-BODY HINT ONLY WHEN THIS BODY HAS NOTHING OF ITS OWN. A quick verify uses this data-driven prior;
+    # the ``adapt_gait`` tool runs the full per-body fit from the same hints. The deploy-select below guards it
+    # against the shipped default either way. (This used to be a ``try`` whose ``raise LookupError`` was how the
+    # has-its-own-op-point case exited, and whose ``except`` doubled as the guard against wiping that op-point.
+    # It is a plain branch now because the hint is needed at a SECOND site below, where an exception used as
+    # control flow would have been unreadable — see ``_mined_hint_params``.)
+    if not gait_params:
+        _hint = _mined_hint_params(gene)
+        if _hint:
+            gait_params, gait_source = _hint, "flywheel_hint"    # a data-driven hint region, not a copied policy
     r = crawl_gait_rollout(gene, steps=steps, record_qpos=True, frame_every=frame_every, **gait_params)
     # EXACTLY THE KWARGS THAT PRODUCED ``r``, tracked separately from the SELECTION variable above because the
     # deploy-select below can swap the rollout without swapping the parameters. It is what the flywheel banks:
     # a row whose ``gait_params`` did not produce its own ``forward_m`` is evidence about nothing.
     deployed_params = dict(gait_params)
+    # WHAT THE ENGINEER LANDED, captured before the deploy-select below is allowed to prefer something else.
+    # ``apply_gait`` / ``train_held`` / ``learn_gait`` / ``adapt_gait`` write an op-point onto the gene and tell
+    # the engineer that verify measures it; when deploy-select then deploys a different arm it OVERWRITES
+    # ``gait_source`` with that arm's name, and the two surfaces contradict each other with nothing in between.
+    # MEASURED 2026-08-10 through ``call_tool`` on a real Menagerie Go2: apply_gait returned ``applied: true,
+    # gait_source_after "tuned_for_this_body::apply_gait"`` and the very next verify answered ``gait_source:
+    # default_crawl``, forward 0.119 m — indistinguishable, from the outside, from an apply that never landed.
+    landed = ({"source": gait_source, "params": dict(gait_params), "rollout": r}
+              if gait_source.startswith("tuned_for_this_body") else None)
     # DEPLOY-SELECT safety net: a recalled gait must never make THIS body walk worse than the shipped default
     # (gene-construction paths differ, so a banked gait may not fit every body). When a gait was recalled, ALSO
     # run the default and keep whichever is CREDIBLE (tie-break: further) — so a mismatched banked SLIDE can never
@@ -804,21 +837,53 @@ def _honest_gait(gene, *, steps: int = 1200, render: bool = False, tag: str = "g
         # each, and the guard this block advertises ("never worse than the shipped default") could not fire even
         # once on those 11 bodies. Naming the constants makes the baseline real at no extra rollout cost, and
         # turns 1598 vacuous zeros into a real measurement of what the per-body tune is worth.
+        r_recalled, src_recalled = r, gait_source                # the arm the selection above chose, pre-swap
         r_def = crawl_gait_rollout(gene, steps=steps, record_qpos=True, frame_every=frame_every,
                                    **_DEFAULT_GAIT)
         cred_r = classify(r).startswith("CREDIBLE")
         cred_def = classify(r_def).startswith("CREDIBLE")
+        # SIGNED, not `abs`. When both arms are non-credible this comparison IS reached, and with `abs` it
+        # preferred whichever travelled FURTHEST IN ANY DIRECTION. Measured on this checkout: ours -0.500 m
+        # against the default's +0.120 m selected OURS -- the deploy-select kept the gait walking backward and
+        # then recorded a 0.380 m "improvement" into a lesson row that feeds the next similar body. Third
+        # instance of one bug today (the other two: `train_held`'s beats_default, and `bank_gait`'s admission
+        # gate); the rule everywhere is that distance only counts along the heading the body set out on.
         better_def = (cred_def and not cred_r) or (
-            cred_def == cred_r and abs(float(r_def.get("forward", 0))) > abs(float(r.get("forward", 0))))
-        _record_gait_hint_outcome(gene, r, r_def, selected_default=better_def, source=gait_source)
+            cred_def == cred_r and float(r_def.get("forward", 0)) > float(r.get("forward", 0)))
         if better_def:
             # the banked hint underperformed the default ON THIS BODY -> a verified failure->fix lesson (the
             # locomotion path's only lesson source; feeds mine_gait_hints for the next similar body)
             _record_gait_lesson(gene, "banked_gait_underperformed", "deploy_default_crawl",
-                                improvement=abs(float(r_def.get("forward", 0))) - abs(float(r.get("forward", 0))),
+                                improvement=float(r_def.get("forward", 0)) - float(r.get("forward", 0)),
                                 root_cause=f"recalled '{gait_source}' gait slid/underperformed the shipped default")
             r, gait_source = r_def, "default_crawl"
             deployed_params = {}       # the SHIPPED DEFAULT produced this rollout — bank ITS params, not the loser's
+        # A LANDING MUST NOT COST THE BODY THE CONTROLLER IT WAS ALREADY DEPLOYING. The net above guards a landed
+        # op-point against the SHIPPED DEFAULT and nothing else — but a body with no op-point of its own does not
+        # deploy the shipped default, it deploys the mined flywheel hint, and the moment an op-point lands, that
+        # hint stops being considered at all (the branch that picks it runs only ``if not gait_params``). So the
+        # alternative the landing was measured against was never the alternative it actually replaced.
+        # MEASURED on the same Go2: verify read ``flywheel_hint`` 1.019 m; ``apply_gait`` landed five in-range
+        # scalars; verify then read ``default_crawl`` 0.119 m — a 9x drop, because the hint that produced 1.019
+        # was no longer in the running. Rare and lazy: this arm runs only when a controller was landed on this
+        # body AND a real mined region exists for it (a fresh or hermetic bank has none, so CI pays nothing).
+        if landed is not None:
+            _alt = _mined_hint_params(gene)
+            if _alt and _alt != landed["params"]:
+                r_alt = crawl_gait_rollout(gene, steps=steps, record_qpos=True, frame_every=frame_every, **_alt)
+                cred_now = classify(r).startswith("CREDIBLE")
+                cred_alt = classify(r_alt).startswith("CREDIBLE")
+                if (cred_alt and not cred_now) or (
+                        cred_alt == cred_now
+                        and abs(float(r_alt.get("forward", 0))) > abs(float(r.get("forward", 0)))):
+                    r, gait_source = r_alt, "flywheel_hint"
+                    deployed_params = dict(_alt)
+        # RECORDED AFTER THE SELECTION IS FINAL, so ``shipped_forward_m`` is what the robot walked away with.
+        # ``delta`` is still the two-arm counterfactual it has always been (recalled - default); only the
+        # "shipped" half needs the winner, and with a third arm in play the old ``default if selected_default
+        # else hint`` inference would have named a rollout that did not happen.
+        _record_gait_hint_outcome(gene, r_recalled, r_def, selected_default=better_def, source=src_recalled,
+                                  shipped_rollout=r, shipped_source=gait_source)
     o = orientation_summary(r.get("qpos_frames") or [])
     out = {"kind": "legged", "verdict": classify(r), "survived": bool(r.get("survived")),
            "gait_source": gait_source,
@@ -828,6 +893,42 @@ def _honest_gait(gene, *, steps: int = 1200, render: bool = False, tag: str = "g
            "roll_max_deg": o.get("roll_max"), "pitch_max_deg": o.get("pitch_max")}
     if gait_provenance is not None and gait_source.startswith("tuned_for_this_body"):
         out["gait_provenance"] = gait_provenance   # which training run produced the controller just measured
+    # SAY THAT THE LANDED CONTROLLER WAS RUN AND BEATEN, rather than leaving a generic ``gait_source`` to imply
+    # it was never installed. Only when the deploy-select actually preferred another arm: on the happy path the
+    # source already names the landing and the payload is unchanged, key for key. This is the field that makes
+    # ``apply_gait``'s report and this verdict readable as one story instead of two contradictory ones — the
+    # landed controller's OWN measured number is right here, which is exactly what the apply verb promised.
+    def _disclose_rejected_landing(o: dict) -> dict:
+        """Stamp the disclosure onto whichever result dict ends up being returned.
+
+        A helper rather than one assignment because ``out`` is REPLACED wholesale further down by the learned-
+        policy branch and the biped branch returns a different dict entirely — and those are the branches where
+        a landed controller is most likely to have lost, so an assignment made here would vanish exactly when
+        it matters most.
+        """
+        if landed is None or o is None:
+            return o
+        src = str(o.get("gait_source") or "")
+        if src == landed["source"]:
+            return o                                   # the landing IS what produced this verdict; nothing to add
+        _lr = landed["rollout"]
+        o["deploy_select"] = {
+            "deployed": src,
+            "deployed_forward_m": o.get("forward_m"),
+            "deployed_verdict": o.get("verdict"),
+            "rejected": {"gait_source": landed["source"], "params": landed["params"],
+                         "forward_m": round(float(_lr.get("forward", 0)), 3), "verdict": classify(_lr)},
+            "still_installed": True,
+            "means": ("the controller landed on this robot IS still installed and WAS measured here — "
+                      "`rejected` is its own number. Verify re-runs the shipped default (and the mined "
+                      "flywheel hint when this body has one) alongside it and reports whichever walked "
+                      f"further, so `gait_source: {src}` after an apply means the landed controller LOST "
+                      "that comparison, NOT that the apply failed to land"),
+            "undo": "edit_robot {robot_id, ops:[{op:'undo'}]} removes the landed controller",
+        }
+        return o
+
+    _disclose_rejected_landing(out)
     # v7-F1 LEARNED-CONTROL DEPLOY: when the scripted gait is NOT credible, this body may still walk with a banked
     # LEARNED policy — the product verdict must use the robot's BEST controller, not only the scripted prior.
     # Never-regress by construction: the learned rollout must itself be classify()-CREDIBLE (same bar, roll/pitch
@@ -837,6 +938,7 @@ def _honest_gait(gene, *, steps: int = 1200, render: bool = False, tag: str = "g
             learned = _learned_gait_attempt(gene)
             if learned is not None:
                 out, r = learned["out"], learned["rollout"]   # adopt the learned walk (+ its frames for the render)
+                _disclose_rejected_landing(out)               # ...and carry the rejected landing onto it
         except Exception:  # noqa: BLE001 - learned recall is an accelerant; the scripted verdict stands on any error
             pass
     # BIPED honesty: the multi-leg crawl wave gait FELLS a 2-legged body (wrong controller). If it's a biped that
@@ -846,7 +948,7 @@ def _honest_gait(gene, *, steps: int = 1200, render: bool = False, tag: str = "g
         try:
             biped = _honest_biped(gene)
             if biped is not None:
-                return biped
+                return _disclose_rejected_landing(biped)
         except Exception:  # noqa: BLE001 - the biped-stand check is value-add; keep the gait verdict on any error
             pass
     # NOTE on flywheel ADAPTATION at verify time: the `adapt_gait` tool warm-starts a short search from the mined
@@ -2114,6 +2216,18 @@ def _reframe_for_imported_body(res: dict, gene, kind: str) -> None:
         "why_this_matters": ("a motion verdict is a claim about a BODY UNDER A CONTROLLER. We have your body "
                              "and not your controller, so we decline to rule on what your robot can do."),
     }
+    # ...UNLESS A CONTROLLER WAS LANDED ON THIS BODY AND LOST. "ours, generic — fitted to no particular robot"
+    # is true of the controller that produced the number and FALSE as a description of the robot: an engineer
+    # who just ran apply_gait / train_held on their Go2 reads it as their landing having evaporated. MEASURED
+    # 2026-08-10: apply_gait reported ``applied: true`` and this block answered ``what: default_crawl``, with
+    # nothing anywhere connecting the two.
+    _dsel = res.get("deploy_select")
+    if isinstance(_dsel, dict) and isinstance(_dsel.get("rejected"), dict):
+        res["controller_provenance"]["a_controller_is_landed_on_this_robot"] = (
+            f"{_dsel['rejected']['gait_source']} is installed and was measured here "
+            f"({_dsel['rejected']['forward_m']} m, {_dsel['rejected']['verdict']}); it lost the deploy-select "
+            f"comparison to '{_dsel['deployed']}', which is why this verdict names a generic controller. "
+            f"See `deploy_select`.")
     res["imported"] = prov
     res["to_get_a_real_verdict"] = [
         # THIS ROUTE USED TO NAME THREE TOOLS AND PROMISE ALL THREE CHANGED THE VERDICT. Only one does.
@@ -2241,8 +2355,15 @@ def verify_robot(args: dict) -> dict:
                 from virturoid.services.camera_perception import robot_sees_target
                 cam = robot_sees_target(gene)
                 if cam.get("has_camera"):
-                    res["vision"] = {k: cam[k] for k in ("camera_part", "fovy_deg", "render_px", "sees",
-                                                         "vision_trained", "perception") if k in cam}
+                    res["vision"] = {k: cam[k] for k in ("camera_part", "camera_is", "fovy_deg", "render_px",
+                                                         "sees", "vision_trained", "perception") if k in cam}
+                elif "we_did_not_add_one" in cam:
+                    # THE REFUSAL IS THE ANSWER, so it ships. Dropping the block entirely would leave the
+                    # customer unable to tell "we looked and your model declares no camera" from "we never ran
+                    # vision", and the previous behaviour -- reporting an Intel RealSense D435i and `sees: true`
+                    # on a Go2 whose model compiles to ncam 0 -- is exactly what silence would let back in.
+                    res["vision"] = {k: cam[k] for k in ("has_camera", "sees", "your_model_declares",
+                                                         "we_did_not_add_one", "note") if k in cam}
             except Exception:  # noqa: BLE001 - vision is value-add; the motion verdict still stands
                 pass
     except Exception as exc:  # noqa: BLE001 - an odd body must yield an honest error, not a crash

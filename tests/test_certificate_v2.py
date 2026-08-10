@@ -160,3 +160,34 @@ def test_full_tier1_certificate_on_a_real_walker():
     assert "friction" in rob["scope_note"].lower()          # honestly scopes what it did NOT sweep
     assert cert["margins"]["available"] in (True, False)     # margins attempted from the verified trajectory
     assert "invariant" in cert["numerics"]
+
+
+# ---------------------------------------------------------------- controller parity (the OTHER half of the claim)
+# `body_parity` has been checked since a Go2 certificate quoted a body 8 kg lighter. The controller half went
+# unasked, and measured on a real Menagerie Go2 the answer was no: the certificate signed a `default_crawl`
+# rollout while the same package deployed a `trot_cpg_gait` from software/control_program.json.
+def test_v2_carries_controller_parity_and_reads_the_gene_stamp():
+    from virturoid.services.gene_build import _stamp_exported_controller
+    g = _legged()
+    _stamp_exported_controller(g, {"policy_type": "trot_cpg_gait", "entrypoint": "software/gait_controller.py",
+                                   "program_fingerprint": "f00d", "control_frequency_hz": 50.0,
+                                   "sim_forward_m": 0.311, "sim_verdict": "CROUCH", "verified_walk": False,
+                                   "parameters_file": "software/control_program.json"})
+    cert = C2.build_certificate_v2(g, {"verdict": "CROUCH", "survived": True, "forward_m": 0.119,
+                                       "gait_source": "default_crawl"},
+                                   run_dr=False, run_margins=False)
+    cp = cert["verdict"]["controller_parity"]
+    assert cp["same"] is False, "a crawl rollout is not the trot program this package deploys"
+    assert cp["shipped_controller"]["program_fingerprint"] == "f00d"     # picked the stamp up off the gene
+    assert cert["verdict"]["deploy_is_measure"] is False
+    assert cert["verdict"]["deploy_is_measure_parts"]["same_controller"] is False
+    assert "deploy==measure" not in cert["verdict"]["verified_with"]
+
+
+def test_v2_without_a_stamp_reports_unknown_not_agreement():
+    cert = C2.build_certificate_v2(_legged(), {"verdict": "CREDIBLE", "credible": True, "survived": True,
+                                               "forward_m": 0.8, "gait_source": "default_crawl"},
+                                   run_dr=False, run_margins=False)
+    assert cert["verdict"]["controller_parity"]["same"] is None
+    assert cert["verdict"]["deploy_is_measure"] is None
+    assert "deploy==measure" not in cert["verdict"]["verified_with"]

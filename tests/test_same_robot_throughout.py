@@ -324,10 +324,21 @@ def test_the_certificate_only_claims_deploy_equals_measure_when_it_is_true():
     from virturoid.services.verdict_certificate import build_certificate
 
     gene = _imported("unitree_go2/go2.xml")
-    verdict = {"verdict": "CREDIBLE WALK", "credible": True, "forward_m": 0.9, "survived": True}
+    verdict = {"verdict": "CREDIBLE WALK", "credible": True, "forward_m": 0.9, "survived": True,
+               "gait_source": "tuned_for_this_body"}
+    # The CONTROLLER half of the same claim. "The SAME rollout that deploys" is about a rollout, and a rollout is
+    # a body and a controller; passing only the body left the other half asserted rather than checked. The
+    # OPERATING POINT counts as part of the controller — measured, the export's own gait search lands somewhere
+    # else than the point the deploy path reads, and matching only the law would call that deploy==measure.
+    _op = {"freq": 1.5, "hip_amp": 0.9, "knee_amp": 1.0, "kp": 32.0, "kd": 1.5}
+    gene.metadata = {**(getattr(gene, "metadata", None) or {}), "gait_params": _op}
+    shipped = {"policy_type": "crawl_wave_gait", "parameters_file": "software/control_program.json",
+               "program_fingerprint": "cafe1234", "sim_forward_m": 0.79, "sim_verdict": "CREDIBLE WALK",
+               "frequency_hz": _op["freq"], "hip_amp": _op["hip_amp"], "knee_amp": _op["knee_amp"],
+               "kp": _op["kp"], "kd": _op["kd"]}
 
     same = fingerprint_delta(physical_fingerprint(gene), physical_fingerprint(gene))
-    cert = build_certificate(gene, verdict, body_parity=same)
+    cert = build_certificate(gene, verdict, body_parity=same, shipped_controller=shipped)
     assert cert["deploy_is_measure"] is True
     assert "deploy==measure" in cert["verified_with"]
 
@@ -336,8 +347,17 @@ def test_the_certificate_only_claims_deploy_equals_measure_when_it_is_true():
         s.mass_kg = round(float(s.mass_kg) * 0.7, 3)
     drifted = fingerprint_delta(physical_fingerprint(gene), physical_fingerprint(lighter))
     assert drifted["same"] is False
-    cert2 = build_certificate(lighter, verdict, body_parity=drifted)
+    cert2 = build_certificate(lighter, verdict, body_parity=drifted, shipped_controller=shipped)
     assert cert2["deploy_is_measure"] is False
     assert "deploy==measure" not in cert2["verified_with"], (
         "the certificate still claims deploy==measure while shipping a different body")
     assert "DEPLOY != MEASURE" in cert2["verified_with"]
+
+    # ...and the mirror case: the right body, the WRONG controller. This is the one a real Go2 export hit.
+    cert3 = build_certificate(gene, verdict, body_parity=same,
+                              shipped_controller={**shipped, "policy_type": "trot_cpg_gait",
+                                                  "sim_forward_m": 0.311, "sim_verdict": "CROUCH"})
+    assert cert3["deploy_is_measure"] is False
+    assert cert3["deploy_is_measure_parts"] == {"same_body": True, "same_controller": False}
+    assert "deploy==measure" not in cert3["verified_with"], (
+        "the certificate claims deploy==measure while shipping a controller it never measured")
