@@ -21,6 +21,7 @@ Every body below was generated from a one-line prompt by the same pipeline — n
 - [Built with](#built-with)
 - [Installation](#installation)
 - [Usage](#usage)
+- [Connect your own AI agent (MCP)](#connect-your-own-ai-agent-mcp)
 - [Configuration](#configuration)
 - [Recent improvements](#recent-improvements)
 - [Roadmap](#roadmap)
@@ -399,6 +400,25 @@ Structurally distinct legged bodies: 20 → 189.
 hardware, simulate a log if you have none, measure the per-joint gap, fit actuator parameters, and revert in
 one call. Actuation delay is identified exactly from a torque log, from a current log via the datasheet
 torque constant (stated, never silent), or from a position-only log.
+
+**The surfaces agree with each other now.** An engineer walked the whole journey — ingest, look, amend,
+verify, train, calibrate, export — and found nine places where two individually-correct parts of the system
+described the same robot differently. A build reported four different forward distances, three of them
+inside the export bundle, because three writers ran three rollouts with three controllers at three horizons
+from three reset poses. Applying a trained controller could quietly evict the mined gait it was measured
+against. And an imported Go2 was told it had an Intel RealSense camera and billed $334 for it, on a model
+that declares no camera at all. Each of those passed every test that existed, because each part was right on
+its own; they are now checked against each other.
+
+**A long build says what it is doing.** The first thing a new user runs used to range from 0.5 s to 634 s
+with no output in between. Builds now stream their stage and elapsed time, and the per-body gait search takes
+a wall-clock budget — when it runs out, it says so and reports what it found rather than silently adopting
+nothing.
+
+**Distance now means distance in the direction you asked for.** A signed-versus-unsigned comparison had
+crept into four decision sites, so a robot travelling backward could out-score one travelling forward — and
+in one of them it was actively doing so, then banking the result as an improvement. Fixed at every site, with
+the tests that certified the old behaviour rewritten to fail on it.
 
 ## Roadmap
 

@@ -1466,7 +1466,28 @@ def ensure_walkable_quad(gene, prompt: str = "", *, force: bool = False):
                     base = float(evaluate_robot(gene).get("value", 0.0))
             except Exception:  # noqa: BLE001 - fitting is an accelerant; the honest verdict stands without it
                 _fit = (getattr(gene, "metadata", None) or {}).get("gait_fit") or {}
-        if base < 0.5 and _fit.get("searched") and (getattr(gene, "metadata", None) or {}).get("grounding"):
+        # WHATEVER CHANCE THIS BUILD ALLOWED CONTROL, IT HAS NOW HAD IT. ``searched`` alone was the guard until
+        # 2026-08-11, and it went silently unreachable the day ``tune_gait=false`` started being honoured inside
+        # ``fit_gait_for_body`` (which now returns ``skipped`` without searching, so the net just above measures
+        # nothing and ``searched`` can never become True). The splay then never ran and a build that declined to
+        # pay for a SEARCH went straight to throwing the customer's design away.
+        #
+        # MEASURED on ``create_robot("a quadruped robot dog that walks", tune_gait=false)``, same prompt, same
+        # commit, guard on vs off: with ``searched`` alone the authored dog (12.791 kg) is replaced by the fanned
+        # template (15.000 kg, metadata.walkability_fallback) and that template TURNS OFF COURSE -- 1.228 m
+        # forward for 4.66 m walked, heading swung 148 deg, travel rate decaying 0.75 -> 0.20 m/1000. The splayed
+        # AUTHORED body is a CREDIBLE WALK: 5.428 m, straightness 0.807, rate holding 1.31 -> 0.90.
+        #
+        # DECLINING TO PAY FOR A SEARCH IS NOT CONSENT TO SHIP A DIFFERENT ROBOT. That is the same rule the net
+        # above states ("NEVER DISCARD A BODY THAT WAS NEVER GIVEN A CONTROLLER OF ITS OWN"), and the splay is
+        # the cheap half of it: it keeps every authored part, and under ``tune_gait=false`` it costs three short
+        # screening rollouts because the re-fit inside it is a no-op too.
+        # ``not_applicable`` is excluded on purpose: that is the fitter saying the crawl gait never DRIVES this
+        # body, and the splay is screened with the crawl, so widening a stance on its word would be measuring a
+        # controller the body does not use -- the artefact this whole gate was rebuilt to remove.
+        _had_its_chance = bool(_fit.get("searched")
+                               or (_fit.get("skipped") and not _fit.get("not_applicable")))
+        if base < 0.5 and _had_its_chance and (getattr(gene, "metadata", None) or {}).get("grounding"):
             # Control had its fair chance and it was not enough. Before throwing the design away, try the ONE
             # change that keeps every authored part -- widening the body's own stance. See _splay_before_substituting.
             try:

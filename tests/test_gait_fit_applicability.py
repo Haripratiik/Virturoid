@@ -167,19 +167,49 @@ def test_the_refusal_is_recorded_on_the_body_so_a_later_reader_cannot_mistake_it
 # --------------------------------------------------------------------------- the general degeneracy backstop
 
 
-def _stub_never_credible(*, integrated):
-    """Every rollout falls. ``integrated`` is how much of the horizon it bought before it did (None = silent)."""
+# TWO NETS CATCH DEGENERACY, AND THESE TESTS ARE ABOUT THE SECOND ONE.
+#
+# Since 2026-08-10 ``fit_gait_for_body`` also refuses UP FRONT: when the shipped default collapses inside
+# ``_DEGENERATE_INTEGRATION_FRAC`` of the horizon it probes the two extreme CORNERS of the parameter box, and if
+# those collapse together it returns ``searched: False`` in three rollouts rather than 379. That is a cheaper and
+# better answer wherever it applies, and it is covered by tests/test_build_budget.py.
+#
+# It is not what the four tests below assert. They are the GENERAL post-search backstop -- the net for every case
+# the up-front probe deliberately fails open on -- so the doubles hand the corner probes SILENCE about
+# ``steps_integrated``, which is precisely the fail-open the probe documents ("an evaluator that does not report
+# ``steps_integrated`` ... is searched normally"). The search then runs, and the backstop is what answers.
+_CORNERS = ({k: GS._LO[k] for k in GF._FIT_PARAMS}, {k: GS._HI[k] for k in GF._FIT_PARAMS})
+
+
+def _is_corner_probe(params) -> bool:
+    """Is this the fitter's up-front probe of an extreme corner, rather than a rollout of the gait under test?"""
+    return any(all(float(params.get(k, 1e30)) == float(v) for k, v in c.items()) for c in _CORNERS)
+
+
+def _stub_never_credible(*, integrated, corners=None):
+    """Every rollout falls. ``integrated`` is how much of the horizon it bought before it did (None = silent).
+
+    ``corners`` is what the two EXTREME-CORNER probes report, and it defaults to ``None`` (silent) so these tests
+    keep measuring the post-search backstop rather than the up-front refusal that would otherwise preempt it --
+    see the block above. Pass a number to exercise the up-front branch instead.
+    """
     def _ev(gene, params, *, steps=1200, reward_fn=None):
         r = {"fitness": -1.0, "forward": 0.0, "height_ratio": 0.1, "survived": False, "cadence": 0.0,
              "support_frac": 0.0, "credible": False, "verdict": "FELL", "reward_return": -1.0}
-        if integrated is not None:
-            r["steps_integrated"] = integrated
+        depth = corners if _is_corner_probe(params) else integrated
+        if depth is not None:
+            r["steps_integrated"] = depth
         return r
     return _ev
 
 
 def _stub_search_that_finds_nothing(**extra):
-    def _one(gene, *, db, bank, warm_evals, max_evals, out, kw):
+    # ``deadline`` accepted and ignored: the real ``_one_search`` takes the build's shared gait-fit clock
+    # (2026-08-10). A double without it raised TypeError inside ``fit_gait_for_body``'s own except, so these
+    # assertions about an HONEST DECLINE came back as an error payload -- "gait fit FAILED for this body
+    # (TypeError) - this is an error, not a finding", which is exactly the confusion this file exists to stop.
+    # Nothing below is timed; the suite pins the budget off (tests/conftest.py).
+    def _one(gene, *, db, bank, warm_evals, max_evals, out, kw, deadline=None):
         return ({"beats_default": False, "params": {}, "forward_m": 0.0, "credible": False,
                  "survived": False, "n_evals": 120, **extra}, 120)
     return _one

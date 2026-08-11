@@ -517,7 +517,7 @@ def learn_gait_flywheel(gene, db, *, generations: int = 10, pop: int = 20, steps
                         deploy_steps: int = 1500, seed: int = 0, workers: int = 1, bank: bool = True,
                         vm=None, max_evals: int | None = None, stop_on_credible: bool = False,
                         recall: bool = True, robust_rel: float | None = _SEARCH_ROBUST_REL,
-                        robust_n: int = _SEARCH_ROBUST_N) -> dict:
+                        robust_n: int = _SEARCH_ROBUST_N, deadline: float | None = None) -> dict:
     """Recall a specific prior -> SCREENED warm-start search -> DEPLOY-SELECT vs the default -> bank -> provenance.
 
     Deploy-select (honesty): the search optimizes at ``steps``, but the winner is re-measured at the longer
@@ -549,7 +549,8 @@ def learn_gait_flywheel(gene, db, *, generations: int = 10, pop: int = 20, steps
     # what the before/after ablation for this task was measured with.
     res = search_gait(gene, generations=generations, pop=pop, steps=steps, seed=seed,
                       workers=workers, warm_start=prior, max_evals=max_evals,
-                      stop_on_credible=stop_on_credible, robust_rel=robust_rel, robust_n=robust_n)
+                      stop_on_credible=stop_on_credible, robust_rel=robust_rel, robust_n=robust_n,
+                      deadline=deadline)
     # DEPLOY-SELECT at the deploy horizon: learned winner vs the shipped default. Bank ONLY a CREDIBLE walk that
     # beats the default — a slide (fast but no real stepping) must never enter the bank.
     learned = evaluate_gait(gene, res.best_params, steps=deploy_steps)
@@ -994,6 +995,27 @@ _SEARCHED_CONTROLLER = "morph_policy.crawl_gait_rollout"
 #: horizon nothing ever reached. The live inchworm books ~30 steps (0.5%) per rollout, 379 times over.
 _DEGENERATE_INTEGRATION_FRAC = 0.02
 
+#: Wall-clock ceiling for ONE per-body gait fit, in seconds. A CUSTOMER-PATIENCE bound, not a search parameter —
+#: see ``_budget_from_env`` for the override chain and ``search_gait``'s ``deadline`` for where it is enforced.
+#:
+#: WHY 180, AND WHY NOT SMALLER. The fit is the thing that makes an authored body walk at all (docs/
+#: breaking_the_cotuning_wall.md; 7/7 proportion variants), so the cost of cutting it too early is the whole
+#: correctness win. The number is therefore set from the measured ADOPTION times, NOT from the failure times.
+#: Every adoption on this checkout landed well inside a minute of searching — grounded authored hexapod 24.2 s
+#: / 3 evals, cat 56.0 s / 87 evals, and through ``call_tool`` a biped that adopted a +3.732 m robust walk at
+#: EVALUATION 1 off a flywheel recall. Every body that searched longer than two minutes adopted nothing (dog
+#: 124.7 s; large quadruped, 8-legged spider). 180 s is ~3x the slowest measured adoption, which is the margin
+#: for a slower machine or a harder body, and it cuts the stage that dominates a slow build by ~3x: MEASURED
+#: end to end through ``create_robot`` on the large quadruped, the gait-fit stage goes 615.4 s -> 188.2 s.
+#:
+#: THE CALL IS NOT THE SEARCH. Compose is LLM-driven and unbounded — measured across five runs of the same
+#: three prompts it ranged 16.8 s to 253.7 s — so end-to-end totals move for reasons this budget does not
+#: control, and the number to compare before/after is the gait-fit stage.
+#:
+#: IT IS NOT A SILENT TRUNCATION. A fit the clock stops reports ``stopped_by_budget`` and a reason that says the
+#: search did not finish, precisely so the budget can never be mistaken for a finding about the body.
+_DEFAULT_FIT_BUDGET_S = 180.0
+
 
 def crawl_deployment_match(gene) -> dict:
     """Will the controller THIS FITTER SEARCHES ever be the controller this body is DRIVEN by?
@@ -1018,10 +1040,19 @@ def crawl_deployment_match(gene) -> dict:
         mobile (wheels)                 _honest_drive                  crawl                  NO
         manipulator / spray / other     _honest_reach / no verdict     crawl                  NO
         legged, 0 measured legs         crawl, driving nothing         crawl                  NO
-        legged, 2 legs (biped)          crawl, then _honest_biped      crawl                  YES (partial)
+        legged, 2 legs (biped)          crawl, then _honest_biped      crawl                  YES (the hard case)
         legged, >=3 legs                crawl                          crawl                  YES
 
     Only the last two rows are searchable. The rest get an honest refusal, never a decline.
+
+    THE BIPED ROW IS SEARCHABLE, and a proposal to refuse it is RECORDED HERE BECAUSE IT WAS WRONG. On
+    2026-08-10 "the crawl engine cannot balance two legs, so that search could never have succeeded" was
+    proposed as a cheap a-priori refusal on this row; the FIRST measurement taken to justify it refuted it — a
+    composed 2-legged body adopted at evaluation 1, +3.732 m at the 6000-step horizon against the default's
+    0.498, rate rising, 4/4 robustness probes — and the bank already held two ``gait::humanoid::*`` locomotion
+    rows, one at success 1.0. The distinction this function exists to police is exactly the one that proposal
+    blurred: "expensive, and often unsuccessful" is not "structurally impossible", and only the second may be
+    refused before measuring. Bounding the cost of the hard case is the BUDGET's job, not this matrix's.
 
     FAIL-OPEN, DELIBERATELY. Anything this cannot determine (no MuJoCo, a partial gene, a stub in a unit test)
     returns ``applicable=True`` with ``measured=False``: a diagnostic must never be the thing that stops a real
@@ -1085,10 +1116,26 @@ def crawl_deployment_match(gene) -> dict:
                            "measures zero), so every operating point produces the identical unactuated rollout "
                            "and the search cannot distinguish them"}
         if legs == 2:
+            # A BIPED IS SEARCHABLE. "The crawl engine cannot balance two legs, so that search could never have
+            # succeeded" was proposed as a cheap refusal here on 2026-08-10 and REFUTED the same day by the
+            # first measurement taken to justify it: a composed 2-legged body (8 DOF, legs=2) adopted an
+            # operating point at EVALUATION 1 — +3.732 m at the 6000-step horizon against the default's 0.498,
+            # rate rising +0.41 -> +0.62 m/1000 (accelerating, not decaying), surviving a 1e-2 perturbation of
+            # all five parameters at once, 4/4 probes. The bank independently agrees: it already holds two
+            # ``gait::humanoid::*`` locomotion rows, one at success 1.0, and a row only enters after beating the
+            # default at the deploy horizon.
+            #
+            # Task #206 is still true and is NOT this claim. It measured ONE humanoid on which the scripted
+            # crawl fell at step 487 while learned control held 6000/6000. "Hard, and often better served by
+            # learned control" is a different statement from "impossible", and only the second would license a
+            # refusal. What bounds the cost of the hard case is the BUDGET, which cannot deny a body a walk it
+            # can actually do.
             return {**out, "why": "biped: _honest_gait runs the crawl FIRST (so a fitted point does ship if it "
                                   "is credible) and falls back to _honest_biped's static-balance verdict only "
-                                  "when it is not — the search is applicable, but a scripted crawl balancing a "
-                                  "2-legged body is a learned-control frontier"}
+                                  "when it is not — the search is applicable, and MEASURED to succeed on a "
+                                  "composed biped (+3.732 m at 6000 steps, 4/4 robustness probes). It is the "
+                                  "hard case, not the impossible one: where the crawl does fail, task #206 "
+                                  "measured learned control balancing the same body 6000/6000"}
         return {**out, "why": f"legged, {legs} legs measured — the crawl gait this fitter searches is the one "
                               f"_honest_gait deploys"}
     except Exception:  # noqa: BLE001 - a diagnostic must never block a real fit; see the docstring
@@ -1110,7 +1157,8 @@ def _integrated(res) -> int | None:
 def fit_gait_for_body(gene, *, deploy_steps: int = _SETTLE_STEPS, search_steps: int = _SETTLE_STEPS,
                       max_evals: int = 96,
                       warm_evals: int = 24, generations: int = 8, pop: int = 24, seed: int = 0,
-                      db=None, bank: bool = True, seed_restarts: int = 3, cache: bool = False) -> dict:
+                      db=None, bank: bool = True, seed_restarts: int = 3, cache: bool = False,
+                      budget_s: float | None = None) -> dict:
     """Give ONE GROUNDED body its OWN operating point, and cache it on ``gene.metadata['gait_params']``.
 
     Call this AFTER ``ground_and_repair``. The whole point is that a body must be judged with a controller fitted
@@ -1196,22 +1244,61 @@ def fit_gait_for_body(gene, *, deploy_steps: int = _SETTLE_STEPS, search_steps: 
     ``adopted=False``), because a swallowed exception that reads as "this body has no better gait" is the exact
     measurement artefact this function exists to eliminate.
 
+    ``budget_s`` IS THE CUSTOMER'S HALF OF THAT COST, and it is why the paragraphs above are no longer the whole
+    story. Everything they say about honesty is about the ANSWER; this is about the WAIT. Measured 2026-08-10
+    across 20 real ``create_robot`` calls through ``agent_tools.call_tool``, the range is 0.5 s to 634 s, and the
+    three worst — a large quadruped 634 s, an 8-legged spider 552 s, a biped 270 s — adopted NOTHING.
+
+    TWO OF THOSE THREE NO LONGER REPRODUCE, which is worth saying because it is the flywheel working rather
+    than this change: re-measured the same day after the corpus had grown, the spider's fit is 111 s (it ADOPTS,
+    at evaluation 14) and the biped's is 86 s for the full 360 evaluations. Only the large quadruped still
+    saturates, and it is the case the budget binds on — 615.4 s -> 188.2 s of gait fitting. A ceiling set from
+    the failures would have been tuned to a moving target; set from the ADOPTIONS, it is not. So the
+    default is a ceiling (``_DEFAULT_FIT_BUDGET_S``, overridable per call or by ``VIRTUROID_GAIT_FIT_BUDGET_S``,
+    ``0`` for unbounded), set from the measured ADOPTION times rather than the failure times so that no body
+    known to walk is cut. Three properties keep it from becoming a quiet way to stop measuring:
+
+    * the clock is checked at EVALUATION boundaries only, never inside a rollout — the horizon is never shortened,
+      which is the one economy this function's own docstring forbids;
+    * a fit the clock stopped sets ``stopped_by_budget`` and says in its ``reason`` that the search DID NOT
+      FINISH. It must never read as "none was still walking";
+    * the test suite pins it OFF (``tests/conftest.py``), so no assertion about whether a body walks becomes a
+      function of how fast the machine running it is.
+
     ``cache=True`` lets an identical body reuse an identical fit, but ONLY when ``VIRTUROID_GAIT_FIT_CACHE=1``;
     the build path asks for it and a test suite turns it on. ``VIRTUROID_SKIP_GAIT_FIT=1`` makes the whole fit a
     disclosed no-op. Both default OFF — see the block above ``_FIT_CACHE`` for what they cost and what they buy.
     """
     import os
+    import time
 
-    from virturoid.services.gait_search import evaluate_gait
+    from virturoid.services.gait_search import _HI, _LO, evaluate_gait
 
     out: dict = {"ok": True, "searched": False, "adopted": False, "reason": "", "n_evals": 0,
-                 "horizon_steps": int(deploy_steps)}
+                 "horizon_steps": int(deploy_steps), "stopped_by_budget": False}
     if os.environ.get("VIRTUROID_SKIP_GAIT_FIT") == "1":
         # SAY SO. A caller reading `searched: False, adopted: False` off a real fit is being told "this body was
         # measured and kept its default"; here it means "nothing was measured", and those must not look alike.
         out["skipped"] = True
         out["reason"] = ("gait fitting was DISABLED for this process by VIRTUROID_SKIP_GAIT_FIT=1 — this body "
                          "was never searched, so nothing here is a finding about whether it can walk")
+        _stash(gene, out)
+        return out
+    # DID THE CALLER TURN FITTING OFF FOR THIS WHOLE BUILD? Checked here rather than at the one call site that
+    # knows about it, because a build fits up to three bodies through two modules — measured, ``tune_gait:
+    # false`` left ``ensure_walkable_quad`` fitting anyway and overwriting the disclosure with a real result,
+    # so the control said "off" and the clock said otherwise.
+    from virturoid.services import build_progress as _P
+    _b = _P.current()
+    if _b is not None and not getattr(_b, "fit_gait", True):
+        out.update({"skipped": True, "searched": False, "adopted": False, "n_evals": 0, "n_rollouts": 0,
+                    "reason": ("gait fitting was TURNED OFF for this build (tune_gait=false), so this body was "
+                               "never measured and nothing here says whether it can walk. It ships on the "
+                               "shipped default operating point, which is another robot's hand-tuned numbers "
+                               "— every authored quadruped measures 0.000 m there — and the walkability gate "
+                               "judges it at those numbers too, so an untuned body is also likelier to be "
+                               "replaced by a template. Rebuild with tune_gait=true, or call learn_gait, "
+                               "before reading any walk verdict as a fact about this design")})
         _stash(gene, out)
         return out
     # DOES THE CONTROLLER THIS FITTER SEARCHES EVER REACH THIS BODY? Asked BEFORE a single rollout is paid for.
@@ -1246,10 +1333,16 @@ def fit_gait_for_body(gene, *, deploy_steps: int = _SETTLE_STEPS, search_steps: 
                 "'planar_m > 0.15' is a threshold an optimiser would scrape rather than a walk it would find")
         _stash(gene, out)
         return out
+    # ``budget_s`` IS PART OF THE KEY. Two fits of the same body under different budgets are two different
+    # searches — one may have finished and one may have been cut — and replaying the cut one as the answer to
+    # the unbounded question is the same class of error as replaying a crash. The BUILD's remaining clock is
+    # deliberately NOT in the key: within one build, replaying an identical body's answer to a later, shorter
+    # window is exactly what the cache is for.
     _ckey = _fit_cache_key(gene, {"deploy_steps": deploy_steps, "search_steps": search_steps,
                                   "max_evals": max_evals, "warm_evals": warm_evals,
                                   "generations": generations, "pop": pop, "seed": seed,
                                   "bank": bank, "seed_restarts": seed_restarts,
+                                  "budget_s": budget_s if budget_s is not None else _budget_from_env(None),
                                   "db": db is not None}) if cache else None
     if _ckey is not None and _ckey in _FIT_CACHE:
         # A structurally identical body already paid for this exact search. Replay BOTH mutations the real call
@@ -1261,7 +1354,14 @@ def fit_gait_for_body(gene, *, deploy_steps: int = _SETTLE_STEPS, search_steps: 
         gene.metadata = md
         return dict(cached_out)
     try:
+        _t_roll0 = time.monotonic()
         default = evaluate_gait(gene, _DEFAULT_GAIT, steps=deploy_steps)
+        # WHAT ONE ROLLOUT COSTS ON *THIS* BODY, measured rather than guessed, and free because the default-gait
+        # probe had to run anyway. It is the only honest basis for telling a customer up front what the fit may
+        # cost: rollout cost varies by an order of magnitude across bodies (an 8-legged spider integrates far
+        # more contacts than a hexapod), so a fixed advertised number would be wrong for almost every robot.
+        _t_roll = max(1e-6, time.monotonic() - _t_roll0)
+        out["rollout_s"] = round(_t_roll, 3)
         out["default_forward_m"] = round(float(default["forward"]), 4)
         out["default_verdict"] = default.get("verdict")
         out["default_rates"] = default.get("rates")
@@ -1278,18 +1378,102 @@ def fit_gait_for_body(gene, *, deploy_steps: int = _SETTLE_STEPS, search_steps: 
             return _remember(_ckey, gene, out)
         n_evals = 0
         n_rollouts = 1                                   # the default-gait probe above is already one rollout
+        # REFUSE IN ADVANCE WHERE THE SEARCH PROVABLY CANNOT SUCCEED — and prove it, in three rollouts.
+        #
+        # ``degenerate_search`` below already catches the case where every rollout dies on contact, but only
+        # AFTER the whole budget is spent: the live inchworm booked "360 gaits (379 physics rollouts)" before
+        # anything noticed that none of them integrated more than ~30 of 6000 steps. The finding was right and
+        # the price was absurd. The same fact is establishable up front, because degeneracy is exactly the
+        # property that the OUTPUT DOES NOT DEPEND ON THE INPUT: if the shipped default and the two extreme
+        # corners of the parameter box all collapse inside ``_DEGENERATE_INTEGRATION_FRAC`` of the horizon, no
+        # operating point in between can be told from any other, and the search has nothing to rank.
+        #
+        # Deliberately narrow, and it FAILS OPEN in both directions: the probes only run when the default
+        # ITSELF collapsed (so a body that gets anywhere never pays for them), any probe that survives past the
+        # floor cancels the refusal, and an evaluator that does not report ``steps_integrated`` (every stubbed
+        # one) leaves ``deepest`` at ``None`` and is searched normally. This is the a-priori refusal the biped
+        # was wrongly proposed for: the criterion is a measurement of THIS body, not a class it belongs to.
+        floor = max(1, int(_DEGENERATE_INTEGRATION_FRAC * deploy_steps))
+        if deepest is not None and deepest < floor:
+            corners = [{k: _LO[k] for k in _FIT_PARAMS}, {k: _HI[k] for k in _FIT_PARAMS}]
+            probes = [_integrated(evaluate_gait(gene, c, steps=deploy_steps)) for c in corners]
+            n_rollouts += len(corners)
+            reached = [p for p in probes if p is not None]
+            deepest = max([deepest, *reached]) if reached else deepest
+            if reached and max(reached) < floor:
+                out.update({"searched": False, "adopted": False, "n_evals": 0, "n_rollouts": n_rollouts,
+                            "degenerate_search": True, "deepest_rollout_steps": deepest,
+                            "probe_rollouts": n_rollouts,
+                            "reason": (
+                                f"NO SEARCH WAS RUN, and nothing here is a finding about this body. Three probe "
+                                f"rollouts — the shipped default and both extreme corners of the "
+                                f"{len(_FIT_PARAMS)}-parameter box — ALL collapsed by step {deepest} of "
+                                f"{deploy_steps} ({deepest / max(1, deploy_steps):.1%} of the horizon). When the "
+                                f"most and least aggressive operating points available produce the same instant "
+                                f"collapse, no point between them can be distinguished either, so a search over "
+                                f"them would spend hundreds of rollouts and then report a decline that reads as "
+                                f"a measured negative about the design. Check that this is a body the leg crawl "
+                                f"gait can drive at all (crawl_deployment_match says it is driven by "
+                                f"{out.get('deployed_controller')}), or give it a learned controller "
+                                f"(train_held)")})
+                _stash(gene, out)
+                return _remember(_ckey, gene, out)
         learned: dict = {}
         best: dict = {}
         attempts = max(1, int(seed_restarts))
+        # THE BUDGET IS SET *AFTER* THE DEFAULT PROBE, deliberately: a body whose default already walks never
+        # reaches here, so the clock only ever runs on a body that is actually being searched.
+        # WHOSE CLOCK. ``create_robot`` can run this fitter up to three times (the authored body, the
+        # walkability gate's candidate, then a substituted body), so three independent ceilings would honour
+        # "spend up to N seconds" while taking 3N. The rule, in precedence order:
+        #
+        #   1. an explicit ``budget_s`` argument is THIS fit's own ceiling;
+        #   2. a build in progress contributes ITS deadline, and the earlier of the two always wins;
+        #   3. with no explicit argument inside a build, the build's clock is taken verbatim — INCLUDING when
+        #      it is unbounded. Falling back to the per-fit default there is the bug that made
+        #      ``gait_budget_s: 0`` silently cap at 180 s;
+        #   4. outside any build, the environment/default chain applies.
+        _now = time.monotonic()
+        _build = _P.current()
+        # ``claim_deadline`` STARTS the build's shared clock here, at the first search that actually needs it,
+        # and returns the same instant to every later fit in the build. Reading a deadline fixed at build
+        # construction instead let a 253.65 s composer hand this function 0.0 s of budget — see build_progress.
+        _bd = _build.claim_deadline() if hasattr(_build, "claim_deadline") else None
+        if budget_s is None:
+            deadline = _bd if _build is not None else (
+                None if _budget_from_env(None) is None else _now + _budget_from_env(None))
+        else:
+            _own = _budget_from_env(budget_s)
+            deadline = None if _own is None else _now + _own
+            if _bd is not None:
+                deadline = _bd if deadline is None else min(deadline, _bd)
+        budget = None if deadline is None else round(max(0.0, deadline - _now), 1)
+        out["budget_s"] = budget
+        _worst = _t_roll * (warm_evals + max_evals) * attempts
+        _P.say(f"fitting an operating point to this body: one {deploy_steps}-step rollout costs {_t_roll:.1f}s "
+               f"here, and the search may run up to {(warm_evals + max_evals) * attempts} of them "
+               f"(~{_worst / 60:.0f} min)"
+               + (f", capped at {budget:.0f}s by the build budget" if budget is not None
+                  else " — UNBOUNDED (no build budget set)"))
+        out["estimated_worst_case_s"] = round(_worst, 1)
+        attempts_run = 0
         _try = 0
         for _try in range(attempts):
+            # BETWEEN attempts as well as inside the search: a restart is a whole fresh budget, and starting one
+            # with the clock already spent is the single largest overshoot available. Never on the FIRST
+            # attempt: a body deserves one honest look even under a budget already spent by an earlier stage of
+            # the same build, and refusing there would make the fit depend on what ran before it.
+            if deadline is not None and time.monotonic() >= deadline and _try:
+                out["stopped_by_budget"] = True
+                break
+            attempts_run += 1
             # Decorrelated restart seeds. A failed search is a failed DRAW, not a verdict on the body (see
             # ``seed_restarts`` above), so retry before concluding this body cannot walk. Retry ONLY on failure
             # OR ON A FRAGILE WIN: a body that finds a STURDY op-point first time costs exactly what it did before.
             kw = dict(generations=generations, pop=pop, steps=search_steps, deploy_steps=deploy_steps,
                       seed=seed + _try * 1009)
             learned, n_try = _one_search(gene, db=db, bank=bank, warm_evals=warm_evals, max_evals=max_evals,
-                                         out=out, kw=kw)
+                                         out=out, kw=kw, deadline=deadline)
             n_evals += n_try
             n_rollouts += int(learned.get("n_rollouts_attempt") or learned.get("n_rollouts") or 0)
             _att = learned.get("deploy_steps_integrated")
@@ -1302,7 +1486,10 @@ def fit_gait_for_body(gene, *, deploy_steps: int = _SETTLE_STEPS, search_steps: 
                 best = learned
             if learned.get("robustness_rel") is not None:
                 break                    # a controller, not one lucky float -> stop paying for further draws
-        out["seed_attempts"] = _try + 1
+        # ATTEMPTS THAT RAN, not the index the loop reached. Breaking out on the clock at ``_try == 2``
+        # left this reporting "3 seed attempt(s)" for two searches -- a count of work that was never done,
+        # inside the very sentence that has to say how much WAS.
+        out["seed_attempts"] = max(1, attempts_run)
         learned = best or learned
         out["searched"] = True
         out.update({k: learned.get(k) for k in ("forward_m", "n_evals", "stopped_reason", "beats_default",
@@ -1366,7 +1553,10 @@ def fit_gait_for_body(gene, *, deploy_steps: int = _SETTLE_STEPS, search_steps: 
             out["reason"] = (f"searched {n_evals} gaits ({n_rollouts} physics rollouts) for this body over "
                              f"{out.get('seed_attempts')} seed attempt(s); adopted one that is still walking at "
                              f"step {deploy_steps} ({out['confirm_forward_m']} m, rate {_rate_str(confirm)}) vs "
-                             f"the default's {out['default_forward_m']} m; it {_rob}")
+                             f"the default's {out['default_forward_m']} m; it {_rob}"
+                             + (" — and the search was cut short by the build budget, so a longer one may find "
+                                "a better point (this one is verified either way)"
+                                if out.get("stopped_by_budget") else ""))
         else:
             # THE HORIZON IN THE SENTENCE HAS TO HAVE BEEN REACHED BY SOMETHING. A decline is a claim about the
             # body, so it may only quote a horizon some rollout actually integrated. When the deepest one
@@ -1374,7 +1564,6 @@ def fit_gait_for_body(gene, *, deploy_steps: int = _SETTLE_STEPS, search_steps: 
             # 379 rollouts in 1.3 s is arithmetically impossible for real physics, and until now nothing noticed
             # (docs/body_vs_controller_ruling.md D1). This is the GENERAL net: it does not know or care why the
             # body dies instantly, only that a horizon nobody reached must not be quoted as one that was.
-            floor = max(1, int(_DEGENERATE_INTEGRATION_FRAC * deploy_steps))
             degenerate = deepest is not None and deepest < floor
             out["deepest_rollout_steps"] = deepest
             out["degenerate_search"] = bool(degenerate)
@@ -1388,6 +1577,22 @@ def fit_gait_for_body(gene, *, deploy_steps: int = _SETTLE_STEPS, search_steps: 
                     f"walk — a search whose rollouts all die on contact cannot tell two operating points apart. "
                     f"The body is driven by {out.get('deployed_controller')}; check that it is a body the leg "
                     f"crawl gait can drive at all (crawl_deployment_match) before reading this as a negative")
+            elif out.get("stopped_by_budget"):
+                # A SEARCH THE CLOCK STOPPED IS A SEARCH THAT DID NOT FINISH — never a finding about the body.
+                # This is the same rule as the degeneracy net one branch up and as the applicability refusal
+                # above it, applied to the third way a search can fail to be a measurement. Saying "none was
+                # still walking at the horizon" here would be exactly the sentence this whole module exists to
+                # stop: a budget the customer set, reported back to them as a fact about their robot.
+                out["reason"] = (
+                    f"THE SEARCH WAS STOPPED BY THE BUILD BUDGET, not by an answer. It ran {n_evals} of a "
+                    f"possible {(warm_evals + max_evals) * attempts} gaits ({n_rollouts} physics rollouts) over "
+                    f"{out.get('seed_attempts')} of {attempts} seed attempt(s) in {out.get('budget_s'):.0f}s and "
+                    f"had not found an operating point that beats the shipped default. NOTHING HERE SAYS THIS "
+                    f"BODY CANNOT WALK — the remaining budget was never spent. One rollout costs "
+                    f"{out.get('rollout_s')}s on this body, so finishing needs roughly "
+                    f"{out.get('estimated_worst_case_s', 0) / 60:.0f} min: re-run with a larger "
+                    f"gait_budget_s (or 0 for unbounded) to complete it. The body ships on the shipped default "
+                    f"gait meanwhile")
             else:
                 _depth = ("" if deepest is None else
                           f" (the deepest rollout reached step {deepest} of {deploy_steps})")
@@ -1453,7 +1658,8 @@ def _rank(learned: dict) -> tuple:
     return (float(rel) if rel is not None else -1.0, float(learned.get("forward_m") or 0.0))
 
 
-def _one_search(gene, *, db, bank: bool, warm_evals: int, max_evals: int, out: dict, kw: dict):
+def _one_search(gene, *, db, bank: bool, warm_evals: int, max_evals: int, out: dict, kw: dict,
+                deadline: float | None = None):
     """One SHORT first pass plus the full-budget re-run. Returns ``(learned, n_evals_used)``.
 
     ``warm_evals`` is small (24) because a GOOD PRIOR should win almost immediately; ``max_evals`` (96) is the
@@ -1477,8 +1683,13 @@ def _one_search(gene, *, db, bank: bool, warm_evals: int, max_evals: int, out: d
     point the code cannot reach as though it were the code's output is the same class of false claim as quoting
     a verdict from a horizon that ends before the fall.
     """
-    learned = _open_db_and_learn(gene, db=db, bank=bank, max_evals=warm_evals, **kw)
+    learned = _open_db_and_learn(gene, db=db, bank=bank, max_evals=warm_evals, deadline=deadline, **kw)
     n_evals = int(learned.get("n_evals") or 0)
+    # THE CLOCK'S VERDICT IS TRACKED SEPARATELY FROM THE WINNER'S. ``learned`` ends up being whichever pass
+    # RANKED higher, so reading the stop reason off it alone loses the case where the COLD re-run is the one the
+    # budget cut -- and the caller would then print a decline for a search that never finished, the exact
+    # sentence this budget exists not to produce.
+    out_of_time = str(learned.get("stopped_reason")) == "budget"
     rollouts = int(learned.get("n_rollouts") or 0)
     # A FRAGILE WIN COUNTS AS AN EMPTY ONE HERE. The warm pass can end in 1 evaluation because the recalled
     # prior IS the answer — and MEASURED 2026-08-02 on the grounded authored cat, the prior the bank held was
@@ -1495,9 +1706,11 @@ def _one_search(gene, *, db, bank: bool, warm_evals: int, max_evals: int, out: d
         # and keep whichever actually beat the default. (The deeper fix belongs in gait_search's elite
         # selection and is not this change.) With no prior to screen, the same re-run is simply the rest of
         # the budget, which is why it is no longer conditional on one having been recalled.
-        cold = _open_db_and_learn(gene, db=db, bank=bank, max_evals=max_evals, recall=False, **kw)
+        cold = _open_db_and_learn(gene, db=db, bank=bank, max_evals=max_evals, recall=False,
+                                  deadline=deadline, **kw)
         n_evals += int(cold.get("n_evals") or 0)
         rollouts += int(cold.get("n_rollouts") or 0)
+        out_of_time = out_of_time or str(cold.get("stopped_reason")) == "budget"
         if learned.get("reused_prior"):
             out["prior_screened_out"] = True
         if cold.get("beats_default"):
@@ -1508,7 +1721,27 @@ def _one_search(gene, *, db, bank: bool, warm_evals: int, max_evals: int, out: d
     # deciding whether it can afford robustness-aware search needs. Each pass's own count already includes the
     # margin ladder it paid for, so this is not double-counted.
     learned["n_rollouts_attempt"] = rollouts
+    if out_of_time:
+        out["stopped_by_budget"] = True
     return learned, n_evals
+
+
+def _budget_from_env(explicit: float | None) -> float | None:
+    """Resolve the wall-clock ceiling for one fit: explicit argument > ``VIRTUROID_GAIT_FIT_BUDGET_S`` > default.
+
+    ``0`` (or anything <= 0) means UNBOUNDED — search until the eval budget is spent, which is exactly today's
+    behaviour and what the test suite pins, so no assertion about whether a body walks becomes a function of how
+    fast the machine running it happens to be.
+    """
+    import os
+
+    if explicit is None:
+        raw = os.environ.get("VIRTUROID_GAIT_FIT_BUDGET_S")
+        try:
+            explicit = _DEFAULT_FIT_BUDGET_S if raw is None else float(raw)
+        except ValueError:
+            explicit = _DEFAULT_FIT_BUDGET_S
+    return None if float(explicit) <= 0 else float(explicit)
 
 
 def _stash(gene, out: dict) -> None:
@@ -1520,7 +1753,8 @@ def _stash(gene, out: dict) -> None:
         pass
 
 
-def _open_db_and_learn(gene, *, db, bank: bool, recall: bool = True, **kw) -> dict:
+def _open_db_and_learn(gene, *, db, bank: bool, recall: bool = True, deadline: float | None = None,
+                       **kw) -> dict:
     """Run ``learn_gait_flywheel`` against the product memory DB, falling back to a DB-less search.
 
     The flywheel contract is consult-before / bank-after, so the build path uses the real corpus. But a build must
@@ -1530,17 +1764,21 @@ def _open_db_and_learn(gene, *, db, bank: bool, recall: bool = True, **kw) -> di
     import os
 
     if db is not None:
-        return learn_gait_flywheel(gene, db, workers=1, bank=bank, stop_on_credible=True, recall=recall, **kw)
+        return learn_gait_flywheel(gene, db, workers=1, bank=bank, stop_on_credible=True, recall=recall,
+                                   deadline=deadline, **kw)
     if os.environ.get("VIRTUROID_DISABLE_GAIT_HINTS") == "1":
         # The bench measures the composer+compiler deterministically; a corpus that grew between runs would make
         # the gate number float, which is the exact flicker VIRTUROID_DISABLE_GAIT_HINTS was introduced to stop.
-        return learn_gait_flywheel(gene, None, workers=1, bank=False, stop_on_credible=True, recall=False, **kw)
+        return learn_gait_flywheel(gene, None, workers=1, bank=False, stop_on_credible=True, recall=False,
+                                   deadline=deadline, **kw)
     try:
         from virturoid.services.agent_tools import safe_build_path
         from virturoid.services.memory_db import MemoryDB
         mem = safe_build_path(None, "memory")
         mem.mkdir(parents=True, exist_ok=True)
         with MemoryDB(mem / "virturoid_memory.db") as _db:
-            return learn_gait_flywheel(gene, _db, workers=1, bank=bank, stop_on_credible=True, recall=recall, **kw)
+            return learn_gait_flywheel(gene, _db, workers=1, bank=bank, stop_on_credible=True, recall=recall,
+                                       deadline=deadline, **kw)
     except Exception:  # noqa: BLE001 - no corpus is a cold start, not a failure
-        return learn_gait_flywheel(gene, None, workers=1, bank=False, stop_on_credible=True, recall=False, **kw)
+        return learn_gait_flywheel(gene, None, workers=1, bank=False, stop_on_credible=True, recall=False,
+                                   deadline=deadline, **kw)

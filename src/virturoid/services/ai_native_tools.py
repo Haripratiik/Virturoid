@@ -657,10 +657,13 @@ def _honest_serpentine(gene, *, steps: int = 2000, render: bool = False, tag: st
 
 def _honest_biped(gene, *, steps: int = 1500) -> dict | None:
     """A BIPED (2-legged) body: honestly report whether it STANDS (static balance, PD-holding its stance) vs the
-    multi-leg crawl gait that just FELLS it (that wave gait is for >=4 legs). Returns None if the body isn't a
-    biped or can't even stand (let the fall verdict stand). A humanoid STANDS statically but DYNAMIC bipedal
-    WALKING is a learned-control frontier (a scripted gait can't balance a walking biped) — say exactly that,
-    rather than a flat 'FELL' that implies it can't balance at all."""
+    multi-leg crawl gait that just FELLED it (that wave gait is written for >=4 legs). Returns None if the body
+    isn't a biped or can't even stand (let the fall verdict stand) — the point is to avoid a flat 'FELL' that
+    implies a body cannot balance at all when it demonstrably can.
+
+    THIS IS A STATEMENT ABOUT THE BODY IN FRONT OF IT, not about bipeds. The verdict used to assert that "a
+    scripted gait can't balance a walking biped"; measured 2026-08-10, one did (+3.732 m at 6000 steps, rate
+    rising, 4/4 robustness probes), so the wording was narrowed to what this branch actually observed."""
     import mujoco
     import numpy as np
 
@@ -707,9 +710,15 @@ def _honest_biped(gene, *, steps: int = 1500) -> dict | None:
     stands = upr_frac > 0.8 * steps
     if not stands:
         return None                                              # can't even stand -> the honest FALL verdict stands
-    return {"kind": "legged", "verdict": "STANDS (static balance); dynamic bipedal walking is a learned-control "
-                                         "frontier (a scripted gait can't balance a walking biped — needs a "
-                                         "learned policy / the GPU trainer)",
+    # "a scripted gait CAN'T balance a walking biped" was the wording here until 2026-08-10, and it is too
+    # strong: measured through ``call_tool``, a composed 2-legged body reached +3.732 m at the 6000-step horizon
+    # under this very crawl gait, rate rising, 4/4 robustness probes — and the bank holds two banked
+    # ``gait::humanoid::*`` rows. This branch is only reached when the crawl DID fail on THIS body, so that is
+    # what the verdict now says. The general claim belonged to task #206, which measured one humanoid, and
+    # generalising one body to "a scripted gait cannot" is the same over-reach this file polices elsewhere.
+    return {"kind": "legged", "verdict": "STANDS (static balance); the scripted crawl gait did not produce a "
+                                         "walk on THIS body — dynamic bipedal walking is where learned control "
+                                         "usually wins (train_held / the GPU trainer)",
             "survived": True, "gait_source": "biped_stand", "forward_m": 0.0, "credible_walk": False,
             "upright_frac": round(upr_frac / max(1, steps), 3),
             "note": "biped: static balance holds; the multi-leg crawl wave gait is the wrong controller for 2 legs"}
@@ -1273,7 +1282,72 @@ def _render_gait_gif(gene, qpos_frames, tag: str) -> str | None:
 # ------------------------------------------------------------------ robot tools
 def create_robot(args: dict) -> dict:
     """Compose a robot from a prompt, ground it, and HOLD it under a new robot_id for editing. Returns the id +
-    a compact summary + a render. This is the entry point for a conversational session."""
+    a compact summary + a render. This is the entry point for a conversational session.
+
+    IT IS ALSO THE FIRST THING A CUSTOMER EVER RUNS, so what it costs and whether it SAYS so are part of the
+    contract. MEASURED 2026-08-10, 20 real calls through ``agent_tools.call_tool``: 0.5 s to 634 s, silent
+    throughout. The stage breakdown of the worst one (a large quadruped, 663.7 s end to end) is where every
+    decision below comes from:
+
+        compose            43.6 s     the composer/LLM proposing the body
+        ground              0.0 s     mass + torque grounding (free)
+        gait fit          615.4 s     92.7% of the call -- summed over EVERY call to the fitter, not one
+        walkability gate  264.7 s     ...and 264.7 s of that gait-fit total is nested in HERE, fitting the
+                                      substitution candidate. So the authored body's own fit is ~351 s and the
+                                      call pays for the search MORE THAN ONCE
+        render              1.3 s
+
+    So the answer to "where does the time go" is: the per-body gait fit, run more than once. Three things
+    follow from that, and the fourth is the thing that deliberately does NOT change.
+
+    * ``gait_budget_s`` runs ONE clock shared by the up-to-three fits (held on the ``build_progress`` context) --
+      three independent ceilings would honour "spend up to N seconds" while taking 3N. It bounds SEARCH, and it
+      STARTS AT THE FIRST SEARCH, not at the call: an earlier revision started it at construction and a biped
+      whose composer took 253.65 s then reached its fit with 0.0 s left and ran ZERO of 360 evaluations. Nothing
+      can interrupt the composer, so charging the search for it only moves the loss onto the stage that was
+      doing useful work. Read it as "stop searching after N", never as "return by N" -- the CALL is compose +
+      whatever the search spends, and only the second half is bounded.
+    * Every stage announces itself with the clock running (``build_progress``, stderr), and the stage table
+      comes back in the result for the agent, which cannot read stderr.
+    * A body whose search provably cannot succeed is refused in THREE ROLLOUTS instead of 379, and the proof is
+      a measurement of that body rather than the class it belongs to: if the shipped default and both extreme
+      corners of the parameter box all collapse in the first 2% of the horizon, no point between them can be
+      ranked either. "A biped cannot be fitted" was proposed for this slot and REFUTED by the first measurement
+      taken to justify it -- see ``gait_flywheel.crawl_deployment_match``.
+    * ``tune_gait`` still DEFAULTS TRUE. The fit is what makes an authored body walk at all (7/7 proportion
+      variants, docs/breaking_the_cotuning_wall.md); defaulting it off would buy a fast build that ships a body
+      tuned at another robot's operating point, which is the dishonesty the fit exists to remove.
+    """
+    from virturoid.services import build_progress as P
+    from virturoid.services.gait_flywheel import _budget_from_env
+    # ONE RESOLVER, so ``gait_budget_s: 0`` and ``VIRTUROID_GAIT_FIT_BUDGET_S=0`` both really mean unbounded.
+    # Resolving it here with a local ``or default`` instead was measured wrong within the hour: an explicit
+    # ``0`` reached ``build_progress`` as "no build clock", the fitter then fell back to its OWN default, and a
+    # call that asked for an unbounded search was silently capped at 180 s (the 8-legged spider came back
+    # ``stopped_by_budget: true, budget_s: 180.0`` having asked for none). A control that does not do what it
+    # says is worse than no control.
+    budget = _budget_from_env(args.get("gait_budget_s"))
+    # EVERY CONTROL RESOLVED IN ONE PLACE, then handed down already decided. Not tidiness: ``_accepted_params``
+    # derives the advertised schema from the handler's OWN body (agent_tools, and
+    # tests/test_tool_registration.py enforces it), so a flag only ever read a frame deeper is a lever the
+    # contract cannot see. Reading them here keeps the schema derivable AND puts the defaults in one spot.
+    opts = {"tune_gait": bool(args.get("tune_gait", True)),
+            "ensure_walkable": bool(args.get("ensure_walkable", True))}
+    with P.build_progress("create_robot", budget_s=budget, fit_gait=opts["tune_gait"]) as rep:
+        rep.say(f"prompt: {args['prompt']!r}")
+        out = _create_robot_stages({**args, **opts})
+    # THE BREAKDOWN COMES BACK WITH THE ROBOT. ``took_s`` alone (all ``call_tool`` results carry it) says a call
+    # cost 664 seconds and nothing about which of four stages spent them, so an agent could neither explain the
+    # wait to a customer nor choose a cheaper argument next time.
+    out["stages"] = rep.table()
+    out["build_seconds"] = rep.elapsed_s()
+    if rep.notes:
+        out["build_notes"] = list(rep.notes)
+    return out
+
+
+def _create_robot_stages(args: dict) -> dict:
+    from virturoid.services import build_progress as P
     from virturoid.services import session_state as S
     from virturoid.services.morphology_composer import compose_robot
     from virturoid.services.task_matched_eval import robot_kind
@@ -1291,7 +1365,8 @@ def create_robot(args: dict) -> dict:
     # So the substitution fired on a measurement artefact. Defer the decision: compose the AUTHORED body, ground
     # it, fit an op-point to it, and only then ask whether it can walk.
     want_walkable = bool(args.get("ensure_walkable", True))
-    gene = compose_robot(prompt, ensure_walkable=False)
+    with P.stage("compose", "(prompt -> anatomy graph -> segments)"):
+        gene = compose_robot(prompt, ensure_walkable=False)
     # GROUND THE HELD BODY (Stage 2.1). The mass/torque grounding used to run only at export/build time, so the
     # robot the product VERIFIED and TRAINED was not the robot it exported and told the customer to build:
     # measured, a "robot dog" was held at 3.57 kg (-76% vs a Go2's 15 kg) while its own export shipped 13.50 kg
@@ -1305,12 +1380,17 @@ def create_robot(args: dict) -> dict:
         from virturoid.services.gene_build import ground_and_repair
         # ``task=prompt``: grounding also bolts on the parts list's own battery/compute/sensors, and that suite
         # is task-adaptive, so it has to be selected from the SAME prompt the shipped BOM is built from.
-        ground_and_repair(gene, task=prompt)
+        with P.stage("ground", "(real mass, torque, battery/compute/sensors)"):
+            ground_and_repair(gene, task=prompt)
     except Exception:  # noqa: BLE001 - grounding is the fidelity layer, never a build blocker
         pass
     # Walk-tune the gait per body AFTER grounding, so the cached op-point is tuned for the REAL mass the body
     # ships with (tuning the styrofoam twin would hand the shipped robot a gait fitted to the wrong inertia).
-    if robot_kind(gene) == "legged" and args.get("tune_gait", True):
+    # NO ``tune_gait`` CONDITION HERE. The flag is honoured ONE level down, inside ``fit_gait_for_body``, via
+    # the build context -- because ``ensure_walkable_quad`` fits too and this guard could never have reached it.
+    # Calling unconditionally also means the DISCLOSURE always lands: skipping the call left the body with no
+    # ``gait_fit`` at all, which reads exactly like a body whose default was measured and kept.
+    if robot_kind(gene) == "legged":
         # NB (flywheel_breakthrough_plan §3.M / §5d): in-place stance_repair was TRIED here and REVERTED — measured
         # 0/5 product-path walk-rate lift (composer already fans offline; the dominant failure is fore-aft LURCH,
         # not lateral roll-over, which lateral splay cannot fix). stance_repair.py is kept for the factory
@@ -1341,7 +1421,12 @@ def create_robot(args: dict) -> dict:
             # cache=True lets a STRUCTURALLY IDENTICAL body reuse an identical fit -- and it does nothing at all
             # unless VIRTUROID_GAIT_FIT_CACHE=1, which only a test suite sets. A product run has the flag unset
             # and searches every body every time, exactly as before.
-            fit_gait_for_body(gene, cache=True)
+            #
+            # NO ``budget_s`` HERE ON PURPOSE. The build's clock lives on the ``build_progress`` context and is
+            # SHARED with the walkability gate's fits below -- passing a per-call budget here would give this
+            # one its own ceiling and let the total exceed what the caller asked for.
+            with P.stage("gait_fit", "(bounded CEM search for an operating point fitted to THIS body)"):
+                fit_gait_for_body(gene, cache=True)
         except Exception:  # noqa: BLE001 - a tune failure must never block the build; defaults still apply
             pass
     # NOW the walkability decision, on the grounded body with its own operating point. A body is only replaced if
@@ -1349,7 +1434,10 @@ def create_robot(args: dict) -> dict:
     if want_walkable and (gene.robot_class or "") not in ("aerial", "aquatic"):
         try:
             from virturoid.services.anatomy_compiler import ensure_walkable_quad
-            swapped = ensure_walkable_quad(gene, prompt)
+            # THE SECOND-BIGGEST STAGE, and it was invisible. Measured on the large quadruped: 264.7 s of the
+            # 663.7 s call, essentially all of it a SECOND full gait fit run on the substitution candidate.
+            with P.stage("walkable_gate", "(can this body walk with its own controller, or is a template better?)"):
+                swapped = ensure_walkable_quad(gene, prompt)
             if swapped is not gene:
                 # A SUBSTITUTE comes out of the COMPOSER, i.e. ungrounded — it used to inherit this function's
                 # grounding because the swap happened before it. Ground and fit it too, or a substituted robot
@@ -1357,19 +1445,42 @@ def create_robot(args: dict) -> dict:
                 # WIDENED STANCE is the same grounded body it went in as (only mount rotations moved) and already
                 # carries an op-point fitted to that stance, so it is left exactly as measured.
                 gene = swapped
-                if not (getattr(gene, "metadata", None) or {}).get("grounding"):
-                    try:
+                try:
+                    if not (getattr(gene, "metadata", None) or {}).get("grounding"):
                         from virturoid.services.gene_build import ground_and_repair as _gar
-                        _gar(gene)
-                        if robot_kind(gene) == "legged" and args.get("tune_gait", True):
-                            from virturoid.services.gait_flywheel import fit_gait_for_body
+                        with P.stage("ground", "(the substituted body's own mass and torque)"):
+                            _gar(gene)
+                    # THE SHIPPED BODY MUST CARRY ITS OWN FIT RECORD, and the guard used to be nested under the
+                    # grounding check -- so a substitute that arrived already grounded was handed back with NO
+                    # ``gait_fit`` on it at all. Measured: ``create_robot`` then returned a robot with no answer
+                    # to "was this body's controller ever measured?", which is indistinguishable from "it was,
+                    # and the default was kept". ``fit_gait_for_body`` self-discloses on every outcome (fitted,
+                    # already-walks, turned off, refused), so calling it unconditionally is what guarantees the
+                    # record exists; it is cheap on every branch that is not a real search.
+                    if robot_kind(gene) == "legged" and not (
+                            (getattr(gene, "metadata", None) or {}).get("gait_fit")):
+                        from virturoid.services.gait_flywheel import fit_gait_for_body
+                        with P.stage("gait_fit", "(operating point for the SUBSTITUTED body)"):
                             fit_gait_for_body(gene, cache=True)
-                    except Exception:  # noqa: BLE001 - grounding is the fidelity layer, never a build blocker
-                        pass
+                except Exception:  # noqa: BLE001 - grounding is the fidelity layer, never a build blocker
+                    pass
         except Exception:  # noqa: BLE001 - best-effort; never block a build on the walkability check
             pass
     rid = S.put_robot(gene, prompt=prompt)
     out = {"ok": True, **_summary(gene, rid, prompt=prompt), "prompt": prompt}
+    # WHAT THE EXPENSIVE STAGE ACTUALLY BOUGHT. The fit's disclosure used to land only on
+    # ``gene.metadata['gait_fit']``, so a caller that had just waited 615 seconds for it got back a summary that
+    # never mentioned it -- neither that it ran, nor that it adopted nothing, nor why. Compact on purpose: the
+    # full dict (robustness probes, rate profiles, per-parameter margins) is still on the body for anyone who
+    # wants it, and `verify_robot` reports the parts that bear on a verdict.
+    _fit = (getattr(gene, "metadata", None) or {}).get("gait_fit") or {}
+    if _fit:
+        out["gait_fit"] = {k: _fit[k] for k in
+                           ("searched", "adopted", "skipped", "not_applicable", "n_evals", "n_rollouts",
+                            "seed_attempts", "stopped_by_budget", "budget_s", "degenerate_search",
+                            "probe_rollouts", "fragile", "robustness_rel", "reason",
+                            "what_would_make_it_fittable")
+                           if k in _fit}
     try:                                                       # WS-G: the robotics AI grounds a novel concept in
         from virturoid.services.agent_tools import safe_build_path   # the nearest VERIFIED concepts (advisory
         from virturoid.services.concept_grounding import ground_concept   # similarity, never a silent route)
@@ -1378,7 +1489,8 @@ def create_robot(args: dict) -> dict:
             out["concept_grounding"] = cg
     except Exception:  # noqa: BLE001 - grounding is value-add; never blocks a build
         pass
-    img = _render_gene(gene, rid)
+    with P.stage("render", "(MuJoCo image of the held body)"):
+        img = _render_gene(gene, rid)
     if img:
         out["artifacts"] = [img]
     return out
@@ -2496,9 +2608,28 @@ def get_job(args: dict) -> dict:
 # name -> {description, parameters, handler, heavy} — merged into agent_tools.TOOLS
 AI_NATIVE_TOOLS: dict[str, dict] = {
     "create_robot": {"description": "Compose a robot from a prompt and HOLD it under a robot_id for incremental "
-                     "editing; returns id + summary + render. Start a design session here.", "heavy": True,
+                     "editing; returns id + summary + render + a per-stage time breakdown. Start a design "
+                     "session here. COST: a legged body also gets an operating point fitted to IT (that fit is "
+                     "what makes an authored body walk) and it is the reason a build can take minutes. The "
+                     "gait budget caps that search; `stages` in the result says where the time went.",
+                     "heavy": True,
                      "handler": create_robot, "parameters": {"type": "object", "required": ["prompt"], "properties": {
-                         "prompt": {"type": "string"}, "ensure_walkable": {"type": "boolean", "default": False}}}},
+                         "prompt": {"type": "string"}, "ensure_walkable": {"type": "boolean", "default": False},
+                         "tune_gait": {"type": "boolean", "default": True,
+                                       "description": "fit an operating point to this body (legged only). "
+                                                      "false returns in seconds but the body arrives tuned at "
+                                                      "another robot's numbers — the result says so"},
+                         "gait_budget_s": {"type": "number", "default": 180,
+                                           "description": "seconds of GAIT SEARCH this build may spend in "
+                                                          "total; 0 = unbounded. ONE clock shared by the "
+                                                          "up-to-three fits a build performs, started when "
+                                                          "the first search begins — so a slow compose "
+                                                          "cannot cancel the search. It does not bound "
+                                                          "compose or render, which cannot be interrupted, "
+                                                          "so the CALL can exceed it. A fit the clock stops "
+                                                          "is reported as an UNFINISHED SEARCH, never as a "
+                                                          "finding about the body"},
+                         }}},
     "get_robot": {"description": "Compact summary of a held robot (class, discovered appendages, height, mass).",
                   "heavy": False, "handler": get_robot, "parameters": {"type": "object", "required": ["robot_id"],
                   "properties": {"robot_id": {"type": "string"}}}},

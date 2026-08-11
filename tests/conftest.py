@@ -77,6 +77,19 @@ os.environ.setdefault("VIRTUROID_GAIT_FIT_CACHE", "1")
 # files alone: 563 s. Default-off in the product (see robot_import._IMPORT_CACHE), on here.
 os.environ.setdefault("VIRTUROID_IMPORT_CACHE", "1")
 
+# ---------------------------------------------------------------- the suite's clock is not the customer's
+#
+# ``create_robot`` now caps its gait fitting at ``gait_flywheel._DEFAULT_FIT_BUDGET_S`` seconds, because the
+# first thing a customer runs measured 0.5 s to 634 s and said nothing for any of it. That cap is a WALL-CLOCK
+# bound, and a wall-clock bound inside a test turns "does this body walk?" into "does this body walk on this
+# machine, today, with this much else running" -- the assertion would pass on a fast laptop and fail on a loaded
+# CI box, with the failure looking like a locomotion regression rather than a slow machine.
+#
+# So the suite pins it OFF (0 = unbounded), which is exactly the pre-2026-08-10 behaviour: every test searches
+# until its EVAL budget is spent, deterministically. The budget's own behaviour is covered by
+# tests/test_build_budget.py, which sets it explicitly and asserts on the disclosure rather than on a duration.
+os.environ.setdefault("VIRTUROID_GAIT_FIT_BUDGET_S", "0")
+
 
 def pytest_configure(config):
     config.addinivalue_line(

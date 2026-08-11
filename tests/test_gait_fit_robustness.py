@@ -59,10 +59,20 @@ def _stub_evaluate(credible_for_winner: bool, *, sturdy: bool = True):
 
 
 def _stub_search(fail_first: int):
-    """Fail ``fail_first`` attempts, then win. Records the seed each attempt was given."""
+    """Fail ``fail_first`` attempts, then win. Records the seed each attempt was given.
+
+    ``deadline`` IS ACCEPTED AND IGNORED, and the two halves of that are separate decisions. Accepted, because
+    the real ``_one_search`` grew the parameter on 2026-08-10 (the build's shared gait-fit clock) and a double
+    that does not is not standing in for the function under test -- it made these tests raise ``TypeError``
+    inside ``fit_gait_for_body``'s own ``except``, so seven assertions about SEED ROBUSTNESS came back as an
+    error payload instead. Ignored, because a wall clock has no place in these tests: they assert how many
+    ATTEMPTS a body gets and which seeds they run at, and the suite pins the budget off (tests/conftest.py) so
+    that no such assertion becomes a measurement of how fast the machine is. The budget's own behaviour is
+    covered by tests/test_build_budget.py, which asserts on the disclosure rather than on a duration.
+    """
     seen: list[int] = []
 
-    def _one(gene, *, db, bank, warm_evals, max_evals, out, kw):
+    def _one(gene, *, db, bank, warm_evals, max_evals, out, kw, deadline=None):
         seen.append(int(kw["seed"]))
         won = len(seen) > fail_first
         return ({"beats_default": won, "params": dict(_WINNER), "forward_m": 0.958,

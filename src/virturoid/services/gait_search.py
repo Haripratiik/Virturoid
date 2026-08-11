@@ -311,7 +311,7 @@ def search_gait(gene, *, generations: int = 8, pop: int = 24, elite_frac: float 
                 warm_start: dict | None = None, progress=None, reward_fn=None,
                 max_evals: int | None = None, stop_on_credible: bool = False,
                 robust_rel: float | None = None, robust_n: int = 2,
-                hold_exploration: bool = True) -> GaitSearchResult:
+                hold_exploration: bool = True, deadline: float | None = None) -> GaitSearchResult:
     """CEM over the crawl-gait parameters. Returns the best DEPLOYABLE gait found for ``gene``.
 
     ``warm_start`` (a prior gait's params, e.g. recalled from the flywheel for a STRUCTURALLY-SIMILAR body) seeds
@@ -338,6 +338,22 @@ def search_gait(gene, *, generations: int = 8, pop: int = 24, elite_frac: float 
     and that is handled one level up by ``gait_flywheel.fit_gait_for_body``'s decorrelated ``seed_restarts``
     (measured: the authored dog walks on seeds 0/3/4 and falls on 1/2). Claiming a seed-robustness probe inside
     this function would be measuring the same number twice.
+
+    ``deadline`` (a ``time.monotonic()`` stamp) STOPS THE SEARCH FROM STARTING MORE WORK once the clock is
+    spent, and reports ``stopped_reason='budget'`` so the caller can say so. It is a CUSTOMER-PATIENCE bound,
+    not a search parameter: measured through ``call_tool``, one ``create_robot`` ran 634 s and adopted nothing,
+    which a first-time user cannot tell from a hang. Two properties keep it honest:
+
+    * it is checked at EVALUATION boundaries, never inside a rollout, so no candidate is ever judged at a
+      shorter horizon than the one it will be reported at — that is the defect ``fit_gait_for_body``'s own
+      docstring warns about ("a caller that needs it cheaper should cut evals, NEVER the horizon");
+    * a search it stops is a search that DID NOT FINISH, and every layer above must present it that way rather
+      than as a finding about the body. ``stopped_reason`` is the carrier of that fact.
+
+    It is a SOFT bound. The last-started evaluation runs to completion, and the deploy-horizon re-measurement in
+    ``gait_flywheel.learn_gait_flywheel`` happens after this returns, so a fit overshoots its budget by roughly
+    one to three rollouts. Bounding it harder would mean killing a rollout mid-flight and reporting a number
+    nothing measured.
     """
     import numpy as np
 
@@ -372,7 +388,13 @@ def search_gait(gene, *, generations: int = 8, pop: int = 24, elite_frac: float 
     # ``robust_rank`` -2.0 puts the empty seed below even a candidate that did not walk (-1.0), so the FIRST
     # result always replaces it — otherwise a generation in which nothing walked would leave ``best_params`` at
     # the untested centre of the bounds.
-    best = {"fitness": -1e9, "robust_fitness": -1e9, "robust_rank": -2.0}
+    # FULLY POPULATED, not just the ranking keys. Until 2026-08-10 nothing could reach the return with this
+    # sentinel still in place — ``budget < 1`` raises and generation 0 always ran a candidate — so the missing
+    # ``forward``/``height_ratio``/``survived`` keys were unreachable. The ``deadline`` makes a ZERO-candidate
+    # search possible for the first time (a build whose clock was already spent), and a KeyError there would
+    # crash a build instead of reporting an empty search. The values say exactly that: nothing was found.
+    best = {"fitness": -1e9, "robust_fitness": -1e9, "robust_rank": -2.0,
+            "forward": 0.0, "height_ratio": 0.0, "survived": False, "credible": False}
     best_params = as_params(mean)
     history: list[float] = []
     n_evals = 0
@@ -402,9 +424,17 @@ def search_gait(gene, *, generations: int = 8, pop: int = 24, elite_frac: float 
     _stop_key = "robust_credible" if robust else "credible"
     _stop_name = "credible_walk"
 
+    import time
+
+    def _out_of_time() -> bool:
+        return deadline is not None and time.monotonic() >= float(deadline)
+
     for g in range(generations):
         remaining = budget - n_evals
         if remaining <= 0:
+            break
+        if _out_of_time():
+            stopped_reason = "budget"
             break
         batch_n = min(pop, remaining)
         samples = rng.normal(mean, std, size=(batch_n, len(PARAM_NAMES)))
@@ -416,6 +446,13 @@ def search_gait(gene, *, generations: int = 8, pop: int = 24, elite_frac: float 
         if stop_on_credible:
             results = []
             for params in params_list:
+                # THE DEADLINE IS CHECKED HERE, BEFORE the rollout, for the same reason the early stop is: this
+                # branch is serial precisely so that not-starting an evaluation actually saves it. Checking
+                # after would spend the whole generation past the budget on a slow body — measured, an
+                # 8-legged spider's rollouts are several seconds each, so one generation is a minute.
+                if _out_of_time():
+                    stopped_reason = "budget"
+                    break
                 result = _score(params)
                 results.append(result)
                 n_evals += 1
@@ -423,6 +460,8 @@ def search_gait(gene, *, generations: int = 8, pop: int = 24, elite_frac: float 
                 if bool(result.get(_stop_key)):
                     stopped_reason = _stop_name
                     break
+            if not results:
+                break                    # out of time before this generation's first candidate: nothing to rank
         elif robust:
             # Serial WITHIN a candidate (its probes depend on its own nominal result), parallel ACROSS them —
             # otherwise turning robust scoring on would quietly cancel a caller's ``workers``, which is the one

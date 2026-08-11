@@ -497,7 +497,12 @@ _PARAM_DOCS: dict[str, dict[str, dict]] = {
     },
     "create_robot": {"tune_gait": {"type": "boolean", "default": True,
                                    "description": "fit a per-body gait after composing (legged only); false is "
-                                                  "much faster but the body arrives untuned"}},
+                                                  "much faster but the body arrives untuned"},
+                     "gait_budget_s": {"type": "number", "default": 180,
+                                       "description": "seconds of gait SEARCH this build may spend in total "
+                                                      "(0 = unbounded). Measured: the fit is >90% of a slow "
+                                                      "build and runs more than once per call, so it is ONE "
+                                                      "clock shared across them, started at the first search"}},
     "assert_design": {"list": {"type": "boolean",
                                "description": "shortcut for kind:'list' — return the assertion vocabulary"}},
     "ingest_project": {

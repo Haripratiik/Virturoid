@@ -268,8 +268,12 @@ def test_the_fit_publishes_the_per_parameter_margin_and_the_rollout_cost(monkeyp
         return _res(-0.7 if default else 1.0, not default)
 
     monkeypatch.setattr(GS, "evaluate_gait", fake)
+    # ``deadline`` is accepted and ignored: the real ``_one_search`` takes the build's shared gait-fit clock
+    # (2026-08-10), and a double missing it raised TypeError inside ``fit_gait_for_body``'s own except, turning
+    # this assertion about the ROBUSTNESS MARGIN into an error payload. Nothing here is timed -- the suite pins
+    # the budget off (tests/conftest.py) so a margin never becomes a function of machine speed.
     monkeypatch.setattr(GF, "_one_search",
-                        lambda gene, *, db, bank, warm_evals, max_evals, out, kw: (
+                        lambda gene, *, db, bank, warm_evals, max_evals, out, kw, deadline=None: (
                             {"beats_default": True, "params": dict(winner), "forward_m": 1.0,
                              "credible": True, "survived": True, "n_evals": 5, "n_rollouts_attempt": 17}, 5))
     out = GF.fit_gait_for_body(_Gene(), bank=False, seed_restarts=1)
