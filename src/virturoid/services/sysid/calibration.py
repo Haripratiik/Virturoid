@@ -274,6 +274,13 @@ def apply_calibration(gene, fit: dict, *, log: dict | None = None, plan: dict | 
     regressor never contained -- link mass, link inertia, a centre of mass. Measured, that fit wrote 15 values
     into the compiled model at ``improvement_x = 0.993``, having made tracking marginally worse. It is now
     withheld unless ``allow_provisional=True`` says otherwise, deliberately, at the call site.
+
+    THE CONVERSE IS NOT TRUE and this function is where it would bite. A fit that DOES improve tracking can
+    still be absorbing an error the regressor never contained: measured 2026-08-12, a wrong gear ratio or
+    torque constant scores 1.507x at a 20% error and link inertia at correct mass reaches 1.753x, both with
+    intervals excluding the truth, and this function applies both without an override. See
+    ``fit.MIN_TRACKING_IMPROVEMENT_X`` and ``application.what_this_gate_does_not_catch``: the gate is
+    necessary and not sufficient, so "applied" means "it tracked better", never "the numbers are right".
     """
     from dataclasses import replace
 

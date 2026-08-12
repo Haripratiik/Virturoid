@@ -9,8 +9,9 @@ exercise.
 That path used to fail. MEASURED on the Menagerie Unitree Go2 and recorded in
 `docs/calibration_wedge_under_delay.md`: at the package's own default the delay search returned 10 ms for a
 20 ms injection and 10 ms for a 40 ms one, and the tracking gate withheld the fit at 1.016x against a 1.5x
-threshold -- with the metric's own CEILING at that delay also 1.016x, so no fit of any quality could have
-passed. The refusal was correct and carried no information.
+threshold -- with the score of the TRUE parameters at that delay also 1.016x, i.e. the metric had no range left
+to reward a fit with. The refusal was correct and carried no information. (That reference was recorded as a
+"ceiling" and is not one; the third retraction below is about exactly that word.)
 
 Both are closed, and this file is the contract for how. Four parts:
 
@@ -34,11 +35,26 @@ was 0.0061 -> 0.1093 rad and is now 0.0039 -> 0.0652 (full 12-joint plan: 0.0031
 RETRACTED as a result, each at its own test:
 
   * "at the package's default 20 ms the delay-blind metric's CEILING is 1.016x, under the 1.5x threshold, so
-    no fit of any quality could pass" -- on the declared drivetrain that ceiling is 1.745x here and 1.791x on
+    no fit of any quality could pass" -- on the declared drivetrain that reference is 1.745x here and 1.791x on
     the full plan. The claim first becomes true at 30 ms (1.009x), not at 20.
   * "the same fit scored at the OLD point is still under the threshold" -- it is 1.503x here and 1.858x on the
     full plan, i.e. it clears. What the scoring change moves at 20 ms is no longer the VERDICT; it is the
     quantity, by 10x here and 15.7x on the full plan.
+
+A THIRD claim is RETRACTED, and this one is about the yardstick rather than the operating point. The number
+above was called a CEILING -- "substitute the true hardware model for the fitted one and the ratio is maximal
+by construction, no fit can do better than the parameters that generated the log". **That is false for a
+delay-blind metric.** The argument needs the replay family to contain the data-generating process, and at
+delay 0 against a delayed log it does not, so the truth is not the residual's minimiser: a twin whose reflected
+inertia is too high MIMICS transport lag and scores better. MEASURED over a 60-point sweep of the estimator's
+own three parameters at 20 ms, the best score is 2.166x (armature +0.08) against the truth's 1.745x -- 24%
+above the supposed ceiling, and 2.277x vs 1.791x (+27%) on the full 12-joint plan. The full-plan fit exceeded
+the reference too, 1.858x vs 1.791x, and that +3.8% had been
+written down here as a windowing artefact; instrumenting both computations on one Go2 log REFUTED that
+(identical start state, commands, log and row range 0..36000 -- ``_windows`` never touches
+``_trajectory_improvement``). The helper is now ``_true_parameter_score`` / ``_best_delay_blind_score``, the
+one-sided bound is now a BRACKET, and the conclusion that mattered survives on the envelope: at 30 ms nothing
+in the family reaches 1.5x (best 1.036x here, 1.012x full plan), at 40 ms nothing reaches 1.01x (1.003x both).
 
 What did NOT move: the delay still comes back EXACTLY at 0 / 20 / 40 ms through every path (torque channel,
 position-only, dirty log, filtered channel), the closed-loop sweep is still wrong at every delay, and a
@@ -158,25 +174,84 @@ def _cmd_response(rig, plan, aligned, model=None, max_ticks=8):
                                         max_ticks=max_ticks, dt=rig["dt"])
 
 
-def _gate_ceiling(rig, delay_ticks):
-    """The largest ``improvement_x`` the OLD, delay-blind metric could EVER return at this delay.
+#: The parameter family the estimator can actually express, as absolute offsets off the compiled twin, spanning
+#: "no error at all" to well past the injected truth (frictionloss +0.08 / damping +0.6 / armature +0.03).
+#: Sweeping it is what replaced an ARGUMENT with a MEASUREMENT: see ``_best_delay_blind_score``.
+_FAMILY_GRID = {"frictionloss": (0.0, 0.08, 0.3), "damping": (0.0, 0.6, 2.0, 6.0),
+                "armature": (0.0, 0.03, 0.08, 0.2, 0.5)}
 
-    The gate divided RMS(prior replay vs log) by RMS(fitted replay vs log) with both replays at delay 0.
-    Substitute the TRUE hardware model for the fitted one and the ratio is maximal by construction: no fit can
-    do better than the parameters that generated the log. Three PD replays, no fit.
+#: The two replays every delay-blind score shares, so a 60-point sweep costs 60 replays rather than 180.
+#:
+#: CACHED ON THE RIG, NOT IN A MODULE-LEVEL DICT, and that is the whole point. This was
+#: ``_DELAY_BLIND_BASE[delay_ticks]`` -- keyed on the delay ALONE, while everything it stores (the hardware log
+#: and the prior's RMS against it) is a function of the RIG: its model, its drivetrain, its command trajectory,
+#: its gains. Correct while exactly one rig existed; a second rig asking for a delay the first had already
+#: cached would have been handed the FIRST rig's log and silently scored against it -- no exception, no
+#: mismatch, just plausible wrong numbers. Section 12 of the doc contemplates measuring an envelope on the
+#: SUBSTITUTED drivetrain, which is precisely that second rig.
+#:
+#: Keying the dict harder (on ``id(rig["model"])``, say) would work until someone forgot a field. Hanging the
+#: cache off the rig removes the key, so there is nothing left to get wrong -- the same chokepoint move as
+#: putting the memory-bank destination policy in ``MemoryDB.__init__`` instead of at each call site.
+
+
+def _delay_blind_score(rig, delay_ticks, offsets):
+    """``improvement_x`` as the OLD, delay-blind gate computed it, for a twin carrying ``offsets``.
+
+    RMS(prior replay vs log) / RMS(offset replay vs log), with BOTH replays at delay 0 against a log that
+    carries ``delay_ticks`` of it. Three PD replays, no fit.
+
+    THE NAME MATTERS AND THE PREVIOUS ONE WAS WRONG. This helper used to be ``_gate_ceiling``, and it was
+    called with the true perturbation on the reasoning that "no fit can do better than the parameters that
+    generated the log, so the ratio is maximal by construction". That reasoning does not hold for a
+    delay-blind metric and the claim is RETRACTED -- measured, see ``_best_delay_blind_score``. The
+    data-generating parameters minimise the residual only when the replay family CONTAINS the data-generating
+    process, and at delay 0 against a delayed log it does not: the timing error is unmodelled, so a twin whose
+    reflected inertia is too high partially MIMICS transport lag and scores better than the truth.
     """
     import numpy as np
 
     from virturoid.services.sysid.bench_rig import pd_replay
+    from virturoid.services.sysid.synthetic_hardware import perturbed_model
 
-    hw, log = _hardware(rig, delay_ticks)
-    q_log = log["q"]
+    d = int(delay_ticks)
     kw = dict(kp=rig["kp"], kd=rig["kd"], q_start=rig["q0"], ctrl_every=rig["ctrl_every"], delay_ticks=0)
-    _, q_prior, _, _ = pd_replay(rig["model"], rig["q_cmd"], **kw)
-    _, q_true, _, _ = pd_replay(hw, rig["q_cmd"], **kw)
-    before = float(np.sqrt(np.mean((q_prior - q_log) ** 2)))
-    after = float(np.sqrt(np.mean((q_true - q_log) ** 2)))
+    base = rig.setdefault("_delay_blind_base", {})
+    if d not in base:
+        _, log = _hardware(rig, d)
+        _, q_prior, _, _ = pd_replay(rig["model"], rig["q_cmd"], **kw)
+        before = float(np.sqrt(np.mean((q_prior - log["q"]) ** 2)))
+        base[d] = (log["q"], before)
+    q_log, before = base[d]
+    _, q_after, _, _ = pd_replay(perturbed_model(rig["model"], dict(offsets)), rig["q_cmd"], **kw)
+    after = float(np.sqrt(np.mean((q_after - q_log) ** 2)))
     return float("inf") if after <= 1e-12 else before / after
+
+
+def _true_parameter_score(rig, delay_ticks):
+    """The delay-blind score of the parameters that GENERATED the log. A REFERENCE POINT, not a bound."""
+    from virturoid.services.sysid.synthetic_hardware import DEFAULT_PERTURBATION
+
+    return _delay_blind_score(rig, delay_ticks, DEFAULT_PERTURBATION)
+
+
+def _best_delay_blind_score(rig, delay_ticks):
+    """``(score, offsets)`` at the MAX over ``_FAMILY_GRID`` -- the measured envelope of the delay-blind metric.
+
+    This is the honest replacement for the retracted "ceiling". It is still not a proof of a bound (it is a
+    grid maximum over one family, and every joint moves together), but it is 60 measured models instead of an
+    argument about one, and it is the family the estimator is drawn from -- which is what the downstream claim
+    ("at this delay no fit could clear the gate") actually needs.
+    """
+    best = (0.0, {})
+    for f in _FAMILY_GRID["frictionloss"]:
+        for dm in _FAMILY_GRID["damping"]:
+            for a in _FAMILY_GRID["armature"]:
+                off = {"frictionloss": f, "damping": dm, "armature": a}
+                s = _delay_blind_score(rig, delay_ticks, off)
+                if s > best[0]:
+                    best = (s, off)
+    return best
 
 
 @pytest.fixture(scope="module")
@@ -438,31 +513,52 @@ def test_the_gate_is_scored_at_the_identified_delay_and_that_is_what_moved_it(ri
     old point is *still under the threshold* -- 1.016x on the full plan. On the drivetrain the Go2's own file
     declares it is 1.503x here and 1.858x on the full plan, i.e. IT CLEARS. At 20 ms the scoring change is no
     longer what flips the verdict, because on a body that does not ring the delay-blind gate at 20 ms was
-    survivable all along. The verdict claim survives only from 30 ms on; see the ceiling test below.
+    survivable all along. The verdict claim survives only from 30 ms on; see the range test below.
 
-    What the scoring change still is, measured two ways:
+    A SECOND RETRACTION, 2026-08-12, and it is about the yardstick rather than the fit. This test used to say
+    the old point was "PINNED against a CEILING that depends only on the delay -- substitute the true hardware
+    for the fitted model and no fit can do better". **There is no such ceiling.** The by-construction argument
+    needs the replay family to CONTAIN the data-generating process, and at delay 0 against a delayed log it does
+    not: the timing error is unmodelled, so the true parameters are not the minimiser of the position residual.
+    MEASURED -- the delay-blind residual falls monotonically as reflected inertia is raised past the injected
+    truth, because a too-heavy rotor makes the replay sluggish and thereby MIMICS transport lag. At 20 ms on
+    this plan the injected truth scores 1.745x while ``armature +0.08`` (2.7x the injected 0.03) scores 2.166x,
+    24% ABOVE the supposed ceiling; on the full 12-joint plan it is 2.277x against 1.791x, +27%. The real fit
+    exceeds the reference too on the full plan: 1.858x against 1.791x, +3.8%, because the fit's own armature
+    lands 17-21% high (0.0350-0.0362 against 0.030 injected).
+    That +3.8% was previously written off as a windowing artefact -- ``_gate_ceiling`` replaying from the bench
+    start pose over the whole log while the fit scored inside the excitation windows. **That explanation was a
+    hypothesis and it is REFUTED**: instrumented on the same Go2 log, the two computations agree bit-for-bit on
+    the start state (``q_meas[0] == start_pose``, maxabs 0.0), on the command series, on the log itself and on
+    the row range (0..36000 for both -- ``_windows`` is used by the TORQUE fit, never by
+    ``_trajectory_improvement``). The only difference was the model in the denominator, and the truth is not the
+    best model there.
 
-      * the old point is PINNED against a ceiling that depends only on the DELAY -- substitute the true
-        hardware for the fitted model and no fit can do better -- and this fit reaches 86% of it. So the number
-        the old gate ruled on is mostly a measurement of the delay, not of the fit. (The two are not computed
-        identically: ``_gate_ceiling`` replays from the bench start pose over the whole log, the fit scores
-        inside the excitation windows from the log's first row, and on the full plan that difference is worth
-        3.7% -- the fit reads 1.858x against a 1.791x ceiling. Hence a one-sided bound here, not a bracket.)
-      * moving it is worth an ORDER OF MAGNITUDE on the same fit: 10.3x here, 15.7x on the full plan.
+    So the helper is renamed (``_true_parameter_score``, a REFERENCE POINT), and what this test asserts is a
+    BRACKET rather than a one-sided bound -- which is strictly stronger and says the thing that is actually
+    true: the fit's delay-blind score cannot get FAR from the truth's delay-blind score in EITHER direction,
+    and that is what makes the old number a measurement of the delay rather than of the fit. Measured
+    0.861x the reference here, 1.038x on the full plan.
+
+    What the scoring change is worth: an ORDER OF MAGNITUDE on the same fit -- 10.3x here, 15.7x on the full
+    plan.
     """
     from virturoid.services.sysid.fit import MIN_TRACKING_IMPROVEMENT_X
 
     traj = fit_at(2)["trajectory"]
-    ceiling = _gate_ceiling(rig, 2)
+    ref = _true_parameter_score(rig, 2)
+    frac = traj["improvement_x_at_zero_delay"] / ref
     assert traj["scored_at_delay_ms"] == pytest.approx(DEFAULT_DELAY_MS)
     assert traj["delay_identified"] is True
     assert traj["improvement_x"] >= MIN_TRACKING_IMPROVEMENT_X
-    assert traj["improvement_x_at_zero_delay"] >= 0.80 * ceiling, (
-        f"the OLD scoring point is meant to be pinned against its delay-only ceiling -- that is what makes it "
-        f"a measurement of the delay rather than of the fit. It reads {traj['improvement_x_at_zero_delay']}x "
-        f"against a ceiling of {ceiling:.3f}x, i.e. {traj['improvement_x_at_zero_delay'] / ceiling:.1%} of it. "
-        f"If the fit has fallen well short of the ceiling, the old point has room to discriminate after all "
-        f"and this docstring's argument is wrong")
+    assert 0.80 <= frac <= 1.20, (
+        f"the OLD scoring point is meant to sit CLOSE to the delay-blind score of the true parameters, on "
+        f"either side -- that is what makes it a measurement of the delay rather than of the fit. It reads "
+        f"{traj['improvement_x_at_zero_delay']}x against a reference of {ref:.3f}x, i.e. {frac:.1%} of it "
+        f"(measured 86.1% on this plan, 103.8% on the full one). Under 80% and the old point has room to "
+        f"discriminate a fit after all, so this docstring's argument is wrong; over 120% and the estimator is "
+        f"buying delay-blind score by MIMICKING the delay far harder than the fit measured here does, which is "
+        f"a finding about the estimator and has to be written down rather than absorbed")
     assert traj["improvement_x"] > 5.0 * traj["improvement_x_at_zero_delay"], (
         f"this test is no longer adversarial: scoring at the identified delay is worth only "
         f"{traj['improvement_x'] / traj['improvement_x_at_zero_delay']:.2f}x on the same fit "
@@ -470,40 +566,74 @@ def test_the_gate_is_scored_at_the_identified_delay_and_that_is_what_moved_it(ri
         f"what moves the quantity and the change being tested has stopped mattering")
 
 
-def test_the_old_scoring_points_ceiling_collapses_with_delay_and_falls_under_the_threshold(rig):
+def test_the_old_scoring_points_range_collapses_with_delay_and_the_whole_family_falls_under_the_threshold(rig):
     """WHY the scoring point had to move, and it is not a tuning argument.
 
-    Scored with both replays at delay 0, ``improvement_x`` has a CEILING that depends only on the delay: no fit
-    can beat the parameters that generated the log. Where that ceiling is under the threshold, a refusal is not
-    evidence about the fit -- it is arithmetic, and no fit of any quality could ever have passed.
+    Scored with both replays at delay 0, ``improvement_x`` loses its dynamic range as the delay grows: the log
+    carries a timing error no fitted parameter can remove, it is in BOTH terms of the ratio, and it dominates
+    them both. Where nothing the estimator can express clears the threshold, a refusal is not evidence about
+    the fit -- it is arithmetic.
 
-    RE-MEASURED, and THE DELAY AT WHICH THAT BITES MOVED. It was 4.964x / 1.016x / 1.000x at 10 / 20 / 40 ms on
-    the full plan, so the package's own DEFAULT injection sat in the dead zone -- which is what made the
-    original finding so sharp. On the drivetrain the Go2 actually declares, the ceiling is 3.350x at 10 ms,
-    1.745x at 20 ms (full plan 1.791x), 1.009x at 30 ms and 0.996x at 40 ms. The dead zone starts at 30 ms, not
-    at 20. The mechanism is unchanged and so is the conclusion -- the ceiling still collapses to 1.0 and takes
-    the gate's meaning with it -- but the claim "at the package's default no fit could pass" is RETRACTED: at
-    20 ms a fit had 74% of headroom to work with, and this file's own fit uses 86% of it.
+    RE-MEASURED TWICE, and both re-measurements are recorded because each moved a claim.
+
+    2026-08-12 (drivetrain): it was 4.964x / 1.016x / 1.000x at 10 / 20 / 40 ms on the full plan, so the
+    package's own DEFAULT injection sat in the dead zone -- which is what made the original finding sharp. On
+    the drivetrain the Go2 actually declares, the true parameters score 3.350x at 10 ms, 1.745x at 20 ms (full
+    plan 1.791x), 1.009x at 30 and 0.996x at 40. The dead zone starts at 30 ms, not at 20, and "at the
+    package's default no fit could pass" is RETRACTED.
+
+    2026-08-12 (the yardstick): the sentence this test used to open with -- "``improvement_x`` has a CEILING
+    that depends only on the delay: no fit can beat the parameters that generated the log" -- is RETRACTED as
+    well. It is not a bound and it never was; see ``_delay_blind_score``. Sweeping the estimator's own three
+    parameters over a 60-point grid at each delay, the MAXIMUM delay-blind score is **2.166x at 20 ms (24%
+    above the true parameters' 1.745x, at armature +0.08), 1.036x at 30 ms and 1.003x at 40 ms** -- and on the
+    full 12-joint plan **3.823x / 2.277x / 1.012x / 1.003x at 10 / 20 / 30 / 40 ms** against references of
+    3.403x / 1.791x / 1.005x / 1.001x. So:
+
+      * the conclusion SURVIVES and is now measured over 60 models instead of argued from one -- at 30 ms and
+        beyond NOTHING in the family the estimator draws from reaches the 1.5x threshold, which is what the
+        "a refusal here is arithmetic" claim actually needs;
+      * the yardstick was mislabelled, and at 20 ms it can be beaten by a quarter -- which is why the fit
+        exceeding it by 3.8% on the full plan was never a defect in the fit.
+
+    Cost: 3 x 60 delay-blind replays (~50 s here) on top of the reference sweep. That is the price of turning
+    "by construction" into a measurement, and this file already paid it once by believing the argument.
     """
     from virturoid.services.sysid.fit import MIN_TRACKING_IMPROVEMENT_X
 
-    at_10, at_20 = _gate_ceiling(rig, 1), _gate_ceiling(rig, 2)
-    at_30, at_40 = _gate_ceiling(rig, 3), _gate_ceiling(rig, 4)
+    at_10, at_20 = _true_parameter_score(rig, 1), _true_parameter_score(rig, 2)
+    at_30, at_40 = _true_parameter_score(rig, 3), _true_parameter_score(rig, 4)
     assert at_10 >= MIN_TRACKING_IMPROVEMENT_X, f"10 ms should be inside reach; got {at_10:.3f}x"
     assert at_20 >= MIN_TRACKING_IMPROVEMENT_X, (
-        f"the RETRACTION in this docstring is itself stale: the delay-blind ceiling at the package's DEFAULT "
-        f"20 ms is back under the {MIN_TRACKING_IMPROVEMENT_X}x threshold at {at_20:.3f}x, so the original "
-        f"'no fit could pass at 20 ms' finding is live again and the retraction must be withdrawn")
-    # THE ADVERSARIAL CLAIM, at the delay where it is now true. This is the assertion the test exists for.
-    assert at_30 < MIN_TRACKING_IMPROVEMENT_X, (
-        f"this test is no longer adversarial: the delay-blind ceiling is still {at_30:.3f}x at 30 ms, above "
-        f"the {MIN_TRACKING_IMPROVEMENT_X}x threshold. If there is no delay at which the ceiling falls under "
-        f"the threshold, a delay-blind refusal is never uninformative and the scoring point did not need to "
-        f"move at all")
-    assert at_40 < 1.05, f"the ceiling at 40 ms should be ~1.0 (no headroom at all); got {at_40:.3f}x"
+        f"the RETRACTION in this docstring is itself stale: the delay-blind score of the TRUE parameters at the "
+        f"package's DEFAULT 20 ms is back under the {MIN_TRACKING_IMPROVEMENT_X}x threshold at {at_20:.3f}x, so "
+        f"the original 'no fit could pass at 20 ms' finding is live again and the retraction must be withdrawn")
+    assert at_40 < 1.05, f"the truth's own score at 40 ms should be ~1.0 (no range at all); got {at_40:.3f}x"
     assert at_10 > at_20 > at_30 > at_40, (
-        f"the ceiling must fall monotonically as the delay grows: {at_10:.3f} / {at_20:.3f} / {at_30:.3f} / "
+        f"the reference must fall monotonically as the delay grows: {at_10:.3f} / {at_20:.3f} / {at_30:.3f} / "
         f"{at_40:.3f}")
+
+    best_20, off_20 = _best_delay_blind_score(rig, 2)
+    best_30, off_30 = _best_delay_blind_score(rig, 3)
+    best_40, off_40 = _best_delay_blind_score(rig, 4)
+
+    # THE RETRACTION, asserted so it cannot be quietly reinstated: the true parameters are NOT the maximum.
+    assert best_20 > at_20 * 1.05, (
+        f"the retracted 'ceiling' claim is back in force: the best model in the estimator's own family scores "
+        f"{best_20:.3f}x at 20 ms against the true parameters' {at_20:.3f}x ({best_20 / at_20:.3f}x), so on "
+        f"this body the truth IS effectively maximal and the by-construction argument this test retracted "
+        f"(measured 2.166x vs 1.745x, at {off_20}) would have to be reinstated -- deliberately, in writing")
+    # THE ADVERSARIAL CLAIM, at the delays where it is true, over the whole family rather than one point.
+    assert best_30 < MIN_TRACKING_IMPROVEMENT_X, (
+        f"this test is no longer adversarial: at 30 ms the delay-blind metric can still reach {best_30:.3f}x "
+        f"(at {off_30}), at or above the {MIN_TRACKING_IMPROVEMENT_X}x threshold. If some model the estimator "
+        f"can express clears the gate at every delay, a delay-blind refusal is never uninformative and the "
+        f"scoring point did not need to move at all")
+    assert best_40 < 1.10, (
+        f"at 40 ms the delay-blind metric should have no range left for ANY model in the family; the best is "
+        f"{best_40:.3f}x at {off_40} (measured 1.003x)")
+    assert best_20 > best_30 > best_40, (
+        f"the envelope must fall with delay too: {best_20:.3f} / {best_30:.3f} / {best_40:.3f}")
 
 
 # =========================================================================================================
@@ -518,8 +648,18 @@ def test_a_misspecification_is_still_refused_when_the_robot_also_has_delay(fit_a
 
     MEASURED on the full 12-joint plan at the new scoring point: 1.001x with no delay, 0.996x at 20 ms. Those
     two predate the drivetrain fix; RE-MEASURED on this narrow plan at 20 ms the same misspecification now
-    scores 1.078x (it was 0.996x). The empty band the 1.5x threshold sits in is narrower than it was -- see the
-    constant's docstring -- and it is still empty.
+    scores 1.078x (it was 0.996x). The band the 1.5x threshold sits in is narrower than it was -- see the
+    constant's docstring.
+
+    "...AND IT IS STILL EMPTY" USED TO CLOSE THAT SENTENCE, AND IT IS RETRACTED (2026-08-12, same day, a
+    different probe): the band is not empty and this test is not the general control it reads as. What it
+    controls is the LINK MASS AND INERTIA family, whose ratio is pinned near 1.0 by the GRAVITY term rather
+    than by anything structural -- measured x0.4 ... x3.0 on the composed dog, 0.939 ... 1.000, never above 1.
+    Take gravity out of the error and it goes straight through the gate: link rotational inertia at CORRECT
+    mass reaches 1.753x and a 20% torque-scale error reaches 1.507x, both applied, both with intervals
+    excluding the truth. Contract for that: ``tests/test_sysid_stage2.py``, and
+    ``docs/calibration_wedge_under_delay.md`` section 13. This test still asserts exactly what it always
+    measured; only the sentence claiming it generalised is withdrawn.
     """
     fit = fit_at(2, perturbation={}, link_scale=1.30)
     app = fit["application"]
@@ -640,9 +780,9 @@ def test_at_twice_the_realistic_delay_the_metric_regains_range_but_the_gate_stil
     """40 ms is double the figure Hwangbo et al. name and double this package's own default, and the closure
     is only partial there. Recorded as a limit, not as a win.
 
-    Same fit, two scoring points: at the OLD one the score is pinned at ~1.000x -- the metric's own ceiling, so
-    the refusal carries no information about the fit at all. At the new one it is 1.148x here and 1.121x on the
-    full 12-joint plan. So the metric gets SOME of its dynamic range back and the gate then refuses ON THE
+    Same fit, two scoring points: at the OLD one the score is pinned at ~1.000x -- and so is every other model
+    in the estimator's family (best 1.003x, measured), so the refusal carries no information about the fit at
+    all. At the new one it is 1.148x here and 1.121x on the full 12-joint plan. So the metric gets SOME of its dynamic range back and the gate then refuses ON THE
     MERITS, which is the honest outcome and the reason this section exists.
 
     RE-MEASURED, and the verdict got WORSE rather than better. It was 1.484x (full plan) / 1.502x (narrow),

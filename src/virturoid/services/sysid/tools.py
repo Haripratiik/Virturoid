@@ -553,6 +553,15 @@ def simulate_bench_log(args: dict) -> dict:
                           "does, so the estimator absorbs it into armature and reports intervals that exclude "
                           "the truth. Measured at 1.30: 14/14 joints 'identified', 13/14 intervals wrong, and "
                           "tracking marginally WORSE. This is what the tracking gate in fit_actuators rules on",
+            "NOT REACHABLE FROM THIS TOOL YET":
+                "``synthetic_hardware_log`` also has ``inertia_scale`` (link rotational inertia wrong at "
+                "exactly correct mass) and ``torque_scale`` (a wrong gear ratio / torque constant / gearbox "
+                "efficiency). Those are the two misspecifications that CLEAR the tracking gate rather than "
+                "being caught by it -- 1.753x and 1.647x, measured 2026-08-12 -- and this tool cannot build "
+                "them, which is the same gap that made the gate's band look empty for as long as it did. "
+                "Wiring them here needs ``_run_tag`` extended too, or two different configurations would "
+                "share one artifact filename. See fit.MIN_TRACKING_IMPROVEMENT_X and "
+                "docs/calibration_wedge_under_delay.md section 13.",
         },
         "log_summary": {
             "n_rows": len(log["t"]), "n_joints": len(log["joints"]), "joints": log["joints"],

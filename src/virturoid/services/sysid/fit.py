@@ -46,14 +46,34 @@ true unchanged value, and all 15 misattributed numbers were written into the com
 are now stated in the engineer-facing output too, per parameter and per fit: see ``PARAMETER_ALSO_ABSORBS``
 and ``parameters_not_fitted``.
 
+**That gate is NECESSARY AND NOT SUFFICIENT, and it was written down as more.** The claim that a
+misspecification can never improve tracking -- "the misspecified ceiling is pinned at ~1.0 by construction" --
+was MEASURED on 2026-08-12 and is RETRACTED at ``MIN_TRACKING_IMPROVEMENT_X``. What the band was sized on is
+one family, link mass and inertia, whose pin is the GRAVITY term rather than anything structural. Errors with
+no gravity signature go through: link rotational inertia at correct mass reaches 1.753x and a 20% torque-scale
+error reaches 1.507x, both above the 1.5x gate, both with intervals excluding the truth. A pass means the
+simulator got closer to your log; it does not mean the three numbers are the three quantities they are named
+after, and ``application.what_this_gate_does_not_catch`` now says so in the output.
+
 **5. That gate is scored at the ACTUATION DELAY, and it had to be.** Both replays used to run at delay 0
-against logs that had one, so both carried a timing error no fitted parameter could remove and the ratio was
-driven to 1 as the delay grew -- a ceiling, not a threshold effect. MEASURED on the Menagerie Go2 at the
-package's own default 20 ms injection: the largest value the metric could return, substituting the TRUE
-hardware model for the fitted one, was 1.016x against a 1.5x threshold. The gate was refusing every fit on
-every robot with meaningful latency, correctly by its own rule and for a reason that had nothing to do with the
-fit. Running both replays at the identified delay fixes it, which is why ``fit_parameters`` measures the
-latency BEFORE the trajectory. See ``docs/calibration_wedge_under_delay.md``.
+against logs that had one, so both carried a timing error no fitted parameter could remove, and the ratio's
+whole dynamic RANGE collapses toward 1 as the delay grows. MEASURED on the Menagerie Go2, full 12-joint plan,
+sweeping the three parameters this estimator can move over 60 points at each delay: at 30 ms of injected delay
+the largest delay-blind score anything in that family reaches is 1.012x against a 1.5x threshold, and at 40 ms
+it is 1.003x. Where the whole family is under the threshold the gate refuses every fit on the merits of the
+LOG's latency, not of the fit. Running both replays at the identified delay fixes it, which is why
+``fit_parameters`` measures the latency BEFORE the trajectory.
+
+Two corrections to how that used to be written down, both measured, both in
+``docs/calibration_wedge_under_delay.md`` and ``tests/test_sysid_delay_wedge.py``: the delay at which it bites
+on THIS robot is 30 ms rather than the 20 ms once quoted (the twin used to carry 40% of Unitree's declared
+damping, and the ring was the phenomenon), and the quantity was called a CEILING obtained by substituting the
+TRUE hardware model for the fitted one. **It is not a ceiling.** At delay 0 against a delayed log the replay
+family does not contain the data-generating process, so the true parameters are not the residual's minimiser --
+a twin with too much reflected inertia mimics transport lag and scores BETTER. Full plan at 20 ms: the truth
+scores 1.791x, the best model in the family reaches 2.277x (+27%), and this package's own fit reads 1.858x,
+already above the figure that was being called a bound. The conclusion survives on the envelope; the word
+"ceiling" does not.
 
 What is reused from Stage 1, unchanged: the bench rig (``bench_model``/``bench_gains``/``pd_replay``/
 ``inverse_torque``/``central_derivative``), the log alignment and per-joint windowing (``_align_log``,
@@ -86,9 +106,12 @@ TRUST_FLOOR_MULT = 20.0
 #:
 #: **The threshold has never moved. The SCORING POINT has, once, and the band below was re-measured after it.**
 #: Both replays now run at the identified actuation delay rather than at zero. The reason is in
-#: ``_trajectory_improvement``: scored at zero delay against a log that has one, this ratio has a CEILING that
-#: depends only on the delay -- 1.016x at 20 ms on the Menagerie Go2 -- so on any robot with real latency it
-#: refused every fit, including ones that had recovered all three parameters to within 13.3%.
+#: ``_trajectory_improvement``: scored at zero delay against a log that has one, this ratio's RANGE is set by
+#: the delay rather than by the fit -- on the Menagerie Go2 at 30 ms, no model the estimator can express scores
+#: above 1.012x -- so on a robot with real latency it refused every fit, including ones that had recovered all
+#: three parameters to within 13.3%. (That range used to be written here as a CEILING of 1.016x at 20 ms. Both
+#: halves were wrong: the figure was measured on a twin carrying 40% of Unitree's declared damping, and it is
+#: not a bound at all -- see ``_trajectory_improvement``.)
 #:
 #: RE-MEASURED at the new scoring point, Go2, full 12-joint 120 s plan, three injections x three delays:
 #:
@@ -104,9 +127,10 @@ TRUST_FLOOR_MULT = 20.0
 #: 3.343): the misspecified ceiling rose to 1.059 and the correct floor fell to 1.484, because at 40 ms the
 #: Go2's hips ring hard enough that trajectory RMS stops being a sensitive function of the parameters. The
 #: threshold is above the 40 ms correct case, so that case is REFUSED -- a false negative, at double the delay
-#: Hwangbo et al. name and double this package's own default. The gate never became permissive: no
-#: misspecification reaches 1.06 at any delay measured. Moving the threshold down to admit 1.484 would put it
-#: within 40% of the misspecified ceiling, which is not a trade this package should make silently.
+#: Hwangbo et al. name and double this package's own default. No misspecification IN THAT TABLE reaches 1.06 at
+#: any delay measured -- and that scoping matters, because the table is one family: see the retraction below,
+#: where two other families clear 1.5 outright. Moving the threshold down to admit 1.484 would put it within
+#: 40% of that family's ceiling, which is not a trade this package should make silently.
 #:
 #: The ORIGINAL calibration, taken with both replays at delay 0 on a composed 14-DOF quadruped and a 35 s
 #: excitation, is kept below because it is what sized the number:
@@ -124,20 +148,89 @@ TRUST_FLOOR_MULT = 20.0
 #:   +30% link mass and inertia                            0.993    <- 13/14 armature intervals exclude truth
 #:   +30% link MASS only                                   0.993
 #:   +60% link mass and inertia                            0.999
-#:   ------------------------------------------------------------ nothing was measured in this gap
+#:   ------------------------------------------------------------ nothing was measured in this gap -- and the
+#:                                                                 gap is NOT empty; see the retraction below
 #:   frictionloss/damping/armature +0.05/+0.20/+0.010      3.343
 #:   the default injection + 20 ms of delay                3.536
 #:   the default injection x0.25                           4.726
 #:   the default injection x0.5                            5.269
 #:   the default injection, no delay                      16.365
 #:
-#: Every misspecification measured lands at or below 0.999 -- i.e. it never improves tracking AT ALL, which is
-#: the structural signature of an error no fitted parameter can express. Every correctly-specified fit lands at
-#: or above 3.343. The threshold sits in that empty band, deliberately off-centre: the misspecified ceiling is
-#: pinned at ~1.0 by construction and needs little margin, while the correct floor is a sample and could go
-#: lower on a smaller perturbation, so the headroom is put on the side that must not refuse a good fit. In the
-#: engineer's units it says: the position RMS has to fall by at least a THIRD before we write anything into
-#: your model. A control that is 2% better is not evidence of calibration.
+#: In the engineer's units the threshold says: the position RMS has to fall by at least a THIRD before we write
+#: anything into your model. A control that is 2% better is not evidence of calibration.
+#:
+#: RE-RUN of that table against the code as shipped (2026-08-12): 3.343 / 5.269 / 16.365 / 0.999 / 0.995 come
+#: back EXACTLY, and "+ 20 ms -> 3.536" comes back exactly as ``improvement_x_at_zero_delay`` (18.497 at the
+#: new scoring point). x0.25 reads 4.584 rather than 4.726. **The three rows that most made the ceiling look
+#: pinned do not reproduce at all: 0.065, 0.360 and 0.000 are all 1.000 today**, because the floor gate now
+#: refuses every cell in them, nothing is applied and ``before == after``. Those rows were never measurements
+#: of a fit failing to help; they are measurements of a fit that no longer happens.
+#:
+#: **THE BAND IS NOT EMPTY, AND THE SENTENCE THAT SAID IT WAS IS RETRACTED (2026-08-12).** It read: "Every
+#: misspecification measured lands at or below 0.999 -- i.e. it never improves tracking AT ALL, which is the
+#: structural signature of an error no fitted parameter can express... the misspecified ceiling is pinned at
+#: ~1.0 BY CONSTRUCTION and needs little margin." That is the same shape of argument as the delay-blind
+#: "ceiling" retracted in ``_trajectory_improvement`` hours earlier -- a claim about what a fit COULD do,
+#: standing where a measurement of what it DOES belongs -- and it fails for a related reason.
+#:
+#: What the table above actually swept is ONE misspecification family: link mass and inertia, moved TOGETHER.
+#: That family is genuinely pinned, and it has now been swept properly -- x0.4 / 0.6 / 0.8 / 0.9 / 1.1 / 1.15 /
+#: 1.2 / 1.3 / 1.45 / 1.6 / 2.0 / 3.0 gives 0.961 / 0.939 / 1.000 / 1.000 / 1.000 / 0.998 / 0.999 / 0.995 /
+#: 0.998 / 0.999 / 0.988 / 0.996, i.e. never once above 1.000. So does a CENTRE-OF-MASS error (5 / 20 / 50 mm
+#: on every link: 1.000 / 1.000 / 1.000). **But the pin is the GRAVITY term, not a structural property of
+#: misspecification.** Mass carries gravity with it, a gravity error is a static tracking offset no dissipative
+#: or inertial parameter can remove, and it therefore dominates ``before`` and survives untouched into
+#: ``after``. Remove the gravity term and the pin goes with it. MEASURED on the same robot, same 35 s
+#: excitation, delay 0, through the shipped ``fit_parameters``:
+#:
+#:   link ROTATIONAL INERTIA only, mass held exactly right (``synthetic_hardware_log(inertia_scale=)``)
+#:     x2   1.000 | x5   1.007 | x10  1.181 | x15  1.466 | x20  1.620 | x25  1.707
+#:     x30  1.745 | x40  1.753 | x50  1.730 | x70  1.691 | x100 1.650 | x300 1.433
+#:   the applied torque scaled -- wrong gear ratio, wrong torque constant, unmodelled gearbox efficiency
+#:   (``synthetic_hardware_log(torque_scale=)``; "gear ratio" is in ``assumed_correct`` below)
+#:     x0.5 1.414 | x0.75 1.466 | x0.9 1.467 | x0.95 1.087 | x1.1 1.364 | x1.2  1.507
+#:     x1.25 1.536 | x1.35 1.600 | x1.5 1.624 | x1.75 1.647 | x2.0 1.500 | x3.0 1.166
+#:
+#: **Both families cross 1.0 and both cross this threshold.** The measured maximum over everything swept is
+#: 1.753x, at link inertia x40 -- and at that point armature comes back "identified" on 14/14 joints with
+#: 14/14 intervals EXCLUDING the true, unchanged value, the fit PASSES, and all 14 numbers are written into the
+#: compiled model. That is the exact failure this gate was built to stop, reached by a different door.
+#:
+#: The mechanism is not mysterious in either family, and both were predicted before they were measured:
+#:
+#:   * A link-inertia error with mass held right has NO gravity signature. It enters each joint's equation
+#:     through the same ``qdd`` term armature does -- which ``PARAMETER_ALSO_ABSORBS`` has said all along --
+#:     so armature can express most of it. At x30 the median fitted armature delta is 0.0105 against the
+#:     0.0094 that would mimic the error exactly. HOW REALISTIC: with mass AND geometry both right a link's
+#:     own inertia cannot be more than ~3x wrong (dumbbell mL^2/4 vs uniform rod mL^2/12), which is ~+4% of
+#:     diag(M) and about 1.005x. So this family kills "never improves tracking AT ALL" at a realizable size
+#:     and only reaches the GATE at sizes that need the geometry to be wrong too. It is the clean statement of
+#:     the mechanism; the family that breaches the gate at an ordinary error is the next one.
+#:   * Scaling the applied torque by g is ALGEBRAICALLY the same as dividing M, b and f by g, and the
+#:     estimator can move all three. What it cannot move is gravity, which is why the ratio saturates around
+#:     1.65 instead of running away. The fitted deltas land on the predicted ``(1 - g)/g`` times each prior:
+#:     at g = 0.5 the median damping delta is +0.841 against a predicted +0.800, frictionloss +0.105 against
+#:     +0.120.
+#:
+#: AND THE OTHER HALF OF THAT SENTENCE -- "the correct floor is a sample and could go lower on a smaller
+#: perturbation" -- was the honest half, so it was measured too. It goes lower than the band can survive:
+#: sweeping the DEFAULT injection down, x0.5 5.269 | x0.25 4.584 | x0.125 3.564 | x0.0625 **1.126** (16/42
+#: identified, correctly specified, refused) | x0.03 1.000 (nothing identified). **So the two populations do
+#: not merely touch, they OVERLAP**: a correctly-specified fit reads 1.126 while a misspecified one reads
+#: 1.753. No threshold on this quantity can separate them, which is the fact that matters and is not a
+#: property of where the threshold was put.
+#:
+#: WHAT SURVIVES, and it is narrower than what was claimed: this gate catches a misspecification whose
+#: signature is mostly GRAVITY (link mass, centre of mass) and does NOT catch one the fitted parameters can
+#: mimic (link inertia at correct mass, a torque-scale error). It is NECESSARY AND NOT SUFFICIENT. The
+#: sentences that presented it as a general detector of "an error no fitted parameter can express" are wrong
+#: and are corrected here and in ``application_gate.why_this_threshold``.
+#:
+#: **THE THRESHOLD IS NOT MOVED, deliberately.** Raising it above the measured 1.753 would (a) refuse
+#: correctly-specified fits that already sit under it -- the Go2's correct case reads 1.484 at 40 ms and 1.121
+#: on the full plan, both already false negatives at 1.5 -- and (b) be sized against a GRID MAXIMUM over four
+#: families on one body, which is not a bound and would be the same fiction this paragraph just retracted.
+#: A constant cannot separate these cases; only a wider model or a second, independent check can.
 #:
 #: RE-MEASURED with this gate and the corrected floor gate BOTH in place, same robot and 35 s excitation, so
 #: the band can be checked against the code as shipped rather than only against the code it was sized on:
@@ -154,8 +247,11 @@ TRUST_FLOOR_MULT = 20.0
 #:
 #: Two rows in that older table are BODY-SPECIFIC and read as general, which is worth saying next to them: the
 #: "+ 20 ms of delay -> 3.536, 42/42 identified" figures are the composed dog's. On the Go2 the same case is
-#: 1.683 at the new scoring point and its delay-blind CEILING was 1.016, so 3.536 was never reachable there by
-#: any fit. The composed dog's bench loop tolerates delay in a way a real quadruped's does not -- its worst
+#: 1.683 at the new scoring point, and the delay-blind score of the Go2's own TRUE parameters was 1.016 -- a
+#: regime with no range left in it (at the comparable collapsed point on the DECLARED drivetrain, 30 ms, the
+#: best model in the estimator's whole 60-point family reaches only 1.012x), so 3.536 was never reachable
+#: there by any fit. The 1.016 figure itself was NOT re-measured on the declared drivetrain and is not a bound;
+#: see ``_trajectory_improvement``. The composed dog's bench loop tolerates delay in a way a real quadruped's does not -- its worst
 #: tracking RMS moves 0.0339 -> 0.0365 rad across 0-40 ms of delay while the Go2's hips go 0.0298 -> 0.1848 --
 #: which is why every number in this package needs re-taking on an imported body before it is quoted as
 #: general. See ``docs/calibration_wedge_under_delay.md`` section 3c.
@@ -200,6 +296,13 @@ def application_gate(trajectory: dict | None, n_identified: int, *,
 
     Fail-closed in both directions that matter. A fit whose effect on tracking was never MEASURED is
     provisional too: "we did not check" is not "it helped".
+
+    **This gate is NECESSARY AND NOT SUFFICIENT, and it used to be described as more than that.** See
+    ``MIN_TRACKING_IMPROVEMENT_X``: the claim that no misspecification can improve tracking was measured and is
+    RETRACTED. It holds for an error whose signature is GRAVITY (link mass, centre of mass); it does not hold
+    for one the fitted parameters can mimic. Passing means the simulator got closer to the log. It does not
+    mean the three numbers are the three physical quantities they are named after, which is why
+    ``what_this_gate_does_not_catch`` now ships in every verdict.
     """
     base = {
         "gate": "tracking_improvement",
@@ -208,12 +311,26 @@ def application_gate(trajectory: dict | None, n_identified: int, *,
                        "residual)",
         "threshold_x": float(threshold),
         "why_this_threshold": (
-            "measured, not chosen: across sim2sim cases every misspecification the estimator cannot express "
-            "(+15/30/60% link mass and inertia, mass-only, inertia-only, a sub-floor injection, and hardware "
-            "identical to the sim) improved tracking by at most 0.999x -- i.e. not at all -- while every "
-            "correctly-specified perturbation improved it by at least 3.343x. The threshold sits in that empty "
-            "band. In engineer units: the position RMS must fall by at least a third before anything is "
-            "written to the model."),
+            "measured, not chosen: across sim2sim cases on a composed 14-DOF quadruped, a link mass and "
+            "inertia error (x0.4 to x3.0), a centre-of-mass error (5-50 mm) and a sub-floor injection improved "
+            "tracking by at most 1.000x -- i.e. not at all -- while every correctly-specified perturbation "
+            "improved it by at least 3.343x. The threshold sits between those. In engineer units: the position "
+            "RMS must fall by at least a third before anything is written to the model."),
+        # NOT a footnote. The sentence above used to end "...the threshold sits in that EMPTY band", and the
+        # band is not empty: two misspecification families were measured straight through it and out the other
+        # side. A customer reading a PASS is entitled to the limit in the same dict as the verdict.
+        "what_this_gate_does_not_catch": (
+            "an error the fitted parameters can MIMIC. Measured on the same robot: a torque-scale error -- a "
+            "wrong gear ratio, a wrong torque constant, an unmodelled gearbox efficiency -- clears this "
+            "threshold from 20% (1.507x) and reaches 1.647x, and link rotational inertia wrong at exactly "
+            "correct mass reaches 1.753x (that one needs the link's geometry to be mis-stated too; the "
+            "torque-scale one needs nothing unusual at all). Both come with intervals excluding the true "
+            "unchanged value. Scaling the applied torque by g is "
+            "algebraically the same as dividing inertia, damping and friction by g, and reflected inertia "
+            "enters the joint equation exactly where a link-inertia error does. So a PASS says your simulator "
+            "now tracks your log; it does not say these three numbers are the three physical quantities they "
+            "are named after. If your gearbox ratio, torque constant or link inertia tensor is uncertain, read "
+            "the per-parameter 'also_absorbs' field before acting on a value."),
     }
     x = (trajectory or {}).get("improvement_x")
     if int(n_identified) <= 0:
@@ -623,20 +740,37 @@ def fit_parameters(gene, log: dict, *, plan: dict | None = None,
                 "joint equation through the same qdd term link inertia does. MEASURED sim2sim: a robot built "
                 "with +30% link mass and inertia and no armature error at all came back armature-'identified' "
                 "on 14/14 joints, 13/14 intervals excluding the true (unchanged) value, one joint at +66% "
-                "(0.0100 -> 0.01664, 90% CI [0.01317, 0.02082]). What catches that case is the "
-                "tracking-improvement gate under 'application' -- the fit stops getting the simulator closer "
-                "the moment the error stops being one it can express. This entry is what NAMES it.",
+                "(0.0100 -> 0.01664, 90% CI [0.01317, 0.02082]). THAT case is caught by the "
+                "tracking-improvement gate under 'application' -- because its error is mostly GRAVITY, which "
+                "no fitted parameter can remove. An INERTIA error at CORRECT MASS has no gravity term and is "
+                "NOT caught: measured at a +60% error in each joint's own diag(M), the same 14/14 armature "
+                "misattribution scores 1.745x, clears the 1.5x gate and is written to the model. This entry is "
+                "what NAMES the mechanism; application.what_this_gate_does_not_catch is what bounds the gate's "
+                "reach, and until 2026-08-12 this sentence claimed more than the gate delivers.",
+            "the gear ratio / torque constant your driver used to report torque":
+                "ASSUMED CORRECT. If your joint really receives g times the torque this log records, that is "
+                "algebraically the same as dividing inertia, damping and friction by g -- all three of which "
+                "ARE fitted -- so the error is absorbed almost exactly and the fit reports the true parameters "
+                "scaled by (1-g)/g. MEASURED sim2sim: at g=0.5 the median damping delta comes back at +0.841 "
+                "against the +0.800 that predicts, and at g=1.2 the resulting fit scores 1.507x and CLEARS the "
+                "tracking gate. Nothing in this report can tell that apart from a real dissipation change; if "
+                "your torque channel's scale is uncertain, that is the first thing to check.",
             "contact / gearbox elasticity / backlash":
                 "not represented in the compiled model at all, so there is no parameter to move. The bench rig "
                 "measures a joint on a stand rather than a foot on the ground precisely so contact is not in "
                 "the residual; backlash and drivetrain compliance still are, and they land in damping and "
-                "frictionloss.",
+                "frictionloss. MEASURED for the elasticity half: an unmodelled joint SPRING at 0.02 to 1.0 "
+                "times the bench gain moves trajectory RMS by up to 0.114 rad and yields NOTHING identified at "
+                "any size -- so this one costs the experiment rather than corrupting it.",
         },
         "assumed_correct": {
             "what": ["link mass", "link inertia", "centre of mass", "kinematic geometry", "gear ratio"],
             "consequence": "an error in any of these is not reported; it is absorbed by the three parameters "
-                           "that ARE fitted, armature first. See parameters_not_fitted for the measured case "
-                           "and 'application' for the gate that refuses the resulting fit.",
+                           "that ARE fitted, armature first. See parameters_not_fitted for the measured case. "
+                           "The tracking gate under 'application' refuses the resulting fit ONLY when the "
+                           "error's signature is gravity (link mass, centre of mass); an error the fitted "
+                           "parameters can mimic -- link inertia at correct mass, a wrong gear ratio or torque "
+                           "constant -- clears it. See application.what_this_gate_does_not_catch.",
         },
         "joints": joints,
         "identified_pairs": len(identified_pairs),
@@ -646,10 +780,10 @@ def fit_parameters(gene, log: dict, *, plan: dict | None = None,
     }
 
     # LATENCY FIRST, and that ordering is load-bearing. ``_trajectory_improvement`` replays the loop, and a
-    # replay run at the wrong delay measures the delay instead of the fit -- MEASURED on the Go2, the gate's own
-    # CEILING at the package's default 20 ms injection is 1.016x against a 1.5x threshold, so no fit of any
-    # quality could pass. Scoring both replays at the IDENTIFIED delay is what makes the ratio about the
-    # parameters again, and that requires knowing the delay before the trajectory is measured.
+    # replay run at the wrong delay measures the delay instead of the fit -- MEASURED on the Go2 at 30 ms of
+    # injected delay, NOTHING the estimator can express scores above 1.012x on the delay-blind metric, against a
+    # 1.5x threshold. Scoring both replays at the IDENTIFIED delay is what makes the ratio about the parameters
+    # again, and that requires knowing the delay before the trajectory is measured.
     if measure_delay:
         out["latency"] = _delay_on_the_fitted_model(gene, model, aligned, deltas, dofs, kp, kd, log, plan,
                                                     joints, int(delay_max_ticks))
@@ -727,11 +861,23 @@ def _trajectory_improvement(gene, model, aligned, deltas, dofs, kp, kd, log, pla
 
     **Both replays run at the IDENTIFIED actuation delay**, and that is the fix to a defect that made this
     number useless on any robot with real latency. Both replays used to run at delay 0 against a log that had
-    one, so both carried a timing error no fitted parameter could remove, and the ratio was driven to 1 as the
-    delay grew regardless of the fit. It is a ceiling, not a threshold effect -- substitute the TRUE hardware
-    model for the fitted one and the largest value the old metric could return was, MEASURED on the Go2,
-    4.964x at 10 ms, **1.016x at 20 ms** and 1.000x at 40 ms, against a 1.5x gate. At 40 ms the fit recovered
-    all three parameters to within 13.3% and scored 1.000x. Nothing about that number was about the fit.
+    one, so both carried a timing error no fitted parameter could remove, and the ratio's whole RANGE collapsed
+    toward 1 as the delay grew regardless of the fit. MEASURED on the Menagerie Go2, full 12-joint plan, by
+    sweeping the three parameters this estimator can move over a 60-point grid at each delay: the largest
+    delay-blind score reachable by ANY of them is 1.012x at 30 ms and 1.003x at 40 ms, against a 1.5x gate. At
+    40 ms the fit recovered all three parameters to within 13.3% and scored 1.000x. Nothing about that number
+    was about the fit.
+
+    THE OLD WORDING OF THAT ARGUMENT IS RETRACTED (2026-08-12) and it is worth keeping the retraction here,
+    because the reasoning was seductive and wrong. It read: "substitute the TRUE hardware model for the fitted
+    one and you have the largest value the metric could return -- no fit can beat the parameters that generated
+    the log." That holds only when the replay family CONTAINS the data-generating process. At delay 0 against a
+    delayed log it does not: the timing error is unmodelled, so the true parameters are not the minimiser of the
+    position residual, and a twin whose reflected inertia is too high partially MIMICS transport lag. Measured
+    at 20 ms: the true perturbation scores 1.791x, ``armature +0.08`` (2.7x the injected 0.03) scores 2.277x,
+    and this package's own fit -- whose armature lands 17-21% high -- reads 1.858x, i.e. ABOVE the figure that
+    was being called a ceiling. Nothing here is a bound; the collapse of the RANGE is the finding, and it is now
+    measured over the family rather than argued from one point.
 
     Running both sides at the same, correct delay cancels the timing term the way the ratio always assumed it
     did. The old figure is kept as ``improvement_x_at_zero_delay`` so the two can be read against each other,
@@ -794,8 +940,10 @@ def _trajectory_improvement(gene, model, aligned, deltas, dofs, kp, kd, log, pla
         "improvement_x_at_zero_delay": at_zero,
         "why_scored_at_the_delay": (
             "both replays carry the same actuation delay, so the timing error cancels in the ratio and what is "
-            "left is the fitted parameters. Scored at 0 ms this number has a CEILING set by the delay alone -- "
-            "measured on the Go2, 1.016x at 20 ms against a 1.5x gate, reachable by no fit."
+            "left is the fitted parameters. Scored at 0 ms this number's RANGE is set by the delay rather than "
+            "by the fit -- measured on the Menagerie Go2 at 30 ms, no parameter set this estimator can express "
+            "scores above 1.012x against a 1.5x gate, so a refusal there would be about your log's latency and "
+            "not about your parameters."
             if d else
             ("the log shows no actuation delay, so 0 ms is the correct scoring point" if delay_identified else
              "the actuation delay could NOT be identified, so this falls back to 0 ms. Any timing error in the "

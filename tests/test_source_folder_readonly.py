@@ -82,19 +82,47 @@ def project(tmp_path):
 
 # --------------------------------------------------------------------------- the guarantee, end to end
 @pytest.mark.skipif(not _MUJOCO, reason="ingesting a model needs MuJoCo")
-def test_an_ingest_leaves_the_customers_folder_byte_identical(project, monkeypatch):
-    """The headline. Every file, its bytes AND its mtime, unchanged across a full ingest."""
+def test_an_ingest_leaves_the_customers_folder_byte_identical_AND_still_imports(project, monkeypatch):
+    """The headline -- and it needs BOTH halves, which the first version of this test did not have.
+
+    As written on 2026-08-12 it asserted only ``robot_id`` plus an unchanged folder. Both of those are ALSO
+    true when the guard does its job and the import dies: refusing the write makes ``_load_model`` raise, the
+    ingest falls back to composing a proxy from the text description, and the customer gets back a truthy
+    ``robot_id`` for a robot that is not theirs -- over a folder that is, indeed, byte-identical. That is
+    exactly what happened (``robot_import._compile`` writes a temp file NEXT TO the real meshes so relative
+    paths resolve; the guard refused it and #215 reopened), and THIS TEST STAYED GREEN THROUGH IT. It measured
+    that we did not write, never that the import still worked.
+
+    So containment is asserted together with the thing containment must not cost. MEASURED on this fixture:
+    ``lane_used='faithful'``, ``lanes_attempted=['faithful','gene']``, ``substituted=None``,
+    ``source_folder_protection=None``.
+
+    ``source_folder_protection is None`` is the sharper of the two. A non-None report means the guard BLOCKED
+    something -- i.e. the folder survived because a write was refused, not because none was attempted. Passing
+    on refusals would let a new writer land inside the customer's folder and be papered over by the guard,
+    which is the failure mode one layer up from the one this file exists for.
+    """
     from virturoid.services.agent_tools import call_tool
     monkeypatch.chdir(project.parent)                       # build/ lands beside, never inside, the project
     before = _snapshot(project)
     env = call_tool("ingest_project", {"project_path": str(project)})
-    assert env["result"].get("robot_id"), env
+    r = env["result"]
+    assert r.get("robot_id"), env
     after = _snapshot(project)
     assert after == before, {
         "added": sorted(set(after) - set(before)),
         "removed": sorted(set(before) - set(after)),
         "changed": sorted(k for k in set(after) & set(before) if after[k] != before[k]),
     }
+    # ...and the customer's own model is what we actually loaded, not a proxy composed after a refusal.
+    assert r.get("lane_used") == "faithful", (
+        f"the folder is intact but the import did not use the customer's model: lane_used="
+        f"{r.get('lane_used')!r}, lanes_attempted={r.get('lanes_attempted')!r} -- containment must not be "
+        f"bought by failing the import (#215)")
+    assert not r.get("substituted"), f"a body was substituted for the customer's: {r.get('substituted')!r}"
+    assert r.get("source_folder_protection") is None, (
+        f"the folder survived because writes were REFUSED, not because none were attempted: "
+        f"{r.get('source_folder_protection')!r} -- find the writer and stage it out-of-tree instead")
 
 
 @pytest.mark.skipif(not _MUJOCO, reason="ingesting a model needs MuJoCo")

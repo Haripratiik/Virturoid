@@ -1409,7 +1409,7 @@ def _splay_before_substituting(gene, base: float):
     return cand, cval, fit
 
 
-def ensure_walkable_quad(gene, prompt: str = "", *, force: bool = False):
+def ensure_walkable_quad(gene, prompt: str = "", *, force: bool = False, decline: dict | None = None):
     """DIAGNOSIS-DRIVEN, per-request walkability fallback for a QUADRUPED — a HINT the build reaches for, never a
     gait/body forced on every dog. If the body already walks under SOME gait (``evaluate_robot`` is gait-aware:
     trot, else the statically-stable crawl), it is returned UNCHANGED (sleek-when-possible). Only if it ROLLS
@@ -1417,20 +1417,49 @@ def ensure_walkable_quad(gene, prompt: str = "", *, force: bool = False):
     wide-stance hint. To respect design intent we DO NOT silently swap out a bespoke LLM anatomy: a generic/
     heuristic quad is rebuilt fanned (its own narrow form doesn't walk anyway), while an LLM-designed creature is
     kept and merely FLAGGED (metadata.walkability) so the caller/trainer knows to widen its stance. See
-    [[walking-breakthrough-abduction]]. Best-effort: any failure returns the gene untouched."""
+    [[walking-breakthrough-abduction]]. Best-effort: any failure returns the gene untouched.
+
+    ``decline`` is an OPTIONAL out-dict a caller passes to learn WHY nothing was adopted. It is written only on
+    the unchanged-return paths, never read, and defaults to ``None`` so every existing call site behaves
+    byte-identically. It exists because this function has EIGHT distinct ways of handing the gene back and the
+    customer-facing operator that wraps it (``edit_operators.adopt_walkable_template``) could not tell them
+    apart, so it printed one sentence for all of them. MEASURED 2026-08-12 through that operator: a real
+    Menagerie ``unitree_g1`` (30 links, 33.341 kg, 0.000 m, CROUCH) and a composed 6-axis ARM both came back
+    with "the original body already walks or no better template was found" — false on its first disjunct for a
+    humanoid that measurably does not walk, and meaningless for a manipulator that never entered the gate. The
+    ingest surface already gives the right reason for the same humanoid ("the walkable reference template is a
+    QUADRUPED fan/crawl recipe; this import is a humanoid body"); two surfaces answering one question in two
+    framings is the #215/#218 shape. Each key here names ONE return path so the decision cannot drift from the
+    explanation."""
     try:
         from virturoid.services.task_matched_eval import evaluate_robot, robot_kind
     except Exception:  # noqa: BLE001
+        if decline is not None:
+            decline.update(reason="evaluator_unavailable",
+                           detail="the walk evaluator could not be loaded, so no body was measured and nothing "
+                                  "was changed")
         return gene
     try:
         import re
         if robot_kind(gene) != "legged":
+            if decline is not None:
+                decline.update(reason="not_a_legged_body", robot_kind=str(robot_kind(gene)),
+                               detail=f"the walkable reference template is a LEGGED (quadruped) fan/crawl recipe "
+                                      f"and this robot is a {robot_kind(gene)}; adopting it would hand back a "
+                                      f"different machine, not a walking version of yours")
             return gene
         legs = {m.group(0) for s in gene.segments
                 if (m := re.search(r"(?:(?:front|hind)_)?leg\d*_[lr]", (s.name or "").lower()))}
         # the fan+crawl hint is a QUADRUPED recipe: accept our own leg{n}_{l|r} naming OR any gene already CLASSIFIED
         # a quadruped (an imported robot uses arbitrary leg names but is structurally classed by limb count).
         if len(legs) != 4 and getattr(gene, "robot_class", "") != "quadruped":
+            if decline is not None:
+                _cls = str(getattr(gene, "robot_class", "") or "legged")
+                decline.update(reason="not_a_quadruped", robot_class=_cls,
+                               detail=f"the walkable reference template is a QUADRUPED fan/crawl recipe and this "
+                                      f"body is a {_cls}; adopting it would hand back a different animal rather "
+                                      f"than a walking version of yours. Train the real body with train_reward "
+                                      f"instead -- for a non-quadruped, walking is a learned-control problem")
             return gene
         base = float(evaluate_robot(gene).get("value", 0.0))
         # WHAT CONTROLLER WAS `base` MEASURED WITH? That is the whole question, and for years the answer was "one
@@ -1503,6 +1532,10 @@ def ensure_walkable_quad(gene, prompt: str = "", *, force: bool = False):
         else:
             _tried = "under the shipped default operating point (freq 1.5 / kp 32), trot and crawl"
         if base >= 0.5 and not force:                        # already walks under some gait -> leave it sleek
+            if decline is not None:
+                decline.update(reason="already_walks", distance_m=round(base, 3), measured=_tried,
+                               detail=f"your body already walks -- {round(base, 3)} m {_tried} -- so there is "
+                                      f"nothing for a template to improve and your geometry was kept")
             return gene                                      # (force skips this shortcut but STILL only adopts the
         #                                                      fanned stance below if it beats the original materially)
         src = (getattr(gene, "design_source", None) or "").lower()
@@ -1516,6 +1549,11 @@ def ensure_walkable_quad(gene, prompt: str = "", *, force: bool = False):
                                  "measured": _tried,
                                  "hint": "widen the stance (fan the legs out) + use the crawl gait"}
             gene.metadata = md
+            if decline is not None:
+                decline.update(reason="bespoke_design_preserved", design_source=src, distance_m=round(base, 3),
+                               detail=f"this is a bespoke design (design_source {src!r}), so its geometry was "
+                                      f"preserved and only FLAGGED (metadata.walkability): {round(base, 3)} m "
+                                      f"{_tried}. The hint is to widen the stance and use the crawl gait")
             return gene
         # The fanned wide-stance rebuild uses the gait-tuned CANONICAL dimensions.
         #
@@ -1544,6 +1582,10 @@ def ensure_walkable_quad(gene, prompt: str = "", *, force: bool = False):
             leg=round(0.42 * _ask["leg"], 4), body=round(0.58 * _ask["torso"], 4),
             leg_girth_mult=_ask["thick"]))
         if cand is None:
+            if decline is not None:
+                decline.update(reason="template_compile_failed", distance_m=round(base, 3),
+                               detail="the walkable reference template could not be compiled for this request, "
+                                      "so nothing was changed")
             return gene
         # B1 (2026-07-24 audit): SCALE the fanned template to the authored body's size instead of substituting a
         # fixed one, so "small dog" and "large horse" no longer collapse to one byte-identical robot (the 5-prompts
@@ -1612,6 +1654,17 @@ def ensure_walkable_quad(gene, prompt: str = "", *, force: bool = False):
                 "Details in metadata.walkability_fallback.",
             ]
             return cand
+        if decline is not None:
+            decline.update(reason="template_no_better", distance_m=round(base, 3),
+                           template_distance_m=round(cval, 3), measured=_tried,
+                           detail=f"the walkable reference template was BUILT AND MEASURED on this body's scale "
+                                  f"and did not beat it: template {round(cval, 3)} m vs your {round(base, 3)} m "
+                                  f"{_tried}, and it must clear both that and 0.4 m to be worth your geometry. "
+                                  f"Your body was kept")
         return gene
-    except Exception:  # noqa: BLE001 - the fallback is best-effort; a rolling body beats a crash
+    except Exception as _exc:  # noqa: BLE001 - the fallback is best-effort; a rolling body beats a crash
+        if decline is not None:
+            decline.update(reason="error", error=f"{type(_exc).__name__}: {_exc}",
+                           detail="the walkability check failed part-way through, so your body was returned "
+                                  "untouched rather than half-substituted")
         return gene

@@ -82,6 +82,7 @@ LOG_CHANNELS = ("torque", "current", "position_only")
 def synthetic_hardware_log(gene, *, perturbation: dict | None = None, delay_ticks: int = DEFAULT_DELAY_TICKS,
                            plan: dict | None = None, budget_s: float = 120.0,
                            hold_only: bool = False, link_scale: float = 1.0,
+                           inertia_scale: float = 1.0, torque_scale: float = 1.0,
                            channel: str = "torque", torque_constant_error: float = 1.0) -> tuple:
     """Run the excitation on a perturbed model and return ``(plan, log)`` in the exact schema a real bench log
     would arrive in -- so ``measure_gap`` cannot tell the difference, which is the point of the harness.
@@ -105,6 +106,27 @@ def synthetic_hardware_log(gene, *, perturbation: dict | None = None, delay_tick
     and ``trajectory.improvement_x`` at 0.993 -- the fit made tracking marginally WORSE while every number in
     it looked like a measurement. That last figure is what ``fit.application_gate`` rules on, and this mode is
     how it is tested. An excitation cannot fix this one; only a wider model or a refusal can.
+
+    ``inertia_scale`` and ``torque_scale`` are the OTHER two misspecifications, and they exist because this
+    harness could only build ``link_scale`` -- which is why ``fit.MIN_TRACKING_IMPROVEMENT_X``'s band looked
+    empty for as long as it did. Both are errors the estimator cannot REPORT and can substantially ABSORB, and
+    both take ``improvement_x`` well past 1.0 (measured, composed dog, 35 s, delay 0; see
+    ``docs/calibration_wedge_under_delay.md`` section 13):
+
+      * ``inertia_scale`` multiplies each link's rotational inertia with its MASS HELD EXACTLY RIGHT, so there
+        is no gravity signature at all and the whole error is in the ``qdd`` term -- the one armature adds to.
+        At 30 (a +60% error in each joint's own diag(M)) the fit scores **1.745x and CLEARS the 1.5x gate**,
+        with armature "identified" on 14/14 joints and 14/14 intervals excluding the true unchanged value.
+      * ``torque_scale`` multiplies the actuator gear, so the plant really receives ``torque_scale`` x the
+        torque the log records: a wrong gear ratio, a wrong torque constant, a current-sense gain error, or an
+        unmodelled gearbox efficiency. Scaling the torque by g is algebraically the same as dividing M, b and f
+        by g -- every one of which the estimator CAN move -- so the absorption is exact except for the gravity
+        term, and the fitted deltas come back at the predicted ``(1 - g) / g`` times each prior (measured at
+        g = 0.5: damping +0.841 against a predicted +0.80). At 1.25 it scores **1.536x and CLEARS the gate**.
+
+    ``link_scale`` moves mass and inertia TOGETHER because that is the realistic density/fill-fraction error;
+    ``inertia_scale`` deliberately does not, because separating them is what shows the gravity term is the only
+    reason the ``link_scale`` family stays pinned at ~1.0.
     """
     import numpy as np
 
@@ -128,6 +150,14 @@ def synthetic_hardware_log(gene, *, perturbation: dict | None = None, delay_tick
         # fraction that is wrong), not a caricature.
         hw.body_mass[1:] = np.asarray(hw.body_mass[1:], dtype=float) * float(link_scale)
         hw.body_inertia[1:] = np.asarray(hw.body_inertia[1:], dtype=float) * float(link_scale)
+    if float(inertia_scale) != 1.0:
+        # Rotational inertia ALONE, mass untouched -- the half of a link error that armature can express.
+        hw.body_inertia[1:] = np.asarray(hw.body_inertia[1:], dtype=float) * float(inertia_scale)
+    if float(torque_scale) != 1.0:
+        # ``pd_replay`` logs the torque it COMMANDED (``data.ctrl``); MuJoCo applies ``gear * ctrl``. Scaling
+        # the gear is therefore exactly the customer whose driver reports a torque computed with the wrong
+        # constant -- the log says one number and the joint receives another.
+        hw.actuator_gear[:, 0] = np.asarray(hw.actuator_gear[:, 0], dtype=float) * float(torque_scale)
 
     _, q_cmd = excitation_command_series(gene, plan)
     q0 = start_pose(model, gene)
@@ -159,7 +189,13 @@ def synthetic_hardware_log(gene, *, perturbation: dict | None = None, delay_tick
         "provenance": "SYNTHETIC - a second MuJoCo model standing in for hardware. NOT a measurement of any "
                       "physical robot."
                       + (f" Its links carry {link_scale:g}x our mass and inertia -- an error no fitted "
-                         f"parameter can express." if float(link_scale) != 1.0 else ""),
+                         f"parameter can express." if float(link_scale) != 1.0 else "")
+                      + (f" Its links carry {inertia_scale:g}x our ROTATIONAL INERTIA at our exact mass -- an "
+                         f"error no fitted parameter can REPORT, and one armature can largely absorb."
+                         if float(inertia_scale) != 1.0 else "")
+                      + (f" Its joints receive {torque_scale:g}x the torque this log records -- a wrong gear "
+                         f"ratio / torque constant / gearbox efficiency."
+                         if float(torque_scale) != 1.0 else ""),
         "excitation": "hold_only (deliberately uninformative)" if hold_only else "full plan",
         "channel": chan,
     }

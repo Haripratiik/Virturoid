@@ -276,6 +276,10 @@ def test_the_follow_up_plan_commands_the_segment_mix_it_advertises(dog, plan):
 # inertia enter the joint equation through the same acceleration term, and comes back with confident numbers
 # and intervals that exclude the true, unchanged value. What catches it is the one number measured on a
 # quantity the fit did not optimise: does applying it make the simulator TRACK BETTER.
+#
+# THAT LAST SENTENCE IS TRUE OF THIS CASE AND WAS GENERALISED TOO FAR; the retraction is the section after
+# next, and it is measured. The gate catches a misspecification whose signature is GRAVITY. It does not catch
+# one the fitted parameters can mimic, and two of those clear it.
 # --------------------------------------------------------------------------------------------------------
 
 LINK_SCALE = 1.30
@@ -436,6 +440,207 @@ def test_a_correctly_specified_fit_is_not_caught_by_the_same_gate(fit):
     assert app["improvement_x"] >= 2 * MIN_TRACKING_IMPROVEMENT_X, (
         f"the correctly-specified fit clears the gate by only {app['improvement_x']}x against a threshold of "
         f"{MIN_TRACKING_IMPROVEMENT_X}x -- too close to call the threshold measured rather than tuned")
+
+
+# --------------------------------------------------------------------------------------------------------
+# ...AND THE TWO MISSPECIFICATIONS THAT CLEAR THE SAME GATE. RETRACTION, 2026-08-12, measured.
+#
+# ``MIN_TRACKING_IMPROVEMENT_X``'s docstring used to close: "every misspecification measured lands at or below
+# 0.999 -- i.e. it never improves tracking AT ALL, which is the structural signature of an error no fitted
+# parameter can express... the misspecified ceiling is PINNED AT ~1.0 BY CONSTRUCTION". Same shape of argument
+# as the delay-blind "ceiling" retracted in ``test_sysid_delay_wedge.py`` hours earlier: a claim about what a
+# fit COULD do standing where a measurement of what it DOES belongs.
+#
+# The original band swept ONE family -- link mass and inertia, moved together -- and that family really is
+# pinned. RE-MEASURED across x0.4 / 0.6 / 0.8 / 0.9 / 1.1 / 1.15 / 1.2 / 1.3 / 1.45 / 1.6 / 2.0 / 3.0 it gives
+# 0.961 / 0.939 / 1.000 / 1.000 / 1.000 / 0.998 / 0.999 / 0.995 / 0.998 / 0.999 / 0.988 / 0.996 -- never once
+# above 1.000. So does a centre-of-mass error (5 / 20 / 50 mm: 1.000 / 1.000 / 1.000) and an unmodelled joint
+# spring (0.02 ... 1.0 x kp: 1.000 throughout, nothing identified).
+#
+# BUT THE PIN IS THE GRAVITY TERM, not a property of misspecification. Mass carries gravity, a gravity error
+# is a static tracking offset no dissipative or inertial parameter can remove, so it dominates `before` and
+# survives untouched into `after`. Take gravity out of the error and the pin goes with it:
+#
+#   link ROTATIONAL INERTIA only, mass exactly right
+#     x2 1.000 | x5 1.007 | x10 1.181 | x15 1.466 | x20 1.620 | x25 1.707 | x30 1.745 | x40 1.753 | x100 1.650
+#   the applied torque scaled -- wrong gear ratio / torque constant / gearbox efficiency
+#     x0.9 1.467 | x1.1 1.364 | x1.2 1.507 | x1.25 1.536 | x1.35 1.600 | x1.5 1.624 | x1.75 1.647 | x3.0 1.166
+#
+# Both cross 1.0 and both cross the 1.5x THRESHOLD; the measured maximum is 1.753x. And the other half of that
+# sentence -- "the correct floor is a sample and could go lower on a smaller perturbation" -- was the honest
+# half and goes lower than the band survives: the DEFAULT injection at x0.125 reads 3.564 and at x0.0625 reads
+# 1.126 (16/42 identified, correctly specified, REFUSED). So the two populations OVERLAP: correct 1.126 against
+# misspecified 1.753. No threshold on this quantity can separate them. The threshold is NOT moved -- see the
+# constant's docstring for why raising it would be the same fiction wearing a bigger number.
+# --------------------------------------------------------------------------------------------------------
+
+#: The plant receives 1.25x the torque the log records. Chosen as the SMALLEST point on the measured curve
+#: that clears the gate (x1.2 reads 1.507, x1.25 1.536), so this is the tightest form of the claim rather than
+#: the most dramatic one. "gear ratio" is listed in ``fit_parameters``' own ``assumed_correct``.
+TORQUE_SCALE = 1.25
+#: Link rotational inertia with mass held EXACTLY right, near the peak of its curve (x30 1.745, x40 1.753).
+#: In the only units that mean anything it is a +60% error (median; 32-66% across the 14 joints) in each
+#: joint's own diag(M) -- the quantity armature adds to.
+INERTIA_SCALE = 30.0
+
+
+@pytest.fixture(scope="module")
+def torque_scale_misspecified(dog, plan):
+    """A fit against hardware whose joints receive more torque than the log says -- an error no fitted
+    parameter can REPORT and all three can largely ABSORB."""
+    from virturoid.services.sysid import fit_parameters
+    from virturoid.services.sysid.synthetic_hardware import synthetic_hardware_log
+
+    _, lg = synthetic_hardware_log(dog, perturbation={}, delay_ticks=0, plan=plan, torque_scale=TORQUE_SCALE)
+    return lg, fit_parameters(dog, lg, plan=plan, n_boot=64, measure_delay=False)
+
+
+@pytest.fixture(scope="module")
+def inertia_misspecified(dog, plan):
+    """A fit against hardware whose link INERTIA is wrong and whose MASS is right -- so there is no gravity
+    signature at all and the whole error sits in the qdd term armature owns."""
+    from virturoid.services.sysid import fit_parameters
+    from virturoid.services.sysid.synthetic_hardware import synthetic_hardware_log
+
+    _, lg = synthetic_hardware_log(dog, perturbation={}, delay_ticks=0, plan=plan, inertia_scale=INERTIA_SCALE)
+    return lg, fit_parameters(dog, lg, plan=plan, n_boot=64, measure_delay=False)
+
+
+def test_a_torque_scale_error_CLEARS_the_tracking_gate_and_reaches_the_model(dog, plan,
+                                                                            torque_scale_misspecified):
+    """THE RETRACTION, asserted so it cannot be quietly reinstated: a misspecification PASSES.
+
+    A wrong gear ratio, a wrong torque constant or an unmodelled gearbox efficiency means the joint receives
+    ``g`` times the torque the log records. That is algebraically the same as dividing inertia, damping and
+    friction by ``g`` -- every one of which this estimator can move -- so the fit reproduces the plant almost
+    exactly and the simulator really does get closer. What it cannot move is GRAVITY, which is the only reason
+    the ratio saturates around 1.65 instead of running away.
+
+    The numbers it writes are wrong in the way this section exists to catch: they are the true parameters
+    scaled by ``(1 - g)/g``, their intervals exclude the true unchanged values, and at 1.25 they clear the gate
+    and are applied to the customer's compiled model.
+    """
+    from virturoid.services.gene_compiler import compile_gene_to_mjcf
+    from virturoid.services.sysid import MIN_TRACKING_IMPROVEMENT_X, apply_calibration
+
+    log, fit = torque_scale_misspecified
+    app = fit["application"]
+    assert app["improvement_x"] >= MIN_TRACKING_IMPROVEMENT_X, (
+        f"a torque-scale error of {TORQUE_SCALE:g}x now scores {app['improvement_x']}x against the "
+        f"{MIN_TRACKING_IMPROVEMENT_X}x gate, i.e. it is REFUSED. Measured 1.536x when this was written. If it "
+        f"is genuinely under the threshold again, the retraction in the block above is stale and the "
+        f"'a misspecification can never improve tracking' claim may be reinstated -- deliberately, in writing, "
+        f"with the whole family re-swept, not by deleting this test")
+    assert app["passed"] is True and app["provisional"] is False, app["verdict"]
+
+    # ...and the numbers are WRONG, which is what makes the pass a defect rather than a success.
+    wrong = [(n, p) for n, r in fit["joints"].items() for p in r["identified"]
+             if not (r["parameters"][p]["delta_interval"][0] <= 0.0 <= r["parameters"][p]["delta_interval"][1])]
+    assert len(wrong) >= 20, (
+        f"only {len(wrong)} identified cells have an interval EXCLUDING the true (unchanged) value; measured "
+        f"25 of 25. Without those this fit would just be a good fit and there would be nothing to report")
+
+    # THE MECHANISM, not just the number: every delta is its own prior times (1 - g)/g.
+    import numpy as np
+
+    from virturoid.services.sysid.bench_rig import bench_model, joint_dof_map
+
+    model, _ = bench_model(dog)
+    dofs = joint_dof_map(model, dog)
+    predicted = (1.0 - TORQUE_SCALE) / TORQUE_SCALE
+    got = float(np.median([fit["joints"][n]["parameters"]["damping"]["delta"] / float(model.dof_damping[a])
+                           for n, a in dofs.items() if n in fit["joints"]]))
+    assert 0.7 <= got / predicted <= 1.8, (
+        f"the fitted damping delta is meant to be the prior times (1-g)/g = {predicted:.3f}; it came back at "
+        f"{got:.3f} of the prior ({got / predicted:.2f}x predicted, measured 1.25x). If that ratio has moved a"
+        f" long way, the absorption mechanism in this docstring is not the one producing the pass")
+
+    # ...and this is the part that costs a customer: it is applied, with no override asked for.
+    cal = apply_calibration(dog, fit, log=log, plan=plan)
+    assert compile_gene_to_mjcf(cal, include_floor=False) != compile_gene_to_mjcf(dog, include_floor=False), (
+        "the gate passed but nothing reached the model, so some other gate is catching this after all -- find "
+        "it and say so here, because the whole point of this test is that nothing does")
+
+
+def test_a_link_inertia_error_at_correct_mass_is_absorbed_into_armature_and_also_clears_the_gate(
+        dog, plan, inertia_misspecified):  # noqa: C901
+    """The second family, and the one that names the mechanism the module docstring has always described.
+
+    ``PARAMETER_ALSO_ABSORBS['armature']`` says reflected inertia and link inertia enter the joint equation
+    through the same qdd term, so the experiment cannot separate them. When the link error also carries MASS
+    that is a half-truth -- the gravity half is not absorbable and pins the ratio at ~1.0, which is what the
+    band was sized on. Hold mass exactly right and the sentence becomes the whole truth: the fit recovers the
+    inertia error as armature, on 14/14 joints, and the simulator genuinely gets closer.
+
+    HOW REALISTIC THIS ONE IS, said next to the number rather than under it: with mass AND geometry both right
+    a link's own inertia is bounded (dumbbell mL^2/4 vs uniform rod mL^2/12, so ~3x at the very most), which is
+    about +4% of diag(M) and reads 1.005x. This family is what kills "a misspecification never improves
+    tracking AT ALL" -- x5 already reads 1.007 -- and it only reaches the GATE at sizes that need the geometry
+    to be wrong too. The sibling test above is the one whose breach needs nothing unrealistic at all.
+
+    The assertion that pins it is not the score but the SIZE of the armature it invents: the change this
+    misspecification makes to each joint's own diag(M) is computed here from the model, and the fitted armature
+    has to land on it. Measured: median fitted delta 0.0105 against the 0.0094 that would mimic the error
+    exactly.
+    """
+    import numpy as np
+
+    from virturoid.services.sysid import MIN_TRACKING_IMPROVEMENT_X
+    from virturoid.services.sysid.bench_rig import bench_model, joint_dof_map, start_pose
+
+    log, fit = inertia_misspecified
+    app = fit["application"]
+    assert app["improvement_x"] >= MIN_TRACKING_IMPROVEMENT_X, (
+        f"a link-inertia error at correct mass now scores {app['improvement_x']}x against the "
+        f"{MIN_TRACKING_IMPROVEMENT_X}x gate; measured 1.745x. See the sibling test for what a genuine "
+        f"refusal here would mean")
+    assert app["passed"] is True
+
+    arm = {n: r["parameters"]["armature"] for n, r in fit["joints"].items()}
+    assert all(c["identified"] for c in arm.values()), (
+        f"armature was refused on some joint, so this is not the absorption case: "
+        f"{[n for n, c in arm.items() if not c['identified']]}")
+    assert not any(c["delta_interval"][0] <= 0.0 <= c["delta_interval"][1] for c in arm.values()), (
+        "some armature interval covers the true (unchanged) value -- the fit is no longer confidently wrong")
+
+    # THE MECHANISM: what armature would have to be to mimic this error exactly is diag(M(hw)) - diag(M(ours)).
+    import copy
+
+    import mujoco
+
+    model, _ = bench_model(dog)
+    dofs = joint_dof_map(model, dog)
+    q0 = start_pose(model, dog)
+
+    def _diag(m):
+        data = mujoco.MjData(m)
+        data.qpos[:m.nv] = q0
+        mujoco.mj_forward(m, data)
+        full = np.zeros((m.nv, m.nv))
+        mujoco.mj_fullM(m, full, data.qM)
+        return np.diag(full).copy()
+
+    hw = copy.deepcopy(model)
+    hw.body_inertia[1:] = np.asarray(hw.body_inertia[1:], dtype=float) * INERTIA_SCALE
+    d_ours, d_hw = _diag(model), _diag(hw)
+    mimic = float(np.median([d_hw[a] - d_ours[a] for a in dofs.values()]))
+    got = float(np.median([c["delta"] for c in arm.values()]))
+    assert 0.6 <= got / mimic <= 1.8, (
+        f"the fitted armature is meant to land on the joint-space inertia the misspecification added: "
+        f"{got:.5f} against {mimic:.5f} ({got / mimic:.2f}x, measured 1.12x). If it does not, the pass is "
+        f"coming from somewhere other than the armature/link-inertia degeneracy this test names")
+
+    # ...and every one of those 14 misattributed numbers reaches the customer's simulator, because the gate
+    # passed and nothing downstream re-asks the question.
+    from virturoid.services.gene_compiler import compile_gene_to_mjcf
+    from virturoid.services.sysid import apply_calibration, calibration_report
+
+    cal = apply_calibration(dog, fit, log=log, plan=plan)
+    assert compile_gene_to_mjcf(cal, include_floor=False) != compile_gene_to_mjcf(dog, include_floor=False)
+    rep = calibration_report(cal)
+    assert rep["n_changes"] == fit["identified_pairs"] and rep["withheld"] is False, (
+        f"the gate passed but only {rep['n_changes']} of {fit['identified_pairs']} parameters reached the "
+        f"model -- something else is catching this, which would be good news and has to be named here")
 
 
 # --------------------------------------------------------------------------------------------------------

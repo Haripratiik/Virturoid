@@ -945,6 +945,29 @@ def set_payload(gene, *, payload_kg: float = 2.0, girth_scale: bool = True,
     return g, out
 
 
+def _geometry_signature(gene) -> tuple:
+    """Everything about a body an operator could move without changing its part COUNT or its NAMES.
+
+    Used to check the claim "nothing was changed" instead of inferring it from one metadata flag. Names alone
+    are not enough: ``anatomy_compiler._splay_before_substituting`` rotates each leg's proximal MOUNT and
+    "preserves every authored segment, its geometry, its proportions and its part count" -- a real change to the
+    robot the customer gets back, invisible to a name-list comparison.
+    """
+    def _vec(v):                                             # a vector field may be list/tuple/ndarray/None --
+        try:                                                 # `v or ()` would raise on an ndarray, so never do that
+            return tuple(float(x) for x in v) if v is not None else ()
+        except TypeError:                                    # a scalar (or anything unindexable) is its own value
+            return (v,)
+
+    return tuple((getattr(s, "name", None), getattr(s, "parent", None), getattr(s, "shape", None),
+                  getattr(s, "length_m", None), getattr(s, "radius_m", None),
+                  _vec(getattr(s, "mount_offset", None)), _vec(getattr(s, "mount_euler", None)),
+                  getattr(s, "joint_type", None), _vec(getattr(s, "joint_axis", None)),
+                  getattr(s, "joint_lower", None), getattr(s, "joint_upper", None),
+                  getattr(s, "mass_kg", None))
+                 for s in getattr(gene, "segments", ()) or ())
+
+
 # op name -> callable(gene, **args). The typed operator library the intent-classifier maps requests onto.
 def adopt_walkable_template(gene, **_):
     """B2: EXPLICITLY replace an imported/composed quadruped's body with a size-matched walkable fanned template.
@@ -955,22 +978,62 @@ def adopt_walkable_template(gene, **_):
     sweep behind this line it was also the only one whose diff carried no ``mass`` block at all -- measured on a
     real Go2, it returned 20 template segments weighing 9.793 kg in place of 13 links weighing 15.207, and said
     so nowhere in numbers. The ledger is the same one every other operator reports, so "what did I get back"
-    has one answer everywhere; ``n_existing_links_dropped`` is what makes a wholesale swap visible in it."""
+    has one answer everywhere; ``n_existing_links_dropped`` is what makes a wholesale swap visible in it.
+
+    WHAT IT ACTUALLY DOES WHEN IT FIRES, measured 2026-08-12 through this operator (nothing anywhere proved
+    this before -- see tests/test_import_verify_honesty.py): on a real Menagerie ``unitree_go2`` it takes the
+    body from 0.000 m / CROUCH to 1.998 m / CREDIBLE WALK, and on the fixed-base fixture quad in that test file
+    from 0.000 m / SLIDE to 1.356 m / CREDIBLE WALK. It works -- at the price of every one of the customer's
+    links, which is what the mass ledger is for.
+
+    A REFUSAL IS AN ANSWER AND MUST NAME ITSELF (2026-08-12). All of the above is the ADOPT case; the DECLINE
+    case said ONE sentence for eight different situations -- "the original body already walks or no better
+    template was found -- unchanged". MEASURED through this operator on three real bodies: a Menagerie
+    ``unitree_g1`` (30 links, 33.341 kg, 0.000 m, CROUCH), the already-walking ingest fixture quad (1.604 m,
+    CREDIBLE WALK), and a composed 6-axis arm all got that identical string. For the humanoid its first
+    disjunct is FALSE, and its second implies we measured a template against their body when we never left the
+    robot-class check; for the arm it is meaningless. Meanwhile ``input_training_tools._ingest_project`` tells
+    the SAME humanoid the true reason, in the same session -- two surfaces answering one question in two
+    framings is the #215/#218 shape. ``ensure_walkable_quad`` now reports WHICH unchanged-return fired, so the
+    sentence a customer reads is the branch that actually ran, and ``declined.reason`` carries it
+    machine-readably the way every other refusal in the amend surface does."""
     from virturoid.services.anatomy_compiler import ensure_walkable_quad
     from virturoid.services.gene_build import grounding_config
     before = len(gene.segments)
     before_mass = {s.name: float(s.mass_kg or 0.0) for s in gene.segments}
-    new = ensure_walkable_quad(gene, "adopt walkable template", force=True)
+    before_geom = _geometry_signature(gene)                  # captured BEFORE the call: some paths return a
+    why: dict = {}                                           # modified body, some mutate this one's metadata
+    new = ensure_walkable_quad(gene, "adopt walkable template", force=True, decline=why)
     applied = bool(dict(getattr(new, "metadata", None) or {}).get("walkability_fallback", {}).get("applied"))
     mass = _mass_ledger(before_mass, new,
                         added={s.name for s in new.segments} - set(before_mass),
                         preserved=bool(grounding_config(gene)["preserve_mass"]))
-    return new, {"op": "adopt_walkable_template", "applied": applied, "segments_before": before,
-                 "segments_after": len(new.segments), "mass": mass,
-                 "note": (f"adopted a size-matched walkable template: {mass['n_existing_links_dropped']} of your "
-                          f"link(s) were replaced and the robot went {mass['total_mass_kg'][0]:.3f} -> "
-                          f"{mass['total_mass_kg'][1]:.3f} kg (undo restores your original body)" if applied
-                          else "the original body already walks or no better template was found -- unchanged")}
+    out = {"op": "adopt_walkable_template", "applied": applied, "segments_before": before,
+           "segments_after": len(new.segments), "mass": mass,
+           "note": (f"adopted a size-matched walkable template: {mass['n_existing_links_dropped']} of your "
+                    f"link(s) were replaced and the robot went {mass['total_mass_kg'][0]:.3f} -> "
+                    f"{mass['total_mass_kg'][1]:.3f} kg (undo restores your original body)" if applied
+                    else "")}
+    if not applied:
+        # "NOTHING WAS CHANGED" IS A CLAIM, SO COMPUTE IT. ``applied`` reads ONE metadata key
+        # (``walkability_fallback``), and ``ensure_walkable_quad`` has a path -- ``_splay_before_substituting``
+        # -- that keeps every authored part but WIDENS THE STANCE and returns that, setting a different key. A
+        # note that said "unchanged" off ``applied`` alone would be false there. (Measured: an ingested body
+        # cannot reach that path at all -- imports carry no ``metadata['grounding']``, which the splay is gated
+        # on -- but a grounded composed body can, so this is computed rather than assumed.)
+        untouched = before_geom == _geometry_signature(new)
+        out["geometry_unchanged"] = untouched
+        out["note"] = ("nothing was changed -- your body was kept as-is" if untouched else
+                       "no template was substituted, but your body's own geometry WAS adjusted in place "
+                       "(see the mass ledger and design_delta; edit_robot op:'undo' restores it)")
+        # NEVER INVENT A REASON. If the compiler named none, say exactly that instead of reaching for a
+        # plausible-sounding catch-all -- reaching for one is how the wrong claim shipped in the first place.
+        out["declined"] = dict(why) if why.get("reason") else {
+            "reason": "unreported",
+            "detail": "the walkability check returned your body without naming a reason -- no template was "
+                      "substituted"}
+        out["note"] += f" -- {out['declined'].get('detail') or out['declined'].get('reason')}"
+    return new, out
 
 
 OPERATORS = {
