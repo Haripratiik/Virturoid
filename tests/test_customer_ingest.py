@@ -127,11 +127,32 @@ class IngestAndAdoptE2ETests(unittest.TestCase):
         self.assertTrue(r["robot_id"])
         self.assertTrue(r.get("control_scripts"), "a dropped control script must be surfaced for adopt_control_script")
 
-    def test_ingested_quadruped_is_honestly_verified_then_walks_on_opt_in(self):
+    def test_ingested_quadruped_is_honestly_verified_and_never_silently_swapped(self):
         # B2 (2026-07-24 audit): the ingest must NOT silently swap the customer's body for a walkable template and
         # report the template's walk as the customer's. It KEEPS the imported geometry, classifies it legged, and
-        # reports ITS honest verdict; the walkable template is an EXPLICIT opt-in (adopt_walkable_template) that
-        # then walks. (Was: auto-swap -> "the ingested quadruped walks" -- a walk that wasn't the customer's.)
+        # reports ITS honest verdict. (Was: auto-swap -> "the ingested quadruped walks" -- a walk that wasn't the
+        # customer's.)
+        #
+        # THE SECOND HALF WAS RE-ANCHORED 2026-08-12 ON A MEASUREMENT, NOT WEAKENED TO GO GREEN. It used to
+        # assert that opting into the walkable template "then walks". MEASURED on THIS fixture: the imported body
+        # ALREADY walks -- 1.604 m, and ``gait_quality.classify`` on that same rollout returns CREDIBLE WALK
+        # (straightness 0.825, upright_frac 1.0, cadence 33.33, survived). So there is nothing for a template to
+        # improve: ``walkable_template_offer`` is correctly WITHHELD, and ``ensure_walkable_quad`` correctly
+        # returns the body UNCHANGED (its documented "sleek-when-possible" rule). The old assertion demanded a
+        # substitution the product is right to refuse -- it was asserting the B2 DEFECT, not the B2 fix, and it
+        # only ever passed back when the swap was automatic.
+        #
+        # What replaces it is STRICTLY STRONGER on the property B2 exists to protect: on a body that already
+        # walks, the customer's geometry survives the opt-in BYTE-IDENTICAL. If a future change makes
+        # ``adopt_walkable_template`` swap a walking customer body, or makes the ingest offer a template to one,
+        # this test fails.
+        #
+        # KNOWN COVERAGE GAP, stated rather than papered over: the opt-in's ability to actually HELP a body that
+        # genuinely cannot walk is not covered anywhere. `test_import_verify_honesty
+        # ::test_walkable_template_is_opt_in_and_undoable` looks like it does and does not -- it asserts only
+        # that `undo` restores the original body, and never asserts the adopt changed anything, so it passes
+        # whether or not the template was ever applied. Closing that needs a fixture quadruped that fails the
+        # gait gate, which this file does not have.
         from virturoid.services import session_state as S
         from virturoid.services.agent_tools import call_tool
         from virturoid.services.input_training_tools import _ingest_project
@@ -143,14 +164,30 @@ class IngestAndAdoptE2ETests(unittest.TestCase):
         # the held robot is the customer's OWN geometry, classified legged, honestly verified
         v = call_tool("verify_robot", {"robot_id": r["robot_id"], "mode": "quick"}).get("result", {})
         self.assertEqual(v.get("kind"), "legged")
-        self.assertIsNotNone(r.get("imported_verdict"))
+        iv = r.get("imported_verdict")
+        self.assertIsNotNone(iv)
         held = [s.name for s in S.get_robot(r["robot_id"]).segments]
         self.assertNotIn("neck", held)                       # not a composed template body
-        # opting into the walkable template makes it walk (the capability is offered, not forced)
+
+        # the distance is attributed to the controller that produced it. verify_robot withholds a locomotion
+        # verdict for this robot precisely because the gait is ours; the ingest report must not quietly imply
+        # otherwise by calling it the customer's walk.
+        self.assertIn("walks_under_our_scripted_gait", iv,
+                      "the imported distance must not be reported as an unattributed 'walks_as_imported'")
+        self.assertIn("OURS, not yours", iv.get("controller", ""),
+                      f"imported_verdict must name whose controller produced {iv.get('distance_m')} m")
+        self.assertIsNone(v.get("locomotion_verdict"),
+                          "verify_robot must still withhold a locomotion verdict without the customer's controller")
+
+        # this body already walks credibly under our gait, so no template is offered...
+        self.assertIsNone((r.get("walkable_template_offer") or {}).get("available"),
+                          "a template must not be offered to a body that already walks")
+        # ...and opting in anyway must NOT cost the customer their geometry.
+        before = [s.name for s in S.get_robot(r["robot_id"]).segments]
         call_tool("edit_robot", {"robot_id": r["robot_id"], "ops": [{"op": "adopt_walkable_template"}]})
-        v2 = call_tool("verify_robot", {"robot_id": r["robot_id"], "mode": "quick"}).get("result", {})
-        self.assertTrue(v2.get("credible_walk"),
-                        f"the adopted walkable template must walk, got: {v2.get('verdict')}")
+        after = [s.name for s in S.get_robot(r["robot_id"]).segments]
+        self.assertEqual(before, after,
+                         "adopt_walkable_template replaced a body that already walks -- that is the B2 defect")
 
     def test_adopt_control_script_utilises_and_improves(self):
         # the user's controller RUNS in our sim and the sim tunes it -> credible walk that beats it (on a body our

@@ -2,6 +2,9 @@
 real actuator by torque, the class's sensor suite (a humanoid's camera eyes, an arm's F/T sensor), materials,
 compute and power, with rolled-up totals."""
 
+import importlib.util
+import os
+import re
 import unittest
 
 from virturoid.services.anatomy_compiler import build_from_anatomy
@@ -259,6 +262,130 @@ class BomTests(unittest.TestCase):
         md = format_bom_markdown(bom)
         self.assertIn("Bill of Materials", md)
         self.assertIn("| Part |", md)
+
+
+# ---------------------------------------------------------------------------------------------------------
+# THE DEFECT (2026-08-12, real MuJoCo Menagerie Unitree Go2 through ``agent_tools.call_tool`` +
+# ``export_held``, reading the WRITTEN bom.json / spec_sheet.md):
+#
+#   spec_sheet.actuation.peak_joint_torque_nm : 360.0     <- the CATALOG PART's rating
+#   robot.xml, same package, forcerange       : 45.43     <- the ROBOT
+#   totals.price_usd                          : $7,614    <- $3,600 of it motors already on the machine
+#
+# Both halves are the same mistake: a fact about the part we would sell, asserted about the customer's robot.
+# Every test below reads the number the customer's own file states and the number we report, and asserts they
+# are either the same or explicitly different things.
+# ---------------------------------------------------------------------------------------------------------
+_MENAGERIE = os.path.join(os.path.expanduser("~"), ".cache", "robot_descriptions", "mujoco_menagerie")
+
+
+def _go2():
+    """The customer's own Go2, imported exactly as the product imports it."""
+    p = os.path.join(_MENAGERIE, "unitree_go2", "go2.xml")
+    if not os.path.exists(p):
+        raise unittest.SkipTest(f"MuJoCo Menagerie not cached at {p}")
+    from virturoid.services.robot_import import import_robot
+    g = import_robot(p)["gene"]
+    assert g is not None, "go2 did not import"
+    return g
+
+
+@unittest.skipUnless(importlib.util.find_spec("mujoco") is not None, "importing a real robot needs MuJoCo")
+class APartsRatingIsNotTheRobotsCapability(unittest.TestCase):
+    def test_the_bom_states_the_robots_own_joint_limits_read_from_their_file(self):
+        """The Go2's file declares 23.7 N.m on hip/thigh and 45.43 on the calf. Those numbers -- not the
+        rating of whatever catalog motor covers them -- are what the BOM must state as the robot's."""
+        bom = build_bom(_go2(), task="")
+        jl = bom["joint_limits"]
+        self.assertEqual(jl["peak_joint_torque_nm"], 45.43,
+                         "the robot's peak joint torque is its OWN declared limit")
+        self.assertTrue(jl["declared_by_your_model"])
+        self.assertEqual(jl["n_declared_by_your_model"], 12, "all 12 limits come from the customer's file")
+        limits = sorted({row["limit"] for row in jl["per_joint"].values()})
+        self.assertEqual(limits, [23.7, 45.43], "hip/thigh 23.7, calf 45.43 -- verbatim from go2.xml")
+        for row in jl["per_joint"].values():
+            self.assertEqual(row["source"], "your model")
+            self.assertTrue(row["declared_in"], "say WHERE in their file it was read")
+
+    def test_the_catalog_rating_still_ships_but_is_never_the_robots_number(self):
+        """The part rating is useful (it is the headroom the certificate grades) and must stay -- labelled.
+        It is also ALWAYS >= the joint it covers, which is exactly why reading it as the robot's can only
+        ever overstate: the selection rule guarantees the direction of the error."""
+        bom = build_bom(_go2(), task="")
+        robot_peak = bom["joint_limits"]["peak_joint_torque_nm"]
+        acts = [ln for ln in bom["lines"] if ln["category"] == "actuator"]
+        self.assertTrue(acts)
+        for ln in acts:
+            part_peak = float(re.search(r"peak\s+([\d.]+)\s*Nm", ln["detail"]).group(1))
+            self.assertGreaterEqual(part_peak, robot_peak)
+            self.assertIn("the PART's datasheet, NOT your robot's", ln["detail"])
+            self.assertIn("YOUR ROBOT's own limit", ln["detail"])
+
+    def test_motors_already_bolted_to_the_machine_are_not_billed(self):
+        """$3,600 of 'EQUIVALENT for a motor already fitted to your robot' sat inside the headline price of a
+        machine the customer already owns and told us to keep. The line stays (an engineer wants the part
+        number and the replacement price); the BILL does not charge for it."""
+        bom = build_bom(_go2(), task="")
+        t = bom["totals"]
+        acts = [ln for ln in bom["lines"] if ln["category"] == "actuator"]
+        actuator_money = round(sum(ln["price_usd"] for ln in acts), 2)
+        self.assertGreater(actuator_money, 1000.0, "this Go2 is exactly the case where money was invented")
+        for ln in acts:
+            self.assertFalse(ln["in_price_total"], f"{ln['part']} is already on the machine; do not bill it")
+            self.assertFalse(ln["in_mass_total"])
+            self.assertGreater(ln["price_usd"], 0.0, "priced as a replacement option, not silently zeroed")
+        self.assertAlmostEqual(t["already_fitted_usd"], actuator_money, places=2)
+        self.assertAlmostEqual(t["price_usd"] + t["already_fitted_usd"], t["catalog_list_price_usd"], places=2)
+        self.assertLess(t["price_usd"], actuator_money,
+                        "the bill for a machine you already own must be smaller than its motors")
+        self.assertIn("replacement", t["already_fitted_note"])
+        # ...and the cost story explains THE BILL, not a total nobody is being charged.
+        cd = bom["cost_drivers"]
+        self.assertAlmostEqual(sum(cd["by_category"].values()), t["price_usd"], places=1)
+        self.assertNotIn("actuator", cd["by_category"])
+        self.assertAlmostEqual(cd["excluded_already_fitted_usd"], actuator_money, places=2)
+
+    def test_the_written_markdown_says_both_numbers(self):
+        md = format_bom_markdown(build_bom(_go2(), task=""))
+        self.assertIn("This robot's actuation capability", md)
+        self.assertIn("45.43 N.m", md)
+        self.assertIn("You are not being billed for hardware you already own", md)
+        self.assertIn("Where each number comes from", md)
+
+    def test_the_provenance_table_names_the_catalog_assumptions(self):
+        """The sweep: voltage, gear ratio and joint speed are the PART's/our model's, never read from the
+        customer's file, and the table has to say so rather than leaving them beside a real measurement."""
+        prov = build_bom(_go2(), task="")["spec_provenance"]
+        self.assertIn("imported", prov["robot_is"])
+        blob = " ".join(f"{r['field']} {r['source']} {r['evidence']}" for r in prov["fields"])
+        for token in ("voltage", "gear ratio", "current", "joint SPEED"):
+            self.assertIn(token, blob, f"the table must rule on {token}")
+        torque_row = next(r for r in prov["fields"] if "joint_limits" in r["field"])
+        self.assertIn("READ from your model", torque_row["source"])
+        part_row = next(r for r in prov["fields"] if "lines[actuator]" in r["field"])
+        self.assertIn("catalog", part_row["source"])
+
+
+class ARobotWeDesignedIsBilledForEveryPart(unittest.TestCase):
+    """The refusal must be narrow. A robot we composed does not exist yet, so every line IS a purchase and its
+    joint limit IS the peak of the motor we chose -- there is no customer machine to contrast it with."""
+
+    def test_every_line_is_in_the_bill_and_there_is_no_already_fitted_split(self):
+        bom = build_bom(build_from_anatomy(QUAD))
+        t = bom["totals"]
+        self.assertTrue(all(ln["in_price_total"] for ln in bom["lines"]))
+        self.assertNotIn("already_fitted_usd", t)
+        self.assertAlmostEqual(t["price_usd"], round(sum(ln["price_usd"] for ln in bom["lines"]), 2), places=2)
+
+    def test_the_joint_limits_are_still_the_bodys_own_not_a_restated_part_rating(self):
+        g = build_from_anatomy(QUAD)
+        bom = build_bom(g)
+        jl = bom["joint_limits"]
+        self.assertFalse(jl["declared_by_your_model"])
+        self.assertEqual(jl["n_joints"], len(g.actuated_joints()))
+        by_seg = {s.name: abs(float(s.actuator_torque_nm or 0.0)) for s in g.actuated_joints()}
+        for name, row in jl["per_joint"].items():
+            self.assertAlmostEqual(row["limit"], round(by_seg[name], 3), places=3)
 
 
 if __name__ == "__main__":

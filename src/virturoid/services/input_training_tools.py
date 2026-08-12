@@ -524,7 +524,31 @@ def _ingest_project(args: dict) -> dict:
     optional BOM/CAD) plus an NLP description ("aluminum body, carbon-fiber legs, 5 kg payload, 6-DOF arm"), and
     gets back ONE unified, immediately-editable RobotGene held in the session -- the user's stated materials +
     load already applied, with a project graph + BOM/CAD summary + honest per-step warnings. It ORCHESTRATES the
-    importers already built (classifier, robot_import, bom_importer, cad_importer) + nlp_properties + edit_operators."""
+    importers already built (classifier, robot_import, bom_importer, cad_importer) + nlp_properties + edit_operators.
+
+    THE CUSTOMER'S FOLDER IS READ-ONLY FOR THE WHOLE OF THIS CALL. Two writes into it were measured on a real
+    Menagerie Go2 (a prep copy in ``model_import``, the report in ``_persist_ingestion_report``); both are
+    fixed at their own site, and this wrapper is what stops the third. It has to sit at the DOOR rather than
+    at each writer, because an ingest fans out through the classifier, three importers, the grounding pass
+    and the edit operators -- "every write reachable from an ingest" is not a list anyone can keep current by
+    reading. A refusal is recorded and surfaced in ``source_folder_protection`` rather than swallowed.
+    """
+    from virturoid.services import source_guard
+    target = (args or {}).get("project_path") or (args or {}).get("path")
+    with source_guard.read_only(target) as guard:
+        result = _ingest_project_inner(args)
+        report = guard.report()
+    if report and isinstance(result, dict):
+        result["source_folder_protection"] = report
+        _finding(result, _WARN, f"WE TRIED TO WRITE INTO YOUR PROJECT FOLDER - {report['n_blocked_writes']} "
+                                f"write(s) into {report['source_folder']} were refused; your files are "
+                                f"unchanged. This is a Virturoid defect — see source_folder_protection.")
+        _finalize_ingest(result)
+    return result
+
+
+def _ingest_project_inner(args: dict) -> dict:
+    """The ingest itself. Always called through :func:`_ingest_project`, which owns the read-only guarantee."""
     import shutil
 
     args = args or {}
@@ -692,9 +716,34 @@ def _ingest_project(args: dict) -> dict:
             _kind = getattr(gene, "robot_class", "")
     if gene is not None and _kind == "legged":
         try:
-            own = float(evaluate_robot(gene).get("value", 0.0))
-            result["imported_verdict"] = {"walks_as_imported": own >= 0.5, "distance_m": round(own, 3),
-                                          "body": "the customer's own imported geometry (not a substitute)"}
+            # WHOSE CONTROLLER PRODUCED THIS NUMBER IS PART OF THE NUMBER. Until 2026-08-12 this read
+            # ``walks_as_imported: own >= 0.5`` over "the customer's own imported geometry", which a customer
+            # reads as "my robot walks". It is OUR scripted gait driving THEIR body -- the very attribution
+            # ``verify_robot`` refuses to make (it returns ``locomotion_verdict: None`` and the "NO LOCOMOTION
+            # VERDICT -- we do not have your robot's controller" lead for the same robot, in the same session).
+            # Two surfaces answering the same question with different framings is how #215/#218 happened.
+            #
+            # The bare ``>= 0.5`` is also the wrong gate on its own: ``forward`` is world-frame delta-x, so a
+            # body going round in a circle books its far side as travel. ``classify`` is the code-owned
+            # un-gameable verdict and is what the rest of the product is judged by, so it is what is reported
+            # here. MEASURED on the tests/test_customer_ingest fixture quad: 1.604 m, CREDIBLE WALK
+            # (straightness 0.825, upright_frac 1.0, cadence 33.33) -- the threshold and the classifier agree
+            # on THIS body, which is exactly why the disagreement had gone unnoticed.
+            _ev = evaluate_robot(gene)
+            own = float(_ev.get("value", 0.0))
+            try:
+                from virturoid.services import gait_quality as _gq
+                _own_verdict = _gq.classify(_ev.get("detail") or {}) or None
+            except Exception:  # noqa: BLE001 - the distance still stands if the classifier cannot be run
+                _own_verdict = None
+            result["imported_verdict"] = {
+                "walks_under_our_scripted_gait": own >= 0.5, "distance_m": round(own, 3),
+                "verdict": _own_verdict,
+                "body": "the customer's own imported geometry (not a substitute)",
+                "controller": "OURS, not yours -- we do not have your controller. This is what YOUR BODY did "
+                              "under a gait we wrote for it, which is why verify_robot withholds a locomotion "
+                              "verdict for this robot. adopt_control_script runs your parameters on it; "
+                              "train_reward learns a controller for the real body."}
             if own < 0.5:
                 # measure (do NOT adopt) what a walkable template would do, so the offer is honest + quantified.
                 # The reference template is a QUADRUPED fan/crawl recipe, so it is only offered to quadruped-
@@ -862,6 +911,21 @@ def _ingest_project(args: dict) -> dict:
                 f"are untouched, and this is the same body the export door produces")
             result["geometry_changed_links"] = sorted(_grew)[:12]
 
+    # 4c) SAY WHERE THIS BODY CAME FROM. `design_source` defaults to "unknown" on RobotGene, and the import
+    # path never overwrote it -- so `get_robot` on a Go2 read straight off a named file answered
+    # `design_source: "unknown"`, which is not modesty, it is the one fact about provenance we most certainly
+    # had. "imported" is the existing vocabulary (`desktop._DESIGN_SOURCE_LABEL` already renders it as
+    # "imported model"), and it is deliberately NOT in `design_cassette.MODEL_AUTHORED_SOURCES`, so an
+    # imported body still counts as not-model-authored in the design-bench funnel.
+    #
+    # Keyed on `metadata['imported_from']` -- the flag `robot_import` sets when a real model file produced
+    # this body -- so it can never fire on a body composed from the description. That matters: the
+    # substitution gate in 6b reads `design_source` to catch an anatomy-composed body wearing a "faithful"
+    # lane label, and stamping it here would have blinded exactly that gate.
+    if str((getattr(gene, "metadata", None) or {}).get("imported_from") or ""):
+        if str(getattr(gene, "design_source", "") or "").lower() in ("", "unknown"):
+            gene.design_source = "imported"
+
     # 5) hold the unified robot in the session so it's immediately editable / verifiable
     from virturoid.services import session_state as S
     result["robot_id"] = S.put_robot(gene, prompt=(description[:120] or "ingested robot"),
@@ -965,7 +1029,10 @@ def _ingest_project(args: dict) -> dict:
     _finalize_ingest(result)
     report = _ingestion_report(result)
     result["ingestion_report"] = report
-    _persist_ingestion_report(report, scan_root if (path and not str(path).lower().endswith(".zip")) else path)
+    written = _persist_ingestion_report(
+        report, scan_root if (path and not str(path).lower().endswith(".zip")) else path)
+    if written:
+        result["ingestion_report_path"] = written
 
     if workdir:
         shutil.rmtree(workdir, ignore_errors=True)
@@ -1013,16 +1080,27 @@ def _ingestion_report(result: dict) -> dict:
             "lane_used": result.get("lane_used"), "lanes_attempted": result.get("lanes_attempted", [])}
 
 
-def _persist_ingestion_report(report: dict, project_dir) -> None:
-    """Write ingestion_report.json next to the project (best-effort; a write failure never sinks an ingest)."""
+def _persist_ingestion_report(report: dict, project_dir) -> str | None:
+    """Write ingestion_report.json UNDER build/, and return where it landed.
+
+    It used to be written "next to the project", which put a Virturoid artifact inside the folder the
+    customer pointed us at -- measured on a real Menagerie Go2, an ingest left
+    ``unitree_go2/ingestion_report.json`` in their tree. Convenient, and not ours to do: that folder can be
+    a git checkout with a dirty-tree gate, a read-only mount, or a vendor drop nobody may modify. Keyed on
+    the source path by ``source_guard.staging_dir`` so two projects never overwrite each other's report.
+
+    Returns the path so the ingest result can NAME it -- a report the customer cannot find is a report that
+    did not happen, and moving it silently would just trade one honesty gap for another.
+    """
     import json
     try:
-        base = project_dir if (project_dir and os.path.isdir(str(project_dir))) else "build"
-        out = os.path.join(str(base), "ingestion_report.json")
+        from virturoid.services import source_guard
+        out = source_guard.staging_dir(project_dir or "project", kind="ingest") / "ingestion_report.json"
         with open(out, "w", encoding="utf-8") as fh:
             json.dump(report, fh, indent=2, ensure_ascii=False)
+        return str(out)
     except Exception:  # noqa: BLE001 - reporting is additive
-        pass
+        return None
 
 
 def _adopt_control_script(args: dict) -> dict:

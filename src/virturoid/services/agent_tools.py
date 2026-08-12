@@ -374,14 +374,28 @@ _LITERAL_TYPE = {bool: "boolean", int: "integer", float: "number", str: "string"
 _ACCEPTED_CACHE: dict = {}
 
 
-def _accepted_params(handler) -> dict[str, dict]:
+def _accepted_params(handler, _seen: frozenset = frozenset()) -> dict[str, dict]:
     """Every key ``handler`` pulls out of its args dict, with the type/default it is read with.
 
     Reads the handler's own AST for ``args["k"]``, ``args.get("k")`` and ``args.pop("k")`` (including the
     ``(args or {}).get("k")`` guard idiom), and infers the JSON-Schema type from the coercion wrapped around the
-    read (``int(...)``/``float(...)``/``bool(...)``/``str(...)``) or from a literal default. Deliberately
-    one-sided: a key forwarded wholesale to another function (``probe(gene, args)``) is not detected, so this
-    UNDER-reports rather than inventing parameters no handler honours.
+    read (``int(...)``/``float(...)``/``bool(...)``/``str(...)``) or from a literal default.
+
+    IT FOLLOWS A WHOLESALE FORWARD (``_inner(args)``), and that is not a refinement — it is the fix for a
+    measured capability regression. This used to stop at the handler's own body and call the blind spot
+    harmless, on the reasoning that it "UNDER-reports rather than inventing parameters no handler honours".
+    Under-reporting is not the safe side here: ``_publish_accepted_params`` PUBLISHES what this returns, so a
+    key it cannot see is a key that DISAPPEARS from the tool's advertised schema. When ``ingest_project``'s
+    body moved behind a one-line read-only wrapper, ``nlp`` — the documented alias an agent uses to send
+    "aluminium chassis, carbon-fibre legs, 5 kg payload" — vanished from the schema while the handler went on
+    honouring it. Nothing was removed and nothing was deprecated; the parameter simply stopped being
+    advertised, which is the drift this whole file exists to prevent, arriving through the one door that was
+    left open on purpose.
+
+    Following is still one-sided in the safe direction: only a call passing the args dict ITSELF is followed
+    (``probe(gene, args)`` qualifies; ``probe(gene, args["spec"])`` does not), only to a function this module
+    can resolve and read source for, and ``_seen`` stops a recursive or mutually-recursive pair. A key found in
+    the wrapper keeps ITS type — the outer read is the more specific one.
 
     Memoized per process. ``inspect.getsource`` reads the file by LINE NUMBER, so a source file edited while
     this process is alive makes a later call disagree with the one that built the schema; the first read — at
@@ -435,6 +449,7 @@ def _accepted_params(handler) -> dict[str, dict]:
             prop.setdefault("type", _LITERAL_TYPE[type(default.value)])
             prop.setdefault("default", default.value)
 
+    forwarded_to: list[ast.Call] = []
     for node in ast.walk(fn):
         if (isinstance(node, ast.Subscript) and is_args(node.value)
                 and isinstance(node.slice, ast.Constant) and isinstance(node.slice.value, str)):
@@ -443,10 +458,35 @@ def _accepted_params(handler) -> dict[str, dict]:
                 and node.func.attr in ("get", "pop") and is_args(node.func.value) and node.args
                 and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str)):
             record(node.args[0].value, node, node.args[1] if len(node.args) > 1 else None)
-    try:
-        _ACCEPTED_CACHE[handler] = found
-    except TypeError:                                          # unhashable handler; recompute next time
-        pass
+        elif isinstance(node, ast.Call) and any(is_args(a) for a in node.args):
+            forwarded_to.append(node)                          # the whole dict went somewhere else; follow it
+
+    # Follow each wholesale forward into the callee and union what IT reads. Resolution is deliberately
+    # narrow — a bare name, or one attribute off a module-level name, both looked up in the handler's OWN
+    # globals — so an unresolvable or dynamically-built callee yields nothing rather than a guess.
+    seen = _seen | {handler}
+    for call in forwarded_to:
+        target, ref = None, call.func
+        if isinstance(ref, ast.Name):
+            target = handler.__globals__.get(ref.id) if hasattr(handler, "__globals__") else None
+        elif isinstance(ref, ast.Attribute) and isinstance(ref.value, ast.Name):
+            owner = handler.__globals__.get(ref.value.id) if hasattr(handler, "__globals__") else None
+            target = getattr(owner, ref.attr, None) if owner is not None else None
+        # A plain function only: it is the case that matters, it is always hashable (so `seen` is safe), and a
+        # class or builtin would just parse to nothing after a pointless `getsource`.
+        if not inspect.isfunction(target) or target in seen:
+            continue
+        for key, derived in _accepted_params(target, seen).items():
+            found.setdefault(key, dict(derived))               # the OUTER read, where there is one, wins
+
+    # Cache only the TOP-level answer. A result computed under a non-empty ``_seen`` may be missing whatever
+    # the cycle-breaker skipped, and storing that would hand a later direct call a silently truncated set —
+    # the same "a key quietly stops being advertised" failure this function was just fixed for.
+    if not _seen:
+        try:
+            _ACCEPTED_CACHE[handler] = found
+        except TypeError:                                      # unhashable handler; recompute next time
+            pass
     return found
 
 

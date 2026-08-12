@@ -10,6 +10,7 @@ the world so verify read "WHEELS OFF GROUND" (#214).
 from __future__ import annotations
 
 import importlib.util
+from pathlib import Path
 
 import pytest
 
@@ -123,10 +124,12 @@ def test_ingest_go2_uses_faithful_lane_and_discloses_it(tmp_path):
     from virturoid.services.input_training_tools import _ingest_project
     (tmp_path / "robot").mkdir()
     shutil.copy(src, tmp_path / "robot" / "go2.urdf")
+    before = {p.relative_to(tmp_path).as_posix() for p in tmp_path.rglob("*")}
     r = _ingest_project({"project_path": str(tmp_path), "description": "a Unitree Go2 quadruped robot dog"})
 
     assert r.get("robot_id")
     assert r["lane_used"] == "faithful", r.get("lanes_attempted")   # disclosure is schema-required
+    assert "gene" in r["lanes_attempted"], r["lanes_attempted"]     # the editable twin was built TOO, not skipped
     f = r["faithful"]
     assert f["ok"] and f["actuated"] >= 12
     kept = " ".join(f["link_names_preserved"])
@@ -134,7 +137,22 @@ def test_ingest_go2_uses_faithful_lane_and_discloses_it(tmp_path):
     assert any(rp["kind"] == "material_normalize" for rp in f["repairs"])
     rep = r["ingestion_report"]
     assert rep["understood"] and set(rep) >= {"understood", "guessed", "dropped", "lane_used"}
-    assert (tmp_path / "ingestion_report.json").exists()
+
+    # The report is WRITTEN and FINDABLE -- but not in the customer's folder. It used to be dropped in beside
+    # their project, which is one of the three writes `source_guard` was built to stop; a report the customer
+    # cannot locate would just trade that for a different dishonesty, so the result NAMES where it landed.
+    written = Path(r["ingestion_report_path"])
+    assert written.is_file()
+    assert tmp_path not in written.parents and written != tmp_path
+
+    # AND THE FOLDER THEY HANDED US IS BYTE-FOR-BYTE UNTOUCHED. This is the regression guard for the defect
+    # that produced this test's last failure: a write into the source folder is refused by `source_guard`, the
+    # refusal makes the twin import RAISE, and the ingest quietly composes a body from the text description --
+    # answering `lane_used: composed_from_description` on a folder holding the customer's actual URDF, which is
+    # #215 reopened. So assert the two together: nothing written, and nothing blocked. Either one alone passes
+    # on a build where the other has broken.
+    assert r.get("source_folder_protection") is None, r.get("source_folder_protection")
+    assert {p.relative_to(tmp_path).as_posix() for p in tmp_path.rglob("*")} == before
 
 
 # --- P0 exposure/honesty: ingestion discoverable + amend reaches hip links -------------------------------

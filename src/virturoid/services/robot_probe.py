@@ -159,10 +159,62 @@ def probe(gene, query: dict | None = None) -> dict:
             s = seg.get(nm[:-6] if nm.endswith("_joint") else nm)
             if s is not None and getattr(s, "actuator_torque_nm", None):
                 rated = float(s.actuator_torque_nm)
-            rows[nm] = {"distal_mass_kg": round(m, 4), "lever_m": round(lever, 5),
-                        "static_hold_nm": round(need, 3), "rated_nm": rated,
-                        "margin": (round(rated / need, 2) if rated and need > 1e-9 else None)}
+            # A MARGIN IS A RATIO, AND A RATIO NEEDS A DENOMINATOR THAT IS A MEASUREMENT.
+            #
+            # The old guard was `need > 1e-9`, which is a float-safety check, not a physics one. Measured on a
+            # Go2 with an arm amended onto it, `arm_1_joint` reported `static_hold_nm: 0.0` and, on the same
+            # row, `margin: 707771.93` -- and the arm's third joint 1663922.19. Nothing is wrong with the
+            # physics: the chain hangs vertically, so `r x F` is ~0 and the joint genuinely carries no gravity
+            # torque. What is wrong is dividing by it and printing the result as a margin. A number like that
+            # is a division by something near zero wearing the costume of a measurement, and it is worse than
+            # no number, because "margin 1.6 million" reads as "enormously safe" when the truth is "this
+            # question has no answer in this pose".
+            #
+            # The threshold is physical rather than numeric: `m*g*|r|` is the torque this load WOULD exert if
+            # the joint axis were oriented to catch all of it, so `need / (m*g*|r|)` is the fraction of the
+            # available gravity torque the axis actually sees (|sin| of the axis-vs-lever angle). Below 0.1%
+            # the joint is gravity-neutral IN THIS POSE and we say so instead of dividing.
+            r_norm = float(np.linalg.norm(r))
+            available = m * 9.81 * r_norm                   # the most gravity could ask of this joint
+            seen = (need / available) if available > 1e-12 else 0.0
+            row = {"distal_mass_kg": round(m, 4), "lever_m": round(lever, 5),
+                   "static_hold_nm": round(need, 3), "rated_nm": rated}
+            if seen < 1e-3:
+                row["margin"] = None
+                row["margin_omitted_because"] = (
+                    f"this joint's axis is gravity-neutral in the measured pose — it catches "
+                    f"{seen * 100:.4f}% of the {available:.3f} N.m the distal mass could exert, so "
+                    f"static_hold_nm is ~0 and rated/required is a division by nothing, not a margin. "
+                    f"Re-probe in a pose where the load is off-axis, or read rated_nm directly.")
+            else:
+                row["margin"] = round(rated / need, 2) if rated else None
+            rows[nm] = row
         rep["torque"] = rows
+        # THE SAME CAVEAT `verify_robot` CARRIES, ON THE SURFACE A CUSTOMER ACTUALLY REACHES FOR.
+        #
+        # `static_hold_nm` answers "what does this joint need to hold the limb BELOW it up" -- and the
+        # question customers bring to it is "can my robot carry the arm I want to bolt on", which is a
+        # different question with a different answer. Measured on a real Go2: mounting a 2.207 kg chain on
+        # `base` left every one of the 12 leg joints BYTE-IDENTICAL (FL_hip 1.623 N.m, margin 14.6 before and
+        # after), because `distal_mass_kg` walks DOWN the kinematic tree and the payload is PROXIMAL to every
+        # leg joint. The number was right; the reading a customer would take from it was not.
+        #
+        # `verify_robot` already says "Ground-reaction load is not in this number" at its own torque block.
+        # Two surfaces reporting one quantity, caveated on the one an agent reaches for last and bare on the
+        # one it reaches for first, is the honesty gap -- not the physics.
+        rep["torque_note"] = {
+            "what_this_measures": "the static gravity torque each joint must hold to support the chain DISTAL "
+                                  "TO IT along the kinematic tree, at the measured pose, versus that joint's "
+                                  "rated torque.",
+            "what_it_cannot_answer": "whether the robot can CARRY a load. Ground-reaction force and any mass "
+                                     "PROXIMAL to a joint (a payload or an arm on the trunk, for a leg joint) "
+                                     "are not in this number — add 2.2 kg to a quadruped's base and every leg "
+                                     "joint here is unchanged, because none of it is distal to them.",
+            "ask_that_instead_with": "verify_robot (stands_under_gravity runs the hold clamped to these same "
+                                     "limits) or edit_robot op 'set_payload', which re-specs the actuators "
+                                     "against the load rather than reporting a number that ignores it.",
+            "posed_from": rep["posed_from"],
+        }
 
     if wanted("reach") and root in ext:
         r0 = ext[root]["centre"]

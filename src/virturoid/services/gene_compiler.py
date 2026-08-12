@@ -921,6 +921,92 @@ def _joint_dynamics(gene: RobotGene, seg) -> tuple[float, float, float]:
             float(fitted.get("frictionloss", frictionloss)))
 
 
+#: The joint-side drivetrain parameters a compiled source model states about the CUSTOMER'S MACHINE, as
+#: opposed to about the solver that was integrating it. ``armature`` is deliberately absent -- see
+#: :func:`_declared_joint_dynamics`.
+DECLARED_DRIVETRAIN_PARAMS = ("damping", "frictionloss")
+
+
+def _declared_joint_dynamics(gene: RobotGene, seg) -> tuple[float, float] | None:
+    """``(damping, frictionloss)`` as the SOURCE FILE declared them, or ``None``. **Not armature.**
+
+    Only imported genes carry ``metadata['source_joint_dynamics']`` (``robot_import`` is its only writer), so
+    a composed body is untouched and keeps the structural prior. Defensive for the same reason
+    ``_calibrated_dynamics`` is: this runs inside the compile, ``metadata`` is a free-form dict that survives
+    a JSON round trip, and a pasted string or a NaN must fall back rather than reach ``dof_damping``.
+    Both or neither -- a half-carried drivetrain is a third value that matches neither model.
+
+    WHY ARMATURE IS RECORDED AND NOT CARRIED, which is the one asymmetry here and was measured the hard way.
+    Carrying all three moved simulated dynamics globally and broke eight gates that had held; a
+    one-parameter-at-a-time ablation across every one of them put ARMATURE alone on the wrong side of all of
+    them, and damping and frictionloss on the right side of all of them::
+
+        gate                                      prior     all 3     damping   armature  frictionloss
+        pal_talos coupling residual (rad)         0.00338   0.15944   0.00332   0.13119   0.00285
+        toddlerbot coupling residual (rad)        0.02373   1.52841   0.01370   1.88989   0.02371
+        cassie loop-closure gap / default          0.495     0.672     0.496     0.720     0.492
+        boston_dynamics_spot holds home pose       True      False     True      True      True
+
+    Two independent reasons, and either alone is sufficient:
+
+    * **A compiled ``dof_armature`` of 0 is not a declaration.** MuJoCo's default is 0 and a compiled model
+      keeps no record of which attributes the XML wrote, so 0 means "declared zero" OR "never mentioned" and
+      nothing can tell them apart. On 14 of the 59 cached Menagerie packages EVERY joint reads 0 --
+      anymal_b/c, spot, talos, kinova_gen3, kuka_iiwa_14, tiago, tiago_dual, stretch, leap_hand, tidybot,
+      wxai, z1, allegro. Real machines with real harmonic drives and real rotor inertia, all of it un-set.
+      Adopting that 0 as the customer's number is a DEFAULT OF MUJOCO'S applied where the source said nothing,
+      which is the same class of over-claim as the substitution this whole carry-through exists to remove.
+    * **Armature is referenced to a model, not to a machine.** It is added to the diagonal of ``qM``, so what
+      it buys is conditioning *relative to the rest of that model* -- and our twin is not that model. We emit
+      our own ``<equality>`` couplings and loop closures at the source's own tight ``solref`` (Cassie's
+      ``0.005 1`` is 2.5 timesteps), driven by ``<motor>`` actuators under our PD rather than the source's
+      ``<position>``, over primitive link inertias. On Cassie the source's armature is 5% of joint inertia
+      where our prior is 20%; taking the 5% removes the margin those constraints are solved with. That is a
+      number the twin cannot inherit, whatever the source declares.
+
+    Damping and frictionloss carry, because both ARE statements about the hardware: 2.0 N.m.s/rad of joint
+    damping is a property of the Go2's drivetrain, and the 0.45 N.m of Coulomb friction we used to invent on a
+    Panda joint whose author declared none was a fiction. ``robot_import`` discloses armature as recorded and
+    not carried, with our number beside theirs.
+    """
+    import math
+
+    meta = getattr(gene, "metadata", None)
+    if not isinstance(meta, dict):
+        return None
+    # THE RECORD IS KEPT EVEN WHEN IT IS NOT CARRIED. ``robot_import`` clears this flag for the one case where
+    # the customer's declaration makes OUR twin unsteppable (their drivetrain is declared against their link
+    # inertias; ours are primitives) -- it falls back to the prior, says so in full, and keeps their numbers
+    # verbatim so nothing is lost. Reading the table without reading the flag would re-apply exactly the
+    # values that diverge. Absent flag means carried, so a gene serialized before this existed is unaffected.
+    if meta.get("source_joint_dynamics_carried") is False:
+        return None
+    # ``isinstance`` on the CONTAINER too, not only on the row: a metadata dict that round-tripped through
+    # JSON as a list (or anything else without ``.get``) would otherwise raise inside the compile, which is
+    # the one thing this function exists to prevent.
+    table = meta.get("source_joint_dynamics")
+    if not isinstance(table, dict):
+        return None
+    row = table.get(getattr(seg, "name", "") or "")
+    if not isinstance(row, dict):
+        return None
+    out = []
+    for param in DECLARED_DRIVETRAIN_PARAMS:
+        v = row.get(param)
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            return None
+        v = float(v)
+        if not math.isfinite(v) or v < 0.0:
+            return None
+        out.append(v)
+    # A record missing ``armature`` is still MALFORMED and still falls back whole: ``robot_import`` writes all
+    # three or none, so a row without it did not come from an import we understand.
+    a = row.get("armature")
+    if isinstance(a, bool) or not isinstance(a, (int, float)) or not math.isfinite(float(a)) or float(a) < 0.0:
+        return None
+    return (out[0], out[1])
+
+
 def _calibrated_dynamics(gene: RobotGene, seg_name: str) -> dict:
     """``{param: fitted_value}`` from an applied sysid calibration, or ``{}``.
 
@@ -941,17 +1027,51 @@ def _calibrated_dynamics(gene: RobotGene, seg_name: str) -> dict:
 
 
 def _joint_dynamics_prior(gene: RobotGene, seg) -> tuple[float, float, float]:
-    """The structural prior, before any measurement. Split out so a calibrated build can still recompute the
-    baseline it replaced (``calibration_report`` uses exactly this to flag a stale record)."""
+    """The baseline before any BENCH MEASUREMENT. Split out so a calibrated build can still recompute the
+    baseline it replaced (``calibration_report`` uses exactly this to flag a stale record).
+
+    A NUMBER THE CUSTOMER DECLARED IS NOT A PRIOR OF OURS, so it wins -- for the two parameters where the
+    source is stating something about the MACHINE. ``robot_import`` reads damping/frictionloss off the
+    customer's own compiled model and records them on the gene; before this they were recorded and then
+    ignored here, and the structural guess below stood in. Measured on a real Menagerie Go2, which declares
+    ``damping=2.0 frictionloss=0.2`` on all 12 leg joints, the emitted model carried 0.8 (-60%) and 0.12
+    (-40%); on a Panda (``damping=1.0``, no dry friction at all) 2.0 and 0.45 -- i.e. we invented 0.45 N.m of
+    Coulomb friction on a joint whose author declared none.
+
+    ARMATURE IS THE EXCEPTION AND STAYS OURS: it is a solver-conditioning term referenced to the model it was
+    declared in, and 24% of the corpus leaves it at MuJoCo's 0 so the record cannot even say whether it was
+    declared. See :func:`_declared_joint_dynamics` for the ablation that put armature alone on the wrong side
+    of every gate that moved. The overlay is written as prior-then-override rather than an early return so
+    that this stays true by construction: whatever the record says, ``armature`` comes from below.
+
+    Why it belongs HERE and not one level up in ``_joint_dynamics``: ``sysid.fit`` reads each parameter's
+    ``from:`` straight off the compiled model's ``dof_*`` arrays, and ``sysid.calibration.calibration_report``
+    re-runs THIS function to decide whether a stored fit has gone stale. Putting the declared value anywhere
+    else makes the fit quote its correction against a baseline the staleness check cannot reproduce, and every
+    imported joint reads as stale. With it here, all three surfaces agree by construction -- and a fit stops
+    "identifying" a substitution of ours and starts measuring the customer's hardware.
+
+    The record carries what the customer's own MuJoCo integrates AT THE JOINT, so an undeclared damping
+    arrives as the 0.0 their file leaves there. That zero is carried: an invented 0.45 N.m of stiction is not
+    a safer error than none, it is just a less visible one. It is also not the whole story on 18 of 59
+    packages, which put their velocity feedback in a ``<position kv=...>`` actuator our ``<motor>`` emitter
+    has nowhere to put -- ``robot_import`` names that hole rather than letting "0" imply an undamped machine.
+    """
+    damping_o, friction_o = _declared_joint_dynamics(gene, seg) or (None, None)
+
+    def _out(damping: float, armature: float, frictionloss: float) -> tuple[float, float, float]:
+        return (damping if damping_o is None else damping_o, armature,
+                frictionloss if friction_o is None else friction_o)
+
     name = (seg.name or "").lower()
     # The mount that decides the DRIVETRAIN prior, which is not always the mount the body is compiled with: a
     # sysid bench rig welds a free-base robot to a stand to isolate its actuators, and that weld must not
     # convert every leg joint into an industrial arm axis. `sysid.bench_rig.bench_model` is the only writer.
     mount = (getattr(gene, "metadata", None) or {}).get("joint_dynamics_base_mount") or gene.base_mount
     if seg.joint_type == "prismatic":
-        return (1.2, 0.02, 0.12)
+        return _out(1.2, 0.02, 0.12)
     if _segment_role(seg) == "wheel" or "wheel" in name or "drive" in name:
-        return (0.25, 0.02, 0.05)
+        return _out(0.25, 0.02, 0.05)
     if mount in ("table", "floor", "torso"):
         # Scale reflected inertia/friction with the selected actuator instead of
         # assigning a shoulder-sized gearbox to every wrist. The fixed 0.45 Nm
@@ -965,13 +1085,13 @@ def _joint_dynamics_prior(gene: RobotGene, seg) -> tuple[float, float, float]:
         damping = max(1.0, min(2.0, 0.2 + 0.08 * capacity))
         armature = max(0.1, min(0.14, 0.003 * capacity))
         friction = max(0.01, min(0.45, 0.02 * capacity))
-        return (damping, armature, friction)
+        return _out(damping, armature, friction)
     if any(token in name for token in ("leg", "hip", "knee", "ankle", "thigh", "shin", "calf")):
         # Preserve the tuned quadruped's measured reflected inertia anchor. A
         # 0.04 armature shifted the closed-loop damping ratio by 37% and broke
         # policy/control parity; the arm/cobot branch retains its identified 0.14.
-        return (0.8, 0.01, 0.12)
-    return (0.6, 0.03, 0.08)
+        return _out(0.8, 0.01, 0.12)
+    return _out(0.6, 0.03, 0.08)
 
 
 def _geom_xml(seg, pad: str, material: str = "mat_body", meshed: bool = False, physics_only: bool = False) -> str:

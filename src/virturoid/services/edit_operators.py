@@ -116,7 +116,7 @@ def _shape_key(gene) -> dict:
             for s in gene.segments}
 
 
-def _reground_and_gate(gene, *, material: str, original=None, respec=None) -> dict:
+def _reground_and_gate(gene, *, material: str, original=None, respec=None, keep_mass=None) -> dict:
     """Re-derive masses/BOM for the mutated geometry, then GATE: the gene must still validate. Teaches on fail.
 
     AND DO NOT RE-MASS THE CUSTOMER'S ROBOT ON THE WAY THROUGH. This called ``ground_gene`` bare, which takes
@@ -141,6 +141,11 @@ def _reground_and_gate(gene, *, material: str, original=None, respec=None) -> di
         re-deriving them is honouring the request, not overriding it;
       * every other link keeps the mass it arrived with.
 
+    ``keep_mass`` is the fourth case and it OVERRIDES the other three: links whose mass is a number the customer
+    STATED rather than one to derive -- a payload. It has to beat both flags, because a payload link is new (so
+    the ``added`` rule would derive it from box volume on an imported body) and every link is derived on a
+    composed one. See ``grounded_physics.ground_gene``'s ``preserve_mass_links``.
+
     Returns a mass ledger the operator puts in its diff, so a mass that does move is stated with its number
     instead of being discovered later on a spec sheet.
     """
@@ -148,6 +153,12 @@ def _reground_and_gate(gene, *, material: str, original=None, respec=None) -> di
     from virturoid.services.grounded_physics import ground_gene
     before_mass = {s.name: float(s.mass_kg or 0.0) for s in gene.segments}
     cfg = grounding_config(gene)
+    keep: set[str] = {str(n) for n in (keep_mass or ())}
+    # A load ALREADY on the robot stays the customer's stated number through every LATER edit too, not only the
+    # one that put it there -- otherwise a `scale_robot` after a `set_payload` re-derives 25 kg of cargo from
+    # the scaled box's volume and the robot quietly stops carrying what was asked for.
+    keep |= {str(n) for n in ((((getattr(gene, "metadata", None) or {}).get("embodied_mass") or {})
+                               .get("payload_kg")) or {})}
     derive: set[str] = set(str(n) for n in (respec or ()))
     added: set[str] = set()
     if original is not None:
@@ -155,14 +166,15 @@ def _reground_and_gate(gene, *, material: str, original=None, respec=None) -> di
         added = {n for n in now if n not in was}
         derive |= added | {n for n in now if n in was and now[n] != was[n]}
         before_mass = {s.name: float(s.mass_kg or 0.0) for s in original.segments}
+    derive -= keep
     try:
         if cfg["preserve_mass"]:
             # The body's masses are the manufacturer's. Ground with the same config the EXPORT door uses, so
             # the robot the customer edits cannot differ from the one that leaves the building.
             ground_gene(gene, material=cfg["material"], fill=cfg["fill"], preserve_mass=True,
-                        derive_mass_links=derive)
+                        derive_mass_links=derive, preserve_mass_links=keep)
         else:
-            ground_gene(gene, material=material, fill=0.25)
+            ground_gene(gene, material=material, fill=0.25, preserve_mass_links=keep)
             # ...and put the parts list's own battery/compute/sensors back on. A re-ground re-derives every
             # link mass from geometry + motor, which DROPS what ``embody_component_masses`` had bolted on, so
             # without this an amend quietly took ~2.9 kg of real hardware off the robot and the mass ledger
@@ -180,7 +192,21 @@ def _reground_and_gate(gene, *, material: str, original=None, respec=None) -> di
 
 
 def _mass_ledger(before_mass: dict, gene, *, added: set, preserved: bool) -> dict:
-    """What this edit did to the robot's mass, per link, in numbers. The disclosure half of the promise."""
+    """What this edit did to the robot's mass, per link, in numbers. The disclosure half of the promise.
+
+    ``source_masses_preserved`` IS THE MEASUREMENT, not the intent. It used to be ``bool(preserved)`` -- a copy
+    of ``grounding_config()['preserve_mass']``, i.e. "this body's masses CAME FROM the manufacturer", which is
+    true of an imported robot no matter what the edit then did to it. Measured through ``call_tool`` on a real
+    Menagerie Go2, one ``set_payload{payload_kg: 25}`` printed
+
+        "source_masses_preserved": true   next to   "n_existing_links_remassed": 15
+
+    with FL_calf at 0.241 -> 4.405 kg, and the same constant read ``true`` on ``scale_group``, ``set_height``,
+    ``scale_robot`` and ``set_material`` while each of them re-massed 12-13 of the customer's links. Some of
+    those re-massings are the request (a longer link weighs more; carbon-fibre legs weigh less) and stay
+    exactly as they are -- what changes here is that the flag stops CONTRADICTING the count printed beside it.
+    ``mass_authority`` keeps the other fact, separately: whether there were manufacturer masses at all.
+    """
     after = {s.name: float(s.mass_kg or 0.0) for s in gene.segments}
     m0 = round(sum(before_mass.values()), 3)
     m1 = round(sum(after.values()), 3)
@@ -188,13 +214,21 @@ def _mass_ledger(before_mass: dict, gene, *, added: set, preserved: bool) -> dic
     moved = [{"segment": n, "mass_kg": [round(before_mass[n], 3), round(after[n], 3)]}
              for n in sorted(after)
              if n in before_mass and abs(after[n] - before_mass[n]) > 1e-3]
+    # A link that is GONE took its mass with it, and no per-link comparison can see that -- which is how a
+    # body-replacing op (``set_leg_count``, ``adopt_walkable_template``) could discard all 13 of a Go2's links
+    # for a template's 20 and still satisfy "no existing link changed mass".
+    dropped = sorted(n for n in before_mass if n not in after)
     led = {"total_mass_kg": [m0, m1], "added_mass_kg": new_mass,
            # `or 0.0` so an unchanged robot reads 0.0, never -0.0 -- a minus sign in front of a mass delta is
            # exactly the thing this ledger exists to make readable.
            "existing_mass_changed_kg": round((m1 - m0) - new_mass, 3) or 0.0,
-           "n_existing_links_remassed": len(moved), "source_masses_preserved": bool(preserved)}
+           "n_existing_links_remassed": len(moved), "n_existing_links_dropped": len(dropped),
+           "source_masses_preserved": bool(preserved) and not moved and not dropped,
+           "mass_authority": "source_model" if preserved else "derived"}
     if moved:
         led["remassed"] = moved[:8]
+    if dropped:
+        led["dropped"] = dropped[:8]
     return led
 
 
@@ -573,7 +607,8 @@ def add_limb(gene, *, parent: str | None = None, segments: int = 3, length_m: fl
     Every other operator RESIZES or RESTYLES what is already there -- measured, the whole edit vocabulary was
     scale_group / set_height / scale_robot / set_material / set_leg_count / set_payload / adopt_walkable_template,
     so a customer could make their robot taller but could not add anything to it. set_leg_count looks like an
-    exception but it REBUILDS the body from a template, discarding the customer's own robot.
+    exception but it REBUILDS the body from a template, discarding the customer's own robot. (``set_payload``
+    now appends one link too -- the load itself -- but a chain of articulated links is still only this op.)
 
     Deliberately NOT ``add_arm``: an arm, a tail, a neck, a mast and a leg are the same structure -- a serial
     chain of N tapering links with revolute joints, optionally ending in a tool. Encoding the ROLE in the op name
@@ -692,35 +727,153 @@ def add_limb(gene, *, parent: str | None = None, segments: int = 3, length_m: fl
                        f"{mass['total_mass_kg'][1]:.3f} kg{kept}"}
 
 
-def set_payload(gene, *, payload_kg: float = 2.0, girth_scale: bool = True):
-    """CAPABILITY amend: make the robot CARRY / LIFT a target payload by upsizing its actuators (and, optionally,
-    the load-path link girth) so its joints can hold the extra load. The actuated joints must support the robot's
-    own weight PLUS the payload, so each joint's required torque is scaled by ``(total_mass + payload)/total_mass``;
-    re-grounding then selects BIGGER real motors for that torque and the BOM/mass rise honestly (a stronger robot
-    costs more + weighs more). This is what turns 'make it lift 10 kg' into a real amendment, not just a wish."""
+#: Density used to size the PAYLOAD's box, kg/m3. ~1000 is mixed cargo / a sealed battery-or-tool case: dense
+#: enough not to draw a room-sized crate for 25 kg, light enough not to draw a lead brick. It only sets what the
+#: load LOOKS like and how much room it takes; the mass is the customer's number and is never re-derived from it.
+_PAYLOAD_DENSITY_KG_M3 = 1000.0
+#: The link name a payload lands on. Fixed and predictable so ``probe_robot``/exports/a second amend can find it.
+PAYLOAD_LINK = "payload"
+#: Classes that carry a payload at the TOOL rather than on the chassis. Same split ``gene_validation`` uses when
+#: it decides whether to hang the payload off the chain tip for the torque-margin check, so the two agree about
+#: where the load is.
+_TIP_LOADED_CLASSES = ("manipulator", "humanoid", "biped")
+
+
+def _payload_host(gene):
+    """The link a payload rides on: the TOOL for a grasping body, the chassis for anything that carries."""
+    if (gene.robot_class or "").lower() in _TIP_LOADED_CLASSES:
+        tip = gene.end_effector()
+        if tip is not None:
+            return tip
+        leaves = {s.name for s in gene.segments} - {s.parent for s in gene.segments if s.parent}
+        if leaves:
+            return next(s for s in gene.segments if s.name in leaves)
+    return gene.root() or (gene.segments[0] if gene.segments else None)
+
+
+def set_payload(gene, *, payload_kg: float = 2.0, girth_scale: bool = True,
+                upsize_actuators: str | bool = "auto"):
+    """CAPABILITY amend: make the robot CARRY / LIFT a target payload.
+
+    THE PAYLOAD IS ADDED TO THE ROBOT. That is the operation, and for a long time it was the one thing this
+    operator did not do: it scaled joint torques, stamped a rating in metadata, and returned
+    ``added_mass_kg: 0`` for a 25 kg request. Measured through ``call_tool`` on a real Menagerie Unitree Go2,
+    ``set_payload{payload_kg: 25}`` left the robot at exactly its own 15.206 kg of links -- while adding 30.654
+    kg of OUR re-derived mass to the customer's own parts. The customer asked to carry 25 kg, carried nothing,
+    and gained 30 kg. A stated payload now lands as a real link (:data:`PAYLOAD_LINK`) with exactly that mass on
+    the link that would carry it -- the chassis on a legged/wheeled body, the tool on a manipulator -- so the
+    sim, the render, the verdict and the export all see the loaded machine.
+
+    Then the joints: the actuated chain must hold the robot's own weight PLUS the payload, so each joint's
+    requirement scales by ``(total_mass + payload)/total_mass``.
+
+    ``upsize_actuators`` decides what happens to joints whose limits are THE CUSTOMER'S -- read from their own
+    file and marked AUTHORITATIVE at import (:func:`grounded_physics.source_declared_torques`):
+
+      ``"auto"`` (default)  re-spec the joints whose limits are OURS; for the customer's, compute the
+                            requirement and PROPOSE the part, changing nothing. Their Go2's 23.7 / 45.43 N.m
+                            stay 23.7 / 45.43.
+      ``True``              re-spec everything, and name every declared limit that was overwritten in
+                            ``source_torque_rewritten``. The capability, on the record, on request.
+      ``False``             propose only; no joint is touched.
+
+    The default used to be an unconditional overwrite, and it was invisible: on the Go2 those two numbers became
+    360 and 520 N.m -- 15.2x and 11.4x -- on the same call that reported ``source_masses_preserved: true``. A
+    limit read off the customer's hardware is a measurement of a machine that exists; a limit WE want is a
+    proposal about parts that do not. They must not be written by the same line.
+
+    ``girth_scale`` thickens the load path for rigidity, and it is likewise skipped on a body whose geometry is
+    the customer's (an import): re-cutting a Go2's calf from 29.0 to 38.9 mm is a change to their model, not to
+    ours. It applies as before to bodies we composed.
+    """
+    from virturoid.services.gene_build import grounding_config
+    from virturoid.services.grounded_physics import source_declared_torques
     pk = _num(payload_kg, "payload_kg")
     if not (0.1 <= pk <= 50.0):
         raise EditError(f"payload {payload_kg} kg out of the safe range [0.1, 50.0]; "
                         "for heavier loads redesign with a larger actuator class")
+    mode = str(upsize_actuators).lower() if not isinstance(upsize_actuators, bool) else upsize_actuators
+    if mode not in (True, False, "auto"):
+        raise EditError(f"upsize_actuators must be 'auto', true or false, got {upsize_actuators!r}")
     g = _clone(gene)
     actuated = [s for s in g.segments if s.joint_type in ("revolute", "prismatic")]
     if not actuated:
         raise EditError("this robot has no actuated joints, so it cannot be amended to carry a payload")
+    host = _payload_host(g)
+    if host is None:
+        raise EditError("this robot has no link to mount a payload on")
+
+    # WHOSE NUMBER IS THIS JOINT'S LIMIT? Empty for every body we generate, so a composed robot behaves exactly
+    # as before; populated for an import, where each entry is a figure out of the customer's own file.
+    declared = source_declared_torques(gene)
+    cfg = grounding_config(gene)
     total_mass = sum(float(s.mass_kg or 0.0) for s in g.segments) or 1.0
     load_factor = (total_mass + pk) / total_mass
-    changed = []
-    for s in actuated:                                          # scale the joint's torque REQUIREMENT (not the last
+
+    changed, proposal, overwritten = [], [], []
+    respec: set[str] = set()
+    for s in actuated:
+        keep_declared = float(declared.get(s.name) or 0.0)
         req0 = s.torque_req_nm if s.torque_req_nm is not None else abs(s.actuator_torque_nm or 8.0)
-        before = round(float(req0), 2)                          # motor's peak) so re-grounding upsizes the motor and
-        s.torque_req_nm = round(before * load_factor, 2)        # stays idempotent under repeated grounding
-        s.actuator_torque_nm = s.torque_req_nm                  # keep them consistent until ground re-selects the peak
-        changed.append({"segment": s.name, "required_nm": [before, round(s.torque_req_nm, 2)]})
-    if girth_scale and load_factor > 1.05:                      # thicken the load-path limbs (sub-linear) for rigidity
+        before = round(float(req0 or 0.0), 2)
+        required = round(before * load_factor, 2)
+        # ``auto`` re-specs a joint whose limit is OURS and proposes for one that is the customer's; ``True``
+        # re-specs both; ``False`` proposes for both and changes nothing.
+        if not ((mode is True) or (mode == "auto" and not keep_declared)):
+            entry = {"segment": s.name,
+                     "declared_nm": (round(keep_declared, 2) if keep_declared else None),
+                     "current_nm": before, "required_nm": required,
+                     "shortfall_x": round(required / max(keep_declared or before, 1e-6), 2),
+                     "limit_source": ("your model" if keep_declared else "our catalog sizing")}
+            # NAME THE PART. A shortfall figure alone is a complaint; the point of refusing to overwrite the
+            # customer's limit is to hand them the actuator that WOULD carry the load, sized exactly the way
+            # ``ground_gene`` would size it (same margin, same continuous-torque rule), so accepting the
+            # proposal cannot produce a different motor than the one quoted here.
+            if s.joint_type == "revolute":
+                try:
+                    from virturoid.services.component_catalog import select_actuator
+                    act = select_actuator(required, margin=1.3, continuous_torque_nm=required * 1.3)
+                    entry.update({"part": act.name, "part_stall_nm": round(float(act.peak_torque_nm), 1),
+                                  "part_mass_kg": round(float(act.mass_kg), 3),
+                                  "over_catalog": bool(float(act.peak_torque_nm) + 1e-6 < required)})
+                except Exception:  # noqa: BLE001 - an unavailable catalog must not turn a proposal into a crash
+                    pass
+            proposal.append(entry)
+            continue
+        if keep_declared:
+            overwritten.append({"segment": s.name, "declared_nm": round(keep_declared, 2),
+                                "respecified_nm": required})
+        # scale the joint's REQUIREMENT (not the last motor's peak) so re-grounding upsizes the motor and stays
+        # idempotent under repeated grounding
+        s.torque_req_nm = required
+        s.actuator_torque_nm = required          # consistent until ground re-selects the peak
+        respec.add(s.name)
+        changed.append({"segment": s.name, "required_nm": [before, required]})
+    # Thicken the load path (sub-linear) for rigidity -- but only where the geometry is OURS to cut, and only
+    # on the joints this call actually re-specified.
+    girth_applied = bool(girth_scale) and load_factor > 1.05 and not cfg["preserve_geometry"] and bool(respec)
+    if girth_applied:
         girth_mult = min(1.4, float(load_factor) ** 0.3)
         for s in actuated:
-            if s.radius_m and s.radius_m > 0:
+            if s.name in respec and s.radius_m and s.radius_m > 0:
                 s.radius_m = round(max(0.005, s.radius_m * girth_mult), 5)
     required_by_name = {c["segment"]: c["required_nm"][1] for c in changed}
+
+    # THE LOAD ITSELF. A fixed link, mass exactly as asked, sized from a cargo density so it occupies real room
+    # instead of being a point mass at the mount. ``_limb_mount`` puts it on the host's measured face in the
+    # ROBOT's frame, the same call ``add_limb`` uses, so "on its back" is its back on any body.
+    from virturoid.schemas.gene import GeneSegment
+    side = max(0.02, (pk / _PAYLOAD_DENSITY_KG_M3) ** (1.0 / 3.0))
+    existing = {s.name for s in g.segments}
+    p_name = PAYLOAD_LINK if PAYLOAD_LINK not in existing else \
+        f"{PAYLOAD_LINK}_{sum(1 for k in existing if k.startswith(PAYLOAD_LINK)) + 1}"
+    site = "tip" if (gene.robot_class or "").lower() in _TIP_LOADED_CLASSES else "top"
+    off, euler0, placed = _limb_mount(gene, host, site)
+    g.segments.append(GeneSegment(
+        name=p_name, parent=host.name, shape="box", length_m=round(side, 5), radius_m=round(side / 2.0, 5),
+        mass_kg=round(float(pk), 4), joint_type="fixed", mount_offset=off, mount_euler=euler0,
+        is_end_effector=False))
+
     # RECORD WHAT THE ROBOT IS NOW RATED FOR. Nothing downstream could previously tell a heavy robot from a robot
     # BUILT HEAVY ON PURPOSE, because the requested payload was applied to the joints and then forgotten. That is
     # not cosmetic: gene_validation's mass_budget screens total mass against the class band for an UNLOADED
@@ -730,13 +883,19 @@ def set_payload(gene, *, payload_kg: float = 2.0, girth_scale: bool = True):
     # can widen by exactly what was asked for and by nothing else.
     md = dict(getattr(g, "metadata", None) or {})
     md["rated_payload_kg"] = round(float(pk), 3)
+    md["payload"] = {"link": p_name, "mass_kg": round(float(pk), 4), "carried_by": host.name, "attach": site}
     g.metadata = md
     mass0 = round(total_mass, 3)
-    # The joints named here had their torque REQUIREMENT re-specified by the customer, so their mass is ours to
-    # re-derive even on a body whose masses are otherwise the manufacturer's -- a bigger motor really is heavier.
-    # Every link they did NOT ask to change keeps its own number.
+    # Joints this call RE-SPECIFIED have their mass re-derived (a bigger motor really is heavier) even on a body
+    # whose masses are otherwise the manufacturer's. Every link the customer did not ask to change -- which now
+    # includes every joint whose declared limit we refused to overwrite -- keeps its own number. The payload's
+    # mass is the customer's figure and is never derived from the box we drew for it.
     ledger = _reground_and_gate(g, material=_dominant_material(gene), original=gene,
-                                respec={s.name for s in actuated})
+                                respec=respec, keep_mass={p_name})
+    # ...and the parts list must not sell the cargo as raw stock. Recorded AFTER grounding, because a re-ground
+    # rebuilds the actuator/component buckets around it.
+    from virturoid.services.grounded_physics import record_payload_mass
+    record_payload_mass(g, p_name, pk)
     mass1 = round(sum(float(s.mass_kg or 0.0) for s in g.segments), 3)
     # HONEST saturation check: if a joint's chosen real motor can't actually meet the scaled requirement, the
     # payload exceeds what the actuator catalog can drive -- say so (a gearbox / bigger class is needed) rather
@@ -747,10 +906,38 @@ def set_payload(gene, *, payload_kg: float = 2.0, girth_scale: bool = True):
         if req is not None and float(s.actuator_torque_nm or 0.0) + 1e-6 < float(req):
             undersized.append({"segment": s.name, "required_nm": round(float(req), 1),
                                "best_motor_nm": round(float(s.actuator_torque_nm or 0.0), 1)})
+    note = (f"added a {pk:.3f} kg payload as '{p_name}' on {host.name!r} ({side * 1000:.0f} mm box, "
+            f"{'at the tool' if site == 'tip' else 'on the chassis'}), taking the robot "
+            f"{mass0:.3f} -> {mass1:.3f} kg")
+    note += (f"; {len(changed)} joint(s) re-specified for the load" if changed
+             else "; no joint was re-specified")
+    n_source_kept = sum(1 for p in proposal if p["declared_nm"])
+    if n_source_kept:
+        note += (f"; {n_source_kept} joint limit(s) are YOUR declared figures and were left untouched -- see "
+                 "actuator_proposal (re-send with upsize_actuators: true to re-spec them)")
+    elif proposal:
+        note += f"; {len(proposal)} joint(s) were left alone (upsize_actuators: false) -- see actuator_proposal"
     out = {"op": "set_payload", "payload_kg": pk, "load_factor": round(load_factor, 3),
+           "payload_link": p_name, "payload_mass_kg": round(float(pk), 4), "carried_by": host.name,
+           "payload_box_m": round(side, 4), "placement": placed,
            "n_joints_upsized": len(changed), "changed": changed[:8], "total_mass_kg": [mass0, mass1],
            "mass": ledger,
-           "note": "joint torque raised for the payload -> re-grounding upsized the real motors (mass/cost rose)"}
+           "source_torque_preserved": bool(n_source_kept), "n_source_torque_preserved": n_source_kept,
+           "girth_scaled": girth_applied, "structural": True, "note": note}
+    if not girth_applied and girth_scale and cfg["preserve_geometry"]:
+        out["girth_scale_skipped"] = ("this body's link geometry is your own model's; thickening the load path "
+                                      "would re-cut it. Nothing was resized.")
+    if proposal:
+        out["actuator_proposal"] = proposal[:12]
+        out["proposal_note"] = (
+            (f"{n_source_kept} joint(s) carry limits read from YOUR model and marked authoritative, so they were "
+             "not rewritten. " if n_source_kept else "No joint was re-specified (upsize_actuators: false). ")
+            + "The figures above are what this payload would require and are a PROPOSAL about new parts, not a "
+              "change to your robot. Apply them with upsize_actuators: true.")
+    if overwritten:
+        out["source_torque_rewritten"] = overwritten[:12]
+        out["warning"] = (f"upsize_actuators: true re-specified {len(overwritten)} joint limit(s) that came from "
+                          "YOUR model — they are no longer your measured figures (edit_robot op:'undo' restores them)")
     if undersized:
         out["undersized_joints"] = undersized[:8]
         out["warning"] = (f"{len(undersized)} joint(s) exceed the strongest catalog motor for this payload -- add a "
@@ -762,14 +949,27 @@ def set_payload(gene, *, payload_kg: float = 2.0, girth_scale: bool = True):
 def adopt_walkable_template(gene, **_):
     """B2: EXPLICITLY replace an imported/composed quadruped's body with a size-matched walkable fanned template.
     Only ever invoked by the customer (never automatically) -- ingest KEEPS the original geometry and merely
-    OFFERS this. Lands as one undo step, so 'undo' restores the customer's original body exactly."""
+    OFFERS this. Lands as one undo step, so 'undo' restores the customer's original body exactly.
+
+    It is the ONLY op that can hand back a robot with none of the customer's own links on it, and until the
+    sweep behind this line it was also the only one whose diff carried no ``mass`` block at all -- measured on a
+    real Go2, it returned 20 template segments weighing 9.793 kg in place of 13 links weighing 15.207, and said
+    so nowhere in numbers. The ledger is the same one every other operator reports, so "what did I get back"
+    has one answer everywhere; ``n_existing_links_dropped`` is what makes a wholesale swap visible in it."""
     from virturoid.services.anatomy_compiler import ensure_walkable_quad
+    from virturoid.services.gene_build import grounding_config
     before = len(gene.segments)
+    before_mass = {s.name: float(s.mass_kg or 0.0) for s in gene.segments}
     new = ensure_walkable_quad(gene, "adopt walkable template", force=True)
     applied = bool(dict(getattr(new, "metadata", None) or {}).get("walkability_fallback", {}).get("applied"))
+    mass = _mass_ledger(before_mass, new,
+                        added={s.name for s in new.segments} - set(before_mass),
+                        preserved=bool(grounding_config(gene)["preserve_mass"]))
     return new, {"op": "adopt_walkable_template", "applied": applied, "segments_before": before,
-                 "segments_after": len(new.segments),
-                 "note": ("adopted a size-matched walkable template (undo to restore the original body)" if applied
+                 "segments_after": len(new.segments), "mass": mass,
+                 "note": (f"adopted a size-matched walkable template: {mass['n_existing_links_dropped']} of your "
+                          f"link(s) were replaced and the robot went {mass['total_mass_kg'][0]:.3f} -> "
+                          f"{mass['total_mass_kg'][1]:.3f} kg (undo restores your original body)" if applied
                           else "the original body already walks or no better template was found -- unchanged")}
 
 
@@ -904,8 +1104,13 @@ def op_specs() -> list[dict]:
                 "tail', 'put a sensor mast on the back'. Keeps the robot; only adds. `attach` is a face of the "
                 "robot (top = its back, front = its nose), not of the parent link's own axis; the chain grows "
                 "that way and the diff reports where it landed plus what it added to the robot's mass."},
-        {"op": "set_payload", "args": {"payload_kg": "0.1-50.0", "girth_scale": "true|false"},
-         "for": "make it CARRY/LIFT heavier: upsize actuators (+ load-path girth) for the payload; BOM/mass rise"},
+        {"op": "set_payload", "args": {"payload_kg": "0.1-50.0", "girth_scale": "true|false",
+                                       "upsize_actuators": "auto|true|false"},
+         "for": "make it CARRY/LIFT a load: the payload is ADDED to the robot as a real link (on the chassis, or "
+                "at the tool on an arm) and every joint's torque requirement rises with it. `upsize_actuators` "
+                "'auto' (default) re-specs the joints whose limits are OURS and PROPOSES parts for the ones read "
+                "from your own model; true re-specs those too (and says which); false proposes only. The diff "
+                "reports payload_mass_kg, what it changed, and what it deliberately did not."},
         {"op": "adopt_walkable_template", "args": {},
          "for": "OPT-IN: replace an imported quadruped that can't walk with a size-matched walkable template (undoable)"},
     ]

@@ -756,6 +756,9 @@ def _import_robot_uncached(source: str, *, robot_id: str | None = None, species:
     src_torque: dict[str, float] = {}
     src_torque_where: dict[str, str] = {}
     src_dynamics: dict[str, dict] = {}
+    src_dyn_undeclared: dict[str, list[str]] = {}
+    src_not_carried: dict[str, dict] = {}
+    src_actuator_kv: dict[str, float] = {}
     undeclared_torque: list[str] = []
     for i in range(1, mj.nbody):
         if i in _frames:                     # a pose, not a part — folded into its children above
@@ -821,11 +824,29 @@ def _import_robot_uncached(source: str, *, robot_id: str | None = None, species:
             # them and substituting the compiler's structural prior means a calibration run "identifies"
             # numbers the customer handed us, and a customer comparing their sim to ours sees a gap we
             # manufactured. The values recorded are the COMPILED ones, i.e. exactly what the customer's own
-            # MuJoCo integrates with (MuJoCo's own default for all three is 0, so an undeclared parameter
-            # records as the 0 their simulator uses -- not as a guess of ours).
+            # MuJoCo integrates with. All three are RECORDED; damping and frictionloss are also CARRIED into
+            # the emitted model, armature is not (see the metadata block below and
+            # `gene_compiler._declared_joint_dynamics`) -- recording the one we decline to use is how the
+            # decline stays checkable.
             _dyn = _source_joint_dynamics(mj, jid)
             if _dyn is not None:
                 src_dynamics[bname] = _dyn
+                # A ZERO IS CARRIED, AND IT IS ALSO THE ONE VALUE WE CANNOT ATTRIBUTE. MuJoCo's own default
+                # for all three is 0, and a compiled model keeps no record of which attributes the XML wrote
+                # -- so a 0 here is either the author's declared zero or no declaration at all, and claiming
+                # to know which would be the same over-claim as the substitution this replaces. For damping
+                # and frictionloss their simulator integrates 0.0, so 0.0 is what the twin carries and the
+                # ambiguity is reported rather than resolved. For armature the same ambiguity is one of the
+                # two reasons it is not carried at all: 14 of the 59 packages read 0 on EVERY joint.
+                _zeros = [p for p, v in _dyn.items() if float(v) == 0.0]
+                if _zeros:
+                    src_dyn_undeclared[bname] = sorted(_zeros)
+            _extra = _source_joint_extras(mj, jid)
+            if _extra:
+                src_not_carried[bname] = _extra
+            _kv = _source_actuator_velocity_feedback(mj, jid)
+            if _kv:
+                src_actuator_kv[bname] = _kv
             _decl = jnt_force.get(jid)
             if _decl:
                 src_torque[bname] = float(_decl["nm"])
@@ -1012,11 +1033,112 @@ def _import_robot_uncached(source: str, *, robot_id: str | None = None, species:
     # load-bearing fact, and it is the one a Go2 supplies.
     gene.metadata["sensor_source"] = "source_model"
     gene.metadata["source_sensors"] = _source_sensor_inventory(mj, mujoco, body_name, segments)
+    # ``joint_dynamics_source`` is to the DRIVETRAIN what ``mass_source`` and ``torque_source`` are to mass and
+    # actuator capacity. It was the one of the four that was recorded and then IGNORED: the record landed here
+    # correctly, and ``gene_compiler._joint_dynamics_prior`` never read it, so the emitted model carried our
+    # structural guess anyway. Measured on a real Menagerie Go2 (declares damping=2.0 frictionloss=0.2 on all
+    # 12 leg joints) the twin compiled to 0.8 / 0.12 -- damping -60%, frictionloss -40% -- and on a Panda
+    # (damping=1.0 and NO dry friction) to 2.0 / 0.45, i.e. 0.45 N.m of stiction we invented outright.
+    #
+    # Worse than a fidelity loss, because these are exactly what ``sysid.fit_parameters`` identifies and it
+    # reads each parameter's baseline straight off the compiled model: a bench fit "corrected" friction by
+    # +300-500% and damping by +60-90% on the Go2, most of which was recovering our own substitution rather
+    # than measuring the customer's hardware. A sim-to-real number built on that is partly SELF-REFERENTIAL --
+    # we would be selling a customer a measurement of our own default.
+    #
+    # TWO OF THE THREE CARRY, AND THE THIRD IS DISCLOSED INSTEAD. The first version of this carried ARMATURE
+    # too and moved simulated dynamics across the whole product -- coupled joints stopped tracking on talos
+    # (0.00338 -> 0.15944 rad) and toddlerbot (0.02373 -> 1.52841), Cassie's carried solref stopped tightening
+    # its loop closure, and a real Spot stopped holding its own home pose (sag 0.038 -> 0.293 m, tilt 2.6 ->
+    # 31.8 deg). A one-parameter-at-a-time ablation put armature alone on the wrong side of every one of them.
+    # It is not a claim about the machine: MuJoCo's default is 0, a compiled model keeps no record of which
+    # attributes the XML wrote, and 14 of the 59 packages here read 0 on EVERY joint (spot, talos, anymal_b/c,
+    # iiwa_14, kinova_gen3, tiago, tiago_dual, stretch, tidybot, wxai, z1, leap_hand, allegro) -- so adopting
+    # it would be MuJoCo's default applied where the source said nothing. See
+    # ``gene_compiler._declared_joint_dynamics``. Carrying damping+frictionloss alone moves the numbers on all
+    # 59 packages and costs simulability on ONE (pal_tiago_dual, handled by the disclosed fallback below).
     if src_dynamics:
+        _carried = ("damping", "frictionloss")
+        gene.metadata["joint_dynamics_source"] = "source_model"
         gene.metadata["source_joint_dynamics"] = dict(src_dynamics)
+        gene.metadata["source_joint_dynamics_carried_params"] = list(_carried)
         gene.metadata["source_joint_dynamics_provenance"] = (
-            "read from the customer's compiled model (dof_armature / dof_damping / dof_frictionloss) at "
-            "import; these are the values their own MuJoCo integrates with, not an estimate of ours")
+            "read from the customer's compiled model (dof_damping / dof_frictionloss / dof_armature) at "
+            "import. damping and frictionloss are CARRIED to the emitted model "
+            "(gene_compiler._joint_dynamics_prior takes a declared value over its structural prior), so a "
+            "bench fit measures your hardware rather than our substitution. armature is RECORDED AND NOT "
+            "CARRIED: it is a solver-conditioning term referenced to the model it was declared in, MuJoCo's "
+            "default for it is 0 so a compiled model cannot say whether it was declared at all, and carrying "
+            "it measurably destabilised couplings, loop closures and posture holds")
+        if src_dyn_undeclared:
+            gene.metadata["source_joint_dynamics_zero_in_source"] = dict(src_dyn_undeclared)
+        _lo = {p: min(float(d[p]) for d in src_dynamics.values()) for p in _carried}
+        _hi = {p: max(float(d[p]) for d in src_dynamics.values()) for p in _carried}
+        _arm = [float(d["armature"]) for d in src_dynamics.values()]
+        warnings.append(
+            f"joint drivetrain (damping / frictionloss) for {len(src_dynamics)} joint(s) was read from the "
+            f"source model and is treated as AUTHORITATIVE, exactly as mass and actuator torque are: "
+            f"damping {_lo['damping']:g}-{_hi['damping']:g}, "
+            f"frictionloss {_lo['frictionloss']:g}-{_hi['frictionloss']:g}. The compiler emits these instead "
+            f"of its structural prior, so the model you verify integrates the numbers your own file declares "
+            f"— and a sysid fit measures your hardware, not a default of ours. Your armature "
+            f"({min(_arm):g}-{max(_arm):g}) is recorded but NOT carried: it conditions the solver of the "
+            f"model it was written for, and this twin rebuilds your links as primitives and adds its own "
+            f"equality constraints, so your number does not mean the same thing here. Ours stands in and is "
+            f"on the model you can read.")
+        if src_dyn_undeclared:
+            # Counted over the CARRIED parameters only. A joint whose sole zero is ``armature`` belongs to the
+            # armature sentence above, not to this one — quoting it here would inflate "we could not attribute
+            # what your file integrates" with a value we do not integrate at all.
+            _zero_carried = {n: ps for n, ps in src_dyn_undeclared.items() if any(p in _carried for p in ps)}
+            _params = sorted({p for ps in _zero_carried.values() for p in ps if p in _carried})
+            if _params:
+                warnings.append(
+                    f"{len(_zero_carried)} joint(s) compile to 0.0 for {', '.join(_params)}. That 0.0 IS "
+                    f"carried — it is what your simulator integrates at the joint — but it is the one value "
+                    f"we cannot attribute: MuJoCo's default for these is also 0, and a compiled model keeps "
+                    f"no record of which attributes the file wrote. So this is either your declared zero or "
+                    f"no declaration at all, and we do not claim to know which. Nothing is invented in its "
+                    f"place.")
+        # ...AND A ZERO AT THE JOINT IS NOT ALWAYS A ZERO IN THE MACHINE. A <position kv=...> actuator applies
+        # -kv*qvel, which is damping that lives in the ACTUATOR and never touches dof_damping. 18 of the 59
+        # packages do exactly that and declare no joint damping at all -- spot 40, kuka_iiwa_14 200, ur5e 400,
+        # tidybot 50000 N.m.s/rad. We emit <motor> (pure torque), so there is nowhere for it to go. Saying
+        # "your model integrates 0" without saying this would turn an incomplete read into a claim.
+        if src_actuator_kv:
+            gene.metadata["source_actuator_velocity_feedback_not_carried"] = dict(src_actuator_kv)
+            _kv_zero = sorted(n for n, v in src_actuator_kv.items()
+                              if float((src_dynamics.get(n) or {}).get("damping", 0.0)) == 0.0)
+            _worst = max(src_actuator_kv, key=lambda n: float(src_actuator_kv[n]))
+            warnings.append(
+                f"{len(src_actuator_kv)} joint(s) get velocity feedback from their ACTUATOR rather than the "
+                f"joint (<position kv=...>), up to kv={float(src_actuator_kv[_worst]):g} on '{_worst}'. We "
+                f"emit torque (<motor>) actuators, so that term is NOT carried and nothing replaces it"
+                + (f" — and on {len(_kv_zero)} of them the joint's own damping is 0, so the twin's drivetrain "
+                   f"is undamped where yours is not. A settling or overshoot number measured here is ours, "
+                   f"not yours." if _kv_zero else ".")
+                + " Use the faithful native lane, which runs your actuators as written.")
+    # DELIBERATELY NOT nested under ``if src_dynamics``. Today the two are collected under the same guard and
+    # cannot diverge, but a disclosure of what we DROPPED must not be conditional on a record of what we kept
+    # — that is the coupling that produced this defect in the first place.
+    if src_not_carried:
+        gene.metadata["source_joint_attributes_not_carried"] = dict(src_not_carried)
+        _attrs = sorted({a for row in src_not_carried.values() for a in row})
+        # Lead with the SPRING when there is one, and name the joint that carries the largest one: a
+        # stiffness of 1250-1500 N.m/rad (Cassie's leaf springs) is a structural member of the machine,
+        # while a tightened solreflimit is a solver setting. Both are disclosed; only one of them is
+        # worth a sentence of its own, and claiming a spring where there is none is its own over-claim.
+        _springy = {n: r for n, r in src_not_carried.items() if "stiffness" in r or "springref" in r}
+        _sample = (max(_springy, key=lambda n: float(_springy[n].get("stiffness") or 0.0)) if _springy
+                   else sorted(src_not_carried)[0])
+        _why = (" A joint 'stiffness' is a physical RETURN SPRING: a twin without it is a different "
+                "machine, and no bench fit identifies stiffness, so nothing downstream recovers it."
+                if _springy else "")
+        warnings.append(
+            f"{len(src_not_carried)} joint(s) declare {', '.join(_attrs)} — attributes a RobotGene has no "
+            f"field for, so they are NOT carried and the twin falls back to MuJoCo's default. Example: "
+            f"{_sample} declares {src_not_carried[_sample]}.{_why} Use the faithful native lane where "
+            f"this matters.")
     if src_torque:
         _sites = sorted(set(src_torque_where.values()))
         warnings.append(
@@ -1074,6 +1196,50 @@ def _import_robot_uncached(source: str, *, robot_id: str | None = None, species:
     # steps perfectly well and is not the customer's robot. Rule on both before anyone else does.
     sim = _simulability_probe(gene) if not gene_issues else {
         "ok": False, "checked": False, "reason": "gene failed schema validation; not simulated"}
+    # THE ONE CASE WHERE THE CUSTOMER'S OWN NUMBERS CANNOT BE CARRIED, and the only honest way to not carry
+    # them. Their drivetrain is declared against THEIR link inertias; our twin's are primitive approximations,
+    # and the two can be incompatible at our timestep.
+    #
+    # SWEPT, because both earlier estimates of the blast radius were wrong, in both directions. Across the 59
+    # cached Menagerie packages that yield a drivetrain record, carrying damping+frictionloss moves the numbers
+    # on ALL 59 -- the substitution was universal, not occasional -- and costs simulability on ONE:
+    # pal_tiago_dual (non-finite at t=1.052 s under excitation). An eight-package spot check had found one of
+    # what it then believed were five, which is exactly the sampling error this fallback must not be sized
+    # against; the five turned out to be four packages that the ARMATURE carry broke (hello_robot_stretch,
+    # kinova_gen3, pal_tiago, pndbotics_adam_lite -- all steppable again once armature stays ours) plus this
+    # one. The other 58 carry the full declaration.
+    #
+    # The two alternatives were both worse. Silently keeping our prior is the defect this whole change exists
+    # to remove. Shipping a NON-SIMULABLE twin costs the customer every downstream number (verdict, BOM, spec
+    # sheet, calibration) on a robot that used to produce them. So: carry by default, fall back only when
+    # carrying is demonstrably what made it unsteppable, and say so in full -- which joints, their numbers,
+    # ours, and the consequence for the gap number. A substitution the customer can read is a different object
+    # from one they cannot.
+    # ``placement_failed`` is excluded because the drivetrain cannot cause it -- the links are in the wrong
+    # PLACE, which no value of damping changes -- so retrying there only buys a second wasted probe on an
+    # import that is already being rejected for a different and more serious reason.
+    if (not sim.get("ok") and not gene_issues and src_dynamics
+            and sim.get("checked", True) and not sim.get("placement_failed")):
+        import dataclasses as _dc
+        _no_dyn = {k: v for k, v in gene.metadata.items() if k != "source_joint_dynamics"}
+        _retry_gene = _dc.replace(gene, metadata=_no_dyn)
+        _retry = _simulability_probe(_retry_gene)
+        if _retry.get("ok"):
+            gene.metadata["joint_dynamics_source"] = "our_structural_prior_declaration_not_steppable"
+            gene.metadata["source_joint_dynamics_carried"] = False
+            gene.metadata["source_joint_dynamics_not_carried_reason"] = str(sim.get("reason"))
+            warnings.insert(0, (
+                f"YOUR DECLARED JOINT DRIVETRAIN (damping, frictionloss) IS NOT CARRIED on this twin, and the "
+                f"compiler's structural prior stands in for all {len(src_dynamics)} joint(s). Carrying it made "
+                f"the twin unsteppable "
+                f"({sim.get('reason')}); removing it and changing nothing else made it steppable again, which "
+                f"is how we know the declaration is the cause. That is OUR limitation, not a defect in your "
+                f"file: your drivetrain is declared against your link inertias and this twin rebuilds them as "
+                f"primitives. Your numbers are still recorded verbatim under "
+                f"'source_joint_dynamics'. THE CONSEQUENCE: a sim-to-real gap measured on this twin is partly "
+                f"a measurement of our default, not of your hardware — do not quote it. Use the faithful "
+                f"native lane, which runs your model as-is."))
+            sim = _retry
     if not sim.get("ok"):
         _misplaced = bool(sim.get("placement_failed"))
         warnings.insert(0, ("IMPORT REJECTED — the editable twin IS NOT YOUR ROBOT: " if _misplaced else
@@ -1437,14 +1603,38 @@ def _load_model(source: str, mujoco, warnings: list[str]):
     def _compile(xml_text: str):
         if not is_urdf:
             return mujoco.MjModel.from_xml_string(xml_text)
-        with tempfile.NamedTemporaryFile("w", suffix=".urdf", delete=False, encoding="utf-8", dir=base_dir) as f:
-            f.write(xml_text); tmp = f.name                     # write NEXT TO the real meshes so relative paths resolve
+        # THE THIRD WRITE INTO THE CUSTOMER'S FOLDER, and the one that cost the most. This used to be
+        # `NamedTemporaryFile(dir=base_dir)` -- "write NEXT TO the real meshes so relative paths resolve" --
+        # the same good reason, and the same defect, as the two `source_guard` was built to stop. It was
+        # missed because it only fires on the RETRY path (a clean URDF loads straight from `from_xml_path`),
+        # and the as-published Go2 always takes that retry.
+        #
+        # Measured through `agent_tools.call_tool` on a real Go2: once the guard armed, this write was
+        # refused, `_load_model` raised, `_ingest_project` found no editable twin and composed one from the
+        # text description -- so the ingest silently reopened #215, answering `lane_used:
+        # composed_from_description` on a folder containing the customer's actual URDF. A read-only rule
+        # that turns "we imported your robot" into "we generated a proxy" is not a safer product.
+        #
+        # `_absolutise_mesh_paths` is what frees the file to move: a URDF's mesh filenames resolve against
+        # the URDF's own directory, which is the only reason the temp file sat there. It is the same weakest
+        # rewrite `model_import` uses -- relative -> absolute, only when the file is really there -- so
+        # `package://` URIs and genuinely missing meshes still fall through to the repair/sanitize passes
+        # below and are still REPORTED rather than papered over.
+        from virturoid.services.model_import import _absolutise_mesh_paths
+        from virturoid.services.source_guard import staging_dir
+        if base_dir:
+            xml_text = _absolutise_mesh_paths(xml_text, Path(base_dir))
+        out_dir = str(staging_dir(base_dir, kind="import")) if base_dir else None
+        with tempfile.NamedTemporaryFile("w", suffix=".urdf", delete=False, encoding="utf-8", dir=out_dir) as f:
+            f.write(xml_text); tmp = f.name
         try:
             return mujoco.MjModel.from_xml_path(tmp)
         finally:
             try:
                 Path(tmp).unlink()
-            except OSError:
+                if out_dir:                        # one empty dir per source path is litter in a long install;
+                    os.rmdir(out_dir)              # `rmdir` refusing a non-empty dir is the right behaviour when
+            except OSError:                        # a concurrent import still holds its own prep file there.
                 pass
 
     # 1) faithful attempt (a real file loads straight from its path so meshes/compiler resolve)
@@ -1587,6 +1777,11 @@ def _source_joint_dynamics(mj, j: int) -> dict | None:
     this the importer had no reference to any of them anywhere in the file and the compiler's structural
     prior stood in — so a bench calibration "identified" values the customer had already handed us, and the
     sim-to-sim gap against their own model was one we created at import.
+
+    All three are RECORDED here. Only damping and frictionloss are carried into the emitted model — see
+    ``gene_compiler._declared_joint_dynamics`` for why armature is not, and the metadata block above for how
+    that is disclosed. Recording the one we do not use is the point: it is what a reader checks the claim
+    against, and what ``sysid`` quotes its correction beside.
     """
     adr = int(mj.jnt_dofadr[j])
     if adr < 0:
@@ -1594,6 +1789,79 @@ def _source_joint_dynamics(mj, j: int) -> dict | None:
     return {"armature": round(float(mj.dof_armature[adr]), 6),
             "damping": round(float(mj.dof_damping[adr]), 6),
             "frictionloss": round(float(mj.dof_frictionloss[adr]), 6)}
+
+
+def _source_actuator_velocity_feedback(mj, j: int) -> float:
+    """``kv`` of the joint's own actuator — DAMPING THAT IS NOT AT THE JOINT — or 0.0.
+
+    A ``<position kp=... kv=...>`` (and the ``<general>`` it compiles to) applies ``-kv*qvel``, so a model can
+    declare ``dof_damping=0`` and still be heavily damped. Reading only ``dof_damping`` and reporting it as
+    "what your simulator integrates" is therefore an incomplete read, and on this corpus not a rare one: 18 of
+    the 59 packages that yield a drivetrain record put ALL of their velocity feedback here — Spot kv=40,
+    kuka_iiwa_14 200, ur5e 400, tidybot 50000 — and declare no joint damping at all.
+
+    We emit ``<motor>`` (pure torque) actuators because the verify/train harness computes its own PD, so there
+    is no ``kv`` on the twin to carry it into. This function exists so the loss can be NAMED with its number
+    rather than disappearing into a "0" that reads like a statement about the machine.
+
+    MuJoCo compiles the velocity term into ``actuator_biasprm[u][2]`` as ``-kv``. A ``<motor>`` has an
+    all-zero biasprm, so a source that already uses torque actuators reports nothing here.
+    """
+    import mujoco as _mj                                 # the enum, not a literal 0: mjtTrn is MuJoCo's to own
+
+    joint_trn = int(_mj.mjtTrn.mjTRN_JOINT)
+    kv = 0.0
+    for u in range(int(mj.nu)):
+        if int(mj.actuator_trntype[u]) != joint_trn:     # a tendon/site/body drive is not this joint's
+            continue
+        if int(mj.actuator_trnid[u][0]) != int(j):
+            continue
+        kv = max(kv, abs(float(mj.actuator_biasprm[u][2])))
+    return round(kv, 6)
+
+
+#: MuJoCo's own documented defaults for the joint attributes the compiler does not emit. A source value equal
+#: to one of these is not a loss -- the twin lands on the same number by omitting the attribute entirely. Only
+#: a DIFFERENCE is a substitution, and only differences are reported.
+_MJ_JOINT_DEFAULTS = {"stiffness": (0.0,), "springref": (0.0,), "margin": (0.0,),
+                      "solreflimit": (0.02, 1.0), "solimplimit": (0.9, 0.95, 0.001, 0.5, 2.0)}
+
+
+def _source_joint_extras(mj, j: int) -> dict:
+    """Joint attributes the customer's file sets to something OTHER than MuJoCo's default, which our compiler
+    has no way to emit -- with the number, so the loss is a disclosure and not a silence.
+
+    ``gene_compiler._body_xml`` writes exactly ``type/axis/range/damping/armature/frictionloss`` on a joint.
+    Everything else falls back to MuJoCo's default, and for most models that is harmless because the source
+    left it at the default too. It is NOT harmless when the source declared otherwise, and real MuJoCo
+    Menagerie packages do: 16 of the 63 declare a joint ``stiffness``, i.e. a physical RETURN SPRING (the
+    Robotiq 2F85's driver spring, Cassie's leaf springs, the xArm7 gripper). A twin that drops the spring is a
+    different machine, and dropping it silently is the same defect as the drivetrain substitution above --
+    with the aggravation that no bench fit identifies stiffness, so nothing downstream can even recover it.
+
+    ``RobotGene`` has no field for any of these, so this reports rather than repairs. That is the honest
+    boundary: the number is in the report, named, next to the reason it did not survive.
+    """
+    import numpy as _np
+
+    adr = int(mj.jnt_dofadr[j])
+    if adr < 0:
+        return {}
+    qadr = int(mj.jnt_qposadr[j])
+    got = {
+        "stiffness": (float(mj.jnt_stiffness[j]),),
+        "springref": (float(mj.qpos_spring[qadr]),),
+        "margin": (float(mj.jnt_margin[j]),),
+        "solreflimit": tuple(float(v) for v in _np.asarray(mj.jnt_solref[j], dtype=float)),
+        "solimplimit": tuple(float(v) for v in _np.asarray(mj.jnt_solimp[j], dtype=float)),
+    }
+    out = {}
+    for attr, value in got.items():
+        default = _MJ_JOINT_DEFAULTS[attr]
+        if len(value) == len(default) and all(abs(a - b) <= 1e-9 for a, b in zip(value, default)):
+            continue
+        out[attr] = round(value[0], 6) if len(value) == 1 else [round(v, 6) for v in value]
+    return out
 
 
 def _source_sensor_inventory(mj, mujoco, body_name: dict, segments) -> dict:

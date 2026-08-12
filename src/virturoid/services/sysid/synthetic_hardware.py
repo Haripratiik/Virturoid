@@ -33,6 +33,17 @@ WHAT_SIM2SIM_DOES_NOT_PROVE = (
 #: hips ring (0.0298 -> 0.1848 rad). Both halves are now measured on the Go2 -- the delay is recovered exactly
 #: at 0/20/40 ms and the tracking gate passes at 0 and 20 -- and the lesson stands: a default this package
 #: validates against is the one place a body-specific number is least likely to be noticed.
+#:
+#: IT IS AN ABSOLUTE OFFSET, SO ITS SIZE IS A PROPERTY OF THE BODY, and the sentence above no longer describes
+#: the Go2. When ``robot_import`` started carrying the customer's DECLARED drivetrain into the twin instead of
+#: substituting a structural prior, this Go2's joints went from damping 0.8 / frictionloss 0.12 to the 2.0 /
+#: 0.2 Unitree writes. The same +0.6 / +0.08 offset that was a +75% / +67% modelling error on the substituted
+#: drivetrain is a +30% / +40% one on the declared one, and the ring it was sized against largely went with it:
+#: prior-replay-vs-log RMS across 0-40 ms is now 0.0031 -> 0.0659 rad on the full plan. Every ``improvement_x``
+#: this package quotes is a ratio of trajectory RMS before and after fitting, so a smaller RELATIVE error
+#: leaves less to remove and the ratio falls -- at 40 ms it went 1.484x -> 1.121x, which reads as a regression
+#: and is not one. Anyone re-sizing this dict should size it as a FRACTION of each joint's declared value, and
+#: re-measure ``tests/test_sysid_delay_wedge.py`` when they do; it is the file that notices.
 DEFAULT_PERTURBATION = {"frictionloss": 0.08, "damping": 0.6, "armature": 0.03}
 DEFAULT_DELAY_TICKS = 2
 

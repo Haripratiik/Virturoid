@@ -104,8 +104,15 @@ class TheTwoSurfacesAgree(unittest.TestCase):
         totals = bom["totals"]
         billed = round(sum(ln["price_usd"] for ln in lines), 2)
         self.assertEqual(totals["proposed_additions_usd"], billed)
-        self.assertAlmostEqual(totals["as_imported_price_usd"] + billed, totals["price_usd"], places=2)
         self.assertGreater(billed, 0.0, "this Go2 is exactly the case where money was invented")
+        # THE MONEY ARITHMETIC, after `price_usd` became THE BILL rather than the whole catalog list. The
+        # actuator lines are catalog equivalents for motors already bolted to this machine, so their price is a
+        # replacement figure and is NOT in the bill; `as_imported_price_usd` still values the machine that
+        # arrived. Both split the same catalog list, two different ways.
+        self.assertAlmostEqual(totals["price_usd"] + totals["already_fitted_usd"],
+                               totals["catalog_list_price_usd"], places=2)
+        self.assertAlmostEqual(totals["as_imported_price_usd"] + billed,
+                               totals["catalog_list_price_usd"], places=2)
 
     def test_the_bom_says_which_sensors_were_read_and_which_were_assumed(self):
         """The deliverable table, on the robot itself: every perception line is an inference from robot_class,

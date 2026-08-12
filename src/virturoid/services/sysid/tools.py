@@ -465,8 +465,28 @@ def simulate_bench_log(args: dict) -> dict:
         if plan is None:
             plan = build_excitation(gene, budget_s=budget_s)
         ctrl_hz = float((plan.get("controller") or {}).get("control_hz") or 100.0)
-        delay_ms = float(args.get("delay_ms", 20.0))
-        ticks = max(0, int(round(delay_ms * ctrl_hz / 1000.0)))
+        # ACTUATION DELAY IS QUANTISED TO THE CONTROL TICK, AND THE SNAP IS SAID OUT LOUD.
+        #
+        # A delay is injected by holding commands for a whole number of control periods, so at 100 Hz the only
+        # representable delays are multiples of 10 ms. Asking for 6 ms got 1 tick = 10 ms -- correct, and the
+        # result then reported `injected.delay_ms: 10.0` with no trace of the 6.0 that was asked for. A caller
+        # sweeping 5/6/7 ms would have read three identical runs as three measurements and concluded the fit
+        # was insensitive to delay; the quantisation would have been invisible in every artifact, including the
+        # filename, which carries ticks. Rounding to the grid is right. Not saying so is the defect.
+        delay_ms_requested = float(args.get("delay_ms", 20.0))
+        ticks = max(0, int(round(delay_ms_requested * ctrl_hz / 1000.0)))
+        delay_ms = round(ticks * 1000.0 / ctrl_hz, 6)
+        delay_coercion = None
+        if abs(delay_ms - delay_ms_requested) > 1e-9:
+            delay_coercion = {
+                "argument": "delay_ms", "requested": delay_ms_requested, "used": delay_ms,
+                "why": f"actuation delay is injected in whole control ticks, and this plan's controller runs "
+                       f"at {ctrl_hz:g} Hz, so the only representable delays are multiples of "
+                       f"{1000.0 / ctrl_hz:g} ms. {delay_ms_requested:g} ms was rounded to {ticks} tick(s) = "
+                       f"{delay_ms:g} ms.",
+                "to_get_what_you_asked_for": f"pass a multiple of {1000.0 / ctrl_hz:g} ms, or re-plan at a "
+                                             f"control rate whose period divides {delay_ms_requested:g} ms",
+            }
         injected = dict(perturbation or DEFAULT_PERTURBATION)
         # NAMED, not positional. The underlying helper returns a bare 2-tuple and an engineer guessed the order
         # wrong, burning a 143 s run to find out; nothing crosses this boundary without a key on it.
@@ -482,6 +502,9 @@ def simulate_bench_log(args: dict) -> dict:
 
     d = _artifact_dir(rid, args.get("out_dir"))
     link_scale = float(args.get("link_scale", 1.0))
+    # Every argument this call did not honour VERBATIM, in one place. `delay_ms` is the one that exists today;
+    # the list is the shape so the next quantised argument has somewhere to be declared instead of vanishing.
+    coerced = [c for c in (delay_coercion,) if c]
     # The filename CARRIES THE CONFIGURATION, and it has to. This tool hands back a path, and a caller who runs
     # it twice with different injections holds a path whose meaning silently changed under them -- found here,
     # by a test that measured a 20 ms-delay log while believing it held the 0 ms one and read the resulting
@@ -500,12 +523,19 @@ def simulate_bench_log(args: dict) -> dict:
         "log_path": log_path,                                # named paths, never a tuple
         "plan_path": plan_path,
         "plan_source": plan_note,
+        # Present WHENEVER an argument was not honoured verbatim, absent otherwise — so a caller that never
+        # trips a coercion is not made to read about one, and a caller that does cannot miss it.
+        **({"coerced_arguments": coerced,
+            "coercion_summary": "; ".join(f"{c['argument']} {c['requested']:g} -> {c['used']:g}"
+                                          for c in coerced)} if coerced else {}),
         "injected": {
             "frictionloss_nm": injected.get("frictionloss"),
             "damping_nm_s_per_rad": injected.get("damping"),
             "armature_kgm2": injected.get("armature"),
-            "delay_ms": round(ticks * 1000.0 / ctrl_hz, 3),
+            "delay_ms": round(delay_ms, 3),
+            "delay_ms_requested": delay_ms_requested,
             "delay_control_ticks": ticks,
+            "delay_quantised_to": f"whole control ticks at {ctrl_hz:g} Hz ({1000.0 / ctrl_hz:g} ms each)",
             "link_mass_and_inertia_scale": link_scale,
             "hold_only": hold,
             "note": "these are the errors deliberately put IN. A working pipeline gets them back out; that is "

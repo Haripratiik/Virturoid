@@ -36,6 +36,21 @@ are the same robot and ``as_built_over_simulated`` reads 1.0. Print all three an
 an IMPORTED robot is deliberately left at the customer's own masses, so its parts list is their machine PLUS
 whatever this BOM proposes adding, and the ratio is a real difference rather than a bookkeeping one.
 
+A NUMBER NAMED AFTER THE ROBOT MUST BE READ FROM THE ROBOT. ``actuation.peak_joint_torque_nm`` reported
+``360.0`` for a customer's real Menagerie Unitree Go2 whose own ``robot.xml``, shipping in the same package,
+declares ``forcerange="-45.43 45.43"`` — 8x, because the only torque this sheet could see was the one it
+regexed out of a BOM line's detail string, and that is the rating of the CATALOG PART the BOM matched to those
+joints. An actuator is selected as the smallest part that COVERS its joint, so a part rating sits at or above
+the joint's limit by construction: reading one as the other can only ever overstate. The robot's number now
+comes from the BOM's ``joint_limits`` block or the genome's own joint efforts (see ``_robot_peak_torque``);
+the part's rating still ships, on its own row, named ``catalog_part_peak_torque_nm``. Same treatment as mass:
+three numbers, each labelled, none standing in for another. And ``consistency`` now cross-checks the sheet's
+peak torque against the genome's declared efforts — the check that would have caught this, and did not exist.
+
+MONEY GETS THE SAME SPLIT. ``est_parts_cost_usd`` is ``totals.price_usd``, which on an imported machine used
+to include $6,480 of catalog EQUIVALENTS for motors the customer already owns and asked us to keep. It is now
+the BILL, with ``already_fitted_usd`` beside it.
+
 This paragraph used to say the sim body "carries the STRUCTURE only ... does not embody the actuators or the
 battery", and ``structure_mass_kg`` was read off material lines that had every link's motor inside them. Both
 halves were wrong in the same direction: grounding has embodied actuator mass for some time, and summing
@@ -167,21 +182,30 @@ def _robot_extent(output_dir: Path) -> tuple[dict | None, str | None]:
 def _bom_facts(bom: dict) -> dict:
     """Everything the spec sheet needs out of the BOM, in the BOM's own units. No re-derivation, no margins."""
     lines = [ln for ln in (bom.get("lines") or []) if isinstance(ln, dict)]
-    torques = []
+    # THE CATALOG PART's rating — a fact about the motor we would buy, NOT about the robot. Kept because a
+    # buyer wants it; named ``part_torques`` because it was previously called ``torques`` and printed under
+    # the label "Peak joint torque". See _robot_peak_torque.
+    part_torques = []
     for line in lines:
         if line.get("category") in _ACTUATOR_CATEGORIES:
             mt = re.search(r"peak\s+([\d.]+)\s*Nm", str(line.get("detail", "")))
             if mt:
-                torques.append(float(mt.group(1)))
+                part_torques.append((float(mt.group(1)), str(line.get("part") or "")))
     return {
         "lines": lines,
-        "torques": torques,
+        "part_torques": part_torques,
         # propulsion = whatever moves THIS body: joint actuators (arm/legged), drive motors (mobile), rotors
         # (aerial) -- so a drone's spec shows its rotors and a rover's its drive motors, not an empty section.
         "actuator_types": sorted({str(ln["part"]) for ln in lines
                                   if ln.get("category") in _ACTUATOR_CATEGORIES and ln.get("part")}),
         "sensors": sorted({str(ln["part"]) for ln in lines
                            if ln.get("category") in _SENSOR_CATEGORIES and ln.get("part")}),
+        # ...and which of them the BOM itself marks as NOT fitted. Same defect one surface along: a Go2 that
+        # compiles to ncam 0 / nsensor 0 had `sensing: [Bosch BNO055, Intel RealSense D435i]` printed flat
+        # under "Sensors", while bom.json two directories away said `proposed: true` on both lines.
+        "sensors_proposed": sorted({str(ln["part"]) for ln in lines
+                                    if ln.get("category") in _SENSOR_CATEGORIES and ln.get("part")
+                                    and ln.get("proposed")}),
         "compute": sorted({str(ln["part"]) for ln in lines
                            if ln.get("category") == "compute" and ln.get("part")}),
         # The STRUCTURE-only mass — raw stock, no motors, no electronics. It is NOT the number the certificate
@@ -193,6 +217,86 @@ def _bom_facts(bom: dict) -> dict:
         "actuator_selection": sorted((str(ln.get("part")), int(ln.get("qty") or 0))
                                      for ln in lines if ln.get("category") == "actuator"),
     }
+
+
+def _genome_joint_efforts(genome: dict) -> list[tuple[float, str]]:
+    """``[(effort, joint name)]`` the GENOME declares — the robot's own limits, in the same package.
+
+    On an imported machine these are the manufacturer's, read out of the customer's file at import; on a body
+    we composed they are the fitted actuator's peak, written by ``gene_build``. Either way they describe THIS
+    ROBOT, which is what a field called "peak joint torque" claims to.
+
+    REVOLUTE ONLY. A prismatic joint's ``effort`` is a LINEAR FORCE in newtons, and a max taken across both
+    would put newtons into a field named ``_nm`` -- the same category error as the one this file is fixing,
+    one unit along. ``bom_builder._aggregate_joint_limits`` splits them for the same reason.
+    """
+    out = []
+    for j in (genome.get("joints") or []):
+        if not isinstance(j, dict):
+            continue
+        if str(j.get("joint_type", "revolute")).lower() not in ("revolute", ""):
+            continue
+        eff = (j.get("limit") or {}).get("effort") if isinstance(j.get("limit"), dict) else None
+        try:
+            val = abs(float(eff))
+        except (TypeError, ValueError):
+            continue
+        if val > 0:
+            out.append((val, str(j.get("name") or "")))
+    return out
+
+
+def _robot_peak_torque(bom: dict, genome: dict, facts: dict) -> tuple[float | None, str, str | None]:
+    """``(peak N.m, how we know, reason it is unavailable)`` — THE ROBOT'S capability, in priority order.
+
+    THE DEFECT THIS FUNCTION EXISTS FOR (2026-08-12, real Menagerie Unitree Go2 through ``call_tool`` +
+    ``export_held``): this sheet reported ``actuation.peak_joint_torque_nm: 360.0`` for a robot whose own
+    ``robot.xml`` — shipping three files away in the same package — declares ``forcerange="-45.43 45.43"``.
+    The 360 was the rating of the catalog part the BOM matched to those joints ("Unitree M107 (B2/H1-class),
+    peak 360 Nm"), regexed out of the part's detail string. A part is selected as the SMALLEST one that COVERS
+    its joint, so its rating is >= the joint's by construction: reading it as the robot's capability can only
+    overstate, never understate, and here it overstated by 8x on a customer's own machine.
+
+    So: the BOM's ``joint_limits`` block first (bom_builder states it explicitly, with provenance), then the
+    genome's declared joint efforts, both of which describe the ROBOT. The catalog rating is used ONLY as a
+    last resort and ONLY on a robot we designed, where the joint limit really is the peak of the motor we
+    chose — and it is labelled even then. On an imported machine with neither block, we refuse: an 8x overstate
+    on hardware somebody is going to command torque to is worse than an empty cell that says why.
+    """
+    jl = bom.get("joint_limits") if isinstance(bom.get("joint_limits"), dict) else {}
+    if jl.get("peak_joint_torque_nm") is not None:
+        src = ("read from your own model's declared limits"
+               if jl.get("declared_by_your_model") else "the peak of the actuator this design fitted")
+        return (round(float(jl["peak_joint_torque_nm"]), 2),
+                f"{src} (worst joint: {jl.get('peak_joint')})", None)
+    efforts = _genome_joint_efforts(genome)
+    if efforts:
+        val, name = max(efforts)
+        return round(val, 2), f"the robot genome's declared joint effort limit (worst joint: {name})", None
+    if facts["part_torques"] and not _is_imported(bom):
+        val, part = max(facts["part_torques"])
+        return (round(val, 2),
+                f"the peak rating of the actuator this design fitted ({part}) — on a robot we designed the "
+                f"joint limit IS the selected motor's peak, because we chose the motor", None)
+    if facts["part_torques"]:
+        val, part = max(facts["part_torques"])
+        return None, "", (
+            f"not derived: this package carries no joint-limit block and no genome joint efforts, and this is "
+            f"YOUR machine rather than a design of ours — so the only torque available is {part}'s catalog "
+            f"rating ({val:g} Nm), which is the smallest part that COVERS your joints and therefore overstates "
+            f"them. Re-export from a re-imported robot so the BOM carries joint_limits, or read the "
+            f"forcerange in the shipped model")
+    return None, "", None
+
+
+def _is_imported(bom: dict) -> bool:
+    """Is the BOM describing the CUSTOMER'S machine? ``bom_builder`` says so in ``spec_provenance.robot_is``
+    (and, on older packages, by excluding the actuator lines from the mass because they are already in it)."""
+    prov = bom.get("spec_provenance") if isinstance(bom.get("spec_provenance"), dict) else {}
+    if prov.get("robot_is"):
+        return "imported" in str(prov["robot_is"])
+    return any(isinstance(ln, dict) and ln.get("category") == "actuator" and ln.get("in_mass_total") is False
+               for ln in (bom.get("lines") or []))
 
 
 def _genome_dof(genome: dict) -> int | None:
@@ -239,10 +343,12 @@ def build_spec_sheet(output_dir) -> dict:
             unavailable[field] = no_bom if not bom else (
                 f"not in this package's bill of materials: totals.{key} is absent -- rebuild the BOM "
                 f"(export format 'bom') so the sheet can quote it")
-    if not facts["torques"]:
-        unavailable["actuation.peak_joint_torque_nm"] = no_bom if not bom else (
-            "not derived: no actuator/drive/rotor line in the BOM carries a 'peak <N> Nm' rating -- the parts "
-            "are listed but unrated, so no peak joint torque can be quoted without inventing one")
+    robot_peak, peak_source, peak_why = _robot_peak_torque(bom, genome, facts)
+    if robot_peak is None:
+        unavailable["actuation.peak_joint_torque_nm"] = peak_why or (no_bom if not bom else (
+            "not derived: this package states no joint torque limit -- neither the BOM's joint_limits block nor "
+            "the genome's joint effort limits are present, and the actuator lines carry no 'peak <N> Nm' rating. "
+            "Re-export including the 'bom' format so the robot's own limits travel with it"))
     if not facts["actuator_types"]:
         unavailable["actuation.actuator_types"] = no_bom if not bom else (
             "empty: the BOM lists no actuator / drive_motor / rotor lines for this body")
@@ -269,13 +375,36 @@ def build_spec_sheet(output_dir) -> dict:
         },
         "power_and_cost": {
             "est_power_draw_w": totals.get("est_power_w"),
+            # THE BILL, not the catalog valuation of a machine the customer already owns. ``bom_builder`` keeps
+            # ``price_usd`` to the lines it actually asks them to buy and quotes the rest beside it; both
+            # travel here so the sheet can never present one as the other.
             "est_parts_cost_usd": totals.get("price_usd"),
+            **({"already_fitted_usd": totals.get("already_fitted_usd"),
+                "catalog_list_price_usd": totals.get("catalog_list_price_usd"),
+                "cost_note": totals.get("already_fitted_note")}
+               if totals.get("already_fitted_usd") else {}),
         },
         "actuation": {
             "actuator_types": facts["actuator_types"],
-            "peak_joint_torque_nm": round(max(facts["torques"]), 1) if facts["torques"] else None,
+            # On an imported machine ``actuator_types`` is a list of parts WE would buy to match the motors the
+            # customer already has, not a list of the motors it has. Say which.
+            **({"equivalents_for_your_motors": True} if (facts["actuator_types"] and _is_imported(bom)) else {}),
+            # THE ROBOT's limit. Never a part rating -- see _robot_peak_torque.
+            "peak_joint_torque_nm": robot_peak,
+            **({"peak_joint_torque_source": peak_source} if robot_peak is not None else {}),
+            # ...and the part rating, on its own line, named for what it is. It is genuinely useful (it is the
+            # headroom the certificate's margin gates grade against); it is simply not the robot's number.
+            **({"catalog_part_peak_torque_nm": round(max(facts["part_torques"])[0], 1),
+                "catalog_part": max(facts["part_torques"])[1],
+                "catalog_part_note": (
+                    "the RATING OF THE PART we would buy, not this robot's capability: an actuator is selected "
+                    "as the smallest one that covers its joint, so this sits at or above the joint limit above")}
+               if facts["part_torques"] else {}),
         },
         "sensing": facts["sensors"],
+        # the RECOMMENDATION stays in ``sensing`` (that is the useful part); which of it is not on the machine
+        # travels beside it, so no consumer can print the list as an inventory again.
+        **({"sensing_proposed": facts["sensors_proposed"]} if facts["sensors_proposed"] else {}),
         "compute": facts["compute"],
         "performance": perf,
     }
@@ -407,11 +536,29 @@ def _consistency(spec: dict, genome: dict, bom: dict, facts: dict, cert: dict) -
             f"bill of materials {facts['actuator_selection']} vs certificate margins.bom {from_cert}"
             if facts["actuator_selection"] != from_cert
             else f"one selection, {len(from_cert)} SKU(s), agreed by the BOM and the certificate")
+        # LIKE FOR LIKE. ``margins.bom`` grades the ORDERED PART, so it is compared against the part rating --
+        # NOT against the robot's joint limit, which is a different quantity and is checked below. Comparing
+        # them here is what made the 360 N.m claim look CONSISTENT: two artifacts agreeing about a part number
+        # while the robot's own model, in the same package, said 45.43.
         cert_peak = max((float(b.get("peak_nm") or 0.0) for b in cert_bom if isinstance(b, dict)), default=None)
-        sheet_peak = (spec.get("actuation") or {}).get("peak_joint_torque_nm")
-        if cert_peak and sheet_peak is not None:
-            add("peak_joint_torque_nm", abs(cert_peak - float(sheet_peak)) <= 0.15,
-                f"spec sheet {sheet_peak} Nm vs certificate margins.bom {cert_peak} Nm")
+        part_peak = (spec.get("actuation") or {}).get("catalog_part_peak_torque_nm")
+        if cert_peak and part_peak is not None:
+            add("actuator_part_peak_nm", abs(cert_peak - float(part_peak)) <= 0.15,
+                f"spec sheet part rating {part_peak} Nm vs certificate margins.bom {cert_peak} Nm")
+
+    # THE CHECK THAT WOULD HAVE CAUGHT IT. The robot's peak joint torque, as this sheet reports it, against the
+    # joint effort limits in the genome shipping in the SAME package. On the Go2 that is 360.0 vs 45.43 -- a
+    # contradiction between two files a customer opens one after the other, and nothing was comparing them.
+    sheet_peak = (spec.get("actuation") or {}).get("peak_joint_torque_nm")
+    efforts = _genome_joint_efforts(genome)
+    if sheet_peak is not None and efforts:
+        worst, jname = max(efforts)
+        ok = abs(float(worst) - float(sheet_peak)) <= max(0.01, 0.02 * float(worst))
+        add("peak_joint_torque_nm", ok,
+            f"spec sheet {sheet_peak} Nm vs the robot genome's own worst joint effort limit {round(worst, 2)} Nm"
+            + (f" at {jname}" if jname else "")
+            + ("" if ok else " -- these describe the SAME robot; a sheet quoting a bigger number is quoting a "
+                            "catalog part's rating instead of the machine's capability"))
 
     struct = facts["structure_mass_kg"]
     sim = ((cert.get("model_sanity") or {}) if isinstance(cert.get("model_sanity"), dict) else {}).get(
@@ -429,12 +576,16 @@ def _summary(spec: dict) -> str:
     cls = spec.get("robot_class") or "robot"
     dof = spec.get("dof")
     mass = (spec.get("physical") or {}).get("mass_kg")
-    cost = (spec.get("power_and_cost") or {}).get("est_parts_cost_usd")
+    pc = spec.get("power_and_cost") or {}
+    cost = pc.get("est_parts_cost_usd")
     bits = [f"{dof}-DOF {cls}" if dof else str(cls)]
     if mass:
         bits.append(f"{mass:.1f} kg")
     if cost:
-        bits.append(f"~${cost:,.0f} parts")
+        # "~$7,614 parts" on an imported machine read as the price of the robot in front of them, and $6,480 of
+        # it was motors already bolted to it. The headline is the BILL; what they own is named, not folded in.
+        already = pc.get("already_fitted_usd")
+        bits.append(f"~${cost:,.0f} parts to buy" + (f" (+${already:,.0f} already fitted)" if already else ""))
     perf = spec.get("performance") or {}
     sr = perf.get("success_rate")
     if perf.get("task") == "locomotion":
@@ -489,10 +640,18 @@ def _markdown(spec: dict) -> str:
     cost = pc.get("est_parts_cost_usd")
     cost_cell = _cell(spec, "power_and_cost.est_parts_cost_usd",
                       f"${float(cost):,.2f}" if isinstance(cost, (int, float)) else None)
+    if pc.get("already_fitted_usd"):
+        cost_cell += (f" to buy (+ ${float(pc['already_fitted_usd']):,.2f} of catalog equivalents for hardware "
+                      f"you already own, not billed)")
     torque_cell = _cell(spec, "actuation.peak_joint_torque_nm", act.get("peak_joint_torque_nm"), " Nm")
+    if act.get("peak_joint_torque_source"):
+        torque_cell += f" -- {act['peak_joint_torque_source']}"
     power_cell = _cell(spec, "power_and_cost.est_power_draw_w", pc.get("est_power_draw_w"), " W")
     mass_cell = _cell(spec, "physical.mass_kg", p.get("mass_kg"), " kg")
-    sensors_cell = ", ".join(spec.get("sensing") or []) or _cell(spec, "sensing", None)
+    # A PART THE BOM MARKS "NOT FITTED TO YOUR ROBOT" MUST NOT BE PRINTED AS ONE OF ITS SENSORS.
+    _proposed = set(spec.get("sensing_proposed") or [])
+    sensors_cell = ", ".join(f"{s} (PROPOSED -- not on your robot)" if s in _proposed else s
+                             for s in (spec.get("sensing") or [])) or _cell(spec, "sensing", None)
     compute_cell = ", ".join(spec.get("compute") or []) or _cell(spec, "compute", None)
     success_cell = _cell(spec, "performance.success_rate", perf.get("success_rate"))
     lines = [
@@ -506,8 +665,11 @@ def _markdown(spec: dict) -> str:
         f"| Degrees of freedom | {spec.get('dof')} |",
         f"| Mass (as built) | {mass_cell} |",
         f"| Size (LxWxH) | {sz} |",
-        f"| Actuators | {_cell(spec, 'physical.actuators', p.get('actuators'))} ({types}) |",
-        f"| Peak joint torque | {torque_cell} |",
+        # ON THE CUSTOMER'S MACHINE THESE ARE OUR PART NUMBERS FOR THEIR MOTORS, not the motors it has.
+        f"| Actuators | {_cell(spec, 'physical.actuators', p.get('actuators'))} "
+        f"({'catalog equivalents for your own motors: ' if act.get('equivalents_for_your_motors') else ''}"
+        f"{types}) |",
+        f"| Peak joint torque (THIS ROBOT) | {torque_cell} |",
         f"| Est. power draw | {power_cell} |",
         f"| Est. parts cost | {cost_cell} |",
         f"| Sensors | {sensors_cell} |",
@@ -515,6 +677,11 @@ def _markdown(spec: dict) -> str:
         f"| Task | {perf.get('task')} |",
         f"| Task success | {success_cell} |",
     ]
+    if act.get("catalog_part_peak_torque_nm") is not None:
+        # A SEPARATE, CLEARLY-LABELLED LINE. It is the part's number; putting it in the row above is the whole
+        # defect (a 45.43 N.m Go2 reported as 360.0 N.m because that is what the motor we would sell can do).
+        lines.append(f"| Actuator part rating (NOT the robot) | {act['catalog_part_peak_torque_nm']} Nm "
+                     f"({act.get('catalog_part')}) -- {act.get('catalog_part_note')} |")
     if perf.get("verdict"):
         lines.append(f"| Physics verdict | {perf.get('verdict')} (gait: {perf.get('gait_source')}, "
                      f"source: {perf.get('measured_by')}) |")
@@ -530,6 +697,8 @@ def _markdown(spec: dict) -> str:
             stability = "stability not reported"
         lines.append(f"| Gait | forward {perf.get('forward_m')} m, cadence {perf.get('cadence_hz')} Hz, "
                      f"{stability} |")
+    if pc.get("cost_note"):
+        lines += ["", f"**Cost:** {pc['cost_note']}"]
     mb = p.get("mass_breakdown") or {}
     if mb.get("note"):
         lines += ["", f"**Mass:** as built {mb.get('as_built_parts_kg')} kg "

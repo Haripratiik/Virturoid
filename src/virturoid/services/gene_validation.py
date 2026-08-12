@@ -94,7 +94,14 @@ def validate_gene_design(gene, *, material: str = "aluminum", payload_kg: float 
         from virturoid.schemas.gene import RobotGene
         from virturoid.services.grounded_physics import ground_gene, physical_prior_for
         g2 = RobotGene.from_dict(gene.to_dict())
-        total_mass = ground_gene(g2)["total_mass_kg"]
+        # A CARRIED LOAD IS NOT A LINK TO RE-WEIGH. ``edit_operators.set_payload`` puts the customer's stated
+        # payload on the robot as a real link and records it (``embodied_mass['payload_kg']``); re-deriving it
+        # here from box volume x aluminium would judge the design against a number nobody asked for -- measured
+        # on a composed quadruped, a 15.0 kg load came back as a 12.15 kg aluminium block.
+        carried = {str(n): float(v or 0.0) for n, v in
+                   ((((getattr(gene, "metadata", None) or {}).get("embodied_mass") or {})
+                     .get("payload_kg")) or {}).items()}
+        total_mass = ground_gene(g2, preserve_mass_links=set(carried))["total_mass_kg"]
         prior = physical_prior_for(g2)
         lo, hi = prior.mass_band_kg if prior is not None else _MASS_BAND.get(cls, (0.1, 200.0))
         # THE BAND DESCRIBES AN UNLOADED MACHINE. A robot RATED to carry a load is genuinely heavier -- it is
@@ -109,11 +116,19 @@ def validate_gene_design(gene, *, material: str = "aluminum", payload_kg: float 
             except (TypeError, ValueError):
                 rated = 0.0
         hi_eff = hi + max(0.0, rated)
-        checks["mass_budget"] = lo <= total_mass <= hi_eff
-        if not (lo <= total_mass <= hi_eff):
+        # ...AND WEIGH THE MACHINE, NOT WHAT IT IS HOLDING. The ``rated`` widening above is about the ROBOT
+        # growing -- bigger motors, thicker load-path links -- which is what a rating buys. The cargo's own
+        # kilograms are a different thing, and once ``set_payload`` started actually putting them on the body
+        # they were charged against the same allowance twice: measured on a composed quadruped rated for 15 kg,
+        # a 25.0 kg machine carrying 15.0 kg read as "37.2 kg outside the 12-15 + 15 band" and the amend gate
+        # auto-reverted the customer's own request -- the same auto-revert the rating was introduced to stop.
+        machine_mass = total_mass - sum(carried.values())
+        checks["mass_budget"] = lo <= machine_mass <= hi_eff
+        if not (lo <= machine_mass <= hi_eff):
             _rated = f" + {rated:.1f} kg rated payload" if rated else ""
-            flag("mass_budget", "med", f"total mass {total_mass:.1f} kg is outside the plausible "
-                 f"{cls or 'robot'} band ({lo}-{hi} kg{_rated})", total_mass)
+            _load = (f" (excluding {sum(carried.values()):.1f} kg of carried load)" if carried else "")
+            flag("mass_budget", "med", f"total mass {machine_mass:.1f} kg is outside the plausible "
+                 f"{cls or 'robot'} band ({lo}-{hi} kg{_rated}){_load}", machine_mass)
     except Exception:  # noqa: BLE001
         pass
 

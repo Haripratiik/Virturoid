@@ -212,10 +212,20 @@ def test_the_coupled_joints_MOVE_TOGETHER_when_the_model_is_STEPPED(rel):
     """THE measurement. Drive the driver, step, and watch the driven joint follow it or not follow it.
 
     MEASURED on this checkout, worst |q_a - offset - ratio*q_b| in rad/m over a 3 s driven sweep,
-    couplings OFF (HEAD) -> ON:
-        panda 0.04193 -> 0.00063   robotiq_2f85 0.01101 -> 0.00046   tidybot 0.25993 -> 0.00044
-        stretch 0.36700 -> 0.00414 talos 0.64744 -> 0.00338          toddlerbot 5.09550 -> 0.02373
-        xarm7 0.35604 -> 0.00035
+    couplings OFF -> ON:
+        panda 0.05354 -> 0.00069   robotiq_2f85 0.01088 -> 0.00046   tidybot 0.28041 -> 0.00045
+        stretch 0.48485 -> 0.00368 talos 0.77116 -> 0.00278          toddlerbot 6.07368 -> 0.01367
+        xarm7 0.25465 -> 0.00036
+
+    RE-MEASURED against the customer's own drivetrain. These numbers moved when ``robot_import`` began
+    carrying the source's declared damping and frictionloss into the twin instead of substituting our
+    structural prior, so both columns are now taken on a model that integrates the damping the customer's file
+    declares. The ratios did not move much and the verdict did not move at all; the point of recording them is
+    that a future drift can be told apart from this one.
+
+    The same change also carried ARMATURE for a while, and this test is one of the eight gates that caught it:
+    talos went 0.00278 -> 0.13119 and toddlerbot 0.01367 -> 1.88989 under armature alone. See
+    ``gene_compiler._declared_joint_dynamics`` for why a compiled ``dof_armature`` is not a declaration.
     """
     gene = _imported(rel)["gene"]
     assert gene.coupled_joints, f"premise gone: {rel} carries no coupling"
@@ -368,8 +378,13 @@ def test_a_source_that_declares_NO_solref_gets_MUJOCOS_default_not_an_invented_o
 
 def test_the_carried_solref_MEASURABLY_tightens_the_linkage_when_STEPPED():
     """Not a number in an attribute — a number in the trajectory. Cassie's plantar rod against its foot, worst
-    separation over 2000 stepped frames: 701.70 mm with no constraint at all, 32.83 mm carrying the constraint
-    at MuJoCo's default stiffness, 14.82 mm carrying the source's own ``solref="0.005 1"``.
+    separation over 2000 stepped frames: 698.99 mm with no constraint at all, 29.61 mm carrying the constraint
+    at MuJoCo's default stiffness, 14.67 mm carrying the source's own ``solref="0.005 1"``.
+
+    RE-MEASURED on the twin that carries Cassie's own declared joint damping (the earlier 701.70 / 32.83 /
+    14.82 were taken against our substituted prior). Carrying the source's ARMATURE too put this at 20.90 mm
+    against 31.10 mm — a ratio of 0.672, through the 0.6 gate below — which is one of the eight failures that
+    identified armature as the parameter that must not be carried.
     """
     import copy
 

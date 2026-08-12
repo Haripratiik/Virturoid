@@ -245,8 +245,15 @@ def test_the_urdfs_mimic_predicts_what_MUJOCO_ACTUALLY_SOLVES(rel, tmp_path):
 
     MEASURED on this checkout, worst |q_driven - (multiplier*q_driver + offset)| in rad/m over the sweep, with
     the model's couplings OFF (i.e. what the URDF would describe if the exporter were wrong) -> ON:
-        panda 0.04193 -> 0.00063   robotiq_2f85 0.01100 -> 0.00046   stretch 0.36700 -> 0.00414
-        toddlerbot 5.09550 -> 0.02373   talos 0.64744 -> 0.00338
+        panda 0.05308 -> 0.00068   robotiq_2f85 0.01088 -> 0.00046   stretch 0.37677 -> 0.00672
+        toddlerbot 6.02917 -> 0.01397   talos 0.79142 -> 0.00360
+
+    RE-MEASURED against the customer's own drivetrain: ``robot_import`` now carries the source's declared joint
+    damping and frictionloss into the twin instead of substituting our structural prior, so both columns are
+    taken on a model that integrates the numbers the customer's file states. The verdict is unchanged on all
+    five. An interim version of that change also carried ARMATURE, which put talos at 0.22868 and toddlerbot at
+    1.49290 — through the 0.05 gate below — and this test was one of the eight that caught it; see
+    ``gene_compiler._declared_joint_dynamics``.
     """
     gene = _gene(rel)
     root, _ = _urdf_root(rel, tmp_path)

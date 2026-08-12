@@ -48,6 +48,24 @@ _OP_IMPACT = {
 }
 _DEFAULT_IMPACT = ("unclassified", sorted(_RECHECK))          # unknown op -> assume it touches everything
 
+#: Operators that only ADD structure. Every other operator in the table reshapes what is already there, so
+#: naming a part means "this part and its descendants move". An additive op means the opposite: the named
+#: part is the MOUNT, and its existing children are exactly what does NOT move.
+#:
+#: Measured, before this distinction existed: `scope_amend {op: add_limb, args: {parent: "base"}}` on an
+#: imported Go2 returned `touches: "a new chain plus its mount"` in the same object as `named_parts` and
+#: `editable` listing all 13 existing links and `preserved: []`. The prose was right and the lists said the
+#: opposite -- a customer reading `preserved: []` would conclude that bolting an arm on reshapes their whole
+#: robot. `edit_operators.add_limb` appends segments and re-grounds with `original=gene`, so on a mass-
+#: preserving (imported) body the existing links are untouched; the mount is listed because the load it
+#: carries changes, which is a real consequence and a different one from being re-cut.
+#:
+#: ``set_payload`` joins it for the same reason: it now hangs the requested load on the carrying link as a new
+#: fixed segment, and on a body whose masses/geometry are the customer's it re-specs no existing joint at all
+#: (it proposes instead — see ``edit_operators.set_payload``). Listing every link as ``editable`` for "carry
+#: 25 kg" would be the same wrong answer this set exists to stop.
+_ADDITIVE_OPS = frozenset({"add_limb", "set_payload"})
+
 
 def _names(gene) -> list[str]:
     return [s.name for s in getattr(gene, "segments", []) or []]
@@ -83,26 +101,54 @@ def scope(gene, ops) -> dict:
             unknown.append(op)
         # Name the parts when the operator says which; a chain edit takes everything BELOW it, because a
         # descendant's placement is defined relative to its parent and therefore moves whether or not it is named.
+        # An ADDITIVE op is the exception: it hangs a NEW chain off the named part, so the named part's
+        # existing descendants are precisely what stays put. See :data:`_ADDITIVE_OPS`.
+        additive = op in _ADDITIVE_OPS
         named = set()
         for key in ("part", "name", "target", "group", "parent"):
             v = args.get(key)
             if isinstance(v, str) and v in all_names:
-                named |= {v} | _descendants(gene, v)
+                named |= {v} if additive else ({v} | _descendants(gene, v))
+        if additive and not named:
+            # `add_limb` with no `parent` defaults to the ROOT — the same default the operator itself takes.
+            root = next((s.name for s in getattr(gene, "segments", []) or [] if not s.parent), None)
+            if root:
+                named = {root}
         editable |= named
         rechecks |= set(checks)
-        per_op.append({"op": op or "(missing)", "touches": touched,
-                       "named_parts": sorted(named) or None, "invalidates": sorted(checks)})
+        entry = {"op": op or "(missing)", "touches": touched,
+                 "named_parts": sorted(named) or None, "invalidates": sorted(checks)}
+        if additive:
+            entry.update({
+                "additive": True,
+                "mount": sorted(named) or None,
+                # What the op is ADDING, named by the caller when they named it and by the operator's own
+                # description otherwise. Not defaulted to "limb": `_ADDITIVE_OPS` holds more than one op now,
+                # and answering "limb" for `set_payload` would be a small instance of exactly the defect this
+                # branch exists to fix.
+                "adds": str(args.get("name") or touched or op),
+                "existing_parts_reshaped": [],
+                "why_the_mount_is_editable":
+                    "the new chain attaches here, so what this part CARRIES changes; its own geometry, and "
+                    "every part already below it, keep their shape and placement",
+            })
+        per_op.append(entry)
     # An op that names no part is NOT an op that touches nothing -- set_height reshapes every ground-reaching
     # chain and scale_robot touches all of it. Returning an empty `editable` for those would read as "nothing
     # changes", which is the most dangerous possible answer, so say plainly that the scope is unbounded.
     unbounded = bool(ops) and not editable
-    return {
+    all_additive = bool(ops) and all(e.get("additive") for e in per_op)
+    out = {
         "ok": True,
         "editable": sorted(editable),
         "scope_is_bounded": not unbounded,
         "scope_note": ("this edit names no specific part, so it may touch ANY of them — nothing is promised "
                        "preserved. Re-check everything in `invalidates`."
-                       if unbounded else "scope is limited to the parts listed in `editable`"),
+                       if unbounded else
+                       ("this edit only ADDS: `editable` is the mount(s) the new structure hangs off, and no "
+                        "existing part is reshaped or moved. The rechecks in `invalidates` are still real — "
+                        "a robot that walked may not walk carrying this."
+                        if all_additive else "scope is limited to the parts listed in `editable`")),
         # "preserved" is a PROMISE, not a finding. verify_preserved() is what turns it into a fact.
         "preserved": sorted(all_names - editable) if editable else [],
         "preserved_is_a_claim": ("nothing here has been checked yet — call verify_preserved(before, after) after "
@@ -112,6 +158,30 @@ def scope(gene, ops) -> dict:
         "unknown_ops": unknown,
         "per_op": per_op,
     }
+    if all_additive:
+        # SAY WHAT "PRESERVED" COVERS, because for an additive op it does not cover everything, and the
+        # scope of the word is not guessable from the word.
+        #
+        # Measured with `verify_preserved` (which compares geometry, placement, mass, joint spec and actuator
+        # rating) after one `add_limb`. Geometry and placement held in EVERY case. Mass and actuator rating
+        # did not, and which of them moves is a property of the body's GROUNDING STATE, not of anything
+        # `scope` can see before the edit runs:
+        #
+        #   real imported Go2, already ground through ingest   0 of 12 existing links moved at all
+        #   freshly composed dog, masses derived by us         19 of 19 moved mass_kg + actuator_torque_nm
+        #   the same composed dog labelled mass_source=        19 of 19 moved actuator_torque_nm (motors
+        #     'source_model'                                     re-selected: 5.64 -> 18.0 N.m)
+        #
+        # An earlier version of this branch tried to predict it from `mass_source` and was wrong on the third
+        # row. Predicting badly is how the original defect was written; the fix is to promise only what holds
+        # in all three, and to name the fields it does not cover so the omission cannot be read as a promise.
+        out["preserved_covers"] = "shape, size, placement, joint type and joint limits"
+        out["preserved_does_not_cover"] = (
+            "mass_kg and actuator_torque_nm — re-grounding after an add re-derives them from the new load. "
+            "Measured: an already-grounded imported body saw no change, a freshly-composed one had every "
+            "link's motor re-selected. edit_robot's diff reports the per-link delta, and "
+            "verify_preserved(before, after) is the check that settles it for YOUR body.")
+    return out
 
 
 def verify_preserved(before, after, preserved=None) -> dict:

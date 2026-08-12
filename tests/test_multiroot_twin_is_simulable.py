@@ -18,6 +18,15 @@ The second test class is the load-bearing one, and it is subtle: **MuJoCo hides 
 reacts to a non-finite ``qacc`` by raising ``mjWARN_BADQACC`` *and calling* ``mj_resetData``, so a post-hoc
 ``np.isfinite(d.qpos)`` reads True on a model that exploded a millisecond earlier. Any gate written the obvious
 way passes the exact case it was written to catch.
+
+ONE FIXTURE MOVED, AND THE REASON MATTERS. The collapsed ALOHA above is no longer the divergence anchor: once
+``robot_import`` began carrying the source's own joint damping (ALOHA declares 1.2-40 N.m.s/rad where our
+structural prior substituted 2.0) the stacked twin became well-damped enough to survive contact it has no
+business surviving. It is still REJECTED — by ``_placement_fidelity``, which is the door that was always right
+for "the links are in the wrong place" — and that is asserted directly in
+``test_a_collapsed_twin_is_STILL_REJECTED_even_though_it_no_longer_diverges``. The divergence door is anchored
+instead on PAL's TIAGo++, the one package in the corpus whose own declaration our twin genuinely cannot
+integrate. Re-anchoring beat the alternative of under-damping a customer's robot so an assertion keeps passing.
 """
 from __future__ import annotations
 
@@ -185,52 +194,110 @@ def test_the_right_arm_keeps_its_180_degree_yaw():
 
 
 # --------------------------------------------------------------------------- the gate
+def _a_twin_that_really_diverges():
+    """A REAL twin, from the real corpus, that MuJoCo cannot step — the anchor for the divergence half.
+
+    It used to be the collapsed ALOHA, and is not any more. When the importer started carrying the source's own
+    joint DAMPING (ALOHA declares 1.2-40 N.m.s/rad against the 2.0 our structural prior used to substitute),
+    the collapsed twin became well-damped enough to survive 600 steps of contact it has no business surviving.
+    That is a faithfulness win and a coverage loss at the same time, and the honest response is to re-anchor
+    rather than to under-damp ALOHA on purpose so an assertion keeps passing.
+
+    The replacement is PAL's TIAGo++, the one package in the whole corpus whose own declaration our twin cannot
+    integrate: 1000 N.s/m on the torso lift and 40 N.m.s/rad across both arms, stable against their real link
+    inertias and non-finite against our primitives at t=1.052 s. ``robot_import`` detects exactly that and
+    falls back to our prior with a loud disclosure, so this rebuilds the gene it declined — the model the gate
+    is FOR.
+    """
+    import dataclasses
+
+    out = _import("pal_tiago_dual/tiago_dual.xml", "diverge")
+    gene = out["gene"]
+    assert gene.metadata.get("source_joint_dynamics_carried") is False, (
+        "premise gone: TIAGo++'s declaration is now steppable on our twin, so this is no longer the corpus's "
+        "diverging case. Re-derive the anchor before weakening anything below.")
+    return dataclasses.replace(
+        gene, metadata={k: v for k, v in gene.metadata.items()
+                        if k not in ("source_joint_dynamics_carried",
+                                     "source_joint_dynamics_not_carried_reason")})
+
+
 def test_mujoco_hides_the_divergence_so_a_finiteness_check_on_state_is_vacuous():
     """The reason this bug survived: ``mj_checkAcc`` calls ``mj_resetData`` when it trips.
 
     A stepped-to-death model therefore reports perfectly finite qpos/qvel afterwards. This test asserts the trap
     itself, so that anybody who "simplifies" the probe back to ``np.isfinite(d.qpos)`` gets a red test explaining
     why that does not work.
+
+    Driven, not settled, and that is not incidental: this twin survives 900 passive steps from either start
+    pose and only blows up once its actuators are commanded. A probe that watched a body fall over quietly
+    would report it healthy — which is the same reason ``_simulability_probe`` excites rather than settling.
     """
     import mujoco
     import numpy as np
     from virturoid.services.gene_compiler import compile_gene_to_mjcf, standing_spawn_z
 
-    out = _import("aloha/aloha.xml", "hide")
-    bad = _collapse_roots(out["gene"])
+    bad = _a_twin_that_really_diverges()
     m = mujoco.MjModel.from_xml_string(
         compile_gene_to_mjcf(bad, include_floor=True, spawn_z=standing_spawn_z(bad)))
+    lo, hi = m.actuator_ctrlrange[:, 0].copy(), m.actuator_ctrlrange[:, 1].copy()
+    free = m.actuator_ctrllimited[:] == 0
+    lo[free], hi[free] = -1.0, 1.0
+    mid, amp = (lo + hi) / 2.0, (hi - lo) / 2.0
     d = mujoco.MjData(m)
-    for _ in range(600):
+    for k in range(1200):                       # commands inside the customer's OWN ctrlrange, never past it
+        phase = 2.0 * np.pi * 1.0 * k * float(m.opt.timestep)
+        d.ctrl[:] = mid + amp * np.sin(phase + np.arange(m.nu) * (np.pi / max(1, m.nu)))
         mujoco.mj_step(m, d)
     diverged = int(d.warning[mujoco.mjtWarning.mjWARN_BADQACC].number)
-    assert diverged > 0, "the collapsed twin was expected to diverge; it did not"
+    assert diverged > 0, "this twin was expected to diverge; it did not"
     assert np.isfinite(d.qpos).all() and np.isfinite(d.qvel).all(), (
         "MuJoCo used to reset the data on a bad qacc, which is what made a state finiteness check useless. If "
         "this now fails, MuJoCo changed behaviour and the probe can be simplified — check mj_checkAcc first.")
 
 
 def test_a_twin_that_cannot_be_stepped_fails_the_import_loudly():
-    """The gate. A NaN twin must be distinguishable from a working one, to callers and to the customer."""
+    """The gate's DIVERGENCE door. A NaN twin must be distinguishable from a working one, to callers and to
+    the customer, and the failure must be attributed rather than asserted."""
     from virturoid.services.robot_import import _simulability_probe
 
-    out = _import("aloha/aloha.xml", "gate")
-    good = _simulability_probe(out["gene"])
+    good = _simulability_probe(_import("aloha/aloha.xml", "gate")["gene"])
     assert good["ok"] and good["checked"], f"the fixed ALOHA twin should pass the gate: {good}"
 
-    bad = _simulability_probe(_collapse_roots(out["gene"]))
-    assert bad["checked"] and not bad["ok"], f"the collapsed twin should FAIL the gate: {bad}"
+    bad = _simulability_probe(_a_twin_that_really_diverges())
+    assert bad["checked"] and not bad["ok"], f"an unsteppable twin should FAIL the gate: {bad}"
+    assert not bad.get("placement_failed"), (
+        f"this must fail on DIVERGENCE, not placement, or it is not covering the divergence door: {bad}")
     assert bad["first_bad_time_s"] > 0, bad
     assert bad["mujoco_warnings"], "the failure must be attributed to a named MuJoCo warning, not a bare bool"
+    assert "non-finite" in bad["reason"] and bad["stage"] == "excitation", bad["reason"]
+    # BOTH start poses are run and both are reported. The corpus no longer contains a twin that survives one
+    # and dies in the other (the collapsed ALOHA was that case, and its carried damping now keeps it alive in
+    # both), so this pins that both are ATTEMPTED rather than pinning an asymmetry that has gone.
+    assert [r["from"] for r in bad["runs"]] == ["rest_keyframe", "zero_pose"], bad["runs"]
+    assert not any(r["ok"] for r in bad["runs"]), [(r["from"], r["ok"]) for r in bad["runs"]]
+
+
+def test_a_collapsed_twin_is_STILL_REJECTED_even_though_it_no_longer_diverges():
+    """THE NON-NEGOTIABLE, and it survives a change that moved the physics under it.
+
+    The collapsed ALOHA — two arms stacked on one point, interpenetrating by 0.14 m — used to be caught by the
+    divergence door. Carrying the source's declared joint damping (1.2-40 against our 2.0 prior) made it
+    numerically survivable, so that door no longer sees it. It is still REJECTED, by the door that was always
+    the right one for this failure: ``_placement_fidelity`` says the links are not where the customer's model
+    puts them, which is true whether or not the solver copes. Asserted here explicitly so "the gate still
+    holds" is a measurement and not an assumption — and so that a future change which quietly loses BOTH doors
+    fails loudly.
+    """
+    from virturoid.services.robot_import import _simulability_probe
+
+    bad = _simulability_probe(_collapse_roots(_import("aloha/aloha.xml", "collapsed")["gene"]))
+    assert bad["checked"] and not bad["ok"], f"the collapsed twin must still FAIL the gate: {bad}"
+    assert bad["placement_failed"] is True, bad
+    assert bad["placement_check"]["max_link_displacement_m"] > 0.9, bad["placement_check"]
     assert bad["max_self_penetration_m"] > 0.1, (
         f"the probe must also report WHY: {bad['max_self_penetration_m']} m of overlap")
-    assert "non-finite" in bad["reason"], bad["reason"]
-    # The collapsed twin survives the whole probe from `neutral_pose` and dies at t=0.106 s from zero. That is
-    # why both start poses are run; a probe that picked one would have missed this half the time.
-    assert bad["stage"] and "zero_pose" in bad["reason"], bad["reason"]
-    assert [r["ok"] for r in bad["runs"]] == [True, False], (
-        f"expected the rest-keyframe run to survive and the zero-pose run to diverge: "
-        f"{[(r['from'], r['ok']) for r in bad['runs']]}")
+    assert "does not place your links" in bad["reason"], bad["reason"]
 
 
 def test_the_gate_reports_a_named_reason_it_could_not_compile():

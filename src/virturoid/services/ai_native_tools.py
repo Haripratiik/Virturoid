@@ -36,6 +36,59 @@ def _render_dir() -> Path:
 
 
 # ------------------------------------------------------------------ helpers
+def _end_effector_report(gene) -> dict:
+    """What tool is on this robot — DECLARED, and what the body actually carries.
+
+    ``end_effector_type`` is a single declared field, and nothing keeps it in step with the parts list.
+    Measured through ``call_tool``: an imported Go2 with an arm amended onto it carried a segment literally
+    named ``arm_gripper`` while ``get_robot`` answered ``end_effector: "none"`` -- ``edit_operators.add_limb``
+    appends the tool link but never restates the gene-level field, and an ingest has no reason to set it at
+    all. "none" was not a measurement, it was an un-updated default reported as one.
+
+    So report both, and never let the declared field be the only answer. The tool vocabulary is the schema's
+    own ``END_EFFECTORS`` rather than a new list, so this cannot drift into a second enum -- a segment counts
+    as a tool if it is FLAGGED one, or if its name's trailing token is a name the schema already knows.
+
+    A flagged part whose name identifies NOTHING gets ``kind: None``, not the declared value. The imported Go2
+    is exactly that case -- ``RR_calf`` carries ``is_end_effector=True`` (a leg tip, flagged by the importer)
+    and answering "its kind is 'none' because the gene says 'none'" would be the same circular non-answer this
+    function exists to remove. Unknown is reported as unknown, and only a part that NAMES a tool can supply
+    the headline value.
+    """
+    from virturoid.schemas.gene import END_EFFECTORS
+    known = {t for t in END_EFFECTORS if t != "none"} | {"hand", "tool", "pad"}
+    declared = str(getattr(gene, "end_effector_type", "") or "none")
+    found: list[dict] = []
+    for s in getattr(gene, "segments", []) or []:
+        name = str(getattr(s, "name", "") or "")
+        tail = name.rsplit("_", 1)[-1].lower()
+        kind = tail if tail in known else None
+        if getattr(s, "is_end_effector", False):
+            found.append({"part": name, "kind": kind, "evidence": "flagged"})
+        elif kind:
+            found.append({"part": name, "kind": kind, "evidence": "named"})
+    named = [f for f in found if f["kind"]]
+    out = {"end_effector": declared, "end_effectors_on_body": found}
+    if declared not in ("", "none"):
+        out["end_effector_source"] = ("declared on the gene" +
+                                      (", and a matching part is present" if named else
+                                       ", but no part on the body identifies as one"))
+    elif named:
+        # Report the truth in the field a caller actually reads, and say where it came from rather than
+        # silently overwriting the customer's declaration with an inference.
+        out["end_effector"] = named[0]["kind"]
+        out["end_effector_source"] = (
+            f"measured from the body ({', '.join(f['part'] for f in named[:4])}); the gene's declared "
+            f"end_effector_type is still {declared!r} and was not updated when the tool was attached")
+    elif found:
+        out["end_effector_source"] = (
+            f"no tool on this body: {found[0]['part']} is flagged as the end effector but names no tool type, "
+            f"and the gene declares {declared!r}")
+    else:
+        out["end_effector_source"] = "declared on the gene; no tool part found on the body"
+    return out
+
+
 def _summary(gene, robot_id: str | None = None, prompt: str = "") -> dict:
     """Compact, LLM-legible read of a robot: class, discovered appendages (GEN-1, structural), size, mass."""
     from virturoid.services.appendage_map import build_appendage_map
@@ -52,9 +105,10 @@ def _summary(gene, robot_id: str | None = None, prompt: str = "") -> dict:
            "dof": len(gene.actuated_joints()), "appendages": app,
            "standing_height_m": _standing_height(gene),
            "total_mass_kg": round(sum(s.mass_kg for s in gene.segments), 3),
-           "material": _dominant_material(gene), "end_effector": gene.end_effector_type,
+           "material": _dominant_material(gene),
            "design_source": getattr(gene, "design_source", "unknown"),
            "composition_notes": list(getattr(gene, "composition_notes", []) or [])}
+    out.update(_end_effector_report(gene))
     out["composition_notes"] += _requested_vs_built_notes(prompt, out)
     if robot_id:
         out["robot_id"] = robot_id

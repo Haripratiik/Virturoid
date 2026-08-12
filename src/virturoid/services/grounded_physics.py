@@ -291,7 +291,7 @@ def source_declared_torques(gene) -> dict[str, float]:
 
 def ground_gene(gene, *, material: str = "aluminum", fill: float = 0.3, margin: float = 1.3,
                 preserve_mass: bool = False, preserve_torque: bool | None = None,
-                derive_mass_links=None) -> dict:
+                derive_mass_links=None, preserve_mass_links=None) -> dict:
     """Mutate ``gene`` in place: set each link's mass from material+geometry (+ its actuator's mass) and each
     actuated joint's torque limit to a real actuator's PEAK. The actuator is sized so its CONTINUOUS (rated)
     torque covers the sustained requirement with ``margin`` -- real thermal practice; never size a joint at its
@@ -315,6 +315,16 @@ def ground_gene(gene, *, material: str = "aluminum", fill: float = 0.3, margin: 
     every calf 0.241 -> 2.177). Named links are derived from geometry + actuator exactly as an unpreserved run
     would; every other link keeps the number it arrived with. The caller decides which is which -- see
     ``edit_operators._reground_and_gate``, where it is (links this op created) + (links this op re-specified).
+
+    ``preserve_mass_links`` is its MIRROR and it wins over both flags: links whose mass is a stated NUMBER
+    rather than something to be derived from geometry. A payload is the case that needed it. When a customer
+    says "carry 25 kg", 25 kg is the answer -- not (box volume x whatever density this call happens to run at)
+    -- and the load has to survive grounding on BOTH kinds of body, an imported one (``preserve_mass=True``,
+    where a newly added link is derived precisely because it has no manufacturer number) and a composed one
+    (``preserve_mass=False``, where every link is derived). Without it there was no way to put a known mass on
+    a robot: ``edit_operators.set_payload`` scaled joint torques, added nothing, and reported
+    ``added_mass_kg: 0`` for a 25 kg request. Provenance is per link, and "the customer told us" is a
+    provenance.
 
     ``preserve_torque`` is the same protection for ACTUATOR CAPACITY, and it did not exist: mass was safe and
     torque was overwritten one line later, so an imported robot kept its manufacturer's masses and lost its
@@ -340,9 +350,12 @@ def ground_gene(gene, *, material: str = "aluminum", fill: float = 0.3, margin: 
     density = MATERIALS.get(material, MATERIALS["aluminum"])
     # Links whose mass is OURS to derive even under ``preserve_mass`` (added or re-specified by an edit).
     _derive = {str(n) for n in (derive_mass_links or ())}
+    # ...and links whose mass is NOT ours at any setting, because it is a number somebody stated (a payload).
+    _keep = {str(n) for n in (preserve_mass_links or ())}
+    _derive -= _keep
 
     def _mass_is_ours(seg) -> bool:
-        return (not preserve_mass) or (seg.name in _derive)
+        return (seg.name not in _keep) and ((not preserve_mass) or (seg.name in _derive))
     declared = source_declared_torques(gene) if preserve_torque is not False else {}
     if preserve_torque is True and not declared:
         declared = {s.name: abs(float(s.actuator_torque_nm))
@@ -444,7 +457,12 @@ def ground_gene(gene, *, material: str = "aluminum", fill: float = 0.3, margin: 
     total = sum(float(s.mass_kg) for s in gene.segments)
     balance_mass = 0.0
     if not preserve_mass:
-        balance_mass = _apply_balance_of_system(gene, prior, own_total=total)
+        # THE BAND DESCRIBES THE MACHINE, NOT ITS CARGO. ``_apply_balance_of_system`` tops a too-light body up
+        # to the class floor because a body grounded from geometry+motors alone has no battery, compute or
+        # wiring. A payload is none of those -- it is mass the robot is holding -- so counting it as the
+        # machine's own would let 25 kg of cargo silently cancel the battery estimate for the robot under it.
+        carried = sum(float((by_name[n].mass_kg if n in by_name else 0.0) or 0.0) for n in _keep)
+        balance_mass = _apply_balance_of_system(gene, prior, own_total=total - carried)
         total = sum(float(s.mass_kg) for s in gene.segments)
     # RECORD WHAT THESE MASSES WERE DERIVED AT. Without this, a downstream re-ground has no way to reproduce
     # the body it was handed and simply picks its own density -- which is how export shipped a robot 30% lighter
@@ -458,6 +476,8 @@ def ground_gene(gene, *, material: str = "aluminum", fill: float = 0.3, margin: 
             # Which links this call derived a mass for DESPITE preservation -- the disclosure that keeps
             # "we kept your robot's mass" a checkable claim rather than a slogan.
             "mass_derived_links": sorted(n for n in _derive if any(s.name == n for s in gene.segments)),
+            # ...and the links this call left alone because their mass is a stated number (a payload).
+            "mass_kept_links": sorted(n for n in _keep if any(s.name == n for s in gene.segments)),
             # Visible, per-joint, in the same report the BOM travels in: a reader must be able to tell which
             # joint limits are the customer's measurement and which are our catalog estimate.
             "torque_preserved": bool(declared),
@@ -484,8 +504,12 @@ def _embodiment_record(gene) -> dict:
       ``actuator_kg``           the motor :func:`ground_gene` folded into the link it drives
       ``component_kg``          the BOM's own battery/compute/sensors/wheels :func:`embody_component_masses` added
       ``balance_of_system_kg``  the residual ESTIMATE (wiring, fasteners, covers) the class band applies
+      ``payload_kg``            the LOAD the robot carries (:func:`record_payload_mass`) — created on demand
 
     Everything left over is STRUCTURE — the material a fabricator actually buys.
+
+    ``payload_kg`` is deliberately NOT pre-created with the other three: an empty bucket on every body we have
+    ever grounded would change the serialised metadata of every existing gene for nothing.
     """
     meta = getattr(gene, "metadata", None)
     if not isinstance(meta, dict):
@@ -499,6 +523,23 @@ def _embodiment_record(gene) -> dict:
         if not isinstance(rec.get(key), dict):
             rec[key] = {}
     return rec
+
+
+def record_payload_mass(gene, link: str, kg: float) -> None:
+    """Mark ``kg`` on ``link`` as CARRIED LOAD, not structure.
+
+    Without this a payload is billed as raw stock. ``bom_builder`` groups link masses into "material" lines --
+    the metal a fabricator buys -- minus exactly what :func:`structural_link_masses` says was folded in, and a
+    25 kg crate on a Go2's back is neither structure nor a part number: it is the customer's cargo. Left
+    unmarked it would appear on their parts list as 25 kg of skeleton stock, which is the same double-count
+    class as the motors billed twice that ``actuator_kg`` exists to stop.
+    """
+    rec = _embodiment_record(gene)
+    bucket = rec.get("payload_kg")
+    if not isinstance(bucket, dict):
+        bucket = {}
+        rec["payload_kg"] = bucket
+    bucket[str(link)] = round(float(kg), 6)
 
 
 def structural_link_masses(gene) -> dict[str, float]:
@@ -518,7 +559,7 @@ def structural_link_masses(gene) -> dict[str, float]:
     rec = (getattr(gene, "metadata", None) or {}).get("embodied_mass")
     rec = rec if isinstance(rec, dict) else {}
     folded: dict[str, float] = {}
-    for key in ("actuator_kg", "component_kg", "balance_of_system_kg"):
+    for key in ("actuator_kg", "component_kg", "balance_of_system_kg", "payload_kg"):
         for name, kg in (rec.get(key) or {}).items():
             folded[str(name)] = folded.get(str(name), 0.0) + float(kg or 0.0)
     return {s.name: max(0.0, float(s.mass_kg or 0.0) - folded.get(s.name, 0.0)) for s in gene.segments}

@@ -132,15 +132,91 @@ def test_preserve_torque_false_restores_the_catalog_sizing():
 
 
 def test_a_deliberate_capability_amend_still_upsizes_the_motor():
-    """set_payload scales the joint REQUIREMENT; preservation must release, or the amend is silently reverted."""
+    """set_payload scales the joint REQUIREMENT; preservation must release, or the amend is silently reverted.
+
+    WHAT MOVED, AND WHY. This used to call ``set_payload(payload_kg=20)`` bare and assert the declared limit
+    went up -- which made "the customer asked for more capacity" indistinguishable from "any payload request
+    silently rewrites limits read off their hardware". Measured through ``call_tool`` on a real Go2, the second
+    reading was the one that shipped: ``set_payload{payload_kg: 25}`` moved their declared 23.7 -> 360 and
+    45.43 -> 520 N.m without a word, on a response that also read ``source_masses_preserved: true``. So the
+    release is now something the caller SAYS (``upsize_actuators=True``) rather than something that happens
+    because they mentioned a payload; the guarantee this test exists for -- preservation is a default, not a
+    cage -- is asserted on exactly that call, and the default is asserted right below it.
+    """
     from virturoid.services.edit_operators import set_payload
     gene = _import("universal_robots_ur5e/ur5e.xml")["gene"]
     from virturoid.services.grounded_physics import ground_gene
     ground_gene(gene, preserve_mass=True)
     before = gene.segment("shoulder_link").actuator_torque_nm
-    amended, _ = set_payload(gene, payload_kg=20.0)
+    amended, diff = set_payload(gene, payload_kg=20.0, upsize_actuators=True)
     after = amended.segment("shoulder_link").actuator_torque_nm
     assert after > before, "the customer asked for more capacity and the declared limit overrode them"
+    # ...and it says so. An overwritten measurement that is not named is the defect, not the feature.
+    rewritten = {r["segment"] for r in diff.get("source_torque_rewritten", [])}
+    assert "shoulder_link" in rewritten
+    assert "warning" in diff
+
+
+def test_the_default_amend_proposes_instead_of_rewriting_a_declared_limit():
+    """The customer's own figures survive a payload request; the requirement comes back as a PROPOSAL."""
+    from virturoid.services.edit_operators import set_payload
+    from virturoid.services.grounded_physics import ground_gene
+    gene = _import("universal_robots_ur5e/ur5e.xml")["gene"]
+    ground_gene(gene, preserve_mass=True)
+    before = {s.name: s.actuator_torque_nm for s in gene.segments}
+    amended, diff = set_payload(gene, payload_kg=20.0)          # no upsize_actuators -> "auto"
+    assert diff["n_joints_upsized"] == 0
+    assert diff["source_torque_preserved"] is True
+    for s in amended.segments:
+        if s.name in before and before[s.name]:
+            assert s.actuator_torque_nm == pytest.approx(before[s.name], abs=1e-6), s.name
+    prop = {p["segment"]: p for p in diff["actuator_proposal"]}
+    assert prop, "the payload needs more torque than the declared limits; that has to be stated"
+    one = prop["shoulder_link"]
+    assert one["required_nm"] > one["declared_nm"] and one["shortfall_x"] > 1.0
+    assert "source_torque_rewritten" not in diff
+
+
+def test_the_payload_is_actually_added_and_the_source_body_is_untouched():
+    """On a real Go2: payload asked -> payload carried, and not one of the customer's numbers moves.
+
+    The defect this pins, measured through ``agent_tools.call_tool``: ``set_payload{payload_kg: 25}`` reported
+    ``added_mass_kg: 0`` (no payload anywhere on the robot) beside ``existing_mass_changed_kg: 30.654`` and 15
+    re-massed links -- FL_calf 0.241 -> 4.405 kg -- under ``source_masses_preserved: true``.
+    """
+    from virturoid.services.edit_operators import set_payload
+    from virturoid.services.gene_build import ground_and_repair
+    gene = _import("unitree_go2/go2.xml")["gene"]
+    ground_and_repair(gene)
+    before = {s.name: (s.mass_kg, s.actuator_torque_nm, s.radius_m, s.length_m) for s in gene.segments}
+    m0 = sum(float(s.mass_kg or 0.0) for s in gene.segments)
+
+    loaded, diff = set_payload(gene, payload_kg=25.0)
+
+    # 1) the payload is ON the robot, at exactly the mass asked for
+    assert diff["payload_mass_kg"] == pytest.approx(25.0)
+    assert diff["mass"]["added_mass_kg"] == pytest.approx(25.0, abs=1e-3)
+    carried = loaded.segment(diff["payload_link"])
+    assert carried is not None and carried.mass_kg == pytest.approx(25.0, abs=1e-4)
+    assert carried.parent == diff["carried_by"]
+    assert sum(float(s.mass_kg or 0.0) for s in loaded.segments) == pytest.approx(m0 + 25.0, abs=1e-2)
+
+    # 2) every link that was already there is byte-identical: mass, torque, geometry
+    for s in loaded.segments:
+        if s.name not in before:
+            continue
+        was = before[s.name]
+        assert s.mass_kg == pytest.approx(was[0], abs=1e-6), f"{s.name} mass moved"
+        assert (s.actuator_torque_nm or 0.0) == pytest.approx(was[1] or 0.0, abs=1e-6), f"{s.name} torque moved"
+        assert s.radius_m == pytest.approx(was[2], abs=1e-9), f"{s.name} was re-cut"
+        assert s.length_m == pytest.approx(was[3], abs=1e-9), f"{s.name} was re-cut"
+
+    # 3) and the booleans agree with the numbers printed beside them
+    led = diff["mass"]
+    assert led["n_existing_links_remassed"] == 0
+    assert led["existing_mass_changed_kg"] == 0.0
+    assert led["source_masses_preserved"] is True
+    assert diff["girth_scaled"] is False
 
 
 def test_a_generated_body_is_unaffected():

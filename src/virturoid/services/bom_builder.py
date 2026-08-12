@@ -9,6 +9,23 @@ the robot is not just a shape — it is a thing you could actually source and as
 
 This reads the gene's ``actuator_torque_nm`` per joint (the compiler already sizes these from link
 length/mass), so the actuator selection tracks the real mechanical demand of the body we generated.
+
+A PART'S RATING IS NOT THE ROBOT'S CAPABILITY, AND A PART THE CUSTOMER ALREADY OWNS IS NOT A PURCHASE. Both
+halves of that sentence were false in the same document, measured on a real Menagerie Unitree Go2 imported
+through ``agent_tools.call_tool``. Its 12 joints declare 23.7 / 23.7 / 45.43 N.m in the customer's own file,
+and those numbers survive import, grounding, and the MJCF this package ships. But the BOM's only torque was
+the one inside an actuator line's detail string — the CATALOG part's rating — so ``spec_sheet`` printed
+``peak_joint_torque_nm: 360.0``, 8x the truth. And the same four "Unitree M107" lines, already correctly
+labelled "EQUIVALENT for a motor already fitted to your robot" and already excluded from the mass total, put
+$3,600 into ``totals.price_usd``. So:
+
+* ``joint_limits`` states the ROBOT's own per-joint capability with its provenance, so nobody downstream has
+  to reconstruct it from a part number. The catalog rating still ships, on the part's own line, labelled.
+* ``BomLine.in_price_total`` is the money twin of ``in_mass_total``. A catalog equivalent for hardware already
+  bolted to the machine is a REPLACEMENT OPTION THE CUSTOMER HAS NOT ASKED FOR: it keeps its real price, in
+  ``totals.already_fitted_usd``, and stays out of ``totals.price_usd``, which is the bill.
+* ``spec_provenance`` is the sweep — every field this list reports, and whether it was READ from the customer's
+  model, DERIVED by our physics, or ASSUMED from a catalog part.
 """
 
 from __future__ import annotations
@@ -48,6 +65,20 @@ class BomLine:
     #: 94.176 kg. The line still ships (you need the part number, the torque and the price); it just does not
     #: get counted a second time, and ``totals.mass_note`` says so.
     in_mass_total: bool = True
+    #: Does this line's price belong in the BILL — the money this list asks the customer to SPEND?
+    #:
+    #: The money twin of ``in_mass_total``, and it was missing for exactly as long. Measured on a real
+    #: Menagerie Go2 through ``agent_tools.call_tool``: the actuator lines were already marked "EQUIVALENT for
+    #: a motor already fitted to your robot" and excluded from the mass, and then $6,480 of them (4x Unitree
+    #: M107 at $900 + 8x AK80-64 at $360) went straight into ``totals.price_usd``, which the spec sheet prints
+    #: as "Est. parts cost". Billing a customer for motors already bolted to their machine — motors they told
+    #: us to keep — is the same claim the mass double-count made, in dollars.
+    #:
+    #: The line still ships at its real catalog price, because "what does a spare cost / what would replacing
+    #: this run to" is a question an engineer legitimately asks. It is a REPLACEMENT OPTION THEY HAVE NOT ASKED
+    #: FOR, so it is quoted in ``totals.already_fitted_usd`` and left out of the bill. Always True on a robot
+    #: we designed: there is no machine yet, so every line is a purchase.
+    in_price_total: bool = True
     #: Is this part FITTED to the machine, or are we PROPOSING it?
     #:
     #: On a robot we designed the whole list is a proposal and this stays False (there is no machine yet to
@@ -675,6 +706,152 @@ def _joint_requirement_nm(seg) -> float:
     return float(getattr(seg, "actuator_torque_nm", None) or _DEFAULT_JOINT_TORQUE_NM)
 
 
+# --- WHAT THE ROBOT CAN DO vs WHAT THE PART IS RATED FOR ----------------------------------------------------
+#
+# MEASURED DEFECT (2026-08-12, real MuJoCo Menagerie Go2 through ``agent_tools.call_tool`` -> ``export_held``).
+# The shipped ``robot.xml`` in the package declares ``forcerange="-45.43 45.43"`` on the calf joints and
+# ``-23.70 23.70`` on hip/thigh — the customer's own numbers, preserved by ``grounded_physics.ground_gene``.
+# ``reports/spec_sheet.md`` in the SAME package said:
+#
+#     | Peak joint torque | 360.0 Nm |
+#
+# 8x the truth, because the only torque anywhere in the BOM was the one embedded in an actuator line's detail
+# string ("peak 360 Nm @ 48 V, gear 1:1"), and that is the CATALOG PART's rating. The part is by construction
+# the smallest one we stock that COVERS the joint, so its rating is always >= the robot's — reading it as the
+# robot's capability can only ever overstate, and on this machine it overstated by 8x.
+#
+# So the BOM now states the robot's own capability itself, per joint, with its provenance, instead of leaving
+# every downstream reader to reconstruct it from a part number. Two different quantities, two different fields,
+# and the one named after the ROBOT is read from the ROBOT.
+def _robot_joint_limits(gene, joints) -> dict:
+    """THE ROBOT's own actuation capability + where each number came from — never a catalog part's rating.
+
+    Per actuated joint: the torque (or, on a slider, force) limit the SHIPPED MODEL declares, which is what
+    ``gene_compiler`` writes into the MJCF ``forcerange``/``ctrlrange`` and what the physics was run at. On an
+    IMPORTED machine that is the manufacturer's number, read out of the customer's file at import and protected
+    through grounding by ``source_declared_torques``; on a robot we designed it is the peak of the actuator we
+    fitted, which genuinely IS that robot's capability because we chose it.
+
+    Torque and force are kept apart. ``actuator_torque_nm`` on a prismatic joint carries a LINEAR FORCE in
+    newtons (see ``grounded_physics.ground_gene``), so a max taken across both would be comparing N.m with N.
+    """
+    try:
+        from virturoid.services.grounded_physics import source_declared_torques
+        declared = source_declared_torques(gene) or {}
+    except Exception:  # noqa: BLE001 - provenance is value-add; a limit with no provenance still beats a part rating
+        declared = {}
+    where = ((getattr(gene, "metadata", None) or {}).get("source_actuator_torque_where") or {})
+    per: dict[str, dict] = {}
+    for s in joints:
+        nm = float(declared.get(s.name) or 0.0) or abs(float(getattr(s, "actuator_torque_nm", 0.0) or 0.0))
+        if not nm:
+            continue
+        row = {"limit": round(nm, 3),
+               "unit": "N" if s.joint_type == "prismatic" else "N.m",
+               "source": "your model" if s.name in declared else "the actuator we fitted"}
+        if s.name in declared:
+            row["declared_in"] = str(where.get(s.name) or "the source model")
+        per[str(s.name)] = row
+    return _aggregate_joint_limits(per)
+
+
+def _aggregate_joint_limits(per: dict[str, dict]) -> dict:
+    """Roll per-joint limits up into the headline capability + the sentence that keeps it distinguishable from
+    a part rating. Torque (N.m) and linear force (N) are aggregated separately — they are not the same unit."""
+    rot = {k: v for k, v in per.items() if v["unit"] == "N.m"}
+    lin = {k: v for k, v in per.items() if v["unit"] == "N"}
+    n_declared = sum(1 for v in per.values() if v["source"] == "your model")
+    out: dict = {
+        "per_joint": per,
+        "n_joints": len(per),
+        "n_declared_by_your_model": n_declared,
+        "n_sized_by_us": len(per) - n_declared,
+        "declared_by_your_model": n_declared > 0,
+    }
+    if rot:
+        worst = max(rot, key=lambda k: rot[k]["limit"])
+        out["peak_joint_torque_nm"] = round(rot[worst]["limit"], 3)
+        out["peak_joint"] = worst
+    if lin:
+        worst = max(lin, key=lambda k: lin[k]["limit"])
+        out["peak_joint_force_n"] = round(lin[worst]["limit"], 3)
+        out["peak_prismatic_joint"] = worst
+    out["note"] = (
+        "THIS IS THE ROBOT'S CAPABILITY, not the rating of the catalog part on the actuator lines. "
+        + (f"{n_declared} of {len(per)} joint limit(s) were READ from your own model" if n_declared else
+           "every limit here is the peak of the actuator this design fitted, which is this robot's capability "
+           "because we chose the motor")
+        + ". A catalog part is selected as the smallest one that COVERS its joint, so its rating is always at "
+          "or above the joint's own limit; quoting the part number as the robot's capability can only overstate "
+          "it, and on a real Unitree Go2 it overstated 45.43 N.m as 360 N.m.")
+    return out
+
+
+#: WHICH NUMBERS ARE THE CUSTOMER'S AND WHICH ARE OURS — one table, shipped with the parts list.
+#:
+#: The peak-torque defect was not a lone bug; it was the visible end of a category. A BOM mixes three kinds of
+#: number and prints them in one font: values READ from the customer's own model, values DERIVED by our physics,
+#: and values ASSUMED from whichever catalog part we selected. Only the first is a fact about their machine.
+#: This is the sweep of everything ``bom_builder`` and ``spec_sheet`` report, per field, so a reader never has
+#: to guess which kind they are looking at. ``sensor_provenance`` does the same job for perception and is
+#: referenced rather than duplicated here.
+_ASSUMED = "assumed from the catalog part"
+_MODELLED = "computed by our model"
+
+
+def _spec_provenance(gene, preserved: bool, joint_limits: dict, has_sensor_table: bool) -> dict:
+    """READ vs DERIVED vs ASSUMED, field by field, for every number this BOM (and the spec sheet built from it)
+    reports about the robot."""
+    imported = bool(str(((getattr(gene, "metadata", None) or {}).get("imported_from")) or ""))
+    n_read = int(joint_limits.get("n_declared_by_your_model") or 0)
+    rows: list[dict] = [
+        {"field": "joint_limits.peak_joint_torque_nm / per_joint",
+         "source": "READ from your model" if n_read else "derived: the peak of the actuator this design fitted",
+         "evidence": (f"{n_read}/{joint_limits.get('n_joints')} joint limits taken verbatim from your file "
+                      f"(actuator forcerange / a force-mode motor's ctrlrange / a joint's actuatorfrcrange) and "
+                      f"protected through grounding" if n_read else
+                      "this robot does not exist yet; we chose the motor, so its peak IS the joint's limit")},
+        {"field": "lines[actuator].detail — peak/rated torque, voltage, gear ratio, no-load speed",
+         "source": _ASSUMED,
+         "evidence": ("the selected part's datasheet. NONE of it is read from your model: MJCF/URDF declare a "
+                      "torque limit, not a bus voltage or a gearbox ratio. On an imported machine the part is a "
+                      "catalog EQUIVALENT chosen to cover your joint, so its ratings sit at or above yours.")},
+        {"field": "power_budget.* / totals.est_power_w", "source": _MODELLED,
+         "evidence": ("joint torque requirement x a class-typical joint speed x a phase factor / drivetrain "
+                      "efficiency + a per-axis driver allowance — see power_budget.basis. The joint SPEED is a "
+                      "class table, not a number from your model; no electrical current is measured or claimed "
+                      "anywhere in this list.")},
+        {"field": "lines[*].price_usd / totals.*_usd", "source": _ASSUMED,
+         "evidence": "single-unit list prices for representative real parts (~2024) — see cost_drivers.basis"},
+        {"field": "lines[material].mass_kg / totals.mass_kg",
+         "source": "READ from your model" if preserved else "derived from geometry x material density",
+         "evidence": ("your own per-link masses, preserved verbatim at import and de-duplicated against the "
+                      "actuator lines" if preserved else
+                      "link volume x the task-chosen material's density x fill, plus each link's actuator")},
+        {"field": "lines[material].part / density / tier", "source": _ASSUMED,
+         "evidence": ("the material our task/prompt heuristic chose — see material_policy. An imported model "
+                      "declares masses and inertias, never what the part is made of.")},
+        {"field": "lines[compute] / lines[power]", "source": _ASSUMED,
+         "evidence": ("sized from DOF + perception load and from the power budget above. A robot model cannot "
+                      "declare its battery or its compute board, so we can neither confirm nor deny the one you "
+                      "already have — these are our recommendation, not an inventory of your machine.")},
+        # no pipes in a field name -- this table is also rendered as markdown, where a pipe ends the cell.
+        {"field": "lines[camera / imu / lidar / force_torque / ...]",
+         "source": "see sensor_provenance (per line)" if has_sensor_table else _ASSUMED,
+         "evidence": ("each perception line says whether your model declares that instrument; the ones it does "
+                      "not are marked PROPOSED and priced separately" if has_sensor_table else
+                      "chosen from robot_class + task keywords + robot mass")},
+    ]
+    return {
+        "robot_is": "your imported machine" if imported else "a design of ours",
+        "rule": ("A number READ from your model is a fact about your robot; a number from a catalog part is a "
+                 "fact about the part we would buy. They are never printed as the same thing." if imported else
+                 "This robot does not exist yet, so every part is a proposal — but the JOINT LIMITS are still "
+                 "this design's own, not a restatement of the part rating that happens to cover them."),
+        "fields": rows,
+    }
+
+
 def _standardize_actuators(picks: list[tuple[str, object, float]]) -> tuple[dict[str, str], dict]:
     """Roll the per-joint picks onto a small number of part numbers. ``picks`` is (joint_name, Actuator, req_nm).
     Returns (joint -> ORDERED part name, policy dict explaining the rule and every roll-up)."""
@@ -751,13 +928,20 @@ def _pick_gripper(gene: RobotGene, scale_kg: float, task: str) -> str:
 
 def _cost_drivers(lines: list[BomLine], total: float) -> dict:
     """WHAT MAKES THIS ROBOT COST WHAT IT COSTS — per-category subtotals + the biggest single lines, so a buyer
-    can see at a glance whether the number is motors, perception or the end effector, and argue with it."""
+    can see at a glance whether the number is motors, perception or the end effector, and argue with it.
+
+    Explains THE BILL, so it reads only the lines the bill charges for (``in_price_total``). A category share
+    computed over hardware the customer already owns answers a question nobody asked: on the imported Go2 it
+    said "actuator 85%" of a total the customer is not being charged.
+    """
+    billed = [ln for ln in lines if ln.in_price_total]
+    excluded = round(sum(ln.price_usd for ln in lines if not ln.in_price_total), 2)
     by_cat: dict[str, float] = {}
-    for ln in lines:
+    for ln in billed:
         by_cat[ln.category] = round(by_cat.get(ln.category, 0.0) + ln.price_usd, 2)
     top_cat = sorted(by_cat.items(), key=lambda kv: -kv[1])
-    top_lines = sorted(lines, key=lambda ln: -ln.price_usd)[:3]
-    return {
+    top_lines = sorted(billed, key=lambda ln: -ln.price_usd)[:3]
+    out = {
         "by_category": {k: v for k, v in top_cat},
         "share_pct": {k: round(100.0 * v / max(total, 1e-6), 1) for k, v in top_cat[:4]},
         "top_lines": [{"part": ln.part, "qty": ln.qty, "price_usd": ln.price_usd} for ln in top_lines],
@@ -766,6 +950,11 @@ def _cost_drivers(lines: list[BomLine], total: float) -> dict:
                   "and can sell below its own one-off parts cost. Compare like for like before concluding we are "
                   "expensive — start with the category shares above."),
     }
+    if excluded > 0:
+        out["excluded_already_fitted_usd"] = excluded
+        out["excluded_note"] = (f"${excluded:,.2f} of catalog equivalents for hardware already on your machine is "
+                                f"NOT in these shares — see totals.already_fitted_usd")
+    return out
 
 
 def _aerial_propulsion(gene: RobotGene) -> list[tuple[str, int, str]]:
@@ -932,15 +1121,41 @@ def build_bom(gene: RobotGene, *, capabilities=None, task: str = "", pins: dict 
                              "NOT a part number: the residue of a finished machine that this parts list does "
                              "not itemise, carried on the trunk so the simulated mass matches the built mass"))
 
-    # ONE PART, COUNTED ONCE. On an imported robot the link masses are the manufacturer's and already contain
-    # that machine's motors, so our actuator lines are equivalents for hardware the customer already owns.
+    # THE ROBOT'S OWN ACTUATION CAPABILITY, stated by the BOM rather than reconstructed from a part number by
+    # whoever reads it next. See _robot_joint_limits: the spec sheet used to regex the catalog rating out of the
+    # detail string below and print it as the robot's peak joint torque (Go2: 360 N.m for a 45.43 N.m machine).
+    joint_limits = _robot_joint_limits(gene, joints)
+
+    # ONE PART, COUNTED ONCE — IN MASS AND IN MONEY. On an imported robot the link masses are the manufacturer's
+    # and already contain that machine's motors, so our actuator lines are equivalents for hardware the customer
+    # already owns. They are excluded from the mass (they are already inside it) AND from the bill (the customer
+    # is not buying them). The line keeps its real catalog price as a REPLACEMENT figure, quoted separately.
     preserved = str((gene.metadata or {}).get("mass_source") or "") == "source_model"
     if preserved:
+        _joints_for = {}
+        for jn, part in (actuator_map or {}).items():
+            _joints_for.setdefault(str(part), []).append(str(jn))
         for ln in lines:
-            if ln.category == "actuator":
-                ln.in_mass_total = False
-                ln.detail += (" - EQUIVALENT for a motor already fitted to your robot; its mass is already "
-                              "inside your model's link masses and is not added again")
+            if ln.category != "actuator":
+                continue
+            ln.in_mass_total = False
+            ln.in_price_total = False
+            # WHOSE NUMBER IS WHOSE. Everything before the dash is the CATALOG PART's datasheet — peak torque,
+            # voltage, gear ratio — and none of it describes the customer's motor. State their joints' own
+            # declared limit here, on the line, so the two can never be read as one number again.
+            mine = [joint_limits["per_joint"][j] for j in _joints_for.get(ln.part, [])
+                    if j in joint_limits.get("per_joint", {})]
+            theirs = [r for r in mine if r["source"] == "your model"]
+            if theirs:
+                worst = max(theirs, key=lambda r: r["limit"])
+                ln.detail = (f"catalog part rating: {ln.detail} -- the PART's datasheet, NOT your robot's. "
+                             f"YOUR ROBOT's own limit on {'this' if len(mine) == 1 else 'these'} "
+                             f"{len(mine)} joint(s) is {worst['limit']:g} {worst['unit']} "
+                             f"(read from {worst['declared_in']})")
+            ln.detail += (" - EQUIVALENT for a motor already fitted to your robot; its mass is already "
+                          "inside your model's link masses and is not added again, and it is NOT billed in "
+                          "totals.price_usd — its catalog price is quoted in totals.already_fitted_usd as a "
+                          "replacement/spares option you have not asked for")
 
     # A SENSOR THE CUSTOMER'S MODEL DOES NOT DECLARE IS A QUOTE, NOT AN INVENTORY LINE. ``_sensor_suite`` picks
     # perception from ``robot_class`` alone: every quadruped gets a RealSense + a BNO055 whether or not the file
@@ -977,7 +1192,12 @@ def build_bom(gene: RobotGene, *, capabilities=None, task: str = "", pins: dict 
     # TOTALS. ``est_power_w`` IS ``power_budget.total_draw_w`` and IS the number the power line was sized against —
     # one figure, quoted in three places, instead of three figures quoted once each.
     total_mass = round(sum(ln.mass_kg for ln in lines if ln.in_mass_total), 3)
-    total_price = round(sum(ln.price_usd for ln in lines), 2)
+    # price_usd IS THE BILL: what this list asks the customer to spend. On a robot we designed that is every
+    # line (nothing exists yet). On an imported machine it excludes the catalog equivalents for hardware already
+    # bolted on, whose catalog value is quoted beside it as a replacement option instead.
+    catalog_list_price = round(sum(ln.price_usd for ln in lines), 2)
+    total_price = round(sum(ln.price_usd for ln in lines if ln.in_price_total), 2)
+    already_fitted_price = round(catalog_list_price - total_price, 2)
     proposed_price = round(sum(ln.price_usd for ln in lines if ln.proposed), 2)
     _embodied = ((gene.metadata or {}).get("embodied_mass") or {}).get("component_kg") or {}
     mass_note = ("every part counted once: material lines are STRUCTURE only (the motors, electronics and "
@@ -995,18 +1215,32 @@ def build_bom(gene: RobotGene, *, capabilities=None, task: str = "", pins: dict 
         "actuator_policy": actuator_policy,
         "material_policy": (gene.metadata or {}).get("material_policy"),
         "power_budget": budget.to_dict(),
+        # THE ROBOT's capability, stated once, with provenance — never re-derived from a part number.
+        "joint_limits": joint_limits,
         "lines": [asdict(ln) | {"mass_kg": ln.mass_kg, "price_usd": ln.price_usd} for ln in lines],
         "totals": {"line_items": len(lines), "actuators": len(joints), "mass_kg": total_mass,
                    "price_usd": total_price, "est_power_w": budget.total_w, "mass_note": mass_note,
                    # THE MONEY SPLIT. Without it "$6,414" reads as the price of the machine in front of them,
                    # and $334 of that was a camera their robot does not have.
+                   **({"already_fitted_usd": already_fitted_price,
+                       "catalog_list_price_usd": catalog_list_price,
+                       "already_fitted_note": (
+                           f"${already_fitted_price:,.2f} of catalog EQUIVALENTS for hardware already on your "
+                           f"machine is NOT in price_usd. You own these parts and did not ask to replace them, "
+                           f"so this is a replacement/spares figure, not a bill. catalog_list_price_usd "
+                           f"(${catalog_list_price:,.2f}) is what the whole list would cost if you were buying "
+                           f"the machine from scratch.")}
+                      if already_fitted_price > 0 else {}),
                    **({"proposed_additions_usd": proposed_price,
-                       "as_imported_price_usd": round(total_price - proposed_price, 2),
-                       "price_note": ("price_usd is the WHOLE list. proposed_additions_usd is the part of it "
-                                      "that is hardware your model does not declare — sensors we recommend "
-                                      "adding, not parts fitted to your robot")}
+                       "as_imported_price_usd": round(catalog_list_price - proposed_price, 2),
+                       "price_note": ("price_usd is THE BILL — what this list asks you to spend. "
+                                      "proposed_additions_usd is the part of that bill which is hardware your "
+                                      "model does not declare (sensors we recommend adding). "
+                                      "as_imported_price_usd values the machine you already have at our catalog "
+                                      "prices; it is not money you are being asked for.")}
                       if proposed_price > 0 else {})},
         **({"sensor_provenance": sensor_prov} if sensor_prov else {}),
+        "spec_provenance": _spec_provenance(gene, preserved, joint_limits, bool(sensor_prov)),
         "cost_drivers": _cost_drivers(lines, total_price),
         **({"pins": {"applied": pins_applied, "rejected": pins_rejected}} if (pins_applied or pins_rejected) else {}),
         "note": ("Representative real-world components (manufacturer datasheets, ~2024); verify exact specs "
@@ -1028,13 +1262,30 @@ def format_bom_markdown(bom: dict) -> str:
     t = bom.get("totals", {})
     rows = ["# Bill of Materials",
             f"\n**Class:** {bom.get('robot_class')}  |  **DOF:** {bom.get('dof')}  |  "
-            f"**Mass:** {t.get('mass_kg')} kg  |  **Est. cost:** ${t.get('price_usd')}  |  "
-            f"**Est. power:** {t.get('est_power_w')} W\n",
-            "| Part | Category | Qty | Mass (kg) | Price (USD) | Detail |",
-            "|------|----------|----:|----------:|------------:|--------|"]
+            f"**Mass:** {t.get('mass_kg')} kg  |  **To buy:** ${t.get('price_usd')}  |  "
+            f"**Est. power:** {t.get('est_power_w')} W\n"]
+    if t.get("already_fitted_usd"):
+        rows.append(f"> **You are not being billed for hardware you already own.** ${t['already_fitted_usd']:,.2f} "
+                    f"of this list is catalog EQUIVALENTS for parts already fitted to your machine (priced as a "
+                    f"replacement option you have not asked for). The whole list bought from scratch would be "
+                    f"${t.get('catalog_list_price_usd', 0.0):,.2f}.\n")
+    jl = bom.get("joint_limits") or {}
+    if jl.get("peak_joint_torque_nm") is not None or jl.get("peak_joint_force_n") is not None:
+        # THE ROBOT's number, above the parts table, so it can never be confused with a part rating below it.
+        bits = []
+        if jl.get("peak_joint_torque_nm") is not None:
+            bits.append(f"**{jl['peak_joint_torque_nm']:g} N.m** at `{jl.get('peak_joint')}`")
+        if jl.get("peak_joint_force_n") is not None:
+            bits.append(f"**{jl['peak_joint_force_n']:g} N** at `{jl.get('peak_prismatic_joint')}` (linear)")
+        rows.append(f"\n## This robot's actuation capability\n\nPeak joint limit: {' and '.join(bits)}. "
+                    f"{jl.get('note', '')}\n")
+    rows += ["| Part | Category | Qty | Mass (kg) | Price (USD) | Detail |",
+             "|------|----------|----:|----------:|------------:|--------|"]
     for ln in bom.get("lines", []):
+        price = (f"{ln['price_usd']} (already owned)" if ln.get("in_price_total") is False
+                 else str(ln["price_usd"]))
         rows.append(f"| {ln['part']} | {ln['category']} | {ln['qty']} | {ln['mass_kg']} | "
-                    f"{ln['price_usd']} | {ln['detail']} |")
+                    f"{price} | {ln['detail']} |")
     # The SELECTION RULES, in the same document as the parts they chose — an engineer ordering from this list
     # should not have to reverse-engineer why it says what it says.
     pb = bom.get("power_budget") or {}
@@ -1063,7 +1314,18 @@ def format_bom_markdown(bom: dict) -> str:
         rows.append(f"\n## What drives the cost\n\n{shares}\n")
         for t3 in cd.get("top_lines", []):
             rows.append(f"- {t3['part']} x{t3['qty']}: ${t3['price_usd']}")
+        if cd.get("excluded_note"):
+            rows.append(f"\n{cd['excluded_note']}.")
         rows.append(f"\n_{cd.get('basis', '')}_")
+    sp = bom.get("spec_provenance") or {}
+    if sp.get("fields"):
+        # WHICH NUMBERS ARE YOURS AND WHICH ARE OURS, in the same document as the numbers.
+        rows.append(f"\n## Where each number comes from\n\nThis robot is **{sp.get('robot_is')}**. "
+                    f"{sp.get('rule', '')}\n")
+        rows.append("| Field | Source | Evidence |")
+        rows.append("|-------|--------|----------|")
+        for f in sp["fields"]:
+            rows.append(f"| `{f['field']}` | {f['source']} | {f['evidence']} |")
     rows.append(f"\n_{bom.get('note', '')}_")
     return "\n".join(rows)
 
@@ -1080,9 +1342,19 @@ def build_bom_from_genome(genome: dict, *, task: str = "", capabilities=None) ->
                    or ("mobile_base" if "mobile" in species else "manipulator"))
     lines: list[BomLine] = []
     picks: list[tuple[str, object, float]] = []
+    # THE GENOME'S OWN EFFORT LIMITS ARE THE ROBOT'S CAPABILITY on this path too — same rule as the gene path,
+    # so both emit the same field and neither leaves the reader to regex a part rating out of a detail string.
+    per_limit: dict[str, dict] = {}
     for j in joints:
-        eff = float(((j.get("limit") or {}).get("effort")) or _DEFAULT_JOINT_TORQUE_NM)
-        picks.append((j.get("name", f"joint{len(picks)}"), select_actuator(eff), eff))
+        declared = (j.get("limit") or {}).get("effort")
+        eff = float(declared or _DEFAULT_JOINT_TORQUE_NM)
+        name = j.get("name", f"joint{len(picks)}")
+        picks.append((name, select_actuator(eff), eff))
+        per_limit[str(name)] = {
+            "limit": round(abs(eff), 3),
+            "unit": "N" if (j.get("joint_type") or "").lower() == "prismatic" else "N.m",
+            "source": "your model" if declared else "the actuator we fitted",
+            **({"declared_in": "the genome's joint effort limit"} if declared else {})}
     actuator_map, actuator_policy = _standardize_actuators(picks)
     _by_name = {a.name: a for _n, a, _r in picks}
     ordered = [_by_name[actuator_map[jn]] for jn, _a, _r in picks]
@@ -1119,6 +1391,7 @@ def build_bom_from_genome(genome: dict, *, task: str = "", capabilities=None) ->
     total_price = round(sum(ln.price_usd for ln in lines), 2)
     return {"robot_class": robot_class, "dof": len(joints), "actuator_map": actuator_map,
             "actuator_policy": actuator_policy, "power_budget": budget.to_dict(),
+            "joint_limits": _aggregate_joint_limits(per_limit),
             "lines": [asdict(ln) | {"mass_kg": ln.mass_kg, "price_usd": ln.price_usd} for ln in lines],
             "totals": {"line_items": len(lines), "actuators": len(joints), "mass_kg": total_mass,
                        "price_usd": total_price, "est_power_w": budget.total_w,

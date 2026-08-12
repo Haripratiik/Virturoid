@@ -8,8 +8,11 @@ flows through ``robot_mjcf`` everywhere. Meshed URDFs need their mesh/asset file
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
+
+from virturoid.services import source_guard
 
 # ---------------------------------------------------------------------------------------------------------
 # URDF REPAIR PASS (P0, agentic-ingestion plan). Real customer URDFs — the AS-PUBLISHED Unitree Go2 among
@@ -199,6 +202,36 @@ def repair_urdf_text(text: str, *, mesh_root: Path | None = None) -> tuple[str, 
     return text, repairs
 
 
+#: `filename="..."` on a <mesh> element, the one URDF reference that is resolved relative to the URDF's
+#: own directory (and therefore the one thing that used to pin our prep copy inside the customer's folder).
+_MESH_FILENAME = re.compile(r'(<mesh\b[^>]*?\bfilename=")([^"]+)(")')
+
+
+def _absolutise_mesh_paths(urdf_text: str, root: Path) -> str:
+    """Rewrite RELATIVE mesh filenames to absolute ones so the prepped copy can live anywhere.
+
+    Only touches a reference that (a) is relative, (b) is not a ``package://`` URI, and (c) resolves to a
+    file that actually exists under ``root``. Anything else is returned untouched, so the missing-mesh and
+    ``package://`` cases still reach ``repair_urdf_text`` and are still reported as repairs rather than
+    being quietly papered over here.
+    """
+    def _rewrite(m: re.Match) -> str:
+        ref = m.group(2)
+        if ref.startswith(("package://", "model://", "file://")) or os.path.isabs(ref):
+            return m.group(0)
+        try:
+            real = (root / ref).resolve()
+        except OSError:
+            return m.group(0)
+        # `_within` for the same reason `_resolve_mesh_path` uses it: a hostile `../../..` reference must not
+        # be turned into a working absolute path by us. Left alone, it stays subject to the existing pass.
+        if not real.is_file() or not _within(real, root):
+            return m.group(0)
+        return m.group(1) + real.as_posix() + m.group(3)
+
+    return _MESH_FILENAME.sub(_rewrite, urdf_text)
+
+
 def _ensure_floor(xml: str) -> str:
     if 'type="plane"' in xml:
         return xml
@@ -268,18 +301,24 @@ def import_model(path: str) -> dict:
             #   unitree_go2/scene.xml -> "Error opening file 'go2.xml'"   (the <include> itself)
             #   unitree_h1/h1.xml     -> "Error opening file 'assets/pelvis.stl'"
             # and each still returned a 0-body import. Menagerie is the most common source a customer brings, so
-            # "bring your own robot" was broken for the format it is most often brought in. The URDF branch below
-            # already had this right (it writes a SIBLING temp file "so relative meshes still resolve"); the MJCF
-            # branch never got the same treatment.
-            tmp_xml = p.with_name(p.stem + ".__mjcfprep__.xml")
-            try:
-                tmp_xml.write_text(_ensure_floor(p.read_text(encoding="utf-8")), encoding="utf-8")
-                model = mujoco.MjModel.from_xml_path(str(tmp_xml))
-            finally:
-                try:
-                    tmp_xml.unlink()
-                except OSError:
-                    pass
+            # "bring your own robot" was broken for the format it is most often brought in. The URDF branch had
+            # the directory context right first (it wrote a SIBLING temp file "so relative meshes still
+            # resolve"); the MJCF branch never got the same treatment.
+            #
+            # ...AND THE SIBLING FILE WAS A WRITE INTO THE CUSTOMER'S OWN FOLDER. Measured through
+            # `call_tool` on a real Menagerie Go2, an ingest created and then deleted
+            # `unitree_go2/go2.__mjcfprep__.xml` in the directory the customer pointed us at. The unlink is
+            # why a before/after mtime diff never showed it, and it is also why the write survived this long.
+            # A folder a customer hands us is theirs; see `source_guard`.
+            #
+            # The prep write turns out to be UNNECESSARY here, which is the whole fix: `_ensure_floor` is
+            # applied AGAIN to the round-tripped XML three lines below, and that second application is the
+            # one that lands in the MJCF we hand downstream. So compile the customer's file exactly as it
+            # sits -- no copy, no floor -- and let the existing post-round-trip `_ensure_floor` add the plane.
+            # Verified identical (nbody / njnt / nu) on 7 real packages spanning both a bare model and an
+            # `<include>`-bearing scene: unitree_go2 go2.xml + scene.xml, unitree_h1, franka_emika_panda,
+            # boston_dynamics_spot, agility_cassie, robotiq_2f85.
+            model = mujoco.MjModel.from_xml_path(str(p))
             # Round-trip through the compiled model so the MJCF we hand downstream is self-contained (includes
             # expanded, asset paths absolute) rather than only loadable from the source directory.
             tmp = tempfile.NamedTemporaryFile(suffix=".xml", delete=False); tmp.close()
@@ -295,20 +334,39 @@ def import_model(path: str) -> dict:
                         "note": "this is a xacro template with unexpanded macros (${...} / <xacro:...>), not a "
                                 "loadable URDF. Expand it first: `ros2 run xacro xacro robot.urdf.xacro "
                                 "> robot.urdf` (or `rosrun xacro xacro`), then import the generated .urdf."}
-            # M3: compile a copy carrying <compiler fusestatic="false"> (sibling file so relative meshes still
-            # resolve) so the base-link inertial survives -- from_xml_path on the original would fuse it away.
-            tmp_urdf = p.with_name(p.stem + ".__mjcfprep__.urdf")
-            tmp_urdf.write_text(_inject_mujoco_compiler(raw), encoding="utf-8")
+            # M3: compile a copy carrying <compiler fusestatic="false"> so the base-link inertial survives --
+            # from_xml_path on the original would fuse it away. The copy CANNOT go beside the original: that
+            # directory belongs to the customer (see `source_guard`). It goes to a staging dir under build/,
+            # and `_absolutise_mesh_paths` is what buys the move -- a URDF's mesh filenames are relative to
+            # the URDF's own location, which is the reason the copy sat there in the first place.
+            #
+            # The rewrite is deliberately the WEAKEST one that works: relative -> absolute, and only when the
+            # file is really there. `package://` URIs and genuinely missing meshes are left exactly as written
+            # so they still fall through to `repair_urdf_text` and are still REPORTED as repairs -- a clean
+            # URDF must keep loading on the first attempt with an empty repair list, and a broken one must
+            # keep producing the same repair ledger. Verified identical (nbody/njnt/nu/nmesh) against the
+            # in-source copy on unitree a1 + go1, ability_hand, and google_barkour_v0 (whose missing
+            # `meshes/powercable.stl` fails the first attempt both ways and is boxed by the repair pass).
+            staging = source_guard.staging_dir(p.parent, kind="import") / f"{p.stem}.prep.urdf"
+            prepped = _absolutise_mesh_paths(_inject_mujoco_compiler(raw), p.parent)
+            staging.write_text(prepped, encoding="utf-8")
             try:
                 try:
-                    model = mujoco.MjModel.from_xml_path(str(tmp_urdf))
+                    model = mujoco.MjModel.from_xml_path(str(staging))
                 except Exception:  # noqa: BLE001 - the as-published file did not compile; repair + retry
+                    # `repair_urdf_text` already rewrites every mesh it can resolve to an ABSOLUTE path, so
+                    # the repaired text needs no help from its location.
                     fixed, repairs = repair_urdf_text(raw, mesh_root=p.parent)
-                    tmp_urdf.write_text(_inject_mujoco_compiler(fixed), encoding="utf-8")
-                    model = mujoco.MjModel.from_xml_path(str(tmp_urdf))
+                    staging.write_text(_inject_mujoco_compiler(fixed), encoding="utf-8")
+                    model = mujoco.MjModel.from_xml_path(str(staging))
             finally:
                 try:
-                    tmp_urdf.unlink()
+                    staging.unlink()
+                    # ...and take the directory with it when nothing else is using it. One empty dir per
+                    # distinct source path ever imported is slow-growing litter in a long-lived install.
+                    # `rmdir` refusing on a non-empty dir is exactly the right behaviour if a concurrent
+                    # import of a sibling file is still holding its own prep file there.
+                    staging.parent.rmdir()
                 except OSError:
                     pass
             tmp = tempfile.NamedTemporaryFile(suffix=".xml", delete=False); tmp.close()
