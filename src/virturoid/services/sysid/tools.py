@@ -728,6 +728,12 @@ def fit_actuators(args: dict) -> dict:
         "next_experiment": brief.get("next_experiment"),
         "application_gate": fit.get("application"),
         "tracking_gate_threshold_x": MIN_TRACKING_IMPROVEMENT_X,
+        # The SECOND gate, on the wire beside the first. A customer who is told "refused" is entitled to the
+        # evidence for WHICH refusal, and this one sends them to their BOM rather than back to the bench.
+        "global_scale_check": fit.get("global_scale"),
+        # ...and the THIRD, which sends them to their CAD rather than to either. Same shape of evidence, other
+        # scalar: a replay of the prior model with one link-inertia multiplier, competing with the whole fit.
+        "link_inertia_check": fit.get("link_inertia"),
         "trajectory": fit.get("trajectory"),
         "latency": fit.get("latency"),
         "assumed_correct": fit.get("assumed_correct"),

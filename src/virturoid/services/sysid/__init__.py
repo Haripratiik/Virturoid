@@ -80,10 +80,19 @@ from virturoid.services.sysid.calibration import (
 )
 from virturoid.services.sysid.excitation import build_excitation, excitation_command_series
 from virturoid.services.sysid.fit import (
+    GLOBAL_SCALE_COHERENCE_R2,
+    GLOBAL_SCALE_RIVAL_X,
+    LINK_INERTIA_RIVAL_IMPROVEMENT_X,
+    LINK_INERTIA_RIVAL_X,
+    LOG_EXCURSION_RATIO_MAX,
+    LOG_EXCURSION_VALID_DELAY_MS,
     MIN_TRACKING_IMPROVEMENT_X,
     application_gate,
     coverage_table,
     fit_parameters,
+    global_scale_signature,
+    link_inertia_signature,
+    log_plausibility,
 )
 from virturoid.services.sysid.gap_report import measure_gap
 from virturoid.services.sysid.identifiability import identifiability_report
@@ -96,7 +105,13 @@ from virturoid.services.sysid.synthetic_hardware import (
 from virturoid.services.sysid.torque_channel import convert_current_to_torque, torque_constants
 
 __all__ = [
+    "GLOBAL_SCALE_COHERENCE_R2",
+    "GLOBAL_SCALE_RIVAL_X",
+    "LINK_INERTIA_RIVAL_IMPROVEMENT_X",
+    "LINK_INERTIA_RIVAL_X",
     "LOG_CHANNELS",
+    "LOG_EXCURSION_RATIO_MAX",
+    "LOG_EXCURSION_VALID_DELAY_MS",
     "MIN_TRACKING_IMPROVEMENT_X",
     "WHAT_SIM2SIM_DOES_NOT_PROVE",
     "application_gate",
@@ -110,8 +125,11 @@ __all__ = [
     "excitation_command_series",
     "fit_parameters",
     "follow_up_experiment",
+    "global_scale_signature",
     "identifiability_report",
     "l2_requirements",
+    "link_inertia_signature",
+    "log_plausibility",
     "log_provenance",
     "measure_gap",
     "model_represents_actuation_delay",

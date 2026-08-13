@@ -506,9 +506,9 @@ def inertia_misspecified(dog, plan):
     return lg, fit_parameters(dog, lg, plan=plan, n_boot=64, measure_delay=False)
 
 
-def test_a_torque_scale_error_CLEARS_the_tracking_gate_and_reaches_the_model(dog, plan,
-                                                                            torque_scale_misspecified):
-    """THE RETRACTION, asserted so it cannot be quietly reinstated: a misspecification PASSES.
+def test_a_torque_scale_error_STILL_clears_the_tracking_gate_and_is_now_stopped_by_the_second_check(
+        dog, plan, torque_scale_misspecified):
+    """THE RETRACTION, still asserted so it cannot be quietly reinstated -- plus the check that closes it.
 
     A wrong gear ratio, a wrong torque constant or an unmodelled gearbox efficiency means the joint receives
     ``g`` times the torque the log records. That is algebraically the same as dividing inertia, damping and
@@ -517,8 +517,15 @@ def test_a_torque_scale_error_CLEARS_the_tracking_gate_and_reaches_the_model(dog
     the ratio saturates around 1.65 instead of running away.
 
     The numbers it writes are wrong in the way this section exists to catch: they are the true parameters
-    scaled by ``(1 - g)/g``, their intervals exclude the true unchanged values, and at 1.25 they clear the gate
-    and are applied to the customer's compiled model.
+    scaled by ``(1 - g)/g`` and their intervals exclude the true unchanged values. **The tracking gate is STILL
+    fooled by all of that** -- ``improvement_x`` reads 1.536x at g=1.25 against a 1.5x threshold, and the first
+    two thirds of this test assert exactly that, unchanged. What is new is the SECOND check: the same coherence
+    that makes the absorption work is the fingerprint that identifies it, and a replay of the PRIOR model with
+    one gear scalar beats the fit outright. So the last third of this test is INVERTED (2026-08-12): the
+    parameters no longer reach the customer's model, and the reason is named in the verdict.
+
+    MEASURED at g=1.25 with this code: improvement_x 1.536 (gate passed on the merits), coherence 0.954,
+    implied g 1.257, the one-number rival tracks 29.8x better than the fit, 0 parameters written.
     """
     from virturoid.services.gene_compiler import compile_gene_to_mjcf
     from virturoid.services.sysid import MIN_TRACKING_IMPROVEMENT_X, apply_calibration
@@ -527,13 +534,12 @@ def test_a_torque_scale_error_CLEARS_the_tracking_gate_and_reaches_the_model(dog
     app = fit["application"]
     assert app["improvement_x"] >= MIN_TRACKING_IMPROVEMENT_X, (
         f"a torque-scale error of {TORQUE_SCALE:g}x now scores {app['improvement_x']}x against the "
-        f"{MIN_TRACKING_IMPROVEMENT_X}x gate, i.e. it is REFUSED. Measured 1.536x when this was written. If it "
-        f"is genuinely under the threshold again, the retraction in the block above is stale and the "
+        f"{MIN_TRACKING_IMPROVEMENT_X}x gate, i.e. the TRACKING gate refuses it on its own. Measured 1.536x. "
+        f"If it is genuinely under the threshold again, the retraction in the block above is stale and the "
         f"'a misspecification can never improve tracking' claim may be reinstated -- deliberately, in writing, "
         f"with the whole family re-swept, not by deleting this test")
-    assert app["passed"] is True and app["provisional"] is False, app["verdict"]
 
-    # ...and the numbers are WRONG, which is what makes the pass a defect rather than a success.
+    # ...and the numbers are WRONG, which is what makes the tracking pass a defect rather than a success.
     wrong = [(n, p) for n, r in fit["joints"].items() for p in r["identified"]
              if not (r["parameters"][p]["delta_interval"][0] <= 0.0 <= r["parameters"][p]["delta_interval"][1])]
     assert len(wrong) >= 20, (
@@ -555,14 +561,38 @@ def test_a_torque_scale_error_CLEARS_the_tracking_gate_and_reaches_the_model(dog
         f"{got:.3f} of the prior ({got / predicted:.2f}x predicted, measured 1.25x). If that ratio has moved a"
         f" long way, the absorption mechanism in this docstring is not the one producing the pass")
 
-    # ...and this is the part that costs a customer: it is applied, with no override asked for.
+    # ---- THE CLOSE. Everything above was true at 824e0fb and the fit was WRITTEN anyway. ----------------
+    gs = fit["global_scale"]
+    assert gs["suspected"] is True, (
+        f"the second check did not fire on the case it exists for: coherence {gs.get('coherence')} "
+        f"(threshold {gs.get('coherence_threshold')}), implied g {gs.get('implied_torque_scale_g')}, rival "
+        f"{gs.get('rival')}. Measured coherence 0.954 / implied g 1.257 / rival explains_x 29.8")
+    assert gs["rival"]["explains_x"] >= 1.0
+    assert 1.05 <= gs["implied_torque_scale_g"] <= 1.6, (
+        f"the check fired but named the wrong factor: it implies {gs['implied_torque_scale_g']}x against an "
+        f"injected {TORQUE_SCALE}x (measured 1.257). A refusal that misnames the cause sends the customer to "
+        f"the wrong part of their BOM")
+    assert app["passed"] is False and app["refused_by"] == "global_scale", app["verdict"]
+    v = app["verdict"].lower()
+    assert "gear ratio" in v and "torque constant" in v, (
+        f"the refusal must name the thing to check, not just refuse: {app['verdict']}")
+
+    # ...and THIS is the line that was inverted. It used to assert the model DID change.
     cal = apply_calibration(dog, fit, log=log, plan=plan)
-    assert compile_gene_to_mjcf(cal, include_floor=False) != compile_gene_to_mjcf(dog, include_floor=False), (
-        "the gate passed but nothing reached the model, so some other gate is catching this after all -- find "
-        "it and say so here, because the whole point of this test is that nothing does")
+    assert compile_gene_to_mjcf(cal, include_floor=False) == compile_gene_to_mjcf(dog, include_floor=False), (
+        "the second check refused the fit and parameters reached the compiled model anyway -- the refusal is "
+        "not being honoured downstream, which is the whole defect wearing a different hat")
+    from virturoid.services.sysid import calibration_of
+
+    rec = calibration_of(cal)
+    assert rec["withheld_from_model"] is True
+    assert rec["n_parameters_moved"] == 0
+    assert rec["n_parameters_withheld"] >= 20, (
+        "the withheld numbers must still be REPORTED -- a fit that vanishes is indistinguishable from one "
+        "that never ran")
 
 
-def test_a_link_inertia_error_at_correct_mass_is_absorbed_into_armature_and_also_clears_the_gate(
+def test_a_link_inertia_error_STILL_clears_the_tracking_gate_and_is_now_stopped_by_the_third_check(
         dog, plan, inertia_misspecified):  # noqa: C901
     """The second family, and the one that names the mechanism the module docstring has always described.
 
@@ -592,9 +622,9 @@ def test_a_link_inertia_error_at_correct_mass_is_absorbed_into_armature_and_also
     app = fit["application"]
     assert app["improvement_x"] >= MIN_TRACKING_IMPROVEMENT_X, (
         f"a link-inertia error at correct mass now scores {app['improvement_x']}x against the "
-        f"{MIN_TRACKING_IMPROVEMENT_X}x gate; measured 1.745x. See the sibling test for what a genuine "
-        f"refusal here would mean")
-    assert app["passed"] is True
+        f"{MIN_TRACKING_IMPROVEMENT_X}x gate; measured 1.745x. If it is genuinely under the threshold again "
+        f"the TRACKING gate is catching it unaided, which would make this case non-adversarial and the whole "
+        f"section would need re-measuring rather than deleting")
 
     arm = {n: r["parameters"]["armature"] for n, r in fit["joints"].items()}
     assert all(c["identified"] for c in arm.values()), (
@@ -630,17 +660,371 @@ def test_a_link_inertia_error_at_correct_mass_is_absorbed_into_armature_and_also
         f"{got:.5f} against {mimic:.5f} ({got / mimic:.2f}x, measured 1.12x). If it does not, the pass is "
         f"coming from somewhere other than the armature/link-inertia degeneracy this test names")
 
-    # ...and every one of those 14 misattributed numbers reaches the customer's simulator, because the gate
-    # passed and nothing downstream re-asks the question.
+    # ---- THE CLOSE. Everything above was true at 12b11dc and the fit was WRITTEN anyway. --------------
+    # The SAME degeneracy, read the other way round: if the fitted armature on every joint is the same
+    # fraction of that joint's own ROTATIONAL inertia, then ONE inertia scalar is a live rival, and it is put
+    # to a replay. MEASURED at x30: inertia coherence 0.9929, implied s 35.89, the one-number rival tracks
+    # 12.418x better than the fit, 0 parameters written.
+    li = fit["link_inertia"]
+    assert li["suspected"] is True, (
+        f"the third check did not fire on the case it exists for: coherence {li.get('coherence')}, implied s "
+        f"{li.get('implied_inertia_scale_s')}, rival {li.get('rival')}. Measured coherence 0.9929 / implied s "
+        f"35.89 / rival explains_x 12.418")
+    assert li["rival"]["explains_x"] >= 1.0
+    assert 15.0 <= li["implied_inertia_scale_s"] <= 90.0, (
+        f"the check fired but named the wrong scale: it implies {li['implied_inertia_scale_s']}x against an "
+        f"injected {INERTIA_SCALE}x (measured 35.89). A refusal that misnames the cause sends the customer to "
+        f"the wrong part of their CAD")
+    assert app["passed"] is False and app["refused_by"] == "link_inertia", app["verdict"]
+    v = app["verdict"].lower()
+    assert "link inertia" in v and "cad" in v, (
+        f"the refusal must name the thing to check, not just refuse: {app['verdict']}")
+    assert "gear ratio" not in v, (
+        f"the link-inertia refusal is sending the customer to their DRIVETRAIN, which this fit has no "
+        f"evidence against -- that is the torque-scale remedy on the wrong verdict: {app['verdict']}")
+
+    # ...and THIS is the line that was inverted. It used to assert the model DID change.
     from virturoid.services.gene_compiler import compile_gene_to_mjcf
-    from virturoid.services.sysid import apply_calibration, calibration_report
+    from virturoid.services.sysid import apply_calibration, calibration_of, calibration_report
 
     cal = apply_calibration(dog, fit, log=log, plan=plan)
-    assert compile_gene_to_mjcf(cal, include_floor=False) != compile_gene_to_mjcf(dog, include_floor=False)
+    assert compile_gene_to_mjcf(cal, include_floor=False) == compile_gene_to_mjcf(dog, include_floor=False), (
+        "the third check refused the fit and parameters reached the compiled model anyway -- the refusal is "
+        "not being honoured downstream, which is the whole defect wearing a different hat")
     rep = calibration_report(cal)
-    assert rep["n_changes"] == fit["identified_pairs"] and rep["withheld"] is False, (
-        f"the gate passed but only {rep['n_changes']} of {fit['identified_pairs']} parameters reached the "
-        f"model -- something else is catching this, which would be good news and has to be named here")
+    assert rep["n_changes"] == 0 and rep["withheld"] is True, rep
+    rec = calibration_of(cal)
+    assert rec["withheld_from_model"] is True and rec["n_parameters_moved"] == 0
+    assert rec["n_parameters_withheld"] >= 14, (
+        "the withheld numbers must still be REPORTED -- a fit that vanishes is indistinguishable from one "
+        "that never ran")
+
+    # ...and the SENTENCE the engineer reads has to say the right cause. Falling through to the torque-scale
+    # branch would tell them to re-check a drivetrain this fit has no evidence against; falling through to the
+    # tracking branch would tell them the fit "does not move your simulator toward this log" about a fit that
+    # moved it 1.745x, which is false and self-contradicting in one clause.
+    from virturoid.services.sysid import engineer_brief
+
+    sentence = engineer_brief(cal, fit, log=log)["sentence"].lower()
+    assert "inertia tensors" in sentence and "cad" in sentence, sentence
+    assert "gear ratio" not in sentence and "torque constant" not in sentence, (
+        f"the brief sends the customer to their drivetrain for a CAD error: {sentence}")
+    assert "does not move your simulator toward this log" not in sentence, (
+        f"the brief reports the symptom instead of the cause: {sentence}")
+
+
+# --------------------------------------------------------------------------------------------------------
+# THE TWO REPLAY CHECKS -- and the SEPARATION each has to hold, on BOTH populations.
+#
+# The block above ends "no threshold on this quantity can separate them", and that stands: a correctly
+# specified fit reads 1.126 while a misspecified one reads 1.753, so ``MIN_TRACKING_IMPROVEMENT_X`` is stuck at
+# 1.5 whatever it is set to. What closes BOTH breaching families is a DIFFERENT question asked of the same
+# data, twice, with two different one-number rivals -- put the priors back, change ONE number, replay, and
+# score the position RMS neither model optimised:
+#
+#   global_scale   scale every actuator's GEAR by g. A torque-scale error of g drives all three fitted
+#                  parameters, on all joints, by the same (1-g)/g of their priors.
+#   link_inertia   scale every link's ROTATIONAL INERTIA by s, masses untouched. A link-inertia error at
+#                  correct mass drives every joint's ARMATURE by the same (s-1) of its own rotational inertia,
+#                  because armature and link inertia add to the same diagonal of M.
+#
+# MEASURED through the shipped ``fit_parameters``, composed dog, 35 s excitation, delay 0, n_boot=64 --
+# 29 fits. This is the table this test file exists to keep honest, and it is the whole sweep, not the winners:
+#
+#                       improvement_x  passed_1.5x  TORQUE rival  INERTIA rival   VERDICT NOW
+#   torque_scale x1.2       1.507         YES          30.119         0.664       REFUSED (global_scale)
+#   torque_scale x1.25      1.536         YES          29.773         0.652       REFUSED (global_scale)
+#   torque_scale x1.35      1.600         YES          17.861         0.625       REFUSED (global_scale)
+#   torque_scale x1.5       1.624         YES          25.529         0.616       REFUSED (global_scale)
+#   torque_scale x1.75      1.647         YES         230.111         0.608       REFUSED (global_scale)
+#   torque_scale x2.0       1.500         YES          57.198         0.667       REFUSED (global_scale)
+#   inertia_scale x20       1.620         YES           0.617        12.365       REFUSED (link_inertia)
+#   inertia_scale x25       1.707         YES           0.571       181.525       REFUSED (link_inertia)
+#   inertia_scale x30       1.745         YES           0.500        12.418       REFUSED (link_inertia)
+#   inertia_scale x40       1.753         YES           0.420        50.690       REFUSED (link_inertia)
+#   inertia_scale x50       1.730         YES           0.387        20.705       REFUSED (link_inertia)
+#   inertia_scale x70       1.691         YES           0.356        64.243       REFUSED (link_inertia)
+#   inertia_scale x100      1.650         YES           0.354        13.278       REFUSED (link_inertia)
+#   inertia_scale x5/10/15  1.007/1.181/1.466  no       --             --         refused (tracking)
+#   inertia_scale x300      1.433         no            --             --         refused (tracking)
+#   link_scale x1.3         0.995         no            --             --         refused (tracking)
+#   ------------------------------------------------------------------------------------- CORRECTLY SPECIFIED
+#   default, no delay      16.365         YES           0.047         0.062       applied
+#   default x0.5            5.269         YES           0.190         0.196       applied
+#   default x0.25           4.584         YES           0.327         0.227       applied
+#   +0.05/+0.20/+0.010      3.343         YES           0.371         0.305       applied
+#   frictionloss only       8.330         YES           0.160         0.119       applied
+#   damping only            7.248         YES           0.198         0.138       applied
+#   ARMATURE only          17.910         YES           0.022         0.099       applied
+#   PROPORTIONAL +25% f,d   4.025         YES           0.389         0.248       applied
+#   default + 20 ms        18.497         YES           0.048         0.055       applied
+#   default x0.0625         1.126         no            --             --         refused (tracking)
+#
+# TWO ROWS DECIDE WHETHER THIS IS A FIX OR A COIN FLIP, and both are in the CORRECT population.
+#
+#   PROPORTIONAL +25% f,d   a genuine dissipation change proportional to the priors. Its torque COHERENCE is
+#                           0.980, higher than four of the six torque-scale errors the first check exists to
+#                           catch, so a coherence-only gate would refuse a correct calibration. The rival
+#                           clears it at 0.389.
+#   ARMATURE only +0.03     a genuine REFLECTED-INERTIA change, which is itself an inertia-like error -- it
+#                           adds to the same diagonal of M that link inertia does. Its INERTIA coherence is
+#                           0.983, inside the 0.982-0.995 the caught inertia cases read, so a coherence-only
+#                           gate there would refuse it too. The rival clears it at 0.099 -- and at 0.099 again
+#                           when scored over a dense 36-point grid of s rather than the shipped local search,
+#                           so the win is not an artefact of where we looked.
+#
+# Both coherences are FILTERS AT BEST and neither is a verdict; the inertia one is not even a filter, because
+# its two populations overlap outright and no line fits between them. Only the replays rule.
+#
+# **AND THIS WHOLE SECTION PASSED WHILE THE LINK-INERTIA CHECK WAS REFUSING CORRECT CALIBRATIONS.** Read the
+# CORRECT column of the table above as a SAMPLE, not as a population: every row in it improves tracking by
+# 3.343x or more, i.e. more than twice the 1.5x gate. The inertia rival's ``explains_x`` is the rival's
+# improvement DIVIDED BY the fit's, so it rises as the fit weakens -- and just above the gate, where a
+# customer's fit is most likely to land, an ordinary armature-only calibration (+0.009, improvement 1.602) was
+# REFUSED at 1.108. Nothing here sampled that region, so nothing here failed. The band is now swept densely on
+# both bodies in ``tests/test_sysid_link_inertia_danger_band.py``, which is where that claim lives; these five
+# rows stay because the strong-fit end still has to hold.
+# --------------------------------------------------------------------------------------------------------
+
+#: Both populations, run once. Deliberately NOT only the winning cases: a separation claim measured on the
+#: catches alone is not a separation claim.
+_SEPARATION_CASES = [
+    # label,                     kwargs to synthetic_hardware_log,                    population
+    ("torque_scale x1.2", dict(perturbation={}, torque_scale=1.2), "MISSPEC_SCALE"),
+    ("torque_scale x1.5", dict(perturbation={}, torque_scale=1.5), "MISSPEC_SCALE"),
+    ("torque_scale x2.0", dict(perturbation={}, torque_scale=2.0), "MISSPEC_SCALE"),
+    # The OTHER family, at the two ends of its breaching range: x20 is the first point that clears the
+    # tracking gate at all (1.620) and x100 the last (1.650).
+    ("inertia_scale x20", dict(perturbation={}, inertia_scale=20.0), "MISSPEC_INERTIA"),
+    ("inertia_scale x100", dict(perturbation={}, inertia_scale=100.0), "MISSPEC_INERTIA"),
+    ("correct default", dict(perturbation=dict(INJECTED)), "CORRECT"),
+    ("correct default x0.5", dict(perturbation={p: v * 0.5 for p, v in INJECTED.items()}), "CORRECT"),
+    ("correct +0.05/+0.20/+0.010",
+     dict(perturbation={"frictionloss": 0.05, "damping": 0.20, "armature": 0.010}), "CORRECT"),
+    # THE ADVERSARIAL CORRECT CASE for the TORQUE check: a real +25% on frictionloss and damping, i.e.
+    # proportional to the leg joints' own priors, so the COHERENCE half alone reads 0.980 and would refuse it.
+    ("correct proportional +25% f,d",
+     dict(perturbation={"frictionloss": 0.03, "damping": 0.2}), "CORRECT"),
+    # THE ADVERSARIAL CORRECT CASE for the INERTIA check, and the one that would have made it worse than the
+    # defect: a REAL reflected-inertia change is itself an inertia-like error on the same diagonal of M.
+    ("correct armature only +0.03", dict(perturbation={"armature": 0.03}), "CORRECT"),
+]
+
+
+@pytest.fixture(scope="module")
+def separation(dog, plan):
+    """One fit per case, both populations, through the shipped ``fit_parameters``."""
+    from virturoid.services.sysid import fit_parameters
+    from virturoid.services.sysid.synthetic_hardware import synthetic_hardware_log
+
+    out = {}
+    for label, kw, pop in _SEPARATION_CASES:
+        _, lg = synthetic_hardware_log(dog, plan=plan, delay_ticks=0, **kw)
+        out[label] = (pop, fit_parameters(dog, lg, plan=plan, n_boot=64, measure_delay=False))
+    return out
+
+
+def test_the_second_check_refuses_every_torque_scale_error_that_breached_the_tracking_gate(separation):
+    """CATCHES: the breach, at every magnitude of it that got through the first gate.
+
+    x1.2 is the case the retraction was written on -- 1.507x against a 1.5x threshold, the smallest realistic
+    gear-ratio error that clears. x2.0 is the far end. Measured rival ``explains_x``: 30.1 / 25.5 / 57.2, i.e.
+    a single gear scalar tracks the log 25-57x better than the 24-29 fitted numbers do. The margin to the 1.0
+    line is not marginal, and that is the claim.
+    """
+    caught = {}
+    for label, (pop, fit) in separation.items():
+        if pop != "MISSPEC_SCALE":
+            continue
+        gs, app = fit["global_scale"], fit["application"]
+        caught[label] = (app["improvement_x"], gs.get("coherence"), gs.get("implied_torque_scale_g"),
+                         (gs.get("rival") or {}).get("explains_x"), app["passed"])
+        assert app["improvement_x"] >= 1.5, (
+            f"{label} no longer breaches the tracking gate ({app['improvement_x']}x) -- this case is not "
+            f"adversarial any more and the whole section needs re-measuring, not deleting. Table: {caught}")
+        assert gs["suspected"] is True, f"{label} was not identified as a global torque scale: {caught}"
+        assert app["passed"] is False and app["refused_by"] == "global_scale", (
+            f"{label} was identified as a torque scale and applied anyway: {app['verdict']}")
+        assert (gs["rival"] or {})["explains_x"] >= 1.0
+    assert len(caught) == 3, f"the misspecified population shrank to {sorted(caught)}"
+
+
+def test_the_third_check_refuses_every_link_inertia_error_that_breached_the_tracking_gate(separation):
+    """CATCHES: the OTHER breach, at both ends of the range that got through the first gate.
+
+    x20 is the first point of the ``inertia_scale`` family that clears 1.5x at all (1.620) and x100 the last
+    (1.650); the shape between them was swept and is in the table above. Measured rival ``explains_x``:
+    12.365 and 13.278 here, 12.4-181 across the seven breaching points. The margin to the 1.0 line is not
+    marginal, and that is the claim.
+
+    It also asserts the ATTRIBUTION, not just the refusal. A link-inertia error must NOT come back as a
+    torque-scale one: the two remedies send the engineer to different documents, and a refusal that names the
+    wrong one costs them a day. Measured: the torque rival on this family reads 0.354-0.617 and loses.
+    """
+    caught = {}
+    for label, (pop, fit) in separation.items():
+        if pop != "MISSPEC_INERTIA":
+            continue
+        li, gs, app = fit["link_inertia"], fit["global_scale"], fit["application"]
+        caught[label] = (app["improvement_x"], li.get("coherence"), li.get("implied_inertia_scale_s"),
+                         (li.get("rival") or {}).get("explains_x"),
+                         (gs.get("rival") or {}).get("explains_x"), app["refused_by"])
+        assert app["improvement_x"] >= 1.5, (
+            f"{label} no longer breaches the tracking gate ({app['improvement_x']}x, measured 1.620 / 1.650) "
+            f"-- this case is not adversarial any more and the whole section needs re-measuring, not "
+            f"deleting. Table: {caught}")
+        assert li["suspected"] is True, f"{label} was not identified as a link-inertia scale: {caught}"
+        assert app["passed"] is False and app["refused_by"] == "link_inertia", (
+            f"{label} was identified as a link-inertia error and applied anyway (or refused for the WRONG "
+            f"reason, {app['refused_by']}): {app['verdict']}")
+        assert (li["rival"] or {})["explains_x"] >= 1.0
+        assert gs["suspected"] is False, (
+            f"{label} was ALSO read as a global torque scale, so the customer would be sent to their gearbox "
+            f"for a CAD error. Torque rival on this family measured 0.354-0.617: {caught}")
+    assert len(caught) == 2, f"the link-inertia population shrank to {sorted(caught)}"
+
+
+def test_neither_check_refuses_any_of_the_correctly_specified_fits(separation):
+    """KEEPS: a fix that refuses correct calibrations is worse than the defect, because the defect at least
+    ships with a disclosure. BOTH checks, on the same population, because each has its own way to be wrong.
+
+    Three of these are reference points the threshold was sized on (16.365 / 5.269 / 3.343). The other two are
+    the ones that decide whether these checks are fixes or coin flips, one per check:
+
+      * PROPORTIONAL +25% f,d -- a REAL dissipation change proportional to the leg joints' priors, so the
+        TORQUE coherence reads 0.980, above four of the six torque-scale errors the sibling test catches. It
+        survives because the torque rival loses at 0.389.
+      * ARMATURE only +0.03 -- a REAL reflected-inertia change, which is ITSELF an inertia-like error: armature
+        adds to the same diagonal of M that link inertia does, so this is the case an inertia rival could most
+        plausibly fail to distinguish from a misstated tensor. Its INERTIA coherence reads 0.983, inside the
+        0.982-0.995 band the caught cases occupy. It survives because the inertia rival loses at 0.099 -- and
+        it is the reason there is no coherence threshold on that check at all.
+    """
+    kept = {}
+    for label, (pop, fit) in separation.items():
+        if pop != "CORRECT":
+            continue
+        gs, li, app = fit["global_scale"], fit["link_inertia"], fit["application"]
+        kept[label] = (app["improvement_x"], gs.get("coherence"), (gs.get("rival") or {}).get("explains_x"),
+                       li.get("coherence"), (li.get("rival") or {}).get("explains_x"))
+        assert gs["suspected"] is False, (
+            f"{label} is a CORRECTLY SPECIFIED fit and the torque-scale check refused it: coherence "
+            f"{gs.get('coherence')}, rival {gs.get('rival')}. Measured torque rivals over this population: "
+            f"0.022-0.389. Table: {kept}")
+        assert li["suspected"] is False, (
+            f"{label} is a CORRECTLY SPECIFIED fit and the LINK-INERTIA check refused it: coherence "
+            f"{li.get('coherence')}, rival {li.get('rival')}. Measured inertia rivals over this population: "
+            f"0.055-0.305 -- but note these are all STRONG fits (3.343x and up) and this assertion has never "
+            f"been able to see the failure the check actually had; that lives in "
+            f"tests/test_sysid_link_inertia_danger_band.py. Table: {kept}")
+        assert app["passed"] is True and app.get("refused_by") is None, (
+            f"{label} lost its PASS: {app['verdict']}. Table: {kept}")
+        # THE COHERENCE FILTER IS NOT A GATE ON THE REPLAY ANY MORE, and this is where that is pinned. Both
+        # rivals must have actually RUN on every correct fit that passes the tracking gate -- eight of these
+        # ten never reached the torque rival when the 0.85 filter still gated it, so "no false refusal" used
+        # to be a claim about a test that was never taken. It now costs ~4 s per rival and is taken every time.
+        assert kept[label][2] is not None and kept[label][4] is not None, (
+            f"{label} passed the tracking gate and one of the two rivals was never simulated: torque "
+            f"{kept[label][2]}, inertia {kept[label][4]}. A fit that reaches the model without being asked "
+            f"the question is the hole this section exists to close")
+    assert len(kept) == 5, f"the correct population shrank to {sorted(kept)}"
+
+    prop = kept["correct proportional +25% f,d"]
+    assert prop[1] >= 0.85, (
+        f"the adversarial correct case no longer trips the torque COHERENCE (reads {prop[1]}, measured 0.980), "
+        f"so it is no longer testing that the rival is load-bearing. Find another proportional perturbation "
+        f"rather than dropping the case")
+    assert prop[2] is not None and prop[2] < 1.0, (
+        f"the torque rival did NOT clear the correct proportional case ({prop[2]}, measured 0.389) -- one "
+        f"number is beating a real calibration and the check is unsafe")
+
+    # THE ONE THAT DECIDES THE INERTIA CHECK. Armature IS reflected inertia; if the inertia rival could not
+    # tell this from a misstated tensor, the check would refuse a correct calibration and be worse than the
+    # breach it closes. It is asserted as a MARGIN, not a boolean, so a drift toward 1.0 fails here rather
+    # than silently later.
+    arm = kept["correct armature only +0.03"]
+    assert arm[3] is not None and arm[3] >= 0.90, (
+        f"the armature-only case no longer looks like a link-inertia error to the coherence statistic (reads "
+        f"{arm[3]}, measured 0.9831 against 0.982-0.995 on the caught cases). It is the adversarial case "
+        f"BECAUSE it looks like one; if it stops, find another rather than dropping it")
+    assert arm[4] is not None and arm[4] <= 0.5, (
+        f"the inertia rival scores {arm[4]} on a REAL armature calibration (measured 0.099, and 0.099 again "
+        f"at its global optimum over a dense 36-point grid). Anything approaching 1.0 means the check cannot "
+        f"separate 'your link inertia is misstated' from 'your reflected inertia really differs', which is "
+        f"the failure that would make this check worse than the defect it closes")
+
+
+def test_the_link_inertia_catch_is_not_a_single_body_artifact():
+    """A SECOND BODY, because a number from the composed dog is not general and this file has been burned by
+    that before (docs/calibration_wedge_under_delay.md section 12; the delay wedge).
+
+    A composed HEXAPOD, 18 joints. MEASURED end to end through the shipped code, delay 0, n_boot=48:
+
+      correct default              improvement 20.879   torque rival 0.007   inertia rival  0.051   applied
+      correct ARMATURE only        improvement 18.107   torque rival 0.005   inertia rival  0.106   applied
+      inertia_scale x30            improvement  2.015   torque rival 0.049   inertia rival 18.125   REFUSED
+      inertia_scale x40            improvement  1.973   torque rival 0.047   inertia rival 320.55   REFUSED
+
+    Two things this establishes and one it does not. The BREACH reproduces on a second body -- bigger here
+    (2.015) than on the dog (1.745) -- and the check refuses it there, which is the first time either catch has
+    been shown off the body it was built on. The torque rival correctly loses on it, so the ATTRIBUTION holds
+    too. What it does NOT establish is the torque-scale catch: on this hexapod, as on the Menagerie Go2, a
+    torque-scale error scores 0.989-1.005 and the tracking gate refuses it unaided, so that breach does not
+    reproduce and there is nothing there for the second check to catch.
+    """
+    from virturoid.services.morphology_composer import compose_robot
+    from virturoid.services.sysid import build_excitation, fit_parameters
+    from virturoid.services.sysid.synthetic_hardware import synthetic_hardware_log
+
+    hexa = compose_robot("a six legged walking robot", llm=None)
+    hplan = build_excitation(hexa, budget_s=BUDGET_S)
+
+    _, bad = synthetic_hardware_log(hexa, perturbation={}, delay_ticks=0, plan=hplan, inertia_scale=30.0)
+    mis = fit_parameters(hexa, bad, plan=hplan, n_boot=32, measure_delay=False)
+    mapp, mli = mis["application"], mis["link_inertia"]
+    assert mapp["improvement_x"] >= 1.5, (
+        f"the link-inertia breach does not reproduce on this body ({mapp['improvement_x']}x, measured 2.015) "
+        f"-- then this test proves nothing about generality and needs a body where it does, not deleting")
+    assert mli["suspected"] is True and mapp["refused_by"] == "link_inertia", (
+        f"the catch did not reproduce on a second body: coherence {mli.get('coherence')}, rival "
+        f"{mli.get('rival')}, verdict {mapp['verdict']}")
+    assert (mis["global_scale"] or {}).get("suspected") is False, (
+        "the hexapod's link-inertia error came back as a TORQUE-SCALE one, which sends the customer to the "
+        "wrong document. Measured torque rival on this case: 0.049")
+
+    # ...and the false-refusal side on the same body, including the case that is itself an inertia change.
+    _, good = synthetic_hardware_log(hexa, perturbation={"armature": 0.03}, delay_ticks=0, plan=hplan)
+    ok = fit_parameters(hexa, good, plan=hplan, n_boot=32, measure_delay=False)
+    assert ok["application"]["passed"] is True and ok["application"].get("refused_by") is None, (
+        f"a REAL armature calibration on the hexapod was refused: {ok['application']['verdict']}")
+    assert ok["link_inertia"]["rival"]["explains_x"] < 1.0, (
+        f"the inertia rival beat a correct armature calibration on the second body: "
+        f"{ok['link_inertia']['rival']} (measured 0.106)")
+
+
+def test_the_disclosure_names_both_catches_and_what_is_STILL_invisible(inertia_misspecified):
+    """The honest half, and it is asserted rather than described, because a partial catch stated as total is
+    the failure mode this whole file is about.
+
+    Two families breached ``MIN_TRACKING_IMPROVEMENT_X`` and both are now caught -- by different checks, with
+    different remedies. The disclosure has to say BOTH of those and it still has to name what neither sees.
+    """
+    _log, fit = inertia_misspecified
+    field = fit["application"]["what_this_gate_does_not_catch"].lower()
+    assert "torque-scale" in field and "link rotational inertia" in field, (
+        f"the disclosure no longer names both families that breached this gate: {field}")
+    assert "gear from 1.2 to 2.0" in field or "g from 1.2 to 2.0" in field, (
+        f"the torque-scale catch RANGE is not stated, so a customer cannot tell what was ruled out: {field}")
+    assert "inertia_scale x15 to x300" not in field, (
+        "the link-inertia catch range must be the MEASURED one (x20 to x100, the points that actually breach), "
+        "not a wider claim")
+    assert "x20 to x100" in field, f"the link-inertia catch range is not stated: {field}"
+    # ...and the limits that remain. Each of these is a measured hole, not a hedge.
+    for phrase in ("some joints", "not_measurable_because"):
+        assert phrase in field, f"the disclosure stopped naming a limit that still exists ({phrase}): {field}"
+    assert "still not caught" not in field, (
+        "the disclosure still says the link-inertia family is not caught, which is now false -- it is refused "
+        "by the link_inertia check. A stale disclosure is the same defect as a missing one")
 
 
 # --------------------------------------------------------------------------------------------------------

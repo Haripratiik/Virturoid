@@ -657,7 +657,85 @@ def engineer_brief(gene, fit: dict, *, gap: dict | None = None, log: dict | None
     if withheld:
         # The headline sentence has to CHANGE, not gain a footnote. "0.993x closer" read as an improvement to
         # anyone skimming, and it is the sentence an engineer quotes to their team.
-        if traj.get("after_rms_deg") is not None and gate.get("improvement_x") is not None:
+        #
+        # ...and the SECOND refusal needs its own sentence for exactly the same reason. A fit stopped by the
+        # global-scale check CLEARED the tracking gate -- 1.536x against a required 1.5x -- so the branch below
+        # would have printed "does not move your simulator toward this log (1.536x, and we require 1.5x)",
+        # which is both false and self-contradicting in one clause. A refusal that misstates its own cause
+        # sends the engineer to re-run an experiment instead of to their BOM.
+        gs = gate.get("global_scale") or {}
+        # THE LOG-PLAUSIBILITY REFUSAL NEEDS ITS OWN SENTENCE, and for a sharper version of the reason the two
+        # rival refusals do. A fit stopped by that guard CLEARED the tracking gate (measured 1.575x and 2.057x
+        # on the composed spider), so the improvement branch below would have printed "does not move your
+        # simulator toward this log (1.575x, and we require 1.5x)" -- false, self-contradicting, and it sends
+        # the engineer to re-run the very experiment whose OUTPUT is the problem. This one also has to name
+        # nothing: not the drivetrain, not the CAD, not the parameters.
+        if gate.get("refused_by") == "implausible_log":
+            lp = gate.get("log_plausibility") or {}
+            lines.append(
+                f"This fit was NOT applied, and the problem is THIS LOG rather than your robot or the fit. "
+                + (f"It contains non-finite values, so the plant that produced it left the reals. "
+                   if not lp.get("finite", True) else
+                   f"Joint '{lp.get('worst_joint')}' travels {lp.get('largest_recorded_excursion_rad')} rad "
+                   f"against a commanded envelope of {lp.get('commanded_envelope_rad')} rad - "
+                   f"{lp.get('excursion_ratio')}x, where we require at most "
+                   f"{lp.get('excursion_ratio_threshold_x')}x. "
+                   + (f"Excluded from that number: {lp.get('unbounded_joint_count')} continuous-rotation "
+                      f"joint(s) whose position integrates without bound and on which this ratio is not a "
+                      f"statistic - {', '.join(lp.get('unbounded_joints') or [])}. "
+                      if lp.get("unbounded_joint_count") else "")
+                   + f"WHAT WE COMPARED YOU AGAINST, and its scope: across 18 composed bodies with no "
+                     f"continuous-rotation joints, EIGHT injection families (nothing wrong at all; our default "
+                     f"perturbation; armature-only +0.009 and +0.050; frictionloss-only +0.030; damping-only "
+                     f"+0.6; link inertia x40 and x100), at every actuation delay from 0 to "
+                     f"{lp.get('valid_delay_window_ms')} ms in 10 ms steps, the ratio runs 0.584x to 6.721x. "
+                     f"That is a range over THOSE families, not over all logs: with a robot's damping and "
+                     f"joint friction removed entirely, the same bodies reach 18.8x and 22.2x at 200 ms on "
+                     f"numerically stable logs, so if your machine genuinely has negligible joint damping this "
+                     f"guard can refuse you wrongly. Read log_plausibility.sampled_range_on_sane_logs before "
+                     f"acting on this refusal. ")
+                + f"That is the signature of a simulation or a rig that diverged, not of a robot tracking a "
+                  f"command, and no parameter verdict taken from it would mean anything - so we are not "
+                  f"issuing one, about any component. Re-take the log: check the excitation amplitudes against "
+                  f"the joints' travel, that the base is really held, and that the gains that ran are the ones "
+                  f"in the plan.")
+        elif gate.get("refused_by") == "global_scale":
+            riv = gs.get("rival") or {}
+            g = riv.get("torque_scale_g") or gs.get("implied_torque_scale_g")
+            lines.append(
+                f"This fit was NOT applied, and it is not because it failed to help: it moves your simulator "
+                f"{gate.get('improvement_x')}x closer to this log, past the {gate.get('threshold_x')}x we "
+                f"require. It was refused because ONE number explains it better than the fit does. Every "
+                f"parameter moved by nearly the same fraction of its own prior on every joint, which is what "
+                f"happens when your joints receive about {g}x the torque this log records rather than when "
+                f"friction, damping or reflected inertia has really changed - and replaying our ORIGINAL model "
+                f"with nothing altered but every actuator's gear scaled by {g} tracks your log "
+                f"{riv.get('explains_x')}x better than this fit. Check the GEAR RATIO and TORQUE CONSTANT your "
+                f"driver used to compute the torque in this log, and any gearbox efficiency you have not "
+                f"modelled; if you can log per-joint motor current, re-fit with the datasheet torque constant.")
+        elif gate.get("refused_by") == "link_inertia":
+            # The THIRD refusal needs its own sentence for the same reason the second did, and it is a
+            # DIFFERENT sentence because it is a different remedy: this one sends the engineer to their CAD,
+            # not to their BOM. Falling through to the torque-scale branch would have told them to re-check a
+            # drivetrain this fit has no evidence against.
+            li = gate.get("link_inertia") or {}
+            riv = li.get("rival") or {}
+            ss = riv.get("inertia_scale_s") or li.get("implied_inertia_scale_s")
+            lines.append(
+                f"This fit was NOT applied, and it is not because it failed to help: it moves your simulator "
+                f"{gate.get('improvement_x')}x closer to this log, past the {gate.get('threshold_x')}x we "
+                f"require. It was refused because ONE number explains it better than the fit does. Every "
+                f"joint's reflected inertia moved by nearly the same fraction of its own link-side rotational "
+                f"inertia, which is what happens when the INERTIA TENSORS in your model are wrong - reflected "
+                f"and link inertia enter each joint's equation through the same acceleration term, so this "
+                f"experiment cannot separate them - and replaying our ORIGINAL model with nothing altered but "
+                f"every link's rotational inertia scaled by {ss}, masses untouched, gets that ORIGINAL model "
+                f"{riv.get('rival_improvement_x')}x closer to your log (we require "
+                f"{riv.get('improvement_threshold_x')}x) and tracks "
+                f"{riv.get('explains_x')}x better than this fit. Check the inertia tensors of your moving "
+                f"links against your CAD, and the density or fill fraction they came from. Your MASSES are "
+                f"not implicated: a mass error would have left a gravity offset this fit could not remove.")
+        elif traj.get("after_rms_deg") is not None and gate.get("improvement_x") is not None:
             lines.append(
                 f"This fit was NOT applied: applying it does not move your simulator toward this log. "
                 f"Position RMS goes {traj['before_rms_deg']:.3f} deg -> {traj['after_rms_deg']:.3f} deg "
@@ -665,11 +743,33 @@ def engineer_brief(gene, fit: dict, *, gap: dict | None = None, log: dict | None
         else:
             lines.append("This fit was NOT applied: its effect on your simulator's tracking was never "
                          "measured, so it cannot be shown to help.")
-        lines.append(
-            "The parameters below are reported and written to nothing. The usual cause is an error this "
-            "experiment does not fit -- link mass, link inertia, centre of mass, drivetrain elasticity -- "
-            "being absorbed by the three parameters it does, armature first, because reflected inertia and "
-            "link inertia enter the joint equation through the same acceleration term.")
+        if gate.get("refused_by") == "implausible_log":
+            lines.append(
+                "The parameters below are reported and written to nothing. Do not read them as bounds on "
+                "anything either: they are a least-squares fit to a torque residual computed from motion that "
+                "the plant did not physically produce, so their magnitudes are properties of the divergence "
+                "and not of your robot.")
+        elif gate.get("refused_by") == "link_inertia":
+            lines.append(
+                "The parameters below are reported and written to nothing. The armature numbers in particular "
+                "are the joint-space inertia your links are missing, expressed on the wrong side of the "
+                "gearbox - read them as a bound on the tensor error, not as a gearbox finding.")
+        elif gate.get("refused_by") != "global_scale":
+            lines.append(
+                "The parameters below are reported and written to nothing. The usual cause is an error this "
+                "experiment does not fit -- link mass, link inertia, centre of mass, drivetrain elasticity -- "
+                "being absorbed by the three parameters it does, armature first, because reflected inertia and "
+                "link inertia enter the joint equation through the same acceleration term.")
+        else:
+            lines.append(
+                # MULTIPLY, not divide. A torque scale g makes the fit report prior/g, so the truth comes back
+                # by multiplying BY g. This line said "divide" until it was checked arithmetically against the
+                # x1.2 case: reported/prior = 0.887/0.782/0.841, x g -> 1.060/0.935/1.005 against a truth of
+                # 1.000, while / g -> 0.743/0.655/0.704. Dividing left the engineer ~30% FURTHER from the truth
+                # than the number they had already been given.
+                "The parameters below are reported and written to nothing. Multiply each of them by the scale "
+                "above if you want to see what they would be with the drivetrain right - but confirm the "
+                "drivetrain first, because this experiment cannot.")
     elif not failed_gate and traj.get("after_rms_deg") is not None:
         # ``not failed_gate`` guards the OVERRIDE path too: a forced fit is applied, so it is not withheld, and
         # without this it would reach the "0.993x closer" sentence -- the exact headline the gate was built to
