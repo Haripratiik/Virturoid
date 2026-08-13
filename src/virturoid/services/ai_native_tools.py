@@ -104,7 +104,10 @@ def _summary(gene, robot_id: str | None = None, prompt: str = "") -> dict:
     out = {"robot_class": gene.robot_class, "kind": robot_kind(gene), "n_segments": len(gene.segments),
            "dof": len(gene.actuated_joints()), "appendages": app,
            "standing_height_m": _standing_height(gene),
-           "total_mass_kg": round(sum(s.mass_kg for s in gene.segments), 3),
+           # `float(... or 0.0)`, not `s.mass_kg`: a bare sum raises TypeError on a link whose mass is unset,
+           # and this summary is the ONLY thing an undo returns -- a body it cannot add up must still be
+           # described, not turned into a failed call on a session whose state has already been reverted.
+           "total_mass_kg": round(sum(float(s.mass_kg or 0.0) for s in gene.segments), 3),
            "material": _dominant_material(gene),
            "design_source": getattr(gene, "design_source", "unknown"),
            "composition_notes": list(getattr(gene, "composition_notes", []) or [])}
@@ -1661,10 +1664,13 @@ def edit_robot(args: dict) -> dict:
     if verb == "list":
         return {"ok": True, "operators": EO.op_specs()}
     if verb == "undo":
+        # Read the held body BEFORE reverting, so the diff can state what the undo gave back instead of the
+        # bare `{"op": "undo"}` it used to return -- see `_undo_diff` for the measured Go2 numbers.
+        was = S.get_robot(rid)
         gene = S.undo_robot(rid)
         if gene is None:
             return {"ok": False, "error": "nothing to undo"}
-        return {"ok": True, "diffs": [{"op": "undo"}], "summary": _summary(gene, rid),
+        return {"ok": True, "diffs": [_undo_diff(was, gene)], "summary": _summary(gene, rid),
                 "structural": False, **S.robot_meta(rid)}
     gene = S.get_robot(rid)
     if gene is None:
@@ -1675,6 +1681,13 @@ def edit_robot(args: dict) -> dict:
         new_gene, diffs = EO.apply_ops(gene, ops)
     except EO.EditError as exc:
         return {"ok": False, "error": str(exc)}                # teaching error (how to fix), not a crash
+    # Hoisted so the SUCCESS path can report it too. Until 2026-08-13 ``explained`` lived inside the gate block
+    # and was returned only when the edit was REFUSED, so an exempted finding was computed and then dropped on
+    # the floor. Measured through ``call_tool``: a 25 kg payload on a 3.832 kg arm applied while a HIGH-severity
+    # ``part_balance`` ("appendage 'payload' is 67% of the body volume") appeared NOWHERE in the response. That
+    # is the exemption turning "not blocking" into "not seen", which is the worse of the two defects -- the
+    # customer at least learned something from the revert.
+    explained: dict | None = None
     if bool(args.get("gate_non_regression", True)):
         # NAME WHAT MOVED, ON WHAT PART, AND THE WAY OUT. This compared two integers and printed them:
         # `before {high_or_fatal: 0, weighted_findings: 0} / after {0, 2}` — zero fatal findings on either
@@ -1727,6 +1740,14 @@ def edit_robot(args: dict) -> dict:
     S.commit_robot(rid, new_gene, label=label)
     out = {"ok": True, "diffs": diffs, "summary": _summary(new_gene, rid),
            "structural": any(d.get("structural") for d in diffs), **S.robot_meta(rid)}
+    # An edit that APPLIED still says what it introduced. ``expected_findings_ignored`` is the list the gate
+    # deliberately did not revert on (``set_payload`` may make the cargo dominate the silhouette; that is the
+    # customer's number, not a proportion to shrink) -- it must reach the caller, or the exemption is silent.
+    if explained is not None:
+        if explained.get("expected_checks"):
+            out["expected_findings_ignored"] = explained["expected_checks"]
+        if explained.get("new"):
+            out["new_findings"] = explained["new"]
     img = _render_gene(new_gene, f"{rid}_{S.robot_meta(rid)['undo_depth']}")
     if img:
         out["artifacts"] = [img]
@@ -1788,12 +1809,61 @@ def _design_non_regression_signature(gene) -> tuple[int, int]:
     return EO.findings_score(EO.design_findings(gene))
 
 
+def _undo_diff(before, after) -> dict:
+    """What the undo GAVE BACK, in numbers -- the diff every other op returns and this one did not.
+
+    MEASURED through ``call_tool`` on a real Menagerie Unitree Go2 (15.206 kg, 13 links): ``set_payload
+    {payload_kg: 25}`` took it to 40.206 kg over 14 links, and the undo that reversed it returned
+
+        {"diffs": [{"op": "undo"}]}
+
+    -- no mass, no link count, no name of what came back. Every other operator's diff carries
+    ``total_mass_kg: [before, after]`` (see ``edit_operators._mass_ledger``), so an agent or a UI reading the
+    same key off an undo got ``None``, and the one step a customer takes when an amend went wrong was the one
+    step that could not say what it had done. It now reads
+    ``total_mass_kg: [40.206, 15.206], n_segments: [14, 13], links_removed: ["payload"]``.
+
+    ``before``/``after`` are the held gene either side of the revert; either may be None if the session could
+    not produce one, and then the fields it would have filled are simply absent rather than null.
+    """
+    d: dict = {"op": "undo"}
+    if after is None:
+        return d
+
+    def _mass(g):
+        return round(sum(float(s.mass_kg or 0.0) for s in g.segments), 3)
+
+    if before is not None:
+        b = {s.name for s in before.segments}
+        a = {s.name for s in after.segments}
+        # Always a [before, after] PAIR, never sometimes a scalar: a consumer that indexes [1] on the pair
+        # must not silently read a digit out of a bare int on the one call where the pre-undo body was lost.
+        d["n_segments"] = [len(before.segments), len(after.segments)]
+        d["total_mass_kg"] = [_mass(before), _mass(after)]
+        d["delta_mass_kg"] = round(d["total_mass_kg"][1] - d["total_mass_kg"][0], 3) or 0.0
+        if b - a:
+            d["links_removed"] = sorted(b - a)[:8]        # the amend's additions, taken back off
+        if a - b:
+            d["links_restored"] = sorted(a - b)[:8]       # links the amend had dropped, returned
+        d["note"] = (f"reverted one edit: {d['total_mass_kg'][0]:.3f} -> {d['total_mass_kg'][1]:.3f} kg over "
+                     f"{len(before.segments)} -> {len(after.segments)} link(s)")
+    else:
+        d["n_segments_now"] = len(after.segments)
+        d["total_mass_kg_now"] = _mass(after)
+        d["note"] = (f"reverted one edit; the robot is now {d['total_mass_kg_now']:.3f} kg over "
+                     f"{d['n_segments_now']} link(s). The body it replaced could not be read back, so the "
+                     f"before-side of this revert is not stated rather than guessed.")
+    return d
+
+
 def undo_robot(args: dict) -> dict:
     from virturoid.services import session_state as S
+    before = S.get_robot(args["robot_id"])
     gene = S.undo_robot(args["robot_id"])
     if gene is None:
         return {"ok": False, "error": "nothing to undo"}
-    return {"ok": True, "restored": _summary(gene, args["robot_id"]), **S.robot_meta(args["robot_id"])}
+    return {"ok": True, "restored": _summary(gene, args["robot_id"]), "undone": _undo_diff(before, gene),
+            **S.robot_meta(args["robot_id"])}
 
 
 def edit_ops(_args: dict) -> dict:

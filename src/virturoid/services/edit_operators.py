@@ -229,6 +229,33 @@ def _mass_ledger(before_mass: dict, gene, *, added: set, preserved: bool) -> dic
         led["remassed"] = moved[:8]
     if dropped:
         led["dropped"] = dropped[:8]
+    # WHOSE NUMBER WAS THROWN AWAY. On a body whose masses are the manufacturer's, a re-derived link does not
+    # get "their figure, adjusted" -- it gets OURS, computed from (primitive volume x density x fill) + a
+    # catalog motor. Measured through ``call_tool`` on a real Menagerie Go2 (15.206 kg, Unitree's own per-link
+    # masses), one op each on a freshly ingested robot:
+    #
+    #   scale_group{legs, length, 1.2}  15.206 -> 23.621 kg, 12 links re-derived, FL_calf 0.241 -> 2.002 (8.3x)
+    #   set_height{target_m: 0.45}      15.206 -> 24.397 kg, 12 links re-derived, FL_calf 0.241 -> 2.056
+    #   scale_robot{factor: 1.2}        15.206 -> 30.424 kg, 13 links re-derived, FL_calf 0.241 -> 2.191
+    #   set_material{all, carbon_fiber} 15.206 -> 21.935 kg, 13 links re-derived, FL_calf 0.241 -> 1.942
+    #
+    # The last one moves NO geometry at all, and carbon fibre is lighter than what a Go2 calf is made of, so an
+    # 8x rise cannot be a material effect -- it is our model replacing their measurement. Some re-derivation is
+    # the request (a longer link does weigh more) and that is not decided here. What is decided here is that a
+    # count alone ("12 links changed mass") reads as "your edit moved these" when the truth is "your figures
+    # were discarded for ours", so the pairs are named. ``mass_authority`` is deliberately left alone: it
+    # answers the separate question of whether manufacturer masses existed at all (pinned by
+    # ``test_set_payload.test_source_masses_preserved_is_the_measurement_not_a_constant``).
+    if preserved and moved:
+        led["n_source_masses_replaced"] = len(moved)
+        led["source_masses_replaced"] = [
+            {"segment": m["segment"], "your_kg": m["mass_kg"][0], "our_derived_kg": m["mass_kg"][1]}
+            for m in moved[:8]]
+        worst = max(moved, key=lambda m: abs(m["mass_kg"][1] - m["mass_kg"][0]))
+        led["source_mass_note"] = (
+            f"{len(moved)} link(s) carried masses from YOUR model and this edit re-derived them from our "
+            f"geometry/density model rather than adjusting your figures (worst: {worst['segment']} "
+            f"{worst['mass_kg'][0]:.3f} -> {worst['mass_kg'][1]:.3f} kg). edit_robot op:'undo' restores them.")
     return led
 
 
@@ -1056,15 +1083,40 @@ _STRUCTURAL = {"set_leg_count", "adopt_walkable_template", "add_limb"}
 #: on a quadruped does -- so "put an arm on my Go2", the single most-requested amend on the product, was
 #: auto-reverted by a med-severity note describing the thing that had been asked for. The finding is still
 #: MEASURED and still REPORTED (see :func:`explain_findings`); it just no longer votes to revert.
-_EXPECTED_FINDINGS = {"add_limb": {"symmetry"}}
+#: ``set_payload``/``part_balance`` is the same shape and cost the front door its headline request. The payload
+#: lands as a real link (that IS the operator), and ``anatomy_critic`` flags any non-root part over 55% of the
+#: body volume as "one part dominates the silhouette; shrink it relative to the body" -- advice that is
+#: meaningless for cargo, since the load's size is the customer's number and not a proportion to tune. Measured
+#: through ``call_tool`` on a grounded 3.356 kg tabletop arm, ``set_payload`` applied at 0.5/1/2/3 kg and was
+#: REVERTED at 5, 10 and 25 kg, held mass unchanged at 3.356 -- so on a small body the operator silently did
+#: nothing for exactly the requests that motivated it. (The real Menagerie Go2 at 15.206 kg clears the
+#: threshold and was unaffected, which is why the sweep on the imported robot never saw it.) The finding is
+#: still MEASURED and still REPORTED as EXPECTED in ``explain_findings``; it no longer votes to revert. A
+#: payload the actuators genuinely cannot deliver is refused elsewhere, by name and margin, in
+#: ``set_payload``'s own ``actuator_proposal`` / ``undersized_joints``.
+_EXPECTED_FINDINGS = {"add_limb": {"symmetry"}, "set_payload": {"part_balance"}}
 
 
 def expected_findings(ops) -> set[str]:
-    """Finding checks the given ``[{op, args}]`` sequence is allowed to introduce without being reverted."""
-    out: set[str] = set()
-    for spec in (ops or []):
-        out |= _EXPECTED_FINDINGS.get(str((spec or {}).get("op") or ""), set())
-    return out
+    """Finding checks the given ``[{op, args}]`` sequence is allowed to introduce without being reverted.
+
+    A BATCH INTERSECTS; IT DOES NOT UNION, and the difference is a real hole rather than a nicety. Until
+    2026-08-13 this OR-ed the sets, so ``[set_payload, scale_group]`` exempted ``part_balance`` outright -- and
+    a ``part_balance`` that ``scale_group`` introduced (a leg scaled until it dominates the silhouette, which is
+    a genuine design finding) rode through on the payload's exemption. An exemption says "THIS op is allowed to
+    cause THIS finding"; nothing here can attribute a finding to one op inside a batch, so the only honest
+    reading of a mixed batch is the one every op agrees on.
+
+    The direction is chosen deliberately. Over-exempting lets a real defect apply SILENTLY; under-exempting
+    reverts a legitimate edit while naming the finding, the threshold and ``gate_non_regression: false``. The
+    second is recoverable in one call and the first is not, which is the same trade the rest of this module
+    makes. A single-op call is unaffected: the intersection over one set is that set.
+    """
+    specs = [s for s in (ops or []) if s]
+    if not specs:
+        return set()
+    sets = [_EXPECTED_FINDINGS.get(str(s.get("op") or ""), set()) for s in specs]
+    return set.intersection(*sets) if len(sets) > 1 else set(sets[0])
 
 
 def design_findings(gene) -> list[dict]:
