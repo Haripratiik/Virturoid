@@ -594,3 +594,33 @@ def test_a_budgeted_build_says_it_was_budgeted_all_the_way_out_through_the_tool(
     # ...and an UNCAPPED build must not start reporting a cap it does not have
     plain = call_tool("create_robot", {"prompt": "a quadruped robot dog", "tune_gait": False})["result"]
     assert plain["gait_max_evals"] is None, plain["gait_max_evals"]
+
+
+def test_a_cache_replay_says_it_ran_no_rollouts_instead_of_billing_the_first_calls_work():
+    """A memoized fit hands back the right ANSWER and must not hand back the first call's INVOICE.
+
+    Found by adversarial review of #291 and measured 2026-08-13: with ``VIRTUROID_GAIT_FIT_CACHE=1`` -- the
+    mode this repo's own test instructions require and the one the build path asks for -- a second structurally
+    identical fit returned ``{searched: True, n_evals: 6}`` for a call that ran zero rollouts, with nothing to
+    tell a reader which it was. The evaluation ledger was never overspent, so the budget itself held; what was
+    wrong is a claim about work done. That is the same defect as every other number corrected today: true where
+    it was taken, quoted somewhere it was not.
+
+    The counts are deliberately KEPT rather than zeroed. They are the honest provenance of the answer being
+    replayed, and blanking them would trade one misreading ("this call searched 6 gaits") for another ("this
+    answer came from nothing"). ``replayed_from_cache`` is what makes them readable as history.
+    """
+    GF._FIT_CACHE.clear()
+    kw = dict(cache=True, warm_evals=3, max_evals=3, seed_restarts=1, bank=False)
+    first = GF.fit_gait_for_body(_grounded("a quadruped robot dog"), **kw)
+    second = GF.fit_gait_for_body(_grounded("a quadruped robot dog"), **kw)
+    assert second.get("adopted") == first.get("adopted"), "a replay must not change the answer"
+    assert second.get("n_evals") == first.get("n_evals"), "the provenance of the answer is kept, not blanked"
+    # ...and the first call must NOT be labelled a replay, or the flag says nothing
+    assert not first.get("replayed_from_cache"), first
+    assert first.get("evals_spent_by_this_call") is None, first
+    # ...while the second says plainly that it spent nothing
+    assert second.get("replayed_from_cache") is True, second
+    assert second.get("evals_spent_by_this_call") == 0, second
+    assert "REPLAYED" in (second.get("reason") or ""), second.get("reason")
+    assert "ran no rollouts" in (second.get("reason") or ""), second.get("reason")

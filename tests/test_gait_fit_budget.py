@@ -95,11 +95,32 @@ def test_a_cached_fit_returns_the_same_answer_AND_the_same_body_state(monkeypatc
     second = GF.fit_gait_for_body(b, **kw)
 
     assert second["adopted"] == first["adopted"]
-    assert second["reason"] == first["reason"]
     assert second.get("params") == first.get("params")
+
+    # THE REASON IS COMPARED ON ITS SUBSTANCE, AND THE REPLAY MARKER IS ASSERTED SEPARATELY. This read
+    # ``second["reason"] == first["reason"]`` until 2026-08-13, when the replay started saying so: a memoized
+    # fit was returning ``{searched: True, n_evals: 6}`` for a call that ran ZERO rollouts, which is a claim
+    # about work done and the same defect as every other number this repo corrected that day. Verbatim equality
+    # cannot express "same answer, different provenance", so it is split into the two things it was standing in
+    # for -- and that is strictly MORE constraint, not less: the substance must match exactly, the first call
+    # must NOT be labelled a replay, the second MUST be, and both surfaces must agree.
+    strip = lambda s: str(s or "").split("] ", 1)[-1] if str(s or "").startswith(GF._REPLAY_TAG) else str(s or "")
+    assert strip(second["reason"]) == strip(first["reason"]), "a replay must not change the ANSWER"
+    assert not first.get("replayed_from_cache"), "the first call really did search; labelling it a replay would "\
+                                                 "make the flag meaningless"
+    assert second.get("replayed_from_cache") is True, second
+    assert second.get("evals_spent_by_this_call") == 0, second
+    assert second["reason"].startswith(GF._REPLAY_TAG), second["reason"]
+
     # the BODY, not just the dict: the adopted operating point and the disclosure both land on the twin
     assert (b.metadata or {}).get("gait_params") == (a.metadata or {}).get("gait_params")
-    assert (b.metadata or {}).get("gait_fit", {}).get("reason") == first["reason"]
+    # ...and the gene's own copy must tell the SAME story as the returned dict. The first version of the replay
+    # marked only the dict, so one fit read two ways depending where you looked -- the four-surfaces-disagree
+    # defect (#215/#218) reintroduced in miniature. This assertion is what caught it.
+    _md_fit = (b.metadata or {}).get("gait_fit", {})
+    assert strip(_md_fit.get("reason")) == strip(first["reason"])
+    assert _md_fit.get("replayed_from_cache") is True, _md_fit
+    assert _md_fit.get("reason", "").startswith(GF._REPLAY_TAG), _md_fit.get("reason")
 
 
 @pytest.mark.skipif(not _MUJOCO, reason="fitting a real body needs MuJoCo")

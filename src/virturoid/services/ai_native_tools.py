@@ -1581,6 +1581,7 @@ def _create_robot_stages(args: dict) -> dict:
                            ("searched", "adopted", "skipped", "not_applicable", "n_evals", "n_rollouts",
                             "seed_attempts", "stopped_by_budget", "budget_s", "degenerate_search",
                             "stopped_by_eval_budget", "evals_budget",
+                            "replayed_from_cache", "evals_spent_by_this_call",
                             "probe_rollouts", "fragile", "robustness_rel", "reason",
                             "what_would_make_it_fittable")
                            if k in _fit}

@@ -843,6 +843,10 @@ _ROBUST_N = 4
 # drives the fitter DIRECTLY must always get a real run, so the fitter never caches unless asked.
 _FIT_CACHE: dict[tuple, tuple[dict, dict]] = {}
 
+#: Prefixed onto a replayed fit's ``reason`` on BOTH the returned dict and the gene's own metadata. One
+#: constant so a reader can strip it to compare two fits' substance, and so the two surfaces cannot drift.
+_REPLAY_TAG = "[REPLAYED from an identical body's fit --"
+
 
 def _fit_cache_key(gene, kw: dict):
     """The identity of THIS fit, or ``None`` when it must not be cached."""
@@ -1369,11 +1373,38 @@ def fit_gait_for_body(gene, *, deploy_steps: int = _SETTLE_STEPS, search_steps: 
         # A structurally identical body already paid for this exact search. Replay BOTH mutations the real call
         # makes -- the adopted operating point and the disclosure -- so the returned gene is indistinguishable
         # from a freshly fitted one; returning the dict alone would hand back a body with no gait_params.
+        #
+        # AND IT SAYS IT IS A REPLAY, because the counts describe a search THIS CALL DID NOT RUN. Measured
+        # 2026-08-13: a second structurally identical fit inside a build whose evaluation ledger was already
+        # exhausted returned ``{searched: true, n_evals: 6}`` -- six evaluations reported by a call that spent
+        # zero, and no way for a reader to tell. The ledger itself was never overspent (the budget holds); what
+        # was wrong is a claim about work done, which is the same defect as every other number in this codebase
+        # that was true where it was taken and quoted somewhere else.
+        #
+        # The counts are KEPT rather than zeroed: they are the honest provenance of the answer being handed
+        # back, and blanking them would trade one misreading for another ("this answer came from nothing").
+        # ``replayed_from_cache`` is what makes them readable as history instead of as this call's invoice.
         cached_out, cached_md = _FIT_CACHE[_ckey]
         md = dict(getattr(gene, "metadata", None) or {})
         md.update({k: dict(v) for k, v in cached_md.items()})
         gene.metadata = md
-        return dict(cached_out)
+        replay = dict(cached_out)
+        _md_fit = md.get("gait_fit")
+        # BOTH SURFACES OR NEITHER. The first version of this prefixed only the RETURNED dict, leaving
+        # ``gene.metadata['gait_fit']['reason']`` on the original string -- so the same fit read two different
+        # ways depending on where you looked at it, which is the defect this codebase has spent the day
+        # removing (four surfaces disagreeing about one robot, #215/#218). ``test_a_cached_fit_returns_the_same
+        # _answer_AND_the_same_body_state`` caught it by asserting the two agree, and it was right to.
+        for _tgt in (replay, _md_fit if isinstance(_md_fit, dict) else None):
+            if _tgt is None:
+                continue
+            _tgt["replayed_from_cache"] = True
+            _tgt["evals_spent_by_this_call"] = 0
+            if _tgt.get("n_evals") and not str(_tgt.get("reason") or "").startswith(_REPLAY_TAG):
+                _tgt["reason"] = (f"{_REPLAY_TAG} this call ran no rollouts; the {_tgt['n_evals']} "
+                                  f"evaluation(s) described below were spent by the first one] "
+                                  + str(_tgt.get("reason") or ""))
+        return replay
     try:
         _t_roll0 = time.monotonic()
         default = evaluate_gait(gene, _DEFAULT_GAIT, steps=deploy_steps)
@@ -1399,15 +1430,28 @@ def fit_gait_for_body(gene, *, deploy_steps: int = _SETTLE_STEPS, search_steps: 
             return _remember(_ckey, gene, out)
         n_evals = 0
         n_rollouts = 1                                   # the default-gait probe above is already one rollout
-        # REFUSE IN ADVANCE WHERE THE SEARCH PROVABLY CANNOT SUCCEED — and prove it, in three rollouts.
+        # REFUSE IN ADVANCE WHERE THREE ROLLOUTS SAY THE SEARCH HAS NOTHING TO RANK.
         #
-        # ``degenerate_search`` below already catches the case where every rollout dies on contact, but only
-        # AFTER the whole budget is spent: the live inchworm booked "360 gaits (379 physics rollouts)" before
-        # anything noticed that none of them integrated more than ~30 of 6000 steps. The finding was right and
-        # the price was absurd. The same fact is establishable up front, because degeneracy is exactly the
-        # property that the OUTPUT DOES NOT DEPEND ON THE INPUT: if the shipped default and the two extreme
-        # corners of the parameter box all collapse inside ``_DEGENERATE_INTEGRATION_FRAC`` of the horizon, no
-        # operating point in between can be told from any other, and the search has nothing to rank.
+        # THIS IS A SAMPLE, NOT A PROOF, and the word "provably" stood here until 2026-08-13. ``_FIT_PARAMS``
+        # is 5-dimensional, so the two corners below are 2 of its 32; the step from "both extremes collapse" to
+        # "so does everything between them" is a monotonicity assumption over that box, and nothing forbids a
+        # body that dies at all-low and all-high gains but survives at, say, high ``freq`` with low ``kp``.
+        # Twice today a claim of this exact shape — a bound asserted over an optimiser's reachable set without
+        # sweeping it — was measured false in ``sysid/fit.py`` and retracted. Calling this one a proof would be
+        # the third.
+        #
+        # WHAT IS MEASURED: swept 20 composed+grounded bodies (inchworm, snake, starfish, biped, 8-legged
+        # spider, humanoid, giraffe, one-legged hopper, ostrich, kangaroo, flamingo, centipede, crab, turtle,
+        # gecko, mantis, millipede, long-legged, top-heavy biped, tiny insect) and the refusal fires on NONE of
+        # them — every default rollout cleared the floor, lowest ostrich 159 and hopper 181 of 6000. So its
+        # blast radius today is zero measured bodies, which is an absence of evidence rather than a proof of
+        # safety, and the reason to keep it narrow.
+        #
+        # WHY IT EXISTS AT ALL: ``degenerate_search`` below catches the same case only AFTER the whole budget
+        # is spent — the live inchworm booked "360 gaits (379 physics rollouts)" before anything noticed that
+        # none integrated more than ~30 of 6000 steps. The finding was right and the price was absurd.
+        # Degeneracy is the property that the OUTPUT DOES NOT DEPEND ON THE INPUT, and three rollouts are
+        # strong EVIDENCE of it even though they are not a demonstration.
         #
         # Deliberately narrow, and it FAILS OPEN in both directions: the probes only run when the default
         # ITSELF collapsed (so a body that gets anywhere never pays for them), any probe that survives past the
@@ -1429,11 +1473,12 @@ def fit_gait_for_body(gene, *, deploy_steps: int = _SETTLE_STEPS, search_steps: 
                                 f"NO SEARCH WAS RUN, and nothing here is a finding about this body. Three probe "
                                 f"rollouts — the shipped default and both extreme corners of the "
                                 f"{len(_FIT_PARAMS)}-parameter box — ALL collapsed by step {deepest} of "
-                                f"{deploy_steps} ({deepest / max(1, deploy_steps):.1%} of the horizon). When the "
-                                f"most and least aggressive operating points available produce the same instant "
-                                f"collapse, no point between them can be distinguished either, so a search over "
-                                f"them would spend hundreds of rollouts and then report a decline that reads as "
-                                f"a measured negative about the design. Check that this is a body the leg crawl "
+                                f"{deploy_steps} ({deepest / max(1, deploy_steps):.1%} of the horizon). Those are "
+                                f"3 samples of a {len(_FIT_PARAMS)}-parameter box and not a proof that nothing "
+                                f"between them survives — but when the most and least aggressive operating "
+                                f"points available collapse identically, a search over them would spend "
+                                f"hundreds of rollouts and then report a decline that reads as a measured "
+                                f"negative about the design. Check that this is a body the leg crawl "
                                 f"gait can drive at all (crawl_deployment_match says it is driven by "
                                 f"{out.get('deployed_controller')}), or give it a learned controller "
                                 f"(train_held)")})
