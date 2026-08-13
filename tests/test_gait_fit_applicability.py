@@ -204,12 +204,13 @@ def _stub_never_credible(*, integrated, corners=None):
 
 
 def _stub_search_that_finds_nothing(**extra):
-    # ``deadline`` accepted and ignored: the real ``_one_search`` takes the build's shared gait-fit clock
-    # (2026-08-10). A double without it raised TypeError inside ``fit_gait_for_body``'s own except, so these
-    # assertions about an HONEST DECLINE came back as an error payload -- "gait fit FAILED for this body
-    # (TypeError) - this is an error, not a finding", which is exactly the confusion this file exists to stop.
-    # Nothing below is timed; the suite pins the budget off (tests/conftest.py).
-    def _one(gene, *, db, bank, warm_evals, max_evals, out, kw, deadline=None):
+    # ``deadline`` and ``eval_cap`` accepted and ignored: the real ``_one_search`` takes the build's shared
+    # gait-fit clock (2026-08-10) and its shared evaluation ledger (2026-08-12). A double without the first
+    # raised TypeError inside ``fit_gait_for_body``'s own except, so these assertions about an HONEST DECLINE
+    # came back as an error payload -- "gait fit FAILED for this body (TypeError) - this is an error, not a
+    # finding", which is exactly the confusion this file exists to stop. Nothing below is budgeted: the suite
+    # pins the clock off (tests/conftest.py) and sets no evaluation cap.
+    def _one(gene, *, db, bank, warm_evals, max_evals, out, kw, deadline=None, eval_cap=None):
         return ({"beats_default": False, "params": {}, "forward_m": 0.0, "credible": False,
                  "survived": False, "n_evals": 120, **extra}, 120)
     return _one

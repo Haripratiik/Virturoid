@@ -1265,6 +1265,18 @@ def fit_gait_for_body(gene, *, deploy_steps: int = _SETTLE_STEPS, search_steps: 
     * the test suite pins it OFF (``tests/conftest.py``), so no assertion about whether a body walks becomes a
       function of how fast the machine running it is.
 
+    AN EVALUATION BUDGET SITS BESIDE THE CLOCK, and that third bullet is why it had to. A wall clock cannot say
+    WHICH candidate it stopped at — MEASURED 2026-08-12, two runs of the same 8-legged spider build on the same
+    box, both stopped by the same 180 s ceiling, stopped at 144 of 360 gaits and at 70 of 360 — so "this build
+    was budgeted" is not a fact any test can pin without pinning the hardware, and the stopping point is not a
+    property of the robot. An evaluation is a unit the physics owns, so the same cap cuts the
+    same search at the same candidate anywhere. It is carried on the build (``build_progress.evals_budget``),
+    shared by every fit in the build for the same reason the clock is, and it is ``None`` unless a caller asked
+    for one: the default is still the full search, which is the thing that makes an authored body walk.
+    MEASURED on the grounded authored dog, ``evals_budget=8``: 8 evaluations, 14 rollouts, 6.4 s against the
+    same body's 124 s unbudgeted fit, and ``stopped_by_eval_budget`` with a reason that says the search did not
+    finish rather than that the body did not walk.
+
     ``cache=True`` lets an identical body reuse an identical fit, but ONLY when ``VIRTUROID_GAIT_FIT_CACHE=1``;
     the build path asks for it and a test suite turns it on. ``VIRTUROID_SKIP_GAIT_FIT=1`` makes the whole fit a
     disclosed no-op. Both default OFF — see the block above ``_FIT_CACHE`` for what they cost and what they buy.
@@ -1275,7 +1287,8 @@ def fit_gait_for_body(gene, *, deploy_steps: int = _SETTLE_STEPS, search_steps: 
     from virturoid.services.gait_search import _HI, _LO, evaluate_gait
 
     out: dict = {"ok": True, "searched": False, "adopted": False, "reason": "", "n_evals": 0,
-                 "horizon_steps": int(deploy_steps), "stopped_by_budget": False}
+                 "horizon_steps": int(deploy_steps), "stopped_by_budget": False,
+                 "stopped_by_eval_budget": False}
     if os.environ.get("VIRTUROID_SKIP_GAIT_FIT") == "1":
         # SAY SO. A caller reading `searched: False, adopted: False` off a real fit is being told "this body was
         # measured and kept its default"; here it means "nothing was measured", and those must not look alike.
@@ -1343,6 +1356,14 @@ def fit_gait_for_body(gene, *, deploy_steps: int = _SETTLE_STEPS, search_steps: 
                                   "generations": generations, "pop": pop, "seed": seed,
                                   "bank": bank, "seed_restarts": seed_restarts,
                                   "budget_s": budget_s if budget_s is not None else _budget_from_env(None),
+                                  # THE EVAL CAP *IS* IN THE KEY, unlike the clock's remaining window one line
+                                  # up, and the asymmetry is deliberate. A cached answer to a LONGER clock is
+                                  # strictly better than the shorter one it replaces. A cached answer to a
+                                  # SMALLER eval cap is a TRUNCATED search, and replaying it for an uncapped
+                                  # caller would hand them a partial result carrying "stopped by the evaluation
+                                  # budget" for a budget they never set — a partial search presented as a
+                                  # completed one, which is the exact defect this budget exists to prevent.
+                                  "evals_budget": getattr(_P.current(), "evals_budget", None),
                                   "db": db is not None}) if cache else None
     if _ckey is not None and _ckey in _FIT_CACHE:
         # A structurally identical body already paid for this exact search. Replay BOTH mutations the real call
@@ -1450,15 +1471,32 @@ def fit_gait_for_body(gene, *, deploy_steps: int = _SETTLE_STEPS, search_steps: 
         budget = None if deadline is None else round(max(0.0, deadline - _now), 1)
         out["budget_s"] = budget
         _worst = _t_roll * (warm_evals + max_evals) * attempts
+        # THE EVALUATION LEDGER lives on the BUILD, like the clock, so the up-to-three fits of one build share
+        # one budget instead of getting one each. ``None`` on every build that did not ask for a cap, and then
+        # every line that reads it is a no-op: the fit still runs, in full, by default. That is the
+        # non-negotiable half of task #291 and it is why the default here is None rather than a number.
+        _evb = getattr(_build, "evals_budget", None) if _build is not None else None
+        out["evals_budget"] = _evb
         _P.say(f"fitting an operating point to this body: one {deploy_steps}-step rollout costs {_t_roll:.1f}s "
                f"here, and the search may run up to {(warm_evals + max_evals) * attempts} of them "
                f"(~{_worst / 60:.0f} min)"
                + (f", capped at {budget:.0f}s by the build budget" if budget is not None
-                  else " — UNBOUNDED (no build budget set)"))
+                  else " — UNBOUNDED (no build budget set)")
+               + (f"; and at {_evb} evaluations for the whole build"
+                  if getattr(_build, "evals_budget", None) else ""))
         out["estimated_worst_case_s"] = round(_worst, 1)
         attempts_run = 0
         _try = 0
         for _try in range(attempts):
+            # NO FIRST-ATTEMPT EXEMPTION HERE, unlike the clock immediately below. The clock forgives its first
+            # attempt because wall time is spent by stages this fit does not control (a 253 s composer would
+            # otherwise cancel a search that had not started). An evaluation is only ever spent BY a search, so
+            # the same exemption would be the 3N bug in another currency: three fits in one build, each granted
+            # "one honest look" past an exhausted ledger, run three searches on a budget of zero.
+            _rem = _build.evals_remaining() if _build is not None else None
+            if _rem is not None and _rem < 1:
+                out["stopped_by_eval_budget"] = True
+                break
             # BETWEEN attempts as well as inside the search: a restart is a whole fresh budget, and starting one
             # with the clock already spent is the single largest overshoot available. Never on the FIRST
             # attempt: a body deserves one honest look even under a budget already spent by an earlier stage of
@@ -1473,8 +1511,13 @@ def fit_gait_for_body(gene, *, deploy_steps: int = _SETTLE_STEPS, search_steps: 
             kw = dict(generations=generations, pop=pop, steps=search_steps, deploy_steps=deploy_steps,
                       seed=seed + _try * 1009)
             learned, n_try = _one_search(gene, db=db, bank=bank, warm_evals=warm_evals, max_evals=max_evals,
-                                         out=out, kw=kw, deadline=deadline)
+                                         out=out, kw=kw, deadline=deadline, eval_cap=_rem)
             n_evals += n_try
+            if _build is not None:
+                # CHARGE WHAT WAS ACTUALLY DRAWN, not what was allowed. An attempt that stops early on a credible
+                # walk must not bill the budget for candidates it never evaluated, or the SECOND fit of the build
+                # would be refused a search this one had left it room for.
+                _build.spend_evals(n_try)
             n_rollouts += int(learned.get("n_rollouts_attempt") or learned.get("n_rollouts") or 0)
             _att = learned.get("deploy_steps_integrated")
             if _att is not None:
@@ -1556,7 +1599,7 @@ def fit_gait_for_body(gene, *, deploy_steps: int = _SETTLE_STEPS, search_steps: 
                              f"the default's {out['default_forward_m']} m; it {_rob}"
                              + (" — and the search was cut short by the build budget, so a longer one may find "
                                 "a better point (this one is verified either way)"
-                                if out.get("stopped_by_budget") else ""))
+                                if out.get("stopped_by_budget") or out.get("stopped_by_eval_budget") else ""))
         else:
             # THE HORIZON IN THE SENTENCE HAS TO HAVE BEEN REACHED BY SOMETHING. A decline is a claim about the
             # body, so it may only quote a horizon some rollout actually integrated. When the deepest one
@@ -1593,6 +1636,19 @@ def fit_gait_for_body(gene, *, deploy_steps: int = _SETTLE_STEPS, search_steps: 
                     f"{out.get('estimated_worst_case_s', 0) / 60:.0f} min: re-run with a larger "
                     f"gait_budget_s (or 0 for unbounded) to complete it. The body ships on the shipped default "
                     f"gait meanwhile")
+            elif out.get("stopped_by_eval_budget"):
+                # THE SAME RULE IN THE OTHER CURRENCY. A caller who capped the search at N evaluations gets back
+                # "your cap stopped this", never "none was still walking" — the second sentence is a measurement
+                # this build did not make. Unlike the clock, this one reproduces: the same cap on any machine
+                # cuts the search at the same candidate, which is why it is the budget a test can pin.
+                out["reason"] = (
+                    f"THE SEARCH WAS STOPPED BY THE EVALUATION BUDGET, not by an answer. It ran {n_evals} of a "
+                    f"possible {(warm_evals + max_evals) * attempts} gaits ({n_rollouts} physics rollouts) over "
+                    f"{out.get('seed_attempts')} of {attempts} seed attempt(s), capped at "
+                    f"{out.get('evals_budget')} evaluations for the whole build, and had not found an operating "
+                    f"point that beats the shipped default. NOTHING HERE SAYS THIS BODY CANNOT WALK — the "
+                    f"candidates past the cap were never drawn. Re-run with a larger gait_max_evals (or omit it "
+                    f"for the full search) to complete it. The body ships on the shipped default gait meanwhile")
             else:
                 _depth = ("" if deepest is None else
                           f" (the deepest rollout reached step {deepest} of {deploy_steps})")
@@ -1659,8 +1715,14 @@ def _rank(learned: dict) -> tuple:
 
 
 def _one_search(gene, *, db, bank: bool, warm_evals: int, max_evals: int, out: dict, kw: dict,
-                deadline: float | None = None):
+                deadline: float | None = None, eval_cap: int | None = None):
     """One SHORT first pass plus the full-budget re-run. Returns ``(learned, n_evals_used)``.
+
+    ``eval_cap`` is the build's REMAINING evaluation budget (``None`` = unbounded, which is the default and the
+    only thing a build that never asked for a cap can see). It bounds both passes together rather than each, and
+    it is reported through ``out['stopped_by_eval_budget']`` whenever it actually bit — a truncated search is a
+    search that did not finish, and the rule this module is built on is that such a search may never come back to
+    the customer as a finding about their body.
 
     ``warm_evals`` is small (24) because a GOOD PRIOR should win almost immediately; ``max_evals`` (96) is the
     real budget. The re-run used to be gated on ``reused_prior``, which meant a body with NO prior — every cold
@@ -1683,7 +1745,10 @@ def _one_search(gene, *, db, bank: bool, warm_evals: int, max_evals: int, out: d
     point the code cannot reach as though it were the code's output is the same class of false claim as quoting
     a verdict from a horizon that ends before the fall.
     """
-    learned = _open_db_and_learn(gene, db=db, bank=bank, max_evals=warm_evals, deadline=deadline, **kw)
+    _warm = warm_evals if eval_cap is None else max(1, min(int(warm_evals), int(eval_cap)))
+    if eval_cap is not None and _warm < warm_evals:
+        out["stopped_by_eval_budget"] = True
+    learned = _open_db_and_learn(gene, db=db, bank=bank, max_evals=_warm, deadline=deadline, **kw)
     n_evals = int(learned.get("n_evals") or 0)
     # THE CLOCK'S VERDICT IS TRACKED SEPARATELY FROM THE WINNER'S. ``learned`` ends up being whichever pass
     # RANKED higher, so reading the stop reason off it alone loses the case where the COLD re-run is the one the
@@ -1706,7 +1771,17 @@ def _one_search(gene, *, db, bank: bool, warm_evals: int, max_evals: int, out: d
         # and keep whichever actually beat the default. (The deeper fix belongs in gait_search's elite
         # selection and is not this change.) With no prior to screen, the same re-run is simply the rest of
         # the budget, which is why it is no longer conditional on one having been recalled.
-        cold = _open_db_and_learn(gene, db=db, bank=bank, max_evals=max_evals, recall=False,
+        _cold_cap = max_evals if eval_cap is None else min(int(max_evals), int(eval_cap) - n_evals)
+        if eval_cap is not None and _cold_cap < max_evals:
+            out["stopped_by_eval_budget"] = True
+        if _cold_cap < 1:
+            # THE LEDGER IS EMPTY MID-ATTEMPT. Returning here rather than running a 1-candidate re-run keeps the
+            # cap honest; the warm pass's answer stands and the disclosure above says the search was cut.
+            learned["n_rollouts_attempt"] = rollouts
+            if out_of_time:
+                out["stopped_by_budget"] = True
+            return learned, n_evals
+        cold = _open_db_and_learn(gene, db=db, bank=bank, max_evals=_cold_cap, recall=False,
                                   deadline=deadline, **kw)
         n_evals += int(cold.get("n_evals") or 0)
         rollouts += int(cold.get("n_rollouts") or 0)

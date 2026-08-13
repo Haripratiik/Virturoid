@@ -1374,6 +1374,27 @@ def create_robot(args: dict) -> dict:
     * ``tune_gait`` still DEFAULTS TRUE. The fit is what makes an authored body walk at all (7/7 proportion
       variants, docs/breaking_the_cotuning_wall.md); defaulting it off would buy a fast build that ships a body
       tuned at another robot's operating point, which is the dishonesty the fit exists to remove.
+
+    RE-MEASURED 2026-08-12 on this checkout, same three prompts, through ``call_tool`` with the defaults:
+
+        a large quadruped robot     634 s silent, adopted nothing  ->  124.1 s, ADOPTS (91 evals / 150 rollouts,
+                                                                       5.877 m at step 6000 vs the default's 0.01)
+        an eight-legged spider      552 s silent, adopted nothing  ->  187.9 s, stopped by the clock at 144 of
+                                                                       360 gaits and SAYS SO
+        a bipedal walking robot     270 s silent, adopted nothing  ->   87.6 s, full 360 evals, declines with the
+                                                                       deepest rollout quoted (step 729 of 6000)
+
+    and all three now print a stage line on entry, a "still running" line every 15 s, and a per-stage table.
+
+    ``gait_max_evals`` IS THE SECOND BUDGET AND THE REPRODUCIBLE ONE. The clock bounds the wait, but WHICH
+    candidate it stops at is not a property of the robot: two runs of that same spider build on this same box,
+    both stopped by the same 180 s ceiling, stopped at 144 of 360 gaits and at 70 of 360 — which is why
+    ``tests/conftest.py`` has to pin the clock off and why
+    every budget test asserts on a disclosure rather than a duration. An evaluation cap stops at the same
+    candidate everywhere. It is ONE LEDGER for the whole build for the same reason the clock is one clock, it is
+    UNSET by default (an unset cap is the full search), and a search it stops is reported as an unfinished
+    search — MEASURED on the grounded authored dog at ``gait_max_evals=8``: 8 evals, 14 rollouts, 6.4 s against
+    the same body's 124 s unbudgeted fit, reason "THE SEARCH WAS STOPPED BY THE EVALUATION BUDGET".
     """
     from virturoid.services import build_progress as P
     from virturoid.services.gait_flywheel import _budget_from_env
@@ -1384,13 +1405,25 @@ def create_robot(args: dict) -> dict:
     # ``stopped_by_budget: true, budget_s: 180.0`` having asked for none). A control that does not do what it
     # says is worse than no control.
     budget = _budget_from_env(args.get("gait_budget_s"))
+    # THE SECOND BUDGET, AND IT IS THE REPRODUCIBLE ONE. ``gait_budget_s`` bounds the WAIT but what it stops is
+    # not a property of the robot: MEASURED 2026-08-12, two runs of the same 8-legged spider build on this box,
+    # both stopped by the same 180 s ceiling, stopped at 144 of 360 gaits and at 70 of 360. ``gait_max_evals``
+    # bounds the same search in candidates, which is a unit the physics owns rather than the hardware, so a
+    # customer can reproduce the stop and a test can pin it without asserting on a duration. Unset by default:
+    # an unset cap is the full search, and the full search is what makes an authored body walk.
+    try:
+        _mev = args.get("gait_max_evals")
+        max_evals = None if _mev is None else int(_mev)
+    except (TypeError, ValueError):
+        max_evals = None                      # garbage falls back to the full search, never to a silent cap
     # EVERY CONTROL RESOLVED IN ONE PLACE, then handed down already decided. Not tidiness: ``_accepted_params``
     # derives the advertised schema from the handler's OWN body (agent_tools, and
     # tests/test_tool_registration.py enforces it), so a flag only ever read a frame deeper is a lever the
     # contract cannot see. Reading them here keeps the schema derivable AND puts the defaults in one spot.
     opts = {"tune_gait": bool(args.get("tune_gait", True)),
             "ensure_walkable": bool(args.get("ensure_walkable", True))}
-    with P.build_progress("create_robot", budget_s=budget, fit_gait=opts["tune_gait"]) as rep:
+    with P.build_progress("create_robot", budget_s=budget, fit_gait=opts["tune_gait"],
+                          evals_budget=max_evals) as rep:
         rep.say(f"prompt: {args['prompt']!r}")
         out = _create_robot_stages({**args, **opts})
     # THE BREAKDOWN COMES BACK WITH THE ROBOT. ``took_s`` alone (all ``call_tool`` results carry it) says a call
@@ -1398,6 +1431,11 @@ def create_robot(args: dict) -> dict:
     # wait to a customer nor choose a cheaper argument next time.
     out["stages"] = rep.table()
     out["build_seconds"] = rep.elapsed_s()
+    # WHAT THE SEARCH ACTUALLY COST, in the unit the cap is set in — reported on every build, capped or not, so
+    # a caller choosing a cap for next time has the number rather than a guess. ``gait_max_evals`` echoes back
+    # what was in force (``None`` = the full search) so a budgeted build can never be mistaken for a complete one.
+    out["gait_evals_spent"] = rep.evals_spent
+    out["gait_max_evals"] = rep.evals_budget
     if rep.notes:
         out["build_notes"] = list(rep.notes)
     return out
@@ -1532,9 +1570,17 @@ def _create_robot_stages(args: dict) -> dict:
     # wants it, and `verify_robot` reports the parts that bear on a verdict.
     _fit = (getattr(gene, "metadata", None) or {}).get("gait_fit") or {}
     if _fit:
+        # A WHITELIST DROPS WHAT IT DOES NOT KNOW ABOUT, WHICH MAKES IT A PLACE NEW DISCLOSURES GO TO DIE.
+        # ``stopped_by_eval_budget`` and ``evals_budget`` were added to the fitter on 2026-08-13 and were
+        # filtered out HERE, so the machine-readable "this search was cut short" flag could not reach an agent
+        # -- only the prose ``reason`` survived. The test written to catch that asserted
+        # ``fit.get("stopped_by_eval_budget") is True`` and passed anyway, because a missing key is falsy: it
+        # was green against a payload that never contained the field. Same shape as the clock's
+        # ``stopped_by_budget``, which IS here, so the two halves of one control now read the same way out.
         out["gait_fit"] = {k: _fit[k] for k in
                            ("searched", "adopted", "skipped", "not_applicable", "n_evals", "n_rollouts",
                             "seed_attempts", "stopped_by_budget", "budget_s", "degenerate_search",
+                            "stopped_by_eval_budget", "evals_budget",
                             "probe_rollouts", "fragile", "robustness_rel", "reason",
                             "what_would_make_it_fittable")
                            if k in _fit}
@@ -2738,7 +2784,29 @@ AI_NATIVE_TOOLS: dict[str, dict] = {
                      "gait budget caps that search; `stages` in the result says where the time went.",
                      "heavy": True,
                      "handler": create_robot, "parameters": {"type": "object", "required": ["prompt"], "properties": {
-                         "prompt": {"type": "string"}, "ensure_walkable": {"type": "boolean", "default": False},
+                         "prompt": {"type": "string"},
+                         # DEFAULT TRUE, AND IT WAS ADVERTISED AS FALSE UNTIL 2026-08-12. The handler reads
+                         # ``args.get("ensure_walkable", True)`` and the gate demonstrably runs on a default
+                         # call (measured: a `walkable_gate` stage of 0.77 s on "a large quadruped robot" with
+                         # no argument passed). This is the most consequential default in the tool -- the gate
+                         # is what can DISCARD THE CUSTOMER'S DESIGN and ship a template in its place -- so a
+                         # schema saying it is off by default told a caller the opposite of the truth about the
+                         # one control that decides whose robot they get.
+                         "ensure_walkable": {"type": "boolean", "default": True,
+                                             "description": "after the body has its own fitted operating "
+                                                            "point, ask whether it can walk -- and SUBSTITUTE "
+                                                            "a template body if it cannot. false keeps the "
+                                                            "composed design whatever it measures"},
+                         "gait_max_evals": {"type": "integer",
+                                            "description": "cap the gait search at N candidate evaluations for "
+                                                           "the whole build (one ledger shared by the up-to-"
+                                                           "three fits). Omit for the full search, which is "
+                                                           "the default and is what makes an authored body "
+                                                           "walk. Unlike gait_budget_s this is machine-"
+                                                           "independent, so the same N stops at the same "
+                                                           "candidate anywhere. A search the cap stops is "
+                                                           "reported as an UNFINISHED SEARCH, never as a "
+                                                           "finding about the body"},
                          "tune_gait": {"type": "boolean", "default": True,
                                        "description": "fit an operating point to this body (legged only). "
                                                       "false returns in seconds but the body arrives tuned at "

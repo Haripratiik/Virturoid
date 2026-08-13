@@ -64,7 +64,7 @@ class BuildProgress:
     """
 
     def __init__(self, label: str, *, printing: bool | None = None, budget_s: float | None = None,
-                 fit_gait: bool = True) -> None:
+                 fit_gait: bool = True, evals_budget: int | None = None) -> None:
         self.label = label
         # BUILD-WIDE POLICY, not just narration. ``create_robot`` is not the only thing that fits a gait during
         # a build -- ``anatomy_compiler.ensure_walkable_quad`` calls the fitter twice more, on bodies
@@ -91,6 +91,27 @@ class BuildProgress:
         # moves the loss onto the one stage that was doing useful work.
         self.budget_s = None if (budget_s is None or float(budget_s) <= 0) else float(budget_s)
         self.deadline: float | None = None
+        # THE SECOND BUDGET, AND IT EXISTS BECAUSE THE FIRST ONE IS NOT REPRODUCIBLE. A wall clock buys a bound
+        # on the WAIT, but what it stops is not a property of the robot: MEASURED 2026-08-12, two runs of the
+        # same "an eight-legged spider robot" build on the same box, both stopped by the same 180 s ceiling,
+        # stopped at 144 of 360 gaits and at 70 of 360. That is why ``tests/conftest.py`` has to pin the clock
+        # OFF and why every budget test asserts on a disclosure rather than a duration. An EVALUATION budget bounds
+        # the same search in a unit the physics owns rather than the hardware, so "this build was budgeted" is a
+        # fact a test can pin and a customer can reproduce. Same ONE-LEDGER rule as the clock: shared by every
+        # fit in the build, because three fits each honouring "spend up to N evaluations" spend 3N.
+        self.evals_budget = None if (evals_budget is None or int(evals_budget) <= 0) else int(evals_budget)
+        self.evals_spent = 0
+
+    def evals_remaining(self) -> int | None:
+        """Evaluations this build may still spend on gait search, or ``None`` when unbounded (the default)."""
+        if self.evals_budget is None:
+            return None
+        return max(0, self.evals_budget - self.evals_spent)
+
+    def spend_evals(self, n: int) -> None:
+        """Charge ``n`` gait evaluations to the build's shared ledger. A no-op on an unbounded build, but the
+        running total is still kept so a caller can report what a build actually cost."""
+        self.evals_spent += max(0, int(n))
 
     def claim_deadline(self) -> float | None:
         """The shared search deadline, STARTING IT on first call. ``None`` when this build is unbounded.
@@ -175,7 +196,7 @@ class BuildProgress:
 
 @contextlib.contextmanager
 def build_progress(label: str, *, printing: bool | None = None, budget_s: float | None = None,
-                   fit_gait: bool = True):
+                   fit_gait: bool = True, evals_budget: int | None = None):
     """Install a ``BuildProgress`` for the duration of a call, so nested code can reach it without plumbing.
 
     A CONTEXTVAR RATHER THAN AN ARGUMENT, because the stages that matter are three and four frames down
@@ -184,7 +205,8 @@ def build_progress(label: str, *, printing: bool | None = None, budget_s: float 
     warrants. Nesting is honoured: an inner ``build_progress`` restores the outer one on exit, and ``current()``
     returns ``None`` outside any of them, which is what makes every emit site a safe no-op by default.
     """
-    rep = BuildProgress(label, printing=printing, budget_s=budget_s, fit_gait=fit_gait)
+    rep = BuildProgress(label, printing=printing, budget_s=budget_s, fit_gait=fit_gait,
+                        evals_budget=evals_budget)
     token = _CURRENT.set(rep)
     try:
         yield rep

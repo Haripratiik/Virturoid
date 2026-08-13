@@ -61,18 +61,20 @@ def _stub_evaluate(credible_for_winner: bool, *, sturdy: bool = True):
 def _stub_search(fail_first: int):
     """Fail ``fail_first`` attempts, then win. Records the seed each attempt was given.
 
-    ``deadline`` IS ACCEPTED AND IGNORED, and the two halves of that are separate decisions. Accepted, because
-    the real ``_one_search`` grew the parameter on 2026-08-10 (the build's shared gait-fit clock) and a double
-    that does not is not standing in for the function under test -- it made these tests raise ``TypeError``
+    ``deadline`` AND ``eval_cap`` ARE ACCEPTED AND IGNORED, and the two halves of that are separate decisions.
+    Accepted, because the real ``_one_search`` grew ``deadline`` on 2026-08-10 (the build's shared gait-fit
+    clock) and ``eval_cap`` on 2026-08-12 (its shared evaluation ledger), and a double that does not take them
+    is not standing in for the function under test -- the first omission made these tests raise ``TypeError``
     inside ``fit_gait_for_body``'s own ``except``, so seven assertions about SEED ROBUSTNESS came back as an
-    error payload instead. Ignored, because a wall clock has no place in these tests: they assert how many
-    ATTEMPTS a body gets and which seeds they run at, and the suite pins the budget off (tests/conftest.py) so
-    that no such assertion becomes a measurement of how fast the machine is. The budget's own behaviour is
-    covered by tests/test_build_budget.py, which asserts on the disclosure rather than on a duration.
+    error payload instead. Ignored, because neither budget has any place in these tests: they assert how many
+    ATTEMPTS a body gets and which seeds they run at, and the suite sets no budget of either kind
+    (tests/conftest.py pins the clock off, and an evaluation cap is opt-in), so no assertion here becomes a
+    measurement of a budget. Both budgets' own behaviour is covered by tests/test_build_budget.py, which asserts
+    on the disclosure and on the evaluation COUNT rather than on a duration.
     """
     seen: list[int] = []
 
-    def _one(gene, *, db, bank, warm_evals, max_evals, out, kw, deadline=None):
+    def _one(gene, *, db, bank, warm_evals, max_evals, out, kw, deadline=None, eval_cap=None):
         seen.append(int(kw["seed"]))
         won = len(seen) > fail_first
         return ({"beats_default": won, "params": dict(_WINNER), "forward_m": 0.958,

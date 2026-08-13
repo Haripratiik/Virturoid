@@ -210,6 +210,92 @@ def test_an_unbounded_build_never_produces_a_deadline():
     assert rep.budget_s is None and rep.claim_deadline() is None
 
 
+# ------------------------------------------------------- 2b. the budget a test can pin: EVALUATIONS
+#
+# The clock above bounds the WAIT. It cannot bound the ANSWER reproducibly, and the evidence is two runs of the
+# SAME code on the SAME box on 2026-08-12: "an eight-legged spider robot" through ``call_tool``, both stopped by
+# the same 180 s ceiling, stopped at 144 of 360 gaits on one run and 70 of 360 on the next. Neither number is a
+# property of the robot. That is exactly why every test in section 2 asserts on a disclosure and never on a
+# duration -- and why "a budgeted build discloses that it was budgeted" could not be pinned there at all. An
+# evaluation is a unit the physics owns rather than the hardware, so these tests CAN assert the count.
+
+
+def test_no_eval_budget_by_default_which_is_the_whole_point():
+    """THE HARD CONSTRAINT OF TASK #291, guarded at the one place a cap could become the default. A number here
+    instead of ``None`` would silently truncate the per-body fit for every build in the product, and the fit is
+    what makes an authored body walk (7/7 proportion variants, docs/breaking_the_cotuning_wall.md)."""
+    rep = BP.BuildProgress("t", printing=False)
+    assert rep.evals_budget is None and rep.evals_remaining() is None
+    rep.spend_evals(500)
+    assert rep.evals_remaining() is None, "an unbounded build can never run out"
+    assert rep.evals_spent == 500, "...but it still counts, so a caller can choose a cap next time"
+
+
+def test_one_build_is_one_eval_ledger_not_one_per_fit():
+    """The same 3N bug the clock has, in the other currency: ``create_robot`` runs the fitter up to three times,
+    so three fits each honouring "spend up to 40 evaluations" spend 120."""
+    rep = BP.BuildProgress("t", printing=False, evals_budget=40)
+    assert rep.evals_remaining() == 40
+    rep.spend_evals(25)                       # the authored body's fit
+    assert rep.evals_remaining() == 15        # ...and the walkability gate's fit inherits the REMAINDER
+    rep.spend_evals(15)
+    assert rep.evals_remaining() == 0
+    rep.spend_evals(9)
+    assert rep.evals_remaining() == 0, "an overspent ledger reports empty, never negative"
+
+
+def test_a_zero_or_negative_eval_budget_means_unbounded_like_the_clock():
+    """One convention for both budgets. ``0`` on the clock already means "no ceiling"; a ``0`` here meaning "run
+    no evaluations" would make the two controls read opposite ways from the same number."""
+    assert BP.BuildProgress("t", printing=False, evals_budget=0).evals_budget is None
+    assert BP.BuildProgress("t", printing=False, evals_budget=-5).evals_budget is None
+
+
+@_needs_mujoco
+def test_the_eval_budget_binds_exactly_and_is_reported_as_an_UNFINISHED_SEARCH():
+    """THE HONESTY TEST, and the deterministic twin of the wall-clock one above.
+
+    MEASURED 2026-08-12 on the grounded authored dog, ``evals_budget=8``: 8 evaluations, 14 physics rollouts,
+    6.4 s -- against 124.1 s and 91 evaluations for the same body's unbudgeted fit through ``create_robot``. The
+    count is asserted because it is machine-independent; the SECONDS deliberately are not.
+
+    "none was still walking at the 6000-step horizon" would be a measurement this build did not make. A cap the
+    customer set may not come back to them as a fact about their robot.
+    """
+    g = _grounded("a quadruped robot dog")
+    with BP.build_progress("t", printing=False, budget_s=0, evals_budget=8) as rep:
+        out = GF.fit_gait_for_body(g, bank=False)
+    if out.get("reason") == "the shipped default gait is already a credible walk for this body":
+        pytest.skip("this body never reaches the search, so there is no budget to test")
+    assert out["n_evals"] == 8, f"the cap must bind exactly, ran {out['n_evals']}"
+    assert rep.evals_spent == 8 and rep.evals_remaining() == 0
+    assert out["stopped_by_eval_budget"] is True, out
+    assert out["evals_budget"] == 8
+    if not out["adopted"]:
+        assert "STOPPED BY THE EVALUATION BUDGET" in out["reason"], out["reason"]
+        assert "NOTHING HERE SAYS THIS BODY CANNOT WALK" in out["reason"], out["reason"]
+        assert "none was still walking" not in out["reason"], out["reason"]
+        assert "gait_max_evals" in out["reason"], "it must say how to finish the search"
+
+
+@_needs_mujoco
+def test_a_second_fit_in_the_same_build_is_refused_rather_than_given_a_fresh_cap():
+    """The walkability gate fits AGAIN, on a different body, inside the same build. With the ledger already
+    spent that second fit must run zero evaluations and say why -- and it must NOT get the clock's
+    first-attempt exemption, which exists only because wall time is spent by stages a fit does not control."""
+    g = _grounded("a quadruped robot dog")
+    with BP.build_progress("t", printing=False, budget_s=0, evals_budget=6) as rep:
+        GF.fit_gait_for_body(g, bank=False)
+        spent_after_first = rep.evals_spent
+        second = GF.fit_gait_for_body(_grounded("a quadruped robot dog"), bank=False)
+    if second.get("reason") == "the shipped default gait is already a credible walk for this body":
+        pytest.skip("this body never reaches the search")
+    assert spent_after_first >= 6
+    assert second["n_evals"] == 0, f"the second fit spent {second['n_evals']} evaluations of an empty ledger"
+    assert second["stopped_by_eval_budget"] is True, second
+    assert "STOPPED BY THE EVALUATION BUDGET" in second["reason"], second["reason"]
+
+
 # ---------------------------------------------------------------------------- 3. refusing in advance
 #
 # "A SEARCH THAT CANNOT SUCCEED MUST NOT BE REPORTED AS A SEARCH THAT FAILED" is an existing rule here, and this
@@ -318,6 +404,65 @@ def test_the_probes_do_not_run_on_a_body_that_gets_anywhere(monkeypatch):
 
 # ---------------------------------------------------------------------------- 4. through the tool
 @_needs_mujoco
+def test_the_per_body_fit_STILL_RUNS_by_default_and_this_is_the_non_negotiable_one():
+    """EVERY OTHER TEST IN THIS FILE IS ABOUT MAKING A BUILD CHEAPER OR LOUDER. This one is the counterweight,
+    and it is the constraint task #291 was given: none of that may be bought by quietly not fitting.
+
+    The fit is what makes an authored body walk. MEASURED 2026-08-12 through ``call_tool`` with no arguments but
+    the prompt, "a large quadruped robot": 91 evaluations / 150 rollouts, ADOPTED, 5.877 m still walking at step
+    6000 against the shipped default's 0.01 m. Remove the fit and that body travels a centimetre.
+
+    So: a default build of a legged body must SEARCH — not skip, not refuse, not be capped by a budget nobody
+    asked for. The only alternative permitted is the one that means the search was unnecessary (the body's
+    shipped default already walks), because then nothing was withheld.
+
+    IT ALSO ASSERTS HOW MUCH SEARCH HAPPENED, AND THE FIRST VERSION DID NOT — which made it blind to the exact
+    defect it exists to prevent. Mutation-tested 2026-08-13: changing the production call at
+    ``ai_native_tools.py`` to ``fit_gait_for_body(gene, cache=True, warm_evals=2, max_evals=2,
+    seed_restarts=1)`` cuts a 360-evaluation search to FOUR and discloses nothing — and this test PASSED, in
+    12.8 s instead of the honest 132.4 s. Every assertion it had was about the ADVERTISED cap
+    (``gait_max_evals is None``, ``stopped_by_eval_budget is not True``), and none of them is false when the
+    search is simply told to be small. "The build got faster by quietly doing less work" is the one outcome
+    task #291 named as worse than a 634 s build, so the floor below is the assertion that matters.
+
+    ``_MIN_HONEST_EVALS`` is deliberately far under the measured 91: the point is to catch a search cut to a
+    handful, not to pin a number that moves with the bank's contents (a warm start legitimately finishes early
+    — measured 91 evals with a warm bank against 360 cold). A run that adopts at evaluation 1 is allowed
+    through explicitly, because there the search ended by SUCCEEDING.
+    """
+    from virturoid.services.agent_tools import call_tool
+    _MIN_HONEST_EVALS = 12
+    res = call_tool("create_robot", {"prompt": "a quadruped robot dog"})["result"]
+    assert (res.get("appendages") or {}).get("legs", 0) >= 4, "this prompt must compose a legged body"
+    assert res["gait_max_evals"] is None, "no build may arrive pre-capped"
+    fit = res.get("gait_fit") or {}
+    assert fit.get("skipped") is not True, fit
+    assert fit.get("stopped_by_eval_budget") is not True, fit
+    assert fit.get("searched") is True or "already a credible walk" in (fit.get("reason") or ""), fit
+    # THE FLOOR IS ON THE BUILD LEDGER, NOT ON ``gait_fit``, and that is the whole trick. Mutation-tested: with
+    # the search cut to 4, ``gait_fit`` comes back {searched: False, n_evals: 0, reason: "the shipped default
+    # gait is already a credible walk for this body"} -- because the walkable gate runs its OWN fit afterwards
+    # and OVERWRITES metadata['gait_fit'], erasing the shrunken search from the record entirely. Any assertion
+    # guarded on ``fit["searched"]`` is therefore unreachable on the default path, which is how the first
+    # version of this floor missed the mutation it was written for. ``gait_evals_spent`` is the build's own
+    # ledger and survives the overwrite: it read 4 under the mutation and 336 on an honest cold run.
+    #
+    # The rule is a BAND, not a minimum, because zero is legitimate: a build that never needed to search says
+    # so. What cannot be legitimate is a handful -- something looked, briefly, and nothing explains why it
+    # stopped. That is the exact signature of a quietly shrunken search.
+    spent = int(res.get("gait_evals_spent") or 0)
+    if spent > 0:
+        assert spent >= _MIN_HONEST_EVALS, (
+            f"a default build spent {spent} evaluation(s) -- too few to be a real search and too many to be "
+            f"none. Either the search was quietly shrunk (the #291 constraint this test exists for) or it "
+            f"stopped for a reason that must be disclosed: gait_fit={fit}")
+    if fit.get("searched") is True and not fit.get("adopted"):
+        n_evals = int(fit.get("n_evals") or 0)
+        assert n_evals >= _MIN_HONEST_EVALS, (
+            f"the fit reports searching only {n_evals} evaluation(s) and adopting nothing: {fit}")
+
+
+@_needs_mujoco
 def test_create_robot_returns_the_breakdown_and_what_the_expensive_stage_bought():
     """``took_s`` alone says a call cost 664 seconds and nothing about which of four stages spent them."""
     from virturoid.services.agent_tools import call_tool
@@ -373,3 +518,79 @@ def test_the_budget_and_the_escape_hatch_are_both_on_the_wire():
     props = spec["parameters"]["properties"]
     assert "gait_budget_s" in props and "tune_gait" in props, sorted(props)
     assert "0" in props["gait_budget_s"]["description"], "the unbounded escape must be documented"
+    assert "gait_max_evals" in props, "the machine-independent budget must be discoverable too"
+    assert "gait_max_evals" not in (spec["parameters"].get("required") or []), "capping must never be required"
+    assert "default" not in props["gait_max_evals"], (
+        "an advertised default here would read as 'the search is capped out of the box'; it is not, and the "
+        "uncapped search is what makes an authored body walk")
+
+
+def test_the_advertised_default_of_every_control_is_the_one_the_handler_uses():
+    """A MEASURED DEFECT, not a tidy-up: ``ensure_walkable`` was advertised ``default: False`` while
+    ``create_robot`` reads ``args.get("ensure_walkable", True)``. Measured 2026-08-12, a plain
+    ``create_robot({"prompt": "a large quadruped robot"})`` ran a ``walkable_gate`` stage for 0.77 s -- so the
+    gate was ON while the schema said OFF.
+
+    It is the WORST control in the tool to misdescribe. The walkability gate is the thing that can DISCARD THE
+    CUSTOMER'S COMPOSED BODY and ship a template in its place (see 12b11dc, where a regression let exactly that
+    happen again), so a caller reading the schema was told the opposite of the truth about who owns the robot
+    that comes back.
+
+    Asserted against the handler's own defaults rather than against literals, so the next control cannot drift
+    the same way.
+    """
+    import inspect
+
+    from virturoid.services import ai_native_tools as A
+    from virturoid.services.agent_tools import tool_specs
+    props = next(t for t in tool_specs() if t["name"] == "create_robot")["parameters"]["properties"]
+    src = inspect.getsource(A.create_robot) + inspect.getsource(A._create_robot_stages)
+    flags = [(k, v["default"]) for k, v in props.items()
+             if isinstance(v.get("default"), bool)]
+    assert {k for k, _ in flags} == {"ensure_walkable", "tune_gait"}, sorted(k for k, _ in flags)
+    for name, advertised in flags:
+        for literal in (f'args.get("{name}", True)', f'args.get("{name}", False)'):
+            if literal in src:
+                assert advertised is literal.endswith("True)"), (
+                    f"{name}: schema says default {advertised!r}, the handler uses {literal}")
+                break
+        else:
+            raise AssertionError(f"{name} advertises a default the handler does not visibly set")
+    # ...and the one numeric default, which the handler resolves through the fitter rather than inline
+    assert props["gait_budget_s"]["default"] == GF._DEFAULT_FIT_BUDGET_S
+
+
+@_needs_mujoco
+def test_a_budgeted_build_says_it_was_budgeted_all_the_way_out_through_the_tool():
+    """END TO END, and deterministic: the cap is in candidates, so this asserts a COUNT rather than a clock.
+    A partial search presented as a completed one is the defect; ``gait_max_evals`` echoed back on the result is
+    what stops a reader mistaking the two.
+
+    THIS TEST WAS DEAD WHEN WRITTEN, and mutation found it: neutering all three production sites that set
+    ``stopped_by_eval_budget = True`` turned its two siblings red and left this one GREEN. Two independent
+    reasons, both now closed. (1) The flag was not in ``ai_native_tools``' ``gait_fit`` projection whitelist, so
+    it never reached the result at all -- and ``fit.get(...) is True`` on an absent key is False, i.e. the
+    assertion could only ever have failed, never passed, and was never reached to fail. (2) The call used the
+    DEFAULT path, where the walkable gate runs its own fit afterwards and overwrites ``metadata['gait_fit']``
+    with ``{searched: false, n_evals: 0}`` -- so ``if fit.get("searched")`` never opened, and a 6-evaluation
+    build and a 360-evaluation build returned byte-identical ``gait_fit`` dicts.
+
+    So the budgeted half now runs with ``ensure_walkable: False``, which is the only way to observe the fit this
+    test is about, and asserts unconditionally rather than behind an ``if`` that a later stage can close."""
+    from virturoid.services.agent_tools import call_tool
+    res = call_tool("create_robot", {"prompt": "a quadruped robot dog",
+                                     "gait_max_evals": 6, "ensure_walkable": False})["result"]
+    assert res["gait_max_evals"] == 6, res.get("gait_max_evals")
+    assert res["gait_evals_spent"] <= 6, res["gait_evals_spent"]
+    fit = res.get("gait_fit") or {}
+    assert fit.get("searched") is True, (
+        "the fit this test is about must be the one reported -- if a later stage overwrote it, this test is "
+        f"measuring something else again: {fit}")
+    assert fit["n_evals"] <= 6, fit
+    if not fit.get("adopted"):
+        assert fit.get("stopped_by_eval_budget") is True, (
+            f"the machine-readable flag must survive the projection out to the caller, not just the prose: {fit}")
+        assert "STOPPED BY THE EVALUATION BUDGET" in fit["reason"], fit["reason"]
+    # ...and an UNCAPPED build must not start reporting a cap it does not have
+    plain = call_tool("create_robot", {"prompt": "a quadruped robot dog", "tune_gait": False})["result"]
+    assert plain["gait_max_evals"] is None, plain["gait_max_evals"]
