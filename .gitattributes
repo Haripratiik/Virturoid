@@ -1,0 +1,7 @@
+# Keep the repo LF everywhere. Windows tooling here has silently rewritten whole
+# files to CRLF, turning a one-line comment fix into a 5,453-line diff (2026-08-28).
+* text=auto eol=lf
+*.png binary
+*.svg text eol=lf
+*.step binary
+*.stl binary
