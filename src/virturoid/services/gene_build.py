@@ -14,6 +14,8 @@ gene + a report) that the existing 3D viewer can replay via ``simulation/scene_s
 from __future__ import annotations
 
 import json
+import os
+import re
 from pathlib import Path
 
 from virturoid.schemas.gene import RobotGene
@@ -212,15 +214,13 @@ def _export_real_cad(gene: RobotGene, output_dir: Path) -> dict | None:
     here (that is exactly the 479-byte placeholder the product audit flagged). The gene path holds a real
     ``RobotGene`` with ``.segments``, so ``export_gene_cad`` (proven: 30-290 KB real STEPs) applies directly."""
     try:
-        import json as _json
-
         from virturoid.services.cad_geometry import export_gene_cad
+        # ``export_gene_cad`` writes ``cad/cad_manifest.json`` ITSELF now, and prunes only after that write
+        # succeeds. It used to be written here instead, one call later -- which meant a zero-part export
+        # returned None from this function without touching the manifest, leaving it claiming the PREVIOUS
+        # robot's 9 parts over a ``cad/step/`` the prune had just emptied. One writer, one order, no gap.
         manifest = export_gene_cad(gene, str(Path(output_dir) / "cad"))
-        if manifest.get("part_count"):
-            (Path(output_dir) / "cad" / "cad_manifest.json").write_text(
-                _json.dumps(manifest, indent=2), encoding="utf-8")
-            return manifest
-        return None
+        return manifest if manifest.get("part_count") else None
     except ImportError:  # build123d absent -> NON-SILENT: tell the user how to get real CAD (don't fake it)
         import warnings
         warnings.warn("build123d is not installed, so this build ships NO CAD (the readiness ledger will mark "
@@ -413,6 +413,137 @@ def ground_and_repair(gene: RobotGene, *, task: str = "") -> dict:
     return report
 
 
+class MixedRobotPackageError(RuntimeError):
+    """A build was asked to write into a directory that already describes a DIFFERENT KIND of robot."""
+
+
+#: The four build paths ``build_gene_package`` dispatches to, keyed by the ``package_type`` each one stamps into
+#: ``reports/robot_package_contract.json``. That contract is an existing document written by every path, so the
+#: identity of a package directory does not need a new file to be readable.
+_PACKAGE_TYPE_TO_PATH = {
+    "gene_package": "manipulation",
+    "gene_navigation_package": "navigation",
+    "gene_freemotion_package": "freemotion",
+    "gene_locomotion_package": "locomotion",
+}
+
+#: Artifacts ONLY the locomotion path writes. They are the direct evidence for a package-contract-less directory
+#: (an interrupted or pre-contract build), and they are also the exact files that made a mixed package
+#: dangerous: every one of them is written by a branch-conditional writer, so a manipulation rebuild neither
+#: refreshes nor removes them, and no index of ours points at them for a pruner to follow.
+_LOCOMOTION_ONLY_ARTIFACTS = ("simulation/locomotion_qpos.json", "software/gait_controller.py",
+                              "software/control_program.json", "simulation/robot_visual.xml",
+                              "simulation/viewer_mesh_index.json")
+
+#: What a rebuild on a different path leaves behind pointing at the WRONG robot. Listed in the refusal so the
+#: message is actionable rather than an abstract objection.
+_BRAIN_ARTIFACTS = _LOCOMOTION_ONLY_ARTIFACTS + (
+    "software/controller/controller.py", "software/controller/policy_params.json",
+    "export/ros2/virturoid_robot/virturoid_robot/controller.py",
+    "export/ros2/virturoid_robot/virturoid_robot/policy_params.json",
+    "fusion/config/ekf.yaml", "simulation/viewer_assets")
+
+
+def _build_path_for(gene: RobotGene) -> str:
+    """Which of the four builders in this module will run for ``gene``. This, not ``robot_kind``, is the unit of
+    "same kind of package": two bodies that take the same path write and overwrite the same artifact set."""
+    from virturoid.services.task_matched_eval import robot_kind
+
+    kind = robot_kind(gene)
+    if kind == "legged":
+        return "locomotion"
+    if kind in ("aerial", "aquatic"):
+        return "freemotion"
+    if kind == "mobile":
+        return "navigation"
+    return "manipulation"
+
+
+def _existing_package_path(output_dir: Path) -> tuple:
+    """``(build path this directory already holds or None, how we know)``."""
+    contract = Path(output_dir) / "reports" / "robot_package_contract.json"
+    if contract.is_file():
+        try:
+            ptype = str(json.loads(contract.read_text(encoding="utf-8")).get("package_type", ""))
+        except (OSError, ValueError):
+            ptype = ""
+        if ptype in _PACKAGE_TYPE_TO_PATH:
+            return _PACKAGE_TYPE_TO_PATH[ptype], f"reports/robot_package_contract.json says package_type={ptype!r}"
+    # No usable contract (an interrupted build, or one written before contracts). Fall back to direct evidence
+    # for the one case that actually ships a wrong brain: a locomotion package under a non-legged rebuild.
+    present = [rel for rel in _LOCOMOTION_ONLY_ARTIFACTS if (Path(output_dir) / rel).exists()]
+    if present:
+        return "locomotion", ("this directory carries " + ", ".join(present)
+                              + ", which only a locomotion build writes")
+    return None, "this directory carries no package of ours"
+
+
+def _guard_package_is_one_robot(gene: RobotGene, output_dir: Path) -> None:
+    """A PACKAGE DIRECTORY DESCRIBES ONE ROBOT, AND ONE KIND OF ROBOT. Refuse to make it describe two.
+
+    Build a quadruped and then an arm into the same directory and the customer used to get, measured:
+    ``export/ros2/virturoid_robot/config/robot.yaml`` listing the ARM's 8 joints beside
+    ``policy_type: "trot_cpg_gait"`` and ``has_controller: true``; an installed ``controller.py`` that is
+    verbatim the quadruped's trot CPG (``class GaitController``); a ``policy_params.json`` keyed to
+    ``genome_built_quadruped_18seg`` with a 12-joint default pose; and stale ``viewer_mesh_index.json``,
+    ``robot_visual.xml``, ``locomotion_qpos.json``, ``gait_controller.py`` and ``fusion/config/ekf.yaml``.
+
+    THE GEOMETRY PRUNE MADE THIS WORSE RATHER THAN BETTER. Before it, 36 obviously-quadruped STLs told a
+    customer at a glance that something was wrong. After it, every surface a human checks first -- the meshes,
+    the CAD, the URDF, the deployment guide -- is a correct arm, and the only thing still wrong is the thing
+    that COMMANDS THE HARDWARE. And the prune cannot be extended to cover it: these writers are
+    BRANCH-CONDITIONAL (``write_packaged_visual_mjcf`` has one caller, on the locomotion path), so a non-legged
+    rebuild never runs them and an in-writer prune never executes; the indexes are stale too, so "follow the
+    manifest" saves no one here either.
+
+    So the honest close is the one the mechanism forces: a rebuild of a different CLASS of robot may not reuse
+    the directory silently. It is refused, and the refusal is written into the package as ``PACKAGE_CONFLICT.md``
+    so it exists on disk and not only in a traceback. Rebuilding the SAME kind of robot -- which is what
+    ``autonomous_build`` does after an accepted redesign -- is untouched: every artifact on that path is
+    rewritten by the rebuild.
+
+    ``VIRTUROID_ALLOW_MIXED_PACKAGE=1`` downgrades the refusal to the same written warning without the raise.
+    It exists for someone who knows exactly what they are doing with a scratch directory; the resulting package
+    ships a controller for a different robot, and ``PACKAGE_CONFLICT.md`` says so.
+    """
+    output_dir = Path(output_dir)
+    want = _build_path_for(gene)
+    have, why = _existing_package_path(output_dir)
+    if have is None or have == want:
+        for rel in ("PACKAGE_CONFLICT.md", "reports/package_conflict.json"):
+            try:                                 # our own note from a refused build; this one is compatible
+                (output_dir / rel).unlink(missing_ok=True)
+            except OSError:
+                pass
+        return
+    stale = [rel for rel in _BRAIN_ARTIFACTS if (output_dir / rel).exists()]
+    msg = (f"{output_dir} already holds a '{have}' robot package and this build is a '{want}' one ({why}). "
+           f"Rebuilding over it would leave {len(stale)} artifact(s) describing the previous robot that this "
+           f"build never rewrites -- including the controller the exported ROS 2 package installs and runs on "
+           f"real hardware: " + ", ".join(stale[:8]) + (", ..." if len(stale) > 8 else "")
+           + ". Build into a new directory, or remove this one yourself; a robot package is not something this "
+             "build will silently mix two robots into.")
+    try:
+        (output_dir / "reports").mkdir(parents=True, exist_ok=True)
+        (output_dir / "reports" / "package_conflict.json").write_text(json.dumps(
+            {"existing_package_path": have, "requested_package_path": want, "evidence": why,
+             "stale_artifacts": stale, "gene_id": gene.id, "robot_class": gene.robot_class,
+             "allowed_anyway": bool(os.environ.get("VIRTUROID_ALLOW_MIXED_PACKAGE"))}, indent=2),
+            encoding="utf-8")
+        (output_dir / "PACKAGE_CONFLICT.md").write_text(
+            "# This directory was asked to hold two different robots\n\n" + msg + "\n\n"
+            "The artifacts below describe the PREVIOUS robot and are not rewritten by a "
+            f"'{want}' build:\n\n" + "".join(f"- `{rel}`\n" for rel in stale) + "\n", encoding="utf-8")
+    except OSError:
+        pass
+    if os.environ.get("VIRTUROID_ALLOW_MIXED_PACKAGE"):
+        import warnings
+        warnings.warn("VIRTUROID_ALLOW_MIXED_PACKAGE is set, so this mixed package is being built anyway. "
+                      + msg, RuntimeWarning, stacklevel=2)
+        return
+    raise MixedRobotPackageError(msg)
+
+
 def build_gene_package(gene: RobotGene, prompt: str, output_dir: Path, scene_count: int = 6,
                        controller_params: dict | None = None, gated_export: bool = False,
                        export_tier_counts: dict | None = None) -> dict:
@@ -432,6 +563,7 @@ def build_gene_package(gene: RobotGene, prompt: str, output_dir: Path, scene_cou
     composed gene (no genome->gene reconstruction), so the gate scores exactly the robot that was built.
     """
     output_dir = Path(output_dir)
+    _guard_package_is_one_robot(gene, output_dir)     # before ANY file is written into a directory we may refuse
     _ground_report = ground_and_repair(gene, task=prompt)
     try:                                                   # persist grounding + the executable-on-BOM certificate
         import json as _json
@@ -1568,13 +1700,62 @@ def _write_gait_control_program(gene: RobotGene, genome: dict, output_dir: Path)
     (bundle / "controller.py").write_text(controller_source, encoding="utf-8")
 
 
-def _write_genome_and_urdf(gene: RobotGene, output_dir: Path, task: str = "") -> None:
+def _record_stale_removal(output_dir: Path, where: str, pruned: dict) -> None:
+    """Append one prune's outcome to ``reports/stale_removed.json`` so NO removal this package performs is
+    silent. The CAD path says it in ``cad_manifest.json``'s ``removed_stale`` and the MJCF writers say it in
+    their return value; the mesh prunes on the URDF/ROS 2 side had nowhere to say it, and a rebuild that
+    deletes geometry without telling anyone is exactly the kind of thing a customer discovers too late.
+    ``left_not_ours`` is here for the same reason from the other side: files we found and deliberately did NOT
+    touch, so a directory that looks fuller than the manifest has a written explanation."""
+    if not (pruned.get("removed") or pruned.get("kept_foreign") or pruned.get("kept_modified")):
+        return
+    try:
+        p = Path(output_dir) / "reports" / "stale_removed.json"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        log = {}
+        if p.is_file():
+            try:
+                log = json.loads(p.read_text(encoding="utf-8"))
+            except ValueError:
+                log = {}
+        if not isinstance(log, dict):
+            log = {}
+        log.setdefault("what", "geometry this rebuild removed from directories a previous build of ours staged, "
+                               "and files it found there that were not ours to remove")
+        log[where] = {"removed_stale": pruned.get("removed", []),
+                      "left_not_ours": pruned.get("kept_foreign", []),
+                      "left_modified_or_locked": pruned.get("kept_modified", [])}
+        p.write_text(json.dumps(log, indent=2), encoding="utf-8")
+    except OSError:  # a report we cannot write must not fail the export
+        pass
+
+
+def _write_genome_and_urdf(gene: RobotGene, output_dir: Path, task: str = "") -> Path | None:
     """Write robot/robot_genome.json AND robot/robot.urdf for a gene-built package. The gene path shipped the genome
     + MJCF but no URDF, so gene-built robots (any creature) had no standard robot description for ROS/Gazebo and
-    wouldn't render in the viewer's Robot mode. Best-effort URDF -- the MJCF replay never needs it."""
+    wouldn't render in the viewer's Robot mode. Best-effort URDF -- the MJCF replay never needs it.
+
+    Returns the ROS 2 package root THIS call wrote, or ``None`` when no package was produced. It used to return
+    nothing, so a caller that wanted the package had to go looking for it on disk -- and ``export_held`` did that
+    with ``glob("export/ros2/*")[0]``, which is unordered and returns a SIBLING from an earlier export whenever
+    the directory holds more than one. That is not hypothetical: it handed a reviewer's disk-only re-export the
+    wrong package and produced 14 of 14 fabricated disagreements. The writer knows which package it wrote; there
+    is no reason for anyone to guess."""
     (output_dir / "robot").mkdir(parents=True, exist_ok=True)
     genome = _gene_to_genome(gene)
     (output_dir / "robot" / "robot_genome.json").write_text(json.dumps(genome, indent=2), encoding="utf-8")
+    urdf_path = output_dir / "robot" / "robot.urdf"
+    # What the PREVIOUS robot.urdf claimed, read before it is overwritten. Together with robot/meshes/'s own
+    # staging ledger this is how the prune below knows which STLs are OURS to remove -- either proof alone is
+    # enough, so a customer who deletes the ledger still gets a clean rebuild and a customer who drops their own
+    # mesh into robot/meshes/ still keeps it.
+    prior_mesh_refs: set[str] = set()
+    if urdf_path.is_file():
+        try:
+            prior_mesh_refs = {os.path.basename(r) for r in
+                               re.findall(r'filename="([^"]+)"', urdf_path.read_text(encoding="utf-8"))}
+        except OSError:
+            prior_mesh_refs = set()
     try:
         # Correct-for-ANY-body URDF: transcribe the compiled MuJoCo model (legs spread to their real mounts), NOT
         # the arm-centric compute_arm_layout that stacked every leg vertically at the torso tip. Falls back to the
@@ -1582,8 +1763,18 @@ def _write_genome_and_urdf(gene: RobotGene, output_dir: Path, task: str = "") ->
         from virturoid.services.gene_urdf import gene_to_urdf
         # mesh_dir = the package's robot/meshes/ so the URDF's <mesh filename="meshes/X.stl"> resolves next to
         # robot.urdf: the shipped body renders its real shape programs in Studio, not the collider primitive.
-        (output_dir / "robot" / "robot.urdf").write_text(
-            gene_to_urdf(gene, mesh_dir=str(output_dir / "robot" / "meshes")), encoding="utf-8")
+        urdf_path.write_text(gene_to_urdf(gene, mesh_dir=str(output_dir / "robot" / "meshes")),
+                             encoding="utf-8")
+        # AFTER the write, never before, and only files a previous run of ours staged: the URDF now on disk is
+        # the authority for what robot/meshes/ should hold, so the two can no longer disagree even if this
+        # process dies here. Disclosed rather than silent -- reports/stale_removed.json is this path's
+        # equivalent of the CAD manifest's ``removed_stale``, since neither this function nor ``gene_to_urdf``
+        # has a natural place in the artifact to say it.
+        from virturoid.services.gene_compiler import prune_staged_dir
+        _kept = {os.path.basename(r) for r in
+                 re.findall(r'filename="([^"]+)"', urdf_path.read_text(encoding="utf-8"))}
+        _pruned = prune_staged_dir(output_dir / "robot" / "meshes", _kept, prior=prior_mesh_refs)
+        _record_stale_removal(output_dir, "robot/meshes", _pruned)
     except Exception:  # noqa: BLE001 - URDF is a nicety; the MJCF replay works without it
         try:
             from virturoid.schemas.robot import RobotGenome
@@ -1632,9 +1823,11 @@ def _write_genome_and_urdf(gene: RobotGene, output_dir: Path, task: str = "") ->
             amap, src = {}, (f"NOT AVAILABLE - the bill of materials could not be computed for this build "
                              f"({type(_bom_exc).__name__}); no parts list was read")
         from virturoid.services.ros2_exporter import maybe_export_ros2_package
-        maybe_export_ros2_package(output_dir, actuator_map=amap, actuator_map_source=src)
+        pkg = maybe_export_ros2_package(output_dir, actuator_map=amap, actuator_map_source=src)
+        return Path(pkg) if pkg else None
     except Exception:  # noqa: BLE001 - the ROS2 package is best-effort; the core package works without it
         pass
+    return None
 
 
 def _gene_to_genome(gene: RobotGene) -> dict:

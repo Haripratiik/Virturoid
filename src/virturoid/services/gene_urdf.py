@@ -182,8 +182,20 @@ def gene_to_urdf(gene, *, name: str | None = None, mesh_dir: str | None = None) 
             claimed: dict[str, str] = {}
             for seg, src in baked.items():
                 seg_mesh[seg] = str(stage_mesh(src, mesh_dir, seg, claimed))
+            # Claim what we just staged in the directory's ledger. Nothing is deleted here (see below), but
+            # recording it now means a build that dies before ``robot.urdf`` is written still leaves files the
+            # NEXT build can prove are ours and clear, rather than orphans nobody may touch.
+            from virturoid.services.gene_compiler import note_staged
+            note_staged(mesh_dir, {os.path.basename(p) for p in seg_mesh.values()})
         except Exception:  # noqa: BLE001 - no build123d / awkward solid -> primitive visuals below
             seg_mesh = {}
+        # NOTHING IS REMOVED FROM ``mesh_dir`` HERE, deliberately. An earlier export into a reused
+        # ``robot/meshes/`` does leave STLs this URDF references none of, and the ROS 2 export then installs all
+        # of them (measured: 25 meshes shipped, 7 referenced, 18 belonging to a discarded quadruped) -- but this
+        # function only RETURNS the URDF, it does not write it. Pruning from here removes the previous robot's
+        # meshes while the previous robot's ``robot.urdf`` is still the one on disk, so any failure between the
+        # two leaves a description beside none of its geometry. The removal therefore lives with the write, in
+        # ``gene_build._write_genome_and_urdf``, keyed on the ``filename=`` refs of the URDF it just wrote.
 
     def bname(b):
         return escape(mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, b) or f"link{b}")

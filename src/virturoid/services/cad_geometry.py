@@ -13,6 +13,7 @@ for mass. MuJoCo meshes use the STL with a 0.001 scale.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from virturoid.services.grounded_physics import MATERIALS
@@ -662,7 +663,8 @@ def prebake_synth_meshes(gene, out_dir: str, *, kitbash: bool = True, llm=None, 
 
 
 def build_visual_meshes(gene, out_dir: str, *, cache: bool = True, kitbash: bool = False,
-                        synth: bool = False, actuator_in_mesh: bool = True) -> dict:
+                        synth: bool = False, actuator_in_mesh: bool = True,
+                        wrote: set | None = None) -> dict:
     """Generate a per-segment VISUAL STL normalized to the link's ``[0, length]`` body frame so it drops
     straight onto the compiler's primitive (which spans 0..length along local +z). This is the mesh layer
     that makes a compiled body render like real hardware instead of a bare capsule.
@@ -721,10 +723,14 @@ def build_visual_meshes(gene, out_dir: str, *, cache: bool = True, kitbash: bool
                 fp = _src_mesh_fp(out, s, src)
                 if not (cache and fp.exists() and fp.stat().st_size == src.stat().st_size):
                     shutil.copyfile(src, fp)
+                    if wrote is not None:
+                        wrote.add(fp.name)
                 meshes[s.name] = str(fp.resolve()).replace("\\", "/")
                 continue
         fp, kit_role = _seg_mesh_fp(out, s, kitbash=kitbash, synth=synth, actuator_in_mesh=actuator_in_mesh)
         if not (cache and fp.exists()):
+            if wrote is not None:
+                wrote.add(fp.name)
             if bd is None:
                 import build123d as bd                # noqa: PLW2901 - raises here exactly as it used to
             baked = None
@@ -753,6 +759,17 @@ def build_visual_meshes(gene, out_dir: str, *, cache: bool = True, kitbash: bool
                 bd.export_stl(solid, str(fp))
         meshes[s.name] = str(fp.resolve()).replace("\\", "/")
     return meshes
+
+
+#: WHY ``wrote`` IS AN OUT-PARAMETER AND NOT THE RETURN VALUE. Callers stage these files and then hand the
+#: names to ``gene_compiler.note_staged``, whose contract is "files this export JUST WROTE" -- the staging
+#: ledger's digest is the only thing separating "ours, untouched" from "ours once, theirs now". Passing the
+#: full returned map violated that: both branches above SKIP the write when the cache serves the file, so a
+#: same-robot rebuild re-digested a mesh the customer had hand-edited and the ledger then swore their bytes
+#: were ours. MEASURED end to end: the package shipped their geometry attributed to us, and the next rebuild
+#: of a different body deleted it and recorded it under ``removed_stale`` as our own stale file -- strictly
+#: worse than the stale geometry this prune was built to remove. Every existing call site is unchanged
+#: because the parameter is optional; a caller that wants to CLAIM files must now ask what was written.
 
 
 def is_real_cad(step_path) -> bool:
@@ -808,6 +825,19 @@ def export_gene_cad(gene, out_dir: str, *, material: str = "aluminum") -> dict:
     out = Path(out_dir)
     (out / "step").mkdir(parents=True, exist_ok=True)
     (out / "stl").mkdir(parents=True, exist_ok=True)
+    # What the PREVIOUS export into this directory claimed, read before the manifest is replaced. It is the
+    # second proof (beside each directory's own staging ledger) of which files here are OURS, so a customer who
+    # deletes the ledger still gets a clean rebuild -- and a directory staged before the ledger existed still
+    # gets cleaned up exactly once.
+    prior_step, prior_stl, prior_asm = set(), set(), set()
+    try:
+        _prev = json.loads((out / "cad_manifest.json").read_text(encoding="utf-8"))
+        prior_step = {Path(p["step"]).name for p in _prev.get("parts", []) if p.get("step")}
+        prior_stl = {Path(p["stl"]).name for p in _prev.get("parts", []) if p.get("stl")}
+        # only if the last manifest says WE wrote one; a robot_assembly.step nobody claims is not ours to delete
+        prior_asm = {"robot_assembly.step"} if _prev.get("assembly_step") else set()
+    except (OSError, ValueError, KeyError, TypeError):
+        prior_step, prior_stl, prior_asm = set(), set(), set()
     parts: list[dict] = []
     solids = []
     total_mass = 0.0
@@ -816,6 +846,8 @@ def export_gene_cad(gene, out_dir: str, *, material: str = "aluminum") -> dict:
     import re
     import shutil
     named: dict[str, str] = {}                           # file stem -> the ONE link that owns it
+    wrote_step: set[str] = set()                         # the files THIS export owns, for the prune below
+    wrote_stl: set[str] = set()
     for s in gene.segments:
         # An IMPORTED link's ``geometry`` is not a shape program -- it is a pointer at the customer's own baked
         # mesh -- and ``realize_shape`` does not know that family, so it fell through to its malformed-spec
@@ -847,10 +879,12 @@ def export_gene_cad(gene, out_dir: str, *, material: str = "aluminum") -> dict:
             stem = f"{stem}_{hashlib.md5(str(s.name).encode('utf-8', 'replace')).hexdigest()[:8]}"
             named.setdefault(stem, s.name)
         bd.export_step(solid, str(out / "step" / f"{stem}.step"))
+        wrote_step.add(f"{stem}.step")
         if src_mesh is not None:
             shutil.copyfile(src_mesh, out / "stl" / f"{stem}.stl")   # the customer's OWN surface, unmodified
         else:
             bd.export_stl(solid, str(out / "stl" / f"{stem}.stl"))
+        wrote_stl.add(f"{stem}.stl")
         vol_m3 = float(solid.volume) * 1e-9          # mm^3 -> m^3
         solid_mass = vol_m3 * density                # mass IF this link were a SOLID `material` billet
         # B3b (2026-07-24 audit): prefer the GROUNDED buildable mass the URDF/BOM/sim all report -- a real link
@@ -910,5 +944,60 @@ def export_gene_cad(gene, out_dir: str, *, material: str = "aluminum") -> dict:
         asm_ok = True
     except Exception:  # noqa: BLE001 - placement/compound can be finicky; per-part STEP is the fallback
         asm_ok = False
-    return {"material": material, "parts": parts, "part_count": len(parts),
-            "total_mass_kg": round(total_mass, 3), "assembly_step": asm_ok, "dir": str(out)}
+    # Claim what was written before the manifest goes down: an export that dies here still leaves files the
+    # next one can prove are its own to clear, instead of orphans nobody is allowed to touch.
+    from virturoid.services.gene_compiler import note_staged
+    note_staged(out / "step", wrote_step)
+    note_staged(out / "stl", wrote_stl)
+    if asm_ok:
+        note_staged(out, {"robot_assembly.step"})
+    manifest = {"material": material, "parts": parts, "part_count": len(parts),
+                "total_mass_kg": round(total_mass, 3), "assembly_step": asm_ok, "dir": str(out)}
+    if not parts:
+        # AN EXPORT THAT PRODUCED NOTHING HAS NO AUTHORITY TO REMOVE ANYTHING. This used to prune with empty
+        # keep-sets, which emptied step/ and stl/ -- while ``_export_real_cad`` returns None on a zero-part
+        # export WITHOUT rewriting the manifest, so ``cad_manifest.json`` was left claiming 9 parts named
+        # ``step/base.step`` over a directory holding zero files (measured). The document this fix designates as
+        # the authority on what belongs here became the wrong one. Leaving both the files and the manifest alone
+        # keeps them describing the same robot, which is the invariant that actually matters.
+        manifest["removed_stale"] = []
+        manifest["pruned"] = False
+        manifest["note"] = ("this export produced no parts, so nothing was written and nothing was removed; any "
+                            "CAD in this directory and the cad_manifest.json beside it are from an earlier "
+                            "export and still describe each other")
+        return manifest
+    from virturoid.services.gene_compiler import prune_staged_dir
+
+    # THIS DIRECTORY DESCRIBES ONE ROBOT. A build into a reused ``out`` only ever added parts, so after a
+    # redesign (``autonomous_build`` rebuilds into the directory it already used) or a re-export of the same
+    # ``robot_id``, ``step/`` held the PREVIOUS body's links beside this one's -- measured: 27 STEP files for a
+    # 9-part arm, 18 of them a discarded quadruped's ``leg*``/``torso``/``head``. ``cad_manifest.json`` listed
+    # only the 9, so a manifest reader was safe and ``glob("cad/step/*.step")`` -- which is not an unreasonable
+    # way to open a folder of STEP files -- assembled a chimera.
+    #
+    # ORDER MATTERS TWICE HERE. The removals are computed first (``dry_run``) so ``removed_stale`` can go INTO
+    # the manifest; the manifest is written next, by the same function that made the files, so writer and
+    # authority can never drift apart; the deletions happen last, so a failure anywhere above leaves the
+    # directory and the manifest still agreeing with each other. And only files a previous run of OURS wrote
+    # are candidates: ``out`` is customer-chosen (``compose.py --build``), and shape-based deletion took out
+    # ``cad/reference_fixture.step``, ``cad/step/my_custom_bracket.step`` and ``cad/stl/customer_scan.STL`` on a
+    # re-export of the very same robot.
+    plans = [("step/", out / "step", wrote_step, (".step",), prior_step),
+             ("stl/", out / "stl", wrote_stl, (".stl",), prior_stl),
+             # a failed assembly must not leave the PREVIOUS robot's assembly standing as this one's
+             ("", out, {"robot_assembly.step"} if asm_ok else set(), (".step",), prior_asm)]
+    dry = [(pfx, d, keep, sfx, prior, prune_staged_dir(d, keep, sfx, prior=prior, dry_run=True))
+           for pfx, d, keep, sfx, prior in plans]
+    manifest["removed_stale"] = sorted(pfx + n for pfx, _d, _k, _s, _p, r in dry for n in r["removed"])
+    manifest["left_not_ours"] = sorted(pfx + n for pfx, _d, _k, _s, _p, r in dry for n in r["kept_foreign"])
+    manifest["pruned"] = True
+    # The manifest is written HERE, not by ``_export_real_cad`` afterwards, so the one document this design
+    # calls the authority is produced by the one function that knows what is on disk.
+    try:
+        (out / "cad_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    except OSError:  # noqa: BLE001 - an unwritable manifest means we must NOT delete anything either
+        manifest["removed_stale"], manifest["pruned"] = [], False
+        return manifest
+    for _pfx, d, keep, sfx, prior, _r in dry:
+        prune_staged_dir(d, keep, sfx, prior=prior)
+    return manifest

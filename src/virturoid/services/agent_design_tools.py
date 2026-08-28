@@ -816,14 +816,27 @@ def export_held(args: dict) -> dict:
         # _write_genome_and_urdf produces robot_genome.json + robot.urdf + (best-effort) the installable ROS2 pkg
         try:
             from virturoid.services.gene_build import _write_genome_and_urdf
-            _write_genome_and_urdf(gene, out_dir, task=task)
+            ros2_pkg = _write_genome_and_urdf(gene, out_dir, task=task)
             urdf = out_dir / "robot" / "robot.urdf"
             if "urdf" in fmts and urdf.exists():
                 artifacts["urdf"] = str(urdf)
-            ros2_root = out_dir / "export" / "ros2"
-            if "ros2" in fmts and ros2_root.exists():
-                pkgs = [str(p) for p in ros2_root.glob("*") if p.is_dir()]
-                artifacts["ros2"] = pkgs[0] if pkgs else str(ros2_root)
+            if "ros2" in fmts:
+                # THE PACKAGE THIS EXPORT WROTE, named by the writer -- not `glob("export/ros2/*")[0]`, which is
+                # what stood here. Directory iteration is unordered, `out_dir` is reused across every export of
+                # this `robot_id`, and a package written under a different name by an earlier call (a re-export,
+                # a test harness, a reviewer's `package_name=`) sorts wherever the filesystem puts it. Measured:
+                # with `aaa_stale` and `zzz_other` beside the real `virturoid_robot`, [0] returned `aaa_stale` --
+                # and that exact substitution once produced 14 of 14 fabricated "disagreements" in a review of
+                # this export. `ros2_package` names the choice so the caller can check it rather than trust it.
+                if ros2_pkg is not None and Path(ros2_pkg).is_dir():
+                    artifacts["ros2"] = str(ros2_pkg)
+                    artifacts["ros2_package"] = Path(ros2_pkg).name
+                else:
+                    # No package came out of THIS export. A sibling on disk belongs to some other export, and
+                    # handing it over as this robot's is the whole defect; say so instead.
+                    artifacts["ros2_error"] = ("no ROS 2 package was produced by this export (the exporter "
+                                               "returned none); any package under export/ros2/ is from an "
+                                               "earlier export and is not this one")
         except Exception as exc:  # noqa: BLE001
             artifacts["urdf_error"] = f"{type(exc).__name__}: {exc}"
     if "usd" in fmts:

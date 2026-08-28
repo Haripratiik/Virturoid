@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 from pathlib import Path
 from xml.sax.saxutils import escape
 
@@ -515,7 +516,6 @@ def stage_mesh(src, dst_dir, owner: str, claimed: dict) -> "Path":
     """
     import filecmp
     import hashlib
-    import re
     import shutil
 
     src, dst_dir = Path(src), Path(dst_dir)
@@ -531,6 +531,174 @@ def stage_mesh(src, dst_dir, owner: str, claimed: dict) -> "Path":
     if not (dst.is_file() and filecmp.cmp(str(src), str(dst), shallow=False)):
         shutil.copyfile(src, dst)
     return dst
+
+
+#: Where a staged directory records WHAT WE PUT THERE, so a later export can tell its own leftovers from the
+#: customer's files. It sits beside the files it describes, so it travels with a copied package.
+STAGE_LEDGER_NAME = ".virturoid_staged.json"
+
+
+def _file_digest(path) -> str:
+    import hashlib
+
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def read_stage_ledger(dst_dir) -> dict:
+    """``{filename: {"size", "sha256"}}`` -- what OUR last export wrote into ``dst_dir``.
+
+    ``{}`` for a directory we have never staged into AND for one whose ledger has been deleted; the two are
+    deliberately indistinguishable, because the safe answer is the same in both cases: we know of nothing here
+    that is ours to remove. The redundancy that makes a deleted ledger survivable is the ``prior`` argument of
+    ``prune_staged_dir`` -- the index document THIS repo wrote next to the directory (the CAD manifest, the
+    URDF's own ``filename=`` refs, ``viewer_mesh_index.json``), which names the same files from the other side.
+    """
+    p = Path(dst_dir) / STAGE_LEDGER_NAME
+    try:
+        rec = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    wrote = rec.get("wrote")
+    return wrote if isinstance(wrote, dict) else {}
+
+
+def prune_staged_dir(dst_dir, keep, suffixes=(".stl",), *, prior=(), dry_run=False) -> dict:
+    """Remove the files A PREVIOUS RUN OF OURS left in a staged directory. Never anything else.
+
+    Returns ``{"removed", "kept_foreign", "kept_modified"}`` -- names, not paths, all sorted.
+
+    ``stage_mesh`` above answers "what do I call this file", and this answers the question that has to be asked
+    with it: what is still sitting there from LAST time? A build into a REUSED output directory (which is what
+    ``autonomous_build`` does after a redesign, and what ``export_held`` does on every re-export of the same
+    ``robot_id``) only ever ADDED files. Measured on a second build of a different body into one directory:
+    ``cad/step/`` held 27 STEPs of which 18 belonged to a DISCARDED quadruped, and the arm's ROS 2 package
+    shipped 25 meshes of which its URDF referenced 7. Every index we write -- the CAD manifest, the URDF's
+    ``<mesh filename=>``, the MJCF's ``file=`` -- named only the current robot, so a reader that follows an
+    index was safe and a customer running ``glob("cad/step/*.step")`` assembled a chimera out of two robots.
+    Documenting that is not a fix: globbing a directory of STEP files is not an unreasonable thing to do.
+
+    REMOVAL IS BY PROVENANCE, NOT BY SHAPE. The first version of this function deleted everything matching a
+    suffix that was not in ``keep``, on the reasoning that "these directories have exactly one writer". That is
+    true of OUR writers and says nothing about the customer: ``output_dir`` is theirs (``compose.py`` exposes
+    ``--build OUTPUT_DIR`` and hands it straight to ``build_gene_package``), and re-exporting THE SAME ROBOT
+    into a directory with files planted in it measured five deletions of files we had never written --
+    ``cad/reference_fixture.step``, ``cad/step/my_custom_bracket.step``, ``cad/stl/customer_scan.STL`` (matched
+    case-insensitively), ``robot/meshes/customer_endeffector.stl`` and the same file inside the ROS 2 package.
+    So a file is removable only when we can show it is ours:
+
+      * it is recorded in this directory's ledger (``STAGE_LEDGER_NAME``) AND still byte-identical to what we
+        wrote -- a file the customer has since edited is theirs now and is reported in ``kept_modified``; or
+      * ``prior`` names it. ``prior`` is what OUR OWN previously-written index for this directory claimed --
+        the last ``cad_manifest.json``'s part list, the last URDF's ``filename=`` refs, the last
+        ``viewer_mesh_index.json``. That is the redundancy that makes the scheme survive a customer who deletes
+        the ledger, and it is also what lets the first post-fix export clean up a directory staged before the
+        ledger existed.
+
+    Anything else is left where it is and reported in ``kept_foreign``. An undeletable file (locked, read-only)
+    is left alone and reported in ``kept_modified``; an export is never failed over one.
+
+    Call this AFTER the document that references the survivors has been written, never before -- see
+    ``write_exported_mjcf`` for why. ``dry_run`` computes the same answer without touching the directory or the
+    ledger, so a caller can name the removals inside the artifact it is about to write and then commit them.
+    """
+    d = Path(dst_dir)
+    if not d.is_dir():
+        return {"removed": [], "kept_foreign": [], "kept_modified": []}
+    keep = {str(k) for k in keep}
+    prior = {str(k) for k in prior}
+    sfx = tuple(s.lower() for s in suffixes)
+    ours = read_stage_ledger(d)
+    removed, kept_foreign, kept_modified = [], [], []
+    for p in sorted(d.iterdir()):
+        if not p.is_file() or p.name == STAGE_LEDGER_NAME:
+            continue
+        if p.suffix.lower() not in sfx or p.name in keep:
+            continue
+        rec = ours.get(p.name)
+        if isinstance(rec, dict):
+            try:
+                unchanged = (p.stat().st_size == rec.get("size")
+                             and _file_digest(p) == rec.get("sha256"))
+            except OSError:
+                unchanged = False
+            if not unchanged:                        # we wrote it; they changed it -- it is theirs now
+                kept_modified.append(p.name)
+                continue
+        elif p.name not in prior:
+            kept_foreign.append(p.name)              # never ours: not in the ledger, not in our last index
+            continue
+        if dry_run:
+            removed.append(p.name)
+            continue
+        try:
+            p.unlink()
+        except OSError:                              # locked/read-only -> leave it; never fail an export over it
+            kept_modified.append(p.name)
+            continue
+        removed.append(p.name)
+    if not dry_run:
+        # DROP the records for what we removed; do NOT re-stamp what we kept. This line was
+        # ``_write_stage_ledger(d, keep)``, which re-digested every surviving file with no carry-over --
+        # so a mesh the customer had hand-edited, which the cache had served rather than rewritten, was
+        # silently re-adopted as ours. MEASURED: edit a file in viewer_assets/, rebuild the SAME robot
+        # (the path the package guard explicitly permits), and the ledger swore their bytes were ours;
+        # the next rebuild of a different body deleted it and filed it under ``removed_stale``. The
+        # digest is the only thing separating "ours, untouched" from "ours once, theirs now", and a
+        # prune has no business refreshing it -- only the writer that actually wrote a file may claim it,
+        # via ``note_staged``.
+        _ledger = read_stage_ledger(d)
+        if _ledger:
+            _gone = set(removed)
+            _write_stage_ledger(d, (), carry_over={k: v for k, v in _ledger.items() if k not in _gone})
+    return {"removed": sorted(removed), "kept_foreign": sorted(kept_foreign),
+            "kept_modified": sorted(kept_modified)}
+
+
+def note_staged(dst_dir, names) -> None:
+    """Add ``names`` -- files this export JUST WROTE -- to a directory's staging ledger, removing nothing.
+
+    Call it as soon as files are staged, before the document that will reference them is written. If the export
+    then fails, the files it left behind are still recorded as ours, so the NEXT export can clear them instead
+    of having to leave them forever as unattributable.
+
+    Records already in the ledger for OTHER names are carried over UNCHANGED, digest included. Re-stamping them
+    would quietly re-adopt a file the customer has edited since we wrote it -- the digest is the only thing that
+    tells "ours, untouched" from "ours once, theirs now", and a helper that refreshes it would hand the next
+    prune permission to delete their edit.
+    """
+    d = Path(dst_dir)
+    if not d.is_dir():
+        return
+    _write_stage_ledger(d, names, carry_over=read_stage_ledger(d))
+
+
+def _write_stage_ledger(dst_dir, names, *, carry_over: dict | None = None) -> None:
+    """Record the files this export staged into ``dst_dir``, with a digest each, so the NEXT export can prove
+    which of them are its own to remove. ``names`` are files written by THIS run, so their digests are taken
+    now; ``carry_over`` entries survive verbatim for any name not in ``names``. Best-effort: a ledger we cannot
+    write costs a future prune, never this export -- and a missing ledger degrades to leaving files alone."""
+    d = Path(dst_dir)
+    names = {str(n) for n in names}
+    wrote: dict = {k: v for k, v in (carry_over or {}).items() if k not in names}
+    for name in sorted(names):
+        p = d / name
+        try:
+            if p.is_file():
+                wrote[name] = {"size": p.stat().st_size, "sha256": _file_digest(p)}
+        except OSError:
+            continue
+    try:
+        (d / STAGE_LEDGER_NAME).write_text(json.dumps(
+            {"version": 1,
+             "what": "files written into this directory by a Virturoid export; the next export removes only "
+                     "these, never anything else it finds here",
+             "wrote": dict(sorted(wrote.items()))}, indent=2), encoding="utf-8")
+    except OSError:
+        pass
 
 
 def write_exported_mjcf(gene: RobotGene, xml_path: str | Path, *, include_floor: bool = True,
@@ -551,6 +719,15 @@ def write_exported_mjcf(gene: RobotGene, xml_path: str | Path, *, include_floor:
     """
     xml_path = Path(xml_path)
     xml_path.parent.mkdir(parents=True, exist_ok=True)
+    # What the PREVIOUS robot.xml in this directory claimed, read before we overwrite it: our own index, and so
+    # the second proof of provenance the prune below needs if this package's staging ledger has been deleted.
+    prior_meshes: set[str] = set()
+    if xml_path.is_file():
+        try:
+            prior_meshes = {Path(m).name for m in
+                            re.findall(r'file="([^"]+)"', xml_path.read_text(encoding="utf-8"))}
+        except OSError:
+            prior_meshes = set()
     if spawn_z is None:
         spawn_z = standing_spawn_z(gene)
     meshes = _with_source_meshes(gene, None, physics_only=False) or {}
@@ -569,11 +746,20 @@ def write_exported_mjcf(gene: RobotGene, xml_path: str | Path, *, include_floor:
                 local[name] = os.path.relpath(dst, start=xml_path.parent).replace("\\", "/")
             except OSError:                          # unreadable source -> that link ships as its primitive
                 continue
+        note_staged(mesh_dir, {Path(p).name for p in local.values()})   # ours even if the compile below fails
     xml = compile_gene_to_mjcf(gene, include_floor=include_floor, spawn_z=spawn_z,
                                meshes=local or None)
     xml_path.write_text(xml, encoding="utf-8")
+    # ONLY NOW. Whatever an EARLIER export into this same directory left in meshes/ is a different robot's
+    # geometry -- this XML references none of it -- but the removal has to come AFTER the XML that references
+    # the survivors is on disk. Pruning first meant any failure in ``compile_gene_to_mjcf`` (which this function
+    # lets propagate) left the previous robot's model beside none of its meshes: a package that USED to load.
+    pruned = prune_staged_dir(xml_path.parent / "meshes", {Path(p).name for p in local.values()},
+                              prior=prior_meshes)
     return {"path": str(xml_path), "meshes": len(local),
-            "mesh_dir": str(xml_path.parent / "meshes") if local else None}
+            "mesh_dir": str(xml_path.parent / "meshes") if local else None,
+            "removed_stale": pruned["removed"], "left_not_ours": pruned["kept_foreign"],
+            "left_modified": pruned["kept_modified"]}
 
 
 def write_packaged_visual_mjcf(gene: RobotGene, package_dir: str | Path, *,
@@ -594,14 +780,34 @@ def write_packaged_visual_mjcf(gene: RobotGene, package_dir: str | Path, *,
     root = Path(package_dir)
     model_path = root / model_uri
     asset_dir = model_path.parent / "viewer_assets"
+    index_path = root / "simulation" / "viewer_mesh_index.json"
+    # What the PREVIOUS index in this package claimed -- read before anything overwrites it, and used below as
+    # the standing proof of which viewer_assets/ files are ours when the directory's own ledger is gone.
+    prior_assets: set[str] = set()
+    try:
+        prior_assets = {Path(m.get("uri", "")).name for m
+                        in json.loads(index_path.read_text(encoding="utf-8")).get("meshes", {}).values()}
+    except (OSError, ValueError, AttributeError):
+        prior_assets = set()
     try:
         from virturoid.services.cad_geometry import build_visual_meshes
 
         # This package compiles with show_actuators=True below, so the compiler draws the motors; leaving them
         # in the mesh too would double-draw every joint (see build_visual_meshes' actuator_in_mesh).
-        absolute_meshes = build_visual_meshes(gene, str(asset_dir), cache=True, actuator_in_mesh=False) or {}
+        # ``wrote`` IS THE CLAIM, NOT ``absolute_meshes``. ``build_visual_meshes`` serves a cached file on
+        # EXISTENCE alone (generated links) or on matching SIZE (source links), so the returned map names
+        # files this call did not touch. Claiming those re-digested a mesh the customer had hand-edited in
+        # ``viewer_assets/`` -- the ledger then swore their bytes were ours, the package shipped their
+        # geometry attributed to us, and the next rebuild of a different body DELETED it and filed it under
+        # ``removed_stale`` as our own. Measured end to end. A file we did not write keeps whatever the
+        # ledger already said about it: ours-and-untouched if it still matches, otherwise left alone.
+        wrote_now: set[str] = set()
+        absolute_meshes = build_visual_meshes(gene, str(asset_dir), cache=True, actuator_in_mesh=False,
+                                              wrote=wrote_now) or {}
         if not absolute_meshes:
             return None
+        # Claim them now, so a failure below leaves files that are still provably ours to clear next time.
+        note_staged(asset_dir, wrote_now)
         model_path.parent.mkdir(parents=True, exist_ok=True)
         # MuJoCo resolves a mesh filename from the XML's directory.  Store a relative filename in the XML,
         # but a package-relative URI in the sidecar for Three.js/API consumers.
@@ -626,13 +832,24 @@ def write_packaged_visual_mjcf(gene: RobotGene, package_dir: str | Path, *,
                 for name, path in absolute_meshes.items()
             },
         }
-        index_path = root / "simulation" / "viewer_mesh_index.json"
         index_path.parent.mkdir(parents=True, exist_ok=True)
         index_path.write_text(json.dumps(mesh_index, indent=2), encoding="utf-8")
+        # ONLY NOW, and only files a previous run of ours put here. viewer_assets/ is this package's own asset
+        # directory (not the shared bake cache) and it accumulated across rebuilds: a second build shipped the
+        # FIRST robot's 18 link STLs beside this one's, unreachable through the index and reachable through the
+        # directory. Pruning BEFORE the two writes above turned this function's documented fail-open into a
+        # broken package: force ``compile_gene_to_mjcf`` to raise and it still returns None, but on disk
+        # viewer_mesh_index.json named 18 meshes of which ZERO existed and MjModel.from_xml_path failed outright
+        # -- measured, against a package that loaded before the prune was added.
+        pruned = prune_staged_dir(asset_dir, {Path(p).name for p in absolute_meshes.values()},
+                                  prior=prior_assets)
         return {
             "model_uri": mesh_index["model_uri"],
             "mesh_index_uri": "simulation/viewer_mesh_index.json",
             "mesh_count": len(mesh_index["meshes"]),
+            "removed_stale": pruned["removed"],
+            "left_not_ours": pruned["kept_foreign"],
+            "left_modified": pruned["kept_modified"],
         }
     except Exception:  # noqa: BLE001 - visual fidelity must never make the core simulator unusable
         return None

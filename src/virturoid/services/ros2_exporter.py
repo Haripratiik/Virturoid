@@ -79,6 +79,16 @@ def _copy_urdf_meshes(package_dir: Path, root: Path, package_name: str, urdf: st
         return f'filename="package://{package_name}/meshes/{src.name}"'
 
     urdf = re.sub(r'filename="([^"]+)"', _rewrite, urdf)
+    if copied:
+        # Claim the copies in the directory's ledger now: if the export dies before urdf/robot.urdf is written,
+        # these are still recorded as ours for the next export to clear.
+        from virturoid.services.gene_compiler import note_staged
+        note_staged(out_dir, copied)
+    # NOTHING IS REMOVED FROM ``<pkg>/meshes/`` HERE. An unreferenced mesh there IS a previous export's robot
+    # (setup.py installs ``meshes/*`` wholesale, so a re-export into a reused package directory shipped and
+    # INSTALLED geometry this URDF never mentions) -- but this function only returns the rewritten text, and
+    # removing the old geometry before the new description is on disk is how a fail-open becomes a broken
+    # package. ``export_ros2_package`` prunes after it writes ``urdf/robot.urdf``, keyed on that file's own refs.
     if missing:
         note = ("  <!-- NOTE: {n} mesh reference(s) could not be resolved from robot/ and are left as written: "
                 "{refs}. Those links fall back to their primitive collision shapes. -->\n").format(
@@ -149,9 +159,40 @@ def export_ros2_package(package_dir: Path, package_name: str = "virturoid_robot"
     mimic: dict = {}
     _urdf_text = ""
     if _src_urdf.exists():
+        import re as _re
+
+        from virturoid.services.gene_compiler import prune_staged_dir
+        _pkg_urdf = root / "urdf" / "robot.urdf"
+        _mesh_ref = r'filename="package://[^/"]+/meshes/([^"]+)"'
+        # What the PREVIOUS export of this package installed, read before the file is replaced: the second
+        # proof of provenance for <pkg>/meshes/, so a deleted staging ledger does not cost a clean rebuild.
+        _prior_refs: set = set()
+        if _pkg_urdf.is_file():
+            try:
+                _prior_refs = set(_re.findall(_mesh_ref, _pkg_urdf.read_text(encoding="utf-8")))
+            except OSError:
+                _prior_refs = set()
         (root / "urdf").mkdir(parents=True, exist_ok=True)
         _urdf_text = _copy_urdf_meshes(package_dir, root, package_name, _src_urdf.read_text(encoding="utf-8"))
-        (root / "urdf" / "robot.urdf").write_text(_urdf_text, encoding="utf-8")
+        _keep_meshes = set(_re.findall(_mesh_ref, _urdf_text))
+        # Name the removals INSIDE the file that causes them (dry run first), then write, then remove: the
+        # shipped description says what geometry this export took out of meshes/, and the geometry is only
+        # taken out once the description that survives it is on disk.
+        _plan = prune_staged_dir(root / "meshes", _keep_meshes, prior=_prior_refs, dry_run=True)
+        if _plan["removed"] or _plan["kept_foreign"]:
+            _note = "  <!-- NOTE: this export "
+            if _plan["removed"]:
+                _note += ("removed {n} mesh file(s) a PREVIOUS export of this package left in meshes/ and this "
+                          "description does not reference: {r}. ".format(
+                              n=len(_plan["removed"]), r="; ".join(_plan["removed"][:8])))
+            if _plan["kept_foreign"]:
+                _note += ("{n} further file(s) in meshes/ were NOT written by Virturoid and were left "
+                          "untouched: {k}. ".format(
+                              n=len(_plan["kept_foreign"]), k="; ".join(_plan["kept_foreign"][:8])))
+            _note += "setup.py installs meshes/* wholesale, so everything left there ships. -->\n"
+            _urdf_text = _urdf_text.replace("</robot>", _note + "</robot>")
+        _pkg_urdf.write_text(_urdf_text, encoding="utf-8")
+        prune_staged_dir(root / "meshes", _keep_meshes, prior=_prior_refs)
         mimic = _mimic_joints_from_urdf(_urdf_text)
     # A mimic joint is DRIVEN, not commanded: its position follows the joint it mimics through a fixed gear.
     # Everything below that names a motor or a command interface uses the commandable set.
