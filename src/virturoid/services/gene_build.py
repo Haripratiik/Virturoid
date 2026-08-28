@@ -524,7 +524,7 @@ def build_gene_package(gene: RobotGene, prompt: str, output_dir: Path, scene_cou
 
     # A genome-from-gene so reports/viewer have the structure (links/joints/ee from the gene).
     (output_dir / "robot").mkdir(parents=True, exist_ok=True)
-    _write_genome_and_urdf(gene, output_dir)
+    _write_genome_and_urdf(gene, output_dir, task=prompt)
 
     cad = _export_real_cad(gene, output_dir)   # REAL B-rep STEP/STL (the gene path shipped no CAD before)
     summary = evaluate_gene_on_task(gene, spec, scenes, params=controller_params)
@@ -739,7 +739,7 @@ def _build_navigation_package(gene: RobotGene, prompt: str, output_dir: Path, co
 
     output_dir = Path(output_dir)
     (output_dir / "robot").mkdir(parents=True, exist_ok=True)
-    _write_genome_and_urdf(gene, output_dir)
+    _write_genome_and_urdf(gene, output_dir, task=prompt)
 
     # Prompt-driven scene set (navigation course or maze) — the SAME general generator the gallery uses, so a
     # "navigate a maze" build renders an actual maze and "navigate to the goal" renders a course.
@@ -820,7 +820,7 @@ def _build_freemotion_package(gene: RobotGene, prompt: str, output_dir: Path, co
     from virturoid.services.task_matched_eval import evaluate_robot
     output_dir = Path(output_dir)
     (output_dir / "robot").mkdir(parents=True, exist_ok=True)
-    _write_genome_and_urdf(gene, output_dir)
+    _write_genome_and_urdf(gene, output_dir, task=prompt)
     # a single bare scene (the robot in free space) so the viewer has something to render
     rel = "simulation/mujoco/scenes/variation/free.xml"
     (output_dir / rel).parent.mkdir(parents=True, exist_ok=True)
@@ -865,7 +865,7 @@ def _build_legged_package(gene: RobotGene, prompt: str, output_dir: Path, contro
 
     output_dir = Path(output_dir)
     (output_dir / "robot").mkdir(parents=True, exist_ok=True)
-    _write_genome_and_urdf(gene, output_dir)
+    _write_genome_and_urdf(gene, output_dir, task=prompt)
 
     # Write the LOCOMOTION scene (robot on flat ground) as a real compiled MJCF + index. A walker's
     # "simulation" is the locomotion rollout, not object scenes — but it IS a compiled, loadable scene, so
@@ -1568,7 +1568,7 @@ def _write_gait_control_program(gene: RobotGene, genome: dict, output_dir: Path)
     (bundle / "controller.py").write_text(controller_source, encoding="utf-8")
 
 
-def _write_genome_and_urdf(gene: RobotGene, output_dir: Path) -> None:
+def _write_genome_and_urdf(gene: RobotGene, output_dir: Path, task: str = "") -> None:
     """Write robot/robot_genome.json AND robot/robot.urdf for a gene-built package. The gene path shipped the genome
     + MJCF but no URDF, so gene-built robots (any creature) had no standard robot description for ROS/Gazebo and
     wouldn't render in the viewer's Robot mode. Best-effort URDF -- the MJCF replay never needs it."""
@@ -1608,8 +1608,31 @@ def _write_genome_and_urdf(gene: RobotGene, output_dir: Path) -> None:
     try:
         # Installable ROS2 (ament_python) harness from the genome + URDF + (for legged robots) the gait-controller
         # bundle, so gene-built robots are ROS2-deployable like the legacy path's. Best-effort.
+        #
+        # The actuator map is handed over rather than left to be read off disk: `_emit_bom` runs AFTER this
+        # function in `build_gene_package` (bom at :555, this at :527), so `robot/bill_of_materials.json` does
+        # not exist yet and the hardware interface named a real motor on ZERO joints. It is the SAME call
+        # `_emit_bom` makes, so the shipped YAML cannot disagree with the shipped parts list, and it is cheap
+        # enough to make unconditional: 0.17 ms median (min 0.15, max 0.21, warm, 14-joint quadruped).
+        #
+        # UNCONDITIONALLY. This used to be skipped when `robot/bill_of_materials.json` already existed, which
+        # made a REBUILD INTO A REUSED DIRECTORY (autonomous_build re-runs `build_gene_package` into the dir
+        # from :932 after a redesign) read the PREVIOUS robot's parts list: measured on a second build of a
+        # rescaled quadruped, 14 of 14 rows named a motor that is not the one this package's own
+        # `bill_of_materials.json` assigns (`leg1_l_0_joint` -> "Dynamixel XM540-W270-T" vs the shipped
+        # "Harmonic Drive FHA-40C-160"), under a header claiming "14 of 14 ... mapped to the REAL actuator".
+        # The gene in hand is the only trustworthy source; disk is for callers that do not have one.
+        try:
+            from virturoid.services.bom_builder import build_bom
+            amap = (build_bom(gene, task=task) or {}).get("actuator_map") or {}
+            src = "computed for this build by bom_builder.build_bom on the gene being exported"
+        except Exception as _bom_exc:  # noqa: BLE001
+            # NOT a fall-back to disk: whatever is on disk may belong to a previous build of a different
+            # robot. An empty map makes every row a named gap, which is the honest answer here.
+            amap, src = {}, (f"NOT AVAILABLE - the bill of materials could not be computed for this build "
+                             f"({type(_bom_exc).__name__}); no parts list was read")
         from virturoid.services.ros2_exporter import maybe_export_ros2_package
-        maybe_export_ros2_package(output_dir)
+        maybe_export_ros2_package(output_dir, actuator_map=amap, actuator_map_source=src)
     except Exception:  # noqa: BLE001 - the ROS2 package is best-effort; the core package works without it
         pass
 

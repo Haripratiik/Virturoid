@@ -1335,7 +1335,13 @@ def build_bom_from_genome(genome: dict, *, task: str = "", capabilities=None) ->
     with NO BOM at all — the e2e fidelity test's worst correctness finding). Uses the genome's own joint effort
     limits to size real actuators, one aluminium structure line for the links, and the SAME class/task-adaptive
     sensor/compute/power selection as the gene path, so both paths emit the identical BOM schema."""
-    joints = [j for j in genome.get("joints", []) if (j.get("joint_type") or "").lower() in ("revolute", "prismatic")]
+    # CONTINUOUS IS A DRIVEN JOINT. A differential-drive base declares both wheels `continuous` (URDF: a
+    # revolute joint with no angle limit), so filtering to revolute/prismatic dropped every wheel: the
+    # mobile-base template's parts list came out with dof 0 and an EMPTY actuator_map, and its ROS2 export
+    # therefore carried `actuator: null` on `left_wheel`/`right_wheel` under a truthful-but-useless "the bill
+    # of materials names no part for them". Fixed/floating/planar stay out -- they carry no motor.
+    joints = [j for j in genome.get("joints", [])
+              if (j.get("joint_type") or "").lower() in ("revolute", "continuous", "prismatic")]
     links = genome.get("links", [])
     species = (genome.get("species") or "").lower()
     robot_class = (genome.get("robot_class")

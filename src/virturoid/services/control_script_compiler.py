@@ -16,8 +16,24 @@ the platform already knows about the robot:
 
 Then it runs the validation ladder the plan requires -- every generated ``.py`` is COMPILE-checked and DRY-RUN
 in a subprocess (each script ships a ``self_test`` that exercises its logic against a mock state) -- and writes
-an honest pass/fail report. A script that would exceed an actuator's datasheet torque fails the audit with the
-joint and the limit named. Pure standard library in the generated code (no ROS/MuJoCo import), deterministic.
+an honest pass/fail report. Pure standard library in the generated code (no ROS/MuJoCo import), deterministic.
+
+THE DATASHEET-TORQUE AUDIT, and exactly how far it reaches. ``audit_torque_ceilings`` re-derives the truth from
+the genome + ``select_actuator`` -- INDEPENDENTLY of anything in the shipped package -- and then:
+
+  * checks every joint's declared ceiling in ``control_config.json`` against that datasheet peak, so an inflated
+    or missing ceiling FAILS validation with the joint and the margin named;
+  * EXECUTES the shipped ``safety_filter.py`` on a command at 10x the datasheet peak for every joint and requires
+    that (a) nothing above the datasheet peak comes back out and (b) ``audit()`` names each breached joint.
+
+That last point is why ``SafetyFilter.audit`` is NOT itself the audit: it compares a command against ``CEIL``,
+which is read from the same ``control_config.json`` the command is being judged by. Inflate the config and
+``audit()`` returns ``[]`` on a 41 Nm command into a 4.1 Nm motor -- it can only say "you exceeded the number we
+declared", never "the number we declared exceeds the motor". The audit here supplies the independent number.
+
+NOT AUDITED, and the report says so: whether hand-written code you add downstream actually routes its commands
+through the filter. Any ``.py`` in the scripts directory this compiler did not emit is listed under
+``unaudited_scripts`` and is never counted as checked.
 """
 
 from __future__ import annotations
@@ -33,18 +49,29 @@ def _safe(name: str) -> str:
     return "".join(c if c.isalnum() or c == "_" else "_" for c in str(name))
 
 
+def datasheet_peak_torques(gene) -> dict:
+    """THE INDEPENDENT TRUTH the audit judges the shipped package against: per actuated joint, the peak torque of
+    the real actuator the BOM sizes for it. Derived from the genome + ``select_actuator`` only -- it never reads
+    ``control_config.json``, which is the whole point (a self-referential check cannot catch an inflated ceiling).
+    """
+    from virturoid.services.bom_builder import _DEFAULT_JOINT_TORQUE_NM, select_actuator
+
+    peaks = {}
+    for s in gene.actuated_joints():
+        act = select_actuator(getattr(s, "actuator_torque_nm", None) or _DEFAULT_JOINT_TORQUE_NM)
+        peaks[_safe(s.name)] = round(float(act.peak_torque_nm), 3)
+    return peaks
+
+
 def _derive(gene, *, task: str = "") -> dict:
     """The single source of truth every generated script reads: ordered joints, per-joint torque ceiling (from
     the actuator the BOM sized), position limits, the obs layout, and the robot kind."""
-    from virturoid.services.bom_builder import _DEFAULT_JOINT_TORQUE_NM, select_actuator
     from virturoid.services.task_matched_eval import robot_kind
 
     joints = gene.actuated_joints()
     names = [_safe(s.name) for s in joints]
-    ceilings, limits = {}, {}
+    ceilings, limits = dict(datasheet_peak_torques(gene)), {}
     for s in joints:
-        act = select_actuator(getattr(s, "actuator_torque_nm", None) or _DEFAULT_JOINT_TORQUE_NM)
-        ceilings[_safe(s.name)] = round(float(act.peak_torque_nm), 3)
         lo = s.joint_lower if s.joint_lower is not None else -3.1416
         hi = s.joint_upper if s.joint_upper is not None else 3.1416
         limits[_safe(s.name)] = [round(float(lo), 4), round(float(hi), 4)]
@@ -139,7 +166,13 @@ class SafetyFilter:
         return out
 
     def audit(self, torques: dict) -> list:
-        """Return a list of (joint, requested, ceiling) for any command that WOULD have exceeded the actuator."""
+        """Return a list of (joint, requested, ceiling) for any command that WOULD have exceeded CEIL.
+
+        SCOPE: CEIL comes from control_config.json, so this reports commands that exceed the DECLARED ceiling.
+        It cannot tell you the declared ceiling itself is wrong. That the ceilings in this package ARE the BOM
+        actuators' datasheet peaks is checked upstream at generation time (control_script_compiler
+        .audit_torque_ceilings) and its verdict ships in reports/script_validation.json -> torque_audit.
+        """
         return [(j, t, CEIL[j]) for j, t in torques.items() if j in CEIL and abs(t) > CEIL[j]]
 
 
@@ -350,10 +383,132 @@ def compile_control_scripts(gene, *, task: str = "") -> dict:
     return {"config": cfg, "files": files, "manifest": manifest}
 
 
-def validate_scripts(scripts_dir) -> dict:
-    """The validation ladder S3 requires, run on the generated scripts: COMPILE every .py, then DRY-RUN each in a
-    subprocess (its ``self_test`` exercises the logic against a mock state). Returns an honest per-script report;
-    a non-compiling or failing script is reported, never hidden."""
+_AUDIT_OVERDRIVE_X = 10.0     # the probe command, as a multiple of each joint's DATASHEET peak
+_TORQUE_TOL_NM = 1e-6
+
+_AUDIT_SCOPE = ("audits the ceilings the generated stack declares against the BOM actuator's datasheet peak "
+                "torque per joint, and the shipped safety_filter's EXECUTED clamp/audit behaviour at "
+                f"{_AUDIT_OVERDRIVE_X:g}x that peak. It does NOT audit whether hand-written downstream code "
+                "routes its commands through the filter; .py files this compiler did not emit are listed under "
+                "unaudited_scripts and are not counted as checked.")
+
+# Executed IN the scripts directory against the shipped safety_filter. Reads the datasheet peaks on stdin so the
+# probe command is an INDEPENDENT number -- never the CEIL the filter is about to judge itself by.
+_AUDIT_PROBE = (
+    "import json, sys\n"
+    "from safety_filter import SafetyFilter\n"
+    "peaks = json.loads(sys.stdin.read())\n"
+    "over = {j: p * OVERDRIVE for j, p in peaks.items()}\n"
+    "sf = SafetyFilter()\n"
+    "print(json.dumps({'let_through': sf.clamp_torques(over),\n"
+    "                  'flagged': sorted(str(row[0]) for row in sf.audit(over))}))\n"
+)
+
+
+def audit_torque_ceilings(scripts_dir, gene, *, overdrive: float = _AUDIT_OVERDRIVE_X) -> dict:
+    """THE datasheet-torque audit the module claims. Re-derives each joint's real actuator peak from the genome,
+    then proves the shipped stack cannot pass a command above it -- by reading the declared ceilings AND by
+    running the emitted filter. Every violation names the joint and the margin. Returns a report; never raises."""
+    scripts_dir = Path(scripts_dir)
+    rep = {"status": "fail", "overdrive_x": float(overdrive), "n_joints": 0, "violations": [],
+           "checks": {}, "unaudited_scripts": [], "scope": _AUDIT_SCOPE}
+    known = set(_SCRIPTS)
+    rep["unaudited_scripts"] = sorted(p.name for p in scripts_dir.glob("*.py") if p.name not in known)
+
+    try:
+        peaks = datasheet_peak_torques(gene)
+    except Exception as exc:  # noqa: BLE001
+        rep["violations"].append(f"could not derive datasheet peak torques from the genome: "
+                                 f"{type(exc).__name__}: {exc}")
+        return rep
+    rep["n_joints"] = len(peaks)
+    if not peaks:
+        # NOT APPLICABLE, not a pass. Every check below is trivially true over an empty joint set, so a jointless
+        # body (a quadcopter: rotors, no actuated joints) came back `status: "pass", n_joints: 0` and the
+        # deployment guide then printed the full paragraph -- "audit passed", "safety_filter.py was EXECUTED at
+        # 10x each joint's datasheet peak", "audit() named every breach" -- none of which happened. A safety
+        # claim over zero joints is a claim about nothing; say so.
+        rep["status"] = "not_applicable"
+        rep["checks"] = {}
+        rep["violations"] = []
+        rep["scope"] = ("NOT APPLICABLE -- this body has no actuated joints, so there is no datasheet torque to "
+                        "audit and nothing was executed. This is not a passed safety check. " + _AUDIT_SCOPE)
+        return rep
+
+    cfg_path = scripts_dir / "control_config.json"
+    try:
+        declared = json.loads(cfg_path.read_text(encoding="utf-8"))["torque_ceilings_nm"]
+    except Exception as exc:  # noqa: BLE001
+        rep["violations"].append(f"no readable control_config.json torque_ceilings_nm to audit ({exc})")
+        return rep
+
+    # --- check 1: every joint is guarded, and no declared ceiling is above the motor's datasheet peak ----------
+    unguarded, inflated = [], []
+    for j, ds in sorted(peaks.items()):
+        if j not in declared:
+            unguarded.append(f"joint {j!r} has NO torque ceiling in the shipped config -- UNGUARDED "
+                             f"(its BOM actuator's datasheet peak is {ds:g} Nm)")
+            continue
+        dec = float(declared[j])
+        if dec > ds + _TORQUE_TOL_NM:
+            inflated.append(f"joint {j!r}: the shipped ceiling is {dec:g} Nm but the BOM actuator's datasheet "
+                            f"peak is {ds:g} Nm -- {dec / ds:.1f}x over the motor")
+    rep["checks"]["every_joint_guarded"] = not unguarded
+    rep["checks"]["declared_ceilings_are_datasheet"] = not inflated
+    rep["violations"].extend(unguarded + inflated)
+
+    # --- checks 2+3: EXECUTE the shipped filter at overdrive x the datasheet peak ------------------------------
+    filt = scripts_dir / "safety_filter.py"
+    if not filt.is_file():
+        rep["violations"].append("safety_filter.py is not in the shipped stack -- nothing clamps the bus")
+        rep["checks"]["filter_clips_to_datasheet"] = False
+        rep["checks"]["audit_names_the_breach"] = False
+        return _finish_audit(rep)
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", f"OVERDRIVE = {float(overdrive)!r}\n" + _AUDIT_PROBE],
+            input=json.dumps(peaks), capture_output=True, text=True, timeout=30,
+            cwd=str(scripts_dir.resolve()))
+        probe = json.loads(proc.stdout.strip().splitlines()[-1])
+    except Exception as exc:  # noqa: BLE001
+        rep["violations"].append(f"could not execute the shipped safety_filter to audit it: "
+                                 f"{type(exc).__name__}: {exc}")
+        rep["checks"]["filter_clips_to_datasheet"] = False
+        rep["checks"]["audit_names_the_breach"] = False
+        return _finish_audit(rep)
+
+    let_through, flagged = probe.get("let_through") or {}, set(probe.get("flagged") or [])
+    leaked, unnamed = [], []
+    for j, ds in sorted(peaks.items()):
+        cmd = ds * float(overdrive)
+        got = abs(float(let_through.get(j, cmd)))
+        if got > ds + _TORQUE_TOL_NM:
+            leaked.append(f"joint {j!r}: commanded {cmd:g} Nm, the shipped safety_filter passed {got:g} Nm to "
+                          f"the bus -- {got / ds:.1f}x the {ds:g} Nm datasheet peak")
+        if j not in flagged:
+            unnamed.append(f"joint {j!r}: safety_filter.audit() did not name a {cmd:g} Nm command as a breach of "
+                           f"its {ds:g} Nm datasheet peak")
+    rep["checks"]["filter_clips_to_datasheet"] = not leaked
+    rep["checks"]["audit_names_the_breach"] = not unnamed
+    rep["violations"].extend(leaked[:20] + unnamed[:20])
+    return _finish_audit(rep)
+
+
+def _finish_audit(rep: dict) -> dict:
+    rep["status"] = "pass" if (rep["checks"] and all(rep["checks"].values()) and not rep["violations"]) else "fail"
+    return rep
+
+
+def validate_scripts(scripts_dir, *, gene=None) -> dict:
+    """The validation ladder S3 requires, run on the generated scripts: COMPILE every .py, DRY-RUN each in a
+    subprocess (its ``self_test`` exercises the logic against a mock state), and -- when ``gene`` is supplied --
+    run the DATASHEET-TORQUE AUDIT (``audit_torque_ceilings``). Returns an honest per-script report; a
+    non-compiling script, a failing dry-run, or a stack that would let a command past a joint's datasheet peak is
+    reported with the joint and the margin named, never hidden.
+
+    Without ``gene`` there is no independent datasheet to audit against: the torque audit reports
+    ``status: 'no_reference'`` and ``all_pass`` then covers compile+dry-run ONLY. Every production caller passes
+    the gene; anything reporting this verdict to a human must not claim the torque check ran when it did not."""
     scripts_dir = Path(scripts_dir)
     results = {}
     ok_all = True
@@ -381,20 +536,31 @@ def validate_scripts(scripts_dir) -> dict:
             entry["detail"] = f"dry-run error: {exc}"
             ok_all = False
         results[py.name] = entry
-    return {"all_pass": ok_all, "scripts": results, "n_scripts": len(results)}
+    if gene is not None:
+        audit = audit_torque_ceilings(scripts_dir, gene)
+    else:
+        audit = {"status": "no_reference", "violations": [], "checks": {}, "unaudited_scripts": [],
+                 "scope": "NOT RUN -- validate_scripts was called without the genome, so there is no independent "
+                          "datasheet to audit the shipped ceilings against. " + _AUDIT_SCOPE}
+    if audit["status"] == "fail":
+        ok_all = False
+    return {"all_pass": ok_all, "scripts": results, "n_scripts": len(results), "torque_audit": audit}
 
 
 def write_control_scripts(gene, output_dir, *, task: str = "") -> Path | None:
-    """Compile the scripts, write them under ``output_dir/software/scripts/``, run the validation ladder, and
-    write ``reports/script_validation.json``. Returns the scripts dir (or None on total failure -- scripts are
-    value-add and never block a build)."""
+    """Compile the scripts, write them under ``output_dir/software/scripts/``, run the validation ladder
+    (compile + dry-run + the datasheet-torque audit against this gene's BOM actuators), and write
+    ``reports/script_validation.json``. Returns the scripts dir (or None on total failure -- scripts are
+    value-add and never block a build). A FAILED torque audit does not delete the scripts: it lands in the
+    report as ``all_pass: false`` with the joint and margin named, which is what the readiness ledger and the
+    deployment guide read."""
     try:
         out = compile_control_scripts(gene, task=task)
         sdir = Path(output_dir) / "software" / "scripts"
         sdir.mkdir(parents=True, exist_ok=True)
         for rel, content in out["files"].items():
             (sdir / rel).write_text(content, encoding="utf-8")
-        report = validate_scripts(sdir)
+        report = validate_scripts(sdir, gene=gene)   # incl. the datasheet-torque audit against THIS robot's BOM
         rdir = Path(output_dir) / "reports"
         rdir.mkdir(parents=True, exist_ok=True)
         (rdir / "script_validation.json").write_text(json.dumps(report, indent=2), encoding="utf-8")

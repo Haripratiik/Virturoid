@@ -12,8 +12,25 @@ Every body below was generated from a one-line prompt by the same pipeline — n
 
 ![Robots generated from prompts: a manipulator, quadruped, hexapod, mobile base, humanoid, and octopod](assets/robot_gallery.png)
 
+## At a glance
+
+|  |  |
+|---|---|
+| **Scale** | ~160k lines of Python; 391 source modules, 388 test modules |
+| **Tested against real robots** | Descriptions from the [MuJoCo Menagerie](https://github.com/google-deepmind/mujoco_menagerie) — Unitree Go2 / G1 / H1 / A1, Boston Dynamics Spot, ANYmal C, Franka Panda, UR5e, PAL Talos, Agility Cassie, ALOHA — rather than fixtures, because fixtures have lied here before |
+| **Agent surface** | 75 tools over MCP (stdio JSON-RPC). Your agent, your keys; `llm_spend` reports our own per-role call count so zero-spend is measurable rather than promised |
+| **Physics** | MuJoCo on CPU; MJX on GPU behind an enforced CPU↔GPU parity gate |
+
+**If you read four files, read these** — they carry the ideas:
+
+- **[`gait_quality.py`](src/virturoid/services/gait_quality.py)** — the un-gameable verdict. Forward distance is a Goodhart magnet, so travel counts only when the robot also stayed upright, kept a real step cadence, survived the episode, and **held its course**: a robot walking in a closed circle is named as *circling*, not credited with the distance. Success is owned by this classifier and never by a reward an agent authored, so nothing can optimise its way to a passing grade.
+- **[`sysid/fit.py`](src/virturoid/services/sysid/fit.py)** — system identification that refuses. It fits joint damping, reflected inertia and dry friction with confidence intervals, declines to write any parameter the experiment could not actually load, and ships `what_this_gate_does_not_catch` in every verdict. Two "by construction" bounds in this file were disproved by measurement and are retracted in place rather than quietly deleted.
+- **[`morphology_embedding.py`](src/virturoid/services/morphology_embedding.py)** — how a new robot finds the robots most like it: a Weisfeiler-Lehman fingerprint over the kinematic graph plus log-compressed mass, so a composed quadruped and an imported Go2 land near each other (0.72) and a snake does not (0.015).
+- **[`agent_tools.py`](src/virturoid/services/agent_tools.py)** — the surface an external agent drives, and the disclosure contract every tool answers under.
+
 ## Table of contents
 
+- [At a glance](#at-a-glance)
 - [What makes it different](#what-makes-it-different)
 - [What it does](#what-it-does)
 - [How it works](#how-it-works)
@@ -34,7 +51,7 @@ Every body below was generated from a one-line prompt by the same pipeline — n
 - **Every robot is original.** Bodies are composed per prompt through one general compiler. Nothing is retrieved from a catalog of stock models or stitched together from existing robot parts. One exception, and it is disclosed: when a composed legged body still cannot walk after being fitted with its own controller, the engine may substitute a shared reference quadruped — labelled in the output and written into that robot's own notes.
 - **One policy architecture spans bodies.** A single morphology-agnostic network (one token per joint) can be trained on a quadruped, a hexapod, or an arm without rewriting the learning code, and it converges in simulation. It is not what ships as the default controller, and reusing a trained *policy* across morphologies is built but not yet demonstrated end to end; no artifact in this checkout clears the bank's own credibility screen.
 - **It banks what it verifies, and reports what that is actually worth.** Every physics-verified result is banked with the error bar that admitted it, and a new search starts from the nearest prior body instead of cold. Measured on our own bank, the honest picture is mixed: recall reliably fires and hands a new body a real banked operating point, and most of the time that changes nothing — across 2163 recorded deploys of a mined hint, 246 wins, 283 losses, 1634 ties. A warm-started search gains about **+0.08 m over its own banked seed** across 594 recorded reuses; **no cold-start control arm has ever been run**, so this is not a warm-versus-cold result. *Mining* the bank for universal parameter rules does not work at all yet: zero of five parameters clear the evidence gates, and the apparent signal got weaker as the corpus grew more diverse. The library is the asset; the claim that it compounds is not yet earned, and the app reports the negative number rather than hiding it.
-- **AI designs it and AI critiques it.** One language model designs the body; a second reads how training went and rewrites the reward. The system improves its own training signal.
+- **Your agent authors the objective, the code owns the verdict.** A language model turns the prompt into the anatomy graph; your agent then writes the training objective in a closed reward DSL — parsed and bounded, never raw `exec`, with anti-gaming detectors. The loop trains, decomposes the reward into its additive terms, names the one that saturated, and the agent re-proposes against that. Whether a run *counts* stays with the un-gameable classifier, separately from whatever the reward says its value was.
 - **It is honest by construction.** A robot is marked ready to export only when real artifacts back every stage, and a gait is scored by real foot contact and balance.
 
 ## What it does

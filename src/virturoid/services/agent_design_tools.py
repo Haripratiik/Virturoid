@@ -792,11 +792,31 @@ def export_held(args: dict) -> dict:
             artifacts["cad"] = cad if isinstance(cad, dict) else str(out_dir / "cad")
         except Exception as exc:  # noqa: BLE001
             artifacts["cad_error"] = f"{type(exc).__name__}: {exc}"
+    # The parts list lands where THIS PACKAGE's own consumers look for it (`robot/bill_of_materials.json`), not
+    # only at the agent-facing `bom.json`: anything that later reads the exported package off disk -- a re-export,
+    # a downstream tool, a human -- must find the same list the shipped hardware_interface.yaml was written from.
+    #
+    # It runs first for readability only. The ROS2 hardware interface no longer DEPENDS on that ordering:
+    # `_write_genome_and_urdf` computes the actuator map from the gene it is exporting and hands it over, which
+    # is what stops a rebuild into a reused directory from picking up a PREVIOUS robot's parts list. Ordering
+    # alone therefore cannot be what a test of this door pins -- see tests/test_ros2_export.py.
+    if "bom" in fmts:
+        try:
+            from virturoid.services.bom_builder import build_bom, format_bom_markdown
+            bom = build_bom(gene, task=task)
+            (out_dir / "bom.json").write_text(json.dumps(bom, indent=2, default=str), encoding="utf-8")
+            (out_dir / "bom.md").write_text(format_bom_markdown(bom), encoding="utf-8")
+            (out_dir / "robot").mkdir(parents=True, exist_ok=True)
+            (out_dir / "robot" / "bill_of_materials.json").write_text(
+                json.dumps(bom, indent=2, default=str), encoding="utf-8")
+            artifacts["bom"] = str(out_dir / "bom.json")
+        except Exception as exc:  # noqa: BLE001
+            artifacts["bom_error"] = f"{type(exc).__name__}: {exc}"
     if "urdf" in fmts or "ros2" in fmts:
         # _write_genome_and_urdf produces robot_genome.json + robot.urdf + (best-effort) the installable ROS2 pkg
         try:
             from virturoid.services.gene_build import _write_genome_and_urdf
-            _write_genome_and_urdf(gene, out_dir)
+            _write_genome_and_urdf(gene, out_dir, task=task)
             urdf = out_dir / "robot" / "robot.urdf"
             if "urdf" in fmts and urdf.exists():
                 artifacts["urdf"] = str(urdf)
@@ -806,15 +826,6 @@ def export_held(args: dict) -> dict:
                 artifacts["ros2"] = pkgs[0] if pkgs else str(ros2_root)
         except Exception as exc:  # noqa: BLE001
             artifacts["urdf_error"] = f"{type(exc).__name__}: {exc}"
-    if "bom" in fmts:
-        try:
-            from virturoid.services.bom_builder import build_bom, format_bom_markdown
-            bom = build_bom(gene, task=task)
-            (out_dir / "bom.json").write_text(json.dumps(bom, indent=2, default=str), encoding="utf-8")
-            (out_dir / "bom.md").write_text(format_bom_markdown(bom), encoding="utf-8")
-            artifacts["bom"] = str(out_dir / "bom.json")
-        except Exception as exc:  # noqa: BLE001
-            artifacts["bom_error"] = f"{type(exc).__name__}: {exc}"
     if "usd" in fmts:
         # OpenUSD physics articulation for NVIDIA Isaac Sim (transcribed from the simulated MuJoCo model)
         try:

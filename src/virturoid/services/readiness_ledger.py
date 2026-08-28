@@ -52,8 +52,15 @@ def build_product_readiness_ledger(package_dir, *, robot_class: str = "", gene=N
         _probe_bom(pkg),
         _probe_actuators_feasible(pkg),
     ]
+    require = list(require)
+    # A control stack that FAILED its datasheet-torque audit must block safe_to_export, not merely be noted:
+    # this is the artifact a customer runs on hardware. Scoped to the failure so a passing/absent audit never
+    # adds a gate a build could not previously have had to clear.
+    ctrl = next((s for s in stages if s.stage == "controller_exported"), None)
+    if ctrl is not None and ctrl.status == BELOW_GATE and "controller_exported" not in require:
+        require.append("controller_exported")
     return ProductReadinessLedger(package_dir=str(pkg), robot_class=robot_class, stages=stages,
-                                  required=list(require), enforce=enforce)
+                                  required=require, enforce=enforce)
 
 
 def write_product_readiness_ledger(package_dir, *, robot_class: str = "", gene=None,
@@ -384,10 +391,60 @@ def _probe_physics(pkg: Path, gene) -> StageRecord:
     return StageRecord("physics_evaluated", NOT_RUN, "no real physics evaluation report")
 
 
+def _control_stack_torque_failure(pkg: Path) -> StageRecord | None:
+    """Return a BELOW_GATE verdict if the shipped control stack FAILED its datasheet-torque audit, else None.
+
+    The control stage used to attain on FILE PRESENCE alone, while the compiler's docstring and the deployment
+    guide both told the customer a command past a joint's datasheet torque had been checked for. Nothing ran that
+    check, so the ladder was crediting a green it had not earned. Now the ledger reads the audit's own verdict in
+    ``reports/script_validation.json -> torque_audit`` and refuses to call the stage real when it failed. A
+    'no_reference'/absent audit does NOT downgrade the stage (nothing was measured, so nothing is claimed) --
+    it is disclosed in the detail instead."""
+    val = next((p for p in pkg.rglob("script_validation.json")), None)
+    if val is None:
+        return None
+    try:
+        audit = (json.loads(val.read_text(encoding="utf-8")) or {}).get("torque_audit") or {}
+    except Exception:  # noqa: BLE001
+        return None
+    if audit.get("status") != "fail":
+        return None
+    viol = [str(v) for v in (audit.get("violations") or [])]
+    return StageRecord("controller_exported", BELOW_GATE,
+                       "the shipped control stack FAILED its datasheet-torque audit: "
+                       + ("; ".join(viol[:3]) or "a command could exceed a joint's actuator peak torque"),
+                       {"torque_audit_violations": len(viol), "detail": viol[:5]})
+
+
 def _probe_controller(pkg: Path) -> StageRecord:
-    """A trained/exported controller bundle. not_required when training wasn't requested (no bundle present)."""
+    """A trained/exported controller bundle whose companion control stack passed the datasheet-torque audit.
+    not_required when training wasn't requested (no bundle present)."""
+    veto = _control_stack_torque_failure(pkg)
+    if veto is not None:
+        return veto                      # a stack that can overdrive a motor is not an exported controller
     bundle = next((p for p in pkg.rglob("controller_bundle.json")), None)
     ctrl = next((p for p in pkg.rglob("controller.py")), None)
+    val = next((p for p in pkg.rglob("script_validation.json")), None)
+    astat, n_joints = None, 0
+    if val is not None:
+        try:
+            _a = ((json.loads(val.read_text(encoding="utf-8")) or {}).get("torque_audit") or {})
+            astat, n_joints = _a.get("status"), int(_a.get("n_joints") or 0)
+        except Exception:  # noqa: BLE001
+            astat = None
+    # A pass over ZERO joints is not a passed safety check -- every check is trivially true over an empty set.
+    # It must read as NOT APPLICABLE here too, or the ledger re-launders the vacuous green the audit refused.
+    audited = astat == "pass" and n_joints > 0
+    if audited:
+        note = " + control stack passed the datasheet-torque audit"
+    elif astat == "not_applicable" or (astat == "pass" and n_joints == 0):
+        note = " (no actuated joints: the datasheet-torque audit does not apply -- nothing was checked)"
+    elif val is not None:
+        note = " (control stack present but its datasheet-torque audit did NOT run)"
+    else:
+        note = ""
     if bundle is not None or ctrl is not None:
-        return StageRecord("controller_exported", ATTAINED, "controller bundle present")
-    return StageRecord("controller_exported", NOT_REQUIRED, "no trained controller requested")
+        return StageRecord("controller_exported", ATTAINED, "controller bundle present" + note,
+                           {"torque_audit_passed": audited})
+    return StageRecord("controller_exported", NOT_REQUIRED, "no trained controller requested" + note,
+                       {"torque_audit_passed": audited})

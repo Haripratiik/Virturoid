@@ -98,7 +98,7 @@ def export_isaac_lab(gene, out_dir: str, *, robot_name: str | None = None, kp: f
                      kd: float = 1.5) -> dict:
     """Write the full Isaac Lab hand-off package for ``gene`` into ``out_dir``. Returns the manifest + the list of
     files written. Requires ``usd-core`` + ``mujoco`` (for the USD). The Python scaffolds are pure text."""
-    from virturoid.services.usd_exporter import _actuator_limits, export_usd
+    from virturoid.services.usd_exporter import _actuator_limits, _safe, export_usd
 
     os.makedirs(out_dir, exist_ok=True)
     name = _pyid(robot_name or f"{gene.robot_class}_{(gene.id or 'robot')[:6]}")
@@ -112,16 +112,40 @@ def export_isaac_lab(gene, out_dir: str, *, robot_name: str | None = None, kp: f
 
     joints = man["joints"]
     limits = _actuator_limits(gene)                     # {segment_name: (effort_nm, vel_radps)}
-    # joint drive names come from the USD (== mjcf joint names); actuator limits are keyed by segment name.
-    # map by order of actuated segments == order of USD joints (both follow the kinematic tree).
+    # Joint drive names come from the USD (== mjcf joint names); actuator limits are keyed by SEGMENT name.
+    #
+    # This used to `zip(joints, [s.name for s in gene.segments if actuated])`, i.e. pair the two lists BY
+    # POSITION on the assumption that USD/MuJoCo kinematic-DFS order equals `gene.segments` list order. That
+    # holds only for a depth-first-AUTHORED body. An AMENDED one -- `add_limb` appends its new chain at the end
+    # of the list while the compiler emits it under its mid-tree parent -- shifts everything after the mount
+    # point. HOW MANY joints that corrupts is MOUNT-POINT DEPENDENT, not a constant. Measured on ONE composed
+    # quadruped (19 DOF after two added limbs), sweeping the mid-tree parent, the old positional pairing gave a
+    # joint the WRONG SEGMENT's motor 18/19 (mount `neck`), 14/19 (`leg1_l_*`), 11/19 (`leg1_r_*`); the subset
+    # where the resulting effort/velocity numbers actually DIFFER is 12/19, 9/19, 7/19 respectively (e.g.
+    # `mast_0_joint` handed `leg1_r_0`'s limits). Mount nearer the end of the list and fewer joints shift --
+    # the defect is identical, only its blast radius moves, so no single ratio describes it.
+    #
+    # The correct key is already in the record and was unread: `usd_exporter` puts the driven body on every
+    # joint dict as `child` (the USD-safe form of the segment name). Resolve by that, and NAME any joint whose
+    # segment cannot be found instead of silently handing it the 20 Nm default.
+    seg_of_safe = {_safe(s.name): s.name for s in gene.segments}
     eff = {}
     vel = {}
-    seg_names = [s.name for s in gene.segments if s.joint_type in ("revolute", "prismatic")]
-    for jd, sname in zip(joints, seg_names):
-        e, v = limits.get(sname, (20.0, 20.0))
+    unresolved: list[str] = []
+    joint_segment: dict = {}
+    for jd in joints:
+        sname = seg_of_safe.get(str(jd.get("child") or ""))
+        if sname is None or sname not in limits:
+            unresolved.append(jd["name"])
+            e, v = 20.0, 20.0
+        else:
+            e, v = limits[sname]
+            joint_segment[jd["name"]] = sname
         eff[jd["name"]] = e
         vel[jd["name"]] = v
     rest = {jd["name"]: jd.get("rest", 0.0) for jd in joints}
+    man["joint_segment"] = joint_segment
+    man["actuator_limits_unresolved"] = unresolved
 
     files = {"usd": usd_path}
 
@@ -157,6 +181,11 @@ def export_isaac_lab(gene, out_dir: str, *, robot_name: str | None = None, kp: f
     manifest = {"robot_name": name, "robot_class": robot_class, "is_legged": is_legged,
                 "isaac_lab_target": _ISAAC_LAB_TARGET, **man,
                 "actuator_effort_nm": eff, "actuator_velocity_radps": vel, "files": files,
+                # WHICH SEGMENT each joint's limits came from, so the pairing is auditable from the shipped
+                # manifest rather than trusted. A joint absent from here carries the fallback default and is
+                # named in `actuator_limits_unresolved`.
+                "joint_segment": joint_segment,
+                "actuator_limits_unresolved": unresolved,
                 "validated_offline": {"usd_reread": man["validated"], "python_compiles": None},
                 "not_run_in_isaac": True}
     man_path = os.path.join(out_dir, "manifest.json")
@@ -359,8 +388,13 @@ def _readme(name, robot_class, is_legged, man, files) -> str:
         f"| `{os.path.basename(files['usd'])}` | the physics USD (UsdPhysics articulation: rigid bodies, "
         f"colliders, {dof} joints w/ limits + drives). Transcribed from the exact MuJoCo model Virturoid "
         f"simulates, then re-read + validated with OpenUSD. |",
-        f"| `{name}_cfg.py` | the `ArticulationCfg` — spawn + init stance + per-joint PD gains and **real "
-        f"selected-motor** effort/velocity limits from the BOM. |",
+        f"| `{name}_cfg.py` | the `ArticulationCfg` — spawn + init stance + per-joint PD gains and "
+        + ("**real selected-motor** effort/velocity limits from the BOM, each resolved through the joint's own "
+           "driven link (`manifest.json` -> `joint_segment` records which segment every limit came from). |"
+           if not (man.get("actuator_limits_unresolved") or []) else
+           f"selected-motor effort/velocity limits from the BOM. **{len(man['actuator_limits_unresolved'])} of "
+           f"{dof} joints could NOT be resolved to a segment** and carry a placeholder limit — they are named "
+           f"in `manifest.json` -> `actuator_limits_unresolved`. |"),
         f"| `spawn_{name}.py` | a standalone smoke test — spawns the robot, steps physics, prints DOF + base "
         f"height. Run this FIRST. |",
     ]

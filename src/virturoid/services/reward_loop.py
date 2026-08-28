@@ -478,7 +478,10 @@ def _generate_control_scripts(args: dict) -> dict:
         out = compile_control_scripts(gene, task=str(args.get("task") or ""))
         d = _artifact_dir(rid, "scripts")
         written = _write_generated(d, out["files"])
-        report = validate_scripts(d)                 # compile + dry-run the files the caller is being handed
+        # compile + dry-run the files the caller is being handed, AND audit the shipped torque ceilings against
+        # this gene's BOM actuators (passing `gene` is what makes the datasheet audit run at all -- without it
+        # validate_scripts has no independent number and honestly reports torque_audit.status 'no_reference').
+        report = validate_scripts(d, gene=gene)
         import shutil
         shutil.rmtree(d / "__pycache__", ignore_errors=True)   # the dry-run's bytecode is not the deliverable
         res = {"ok": True, "manifest": out["manifest"], "validation": report,
@@ -501,7 +504,13 @@ REWARD_LOOP_TOOLS = {
                        "every joint command to the PEAK TORQUE of the real actuator the BOM sized for it, a "
                        "safety state machine (estop/stand/active/fall-damping), a watchdog, a teleop stub, and a "
                        "joint calibration routine. Every generated .py is compile-checked AND dry-run before it "
-                       "ships; the result includes that honest pass/fail verdict. No human writes the glue. YOU "
+                       "ships, and the stack is TORQUE-AUDITED: the declared ceilings are re-derived from the "
+                       "genome's BOM actuators and the emitted filter is EXECUTED at 10x each joint's datasheet "
+                       "peak, so an inflated ceiling or a filter that lets a command through fails validation "
+                       "with the joint and the margin named (`validation.torque_audit`). What that audit does "
+                       "NOT cover -- and the report says so in `torque_audit.scope` -- is whether code you write "
+                       "downstream routes its commands through the filter; .py files we did not emit are listed "
+                       "as `unaudited_scripts` and are never counted as checked. No human writes the glue. YOU "
                        "GET THE CODE, not just a verdict: the scripts are written to `scripts_dir` (kept, under "
                        "build/agent_builds/<robot_id>/scripts) and `files` gives an absolute path per file. "
                        "`config` -- the per-robot part (joint list, obs layout, the BOM actuators' torque "

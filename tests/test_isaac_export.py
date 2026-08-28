@@ -11,6 +11,7 @@ always run.
 """
 import ast
 import importlib.util
+import json
 import math
 import os
 import py_compile
@@ -181,6 +182,104 @@ class IsaacLabScaffoldTests(unittest.TestCase):
         efforts = list(man["actuator_effort_nm"].values())
         self.assertTrue(all(e > 0 for e in efforts))
         self.assertTrue(any(e > 3.0 for e in efforts), "leg motors should carry real torque, not a 1.0 stub")
+
+    def _assert_limits_belong_to_their_own_joint(self, gene, man, label):
+        """Every per-joint limit in the cfg is the one THIS joint's own segment was sized for.
+
+        A range check (`all(e > 0)`, `any(e > 3)`) is invariant under a PERMUTATION of the values, which is
+        exactly the failure this pins: ``export_isaac_lab`` used to pair the USD joint list against
+        ``gene.segments`` order BY POSITION, and on an amended body those orders differ.
+
+        The ``actuator_limits_unresolved == []`` assertion below is only worth writing because the list CAN be
+        non-empty: ``test_an_unresolvable_joint_is_named_not_handed_the_default`` drives that branch and
+        asserts what lands in it. Without that companion the assertion could never fail.
+
+        The expected segment is derived from the JOINT NAME (``<segment>_joint``, which the compiler builds by
+        construction for a composed/amended gene), deliberately NOT from the ``child`` field the exporter now
+        resolves through -- so this asserts the answer, not the implementation.
+        """
+        from virturoid.services.usd_exporter import _actuator_limits
+        limits = _actuator_limits(gene)
+        eff, vel = man["actuator_effort_nm"], man["actuator_velocity_radps"]
+        self.assertEqual(man["actuator_limits_unresolved"], [], f"{label}: unresolved joints")
+        checked = 0
+        for jname, e in eff.items():
+            self.assertTrue(jname.endswith("_joint"), f"{label}: {jname} breaks the naming convention")
+            seg = jname[: -len("_joint")]
+            self.assertIn(seg, limits, f"{label}: {jname} names no segment of this gene")
+            self.assertAlmostEqual(float(e), float(limits[seg][0]), places=6,
+                                   msg=f"{label}: {jname} carries {e} Nm, but its own segment {seg} is sized "
+                                       f"for {limits[seg][0]} Nm")
+            self.assertAlmostEqual(float(vel[jname]), float(limits[seg][1]), places=6,
+                                   msg=f"{label}: {jname}'s velocity limit belongs to another joint")
+            self.assertEqual(man["joint_segment"].get(jname), seg, f"{label}: manifest pairing for {jname}")
+            checked += 1
+        # a permutation is only VISIBLE when the values differ; a body sized to one torque everywhere would
+        # make the assertions above pass under any shuffle.
+        self.assertGreater(len(set(round(float(v), 6) for v in eff.values())), 1,
+                           f"{label}: all efforts identical -- this check could not see a permutation")
+        return checked
+
+    def test_per_joint_limits_belong_to_their_own_joint_composed(self):
+        from virturoid.services.isaac_lab_exporter import export_isaac_lab
+        gene = _gene("a quadruped robot dog that walks")
+        man = export_isaac_lab(gene, os.path.join(self.tmp, "pairc"), robot_name="pairc")
+        self.assertGreaterEqual(self._assert_limits_belong_to_their_own_joint(gene, man, "composed"), 4)
+
+    def test_an_unresolvable_joint_is_named_not_handed_the_default(self):
+        """The NEGATIVE side of ``actuator_limits_unresolved``, without which the ``== []`` assertions in
+        ``_assert_limits_belong_to_their_own_joint`` are decorative -- an always-empty list cannot fail.
+
+        Drives the real branch (`sname is None or sname not in limits`) the way production reaches it: a joint
+        whose driven segment the BOM sizes NO actuator for. The joint must be NAMED in the manifest and called
+        out in the README, never silently handed the 20 Nm placeholder as if it were a measured motor limit.
+        """
+        from virturoid.services import usd_exporter
+        from virturoid.services.isaac_lab_exporter import export_isaac_lab
+        gene = _gene("a quadruped robot dog that walks")
+        real = usd_exporter._actuator_limits
+        full = real(gene)
+        dropped = sorted(full)[0]                     # one segment the parts list will not size
+
+        def _missing_one(g):
+            return {k: v for k, v in real(g).items() if k != dropped}
+
+        with mock.patch.object(usd_exporter, "_actuator_limits", _missing_one):
+            man = export_isaac_lab(gene, os.path.join(self.tmp, "unres"), robot_name="unres")
+
+        unresolved = man["actuator_limits_unresolved"]
+        self.assertEqual(unresolved, [f"{dropped}_joint"], man["joint_segment"])
+        self.assertNotIn(f"{dropped}_joint", man["joint_segment"])          # no fabricated pairing
+        self.assertEqual(man["actuator_effort_nm"][f"{dropped}_joint"], 20.0)   # the placeholder, disclosed
+        # every OTHER joint still carries its own segment's real limit -- the gap is scoped, not contagious
+        for jname, seg in man["joint_segment"].items():
+            self.assertAlmostEqual(float(man["actuator_effort_nm"][jname]), float(full[seg][0]), places=6)
+        readme = open(man["files"]["readme"], encoding="utf-8").read()
+        self.assertIn("could NOT be resolved", readme)
+        self.assertIn("actuator_limits_unresolved", readme)
+        manifest = json.loads(open(os.path.join(self.tmp, "unres", "manifest.json"), encoding="utf-8").read())
+        self.assertEqual(manifest["actuator_limits_unresolved"], unresolved)   # re-read from the written file
+
+    def test_per_joint_limits_survive_an_amend(self):
+        """The regression that the range check could not see: ``add_limb`` appends its chain at the END of
+        ``gene.segments`` while the compiler emits it under its mid-tree parent, so kinematic-DFS order and
+        list order diverge. How MANY joints that corrupts depends on WHERE you mount, so no single ratio
+        describes it: sweeping the mid-tree parent on this 19-DOF body, the old positional pairing handed a
+        joint the wrong segment's motor 18/19 (`neck`, the parent this test picks), 14/19 (`leg1_l_*`) and
+        11/19 (`leg1_r_*`) -- of which the effort/velocity numbers actually differ on 12, 9 and 7."""
+        from virturoid.services.edit_operators import add_limb
+        from virturoid.services.isaac_lab_exporter import export_isaac_lab
+        gene = _gene("a quadruped robot dog that walks")
+        # a MID-TREE parent (has a parent of its own AND has children), picked from the body rather than
+        # hard-coded, so the test does not depend on the composer's naming
+        names = {s.name for s in gene.segments}
+        mid = next(s.name for s in gene.segments
+                   if s.parent in names and any(c.parent == s.name for c in gene.segments))
+        amended, _ = add_limb(gene, segments=3, name="limb")            # on the root
+        amended, _ = add_limb(amended, parent=mid, segments=2, name="mast")   # mid-tree: the reorder
+        man = export_isaac_lab(amended, os.path.join(self.tmp, "paira"), robot_name="paira")
+        n = self._assert_limits_belong_to_their_own_joint(amended, man, "amended")
+        self.assertGreater(n, _gene_dof(gene), "the amend should have added actuated joints")
 
     def test_legged_gets_velocity_env_manipulator_does_not(self):
         _, quad = self._pkg("a quadruped robot dog that walks", "qv")

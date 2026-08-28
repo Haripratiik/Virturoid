@@ -119,7 +119,17 @@ def _mimic_joints_from_urdf(urdf: str) -> dict:
     return out
 
 
-def export_ros2_package(package_dir: Path, package_name: str = "virturoid_robot") -> Path:
+def export_ros2_package(package_dir: Path, package_name: str = "virturoid_robot",
+                        actuator_map: dict | None = None, actuator_map_source: str | None = None) -> Path:
+    """``actuator_map`` (segment OR joint name -> catalog part -- the namespace is DECIDED below by
+    ``_map_key_namespace``, never assumed) lets a caller that has the bill of materials IN HAND pass it in. The
+    package build writes the BOM to disk AFTER the URDF/ROS2 export, so reading it off disk here found nothing
+    on a fresh build; passing it removes the ordering dependency entirely.
+
+    ``actuator_map`` is honoured whenever it is not ``None`` -- an EMPTY dict means "the caller knows there is
+    no parts list for this build", and must NOT silently fall back to a file on disk that may belong to a
+    previous build of a different robot. ``actuator_map_source`` is the provenance string the emitted YAML
+    prints; the header may only claim the parts came from a bill of materials it can NAME."""
     package_dir = Path(package_dir)
     genome = json.loads((package_dir / "robot" / "robot_genome.json").read_text(encoding="utf-8"))
     joints = [j["name"] for j in genome.get("joints", [])]
@@ -137,6 +147,7 @@ def export_ros2_package(package_dir: Path, package_name: str = "virturoid_robot"
     # via robot_state_publisher (was absent -> a ROS 2 package with no robot to describe).
     _src_urdf = package_dir / "robot" / "robot.urdf"
     mimic: dict = {}
+    _urdf_text = ""
     if _src_urdf.exists():
         (root / "urdf").mkdir(parents=True, exist_ok=True)
         _urdf_text = _copy_urdf_meshes(package_dir, root, package_name, _src_urdf.read_text(encoding="utf-8"))
@@ -181,10 +192,22 @@ def export_ros2_package(package_dir: Path, package_name: str = "virturoid_robot"
     )
     # ros2_control DEPLOY substrate (§4.7): a controller-manager config + a BOM-keyed hardware-interface map (the
     # bridge to the REAL motors you bought) + the safety filter the node applies before commanding a motor.
-    actuator_map = _read_actuator_map(package_dir)
+    if actuator_map is None:
+        actuator_map, disk_src = _read_actuator_map(package_dir)
+        amap_source = actuator_map_source or disk_src
+    else:
+        actuator_map = dict(actuator_map)
+        amap_source = actuator_map_source or "handed to the exporter by the caller (source not stated)"
+    # A parts list keys its map EITHER by the link a joint drives (build_bom) OR by the joint's own name
+    # (build_bom_from_genome), and both land at the same path. Decide which from THIS body's own name sets,
+    # once for the whole map, then resolve strictly inside that namespace.
+    seg_of = _joint_to_segment(genome, _urdf_text)
+    _link_names = [l if isinstance(l, str) else (l or {}).get("name", "") for l in genome.get("links", []) or []]
+    ns = _map_key_namespace(actuator_map, commandable, seg_of, _link_names)
+    gaps = _unresolved_joints(commandable, actuator_map, seg_of, ns["namespace"])
     (root / "config" / "ros2_control.yaml").write_text(_ros2_control_yaml(commandable, mimic), encoding="utf-8")
     (root / "config" / "hardware_interface.yaml").write_text(
-        _hardware_interface_yaml(commandable, actuator_map, mimic), encoding="utf-8")
+        _hardware_interface_yaml(commandable, actuator_map, mimic, seg_of, amap_source, ns), encoding="utf-8")
     (root / package_name / "safety_filter.py").write_text(_SAFETY_FILTER_PY, encoding="utf-8")
     (root / "test" / "test_task_regression.py").write_text(_TEST_PY, encoding="utf-8")
     # AERIAL: a quadcopter has no actuated joints, so ros2_control joint trajectories are the wrong interface.
@@ -201,8 +224,20 @@ def export_ros2_package(package_dir: Path, package_name: str = "virturoid_robot"
         f"reference (rotor layout + gains) Virturoid used in sim; the joint `evaluation_node` is inert for this body.\n"
         if flight is not None else
         "## Deploy to hardware (§4.7)\n"
-        "`config/ros2_control.yaml` (controller manager) + `config/hardware_interface.yaml` (each joint -> its\n"
-        "real BOM actuator) wire the controller to ros2_control; set `hardware_plugin` to your motor-bus driver\n"
+        "`config/ros2_control.yaml` (controller manager) + `config/hardware_interface.yaml` wire the controller\n"
+        f"to ros2_control. {len(commandable) - len(gaps)} of {len(commandable)} commandable joints are mapped to\n"
+        f"the part assigned to {'the joint itself' if ns['namespace'] == _NS_JOINT else 'the link they drive'}"
+        f" by the parts list this export read ({amap_source})"
+        + ("" if not gaps else
+           f"; {len(gaps)} are NOT (`" + "`, `".join(j for j, _ in gaps[:6])
+           + ("`" if len(gaps) <= 6 else "`, ...")
+           + "`) — " + ("the key namespace of that parts list could not be determined, so nothing was resolved\n"
+                        "from it; see `KEY NAMESPACE: UNDETERMINED` at the top of `config/hardware_interface.yaml`.\n"
+                        "That is NOT a claim that it names no actuator for them"
+                        if ns["namespace"] == _NS_UNDETERMINED else
+                        "the parts list names no actuator for them, so they carry `actuator: null` and are listed\n"
+                        "under `unresolved_joints:`. That is a gap in the parts list, not a field for you to fill in"))
+        + ". Set `hardware_plugin` to your motor-bus driver\n"
         "(Dynamixel / ODrive / CAN / EtherCAT). `" + package_name + "/safety_filter.py` clamps every command to\n"
         "joint + rate limits before a motor sees it. Validate the closed loop in sim first via\n"
         "`services/sim_ros_bridge` (MuJoCo as virtual hardware behind the same command/state interface).\n")
@@ -230,7 +265,8 @@ def export_ros2_package(package_dir: Path, package_name: str = "virturoid_robot"
     return root
 
 
-def maybe_export_ros2_package(package_dir, package_name: str = "virturoid_robot"):
+def maybe_export_ros2_package(package_dir, package_name: str = "virturoid_robot",
+                              actuator_map: dict | None = None, actuator_map_source: str | None = None):
     """Export a ROS2 package if the build has a Robot Genome; never raise into the build pipeline.
 
     Returns the package root path on success, else None (e.g. genome not written yet, or no joints).
@@ -241,22 +277,171 @@ def maybe_export_ros2_package(package_dir, package_name: str = "virturoid_robot"
     if not (package_dir / "robot" / "robot_genome.json").exists():
         return None
     try:
-        return export_ros2_package(package_dir, package_name)
+        return export_ros2_package(package_dir, package_name, actuator_map=actuator_map,
+                                   actuator_map_source=actuator_map_source)
     except Exception:  # noqa: BLE001 - ROS2 export must never break the core build
         return None
 
 
-def _read_actuator_map(package_dir: Path) -> dict:
-    """The joint -> real-motor map from the bill of materials, so the hardware interface names the ACTUAL part
-    per joint. Empty (generic) when no BOM was written with the package."""
-    for rel in ("robot/bill_of_materials.json", "reports/bill_of_materials.json"):
+_BOM_SEARCH_PATHS = ("robot/bill_of_materials.json", "reports/bill_of_materials.json",
+                     "bom.json", "reports/bom.json", "bom/bom.json")
+
+
+def _read_actuator_map(package_dir: Path) -> tuple:
+    """``(the parts list's ``actuator_map`` as written, the provenance string naming where it came from)``.
+
+    WHICH NAMESPACE THAT MAP IS KEYED IN IS NOT KNOWN HERE and this function does not assume one. ``bom_builder``
+    has TWO producers: ``build_bom`` keys by SEGMENT, ``build_bom_from_genome`` keys by JOINT NAME, and both land
+    at ``robot/bill_of_materials.json``. ``_map_key_namespace`` below decides which, from the body.
+
+    Empty map + a "no parts list found" provenance when no BOM was written with the package -- and the emitted
+    YAML prints that provenance, so the header can never claim a bill of materials the code did not read.
+
+    ``bom.json`` at the package root is in the list because that is where ``agent_design_tools.export_held``
+    lands the parts list -- the agent-facing door. Reading only the two ``bill_of_materials.json`` paths meant
+    the map was EMPTY on every export that came through that door, so every row fell back to the generic
+    string before the key lookup below even ran.
+    """
+    for rel in _BOM_SEARCH_PATHS:
         p = package_dir / rel
         if p.exists():
             try:
-                return json.loads(p.read_text(encoding="utf-8")).get("actuator_map", {}) or {}
-            except (json.JSONDecodeError, OSError):
-                pass
-    return {}
+                return (json.loads(p.read_text(encoding="utf-8")).get("actuator_map", {}) or {},
+                        f"read from {rel} in this package")
+            except (json.JSONDecodeError, OSError) as exc:
+                return {}, f"{rel} is present in this package but unreadable ({type(exc).__name__})"
+    return {}, ("no bill of materials was found in this package (looked for "
+                + ", ".join(_BOM_SEARCH_PATHS) + ")")
+
+
+def _joint_to_segment(genome: dict, urdf_text: str = "") -> dict:
+    """``{urdf_joint_name: the link/segment it drives}`` -- the relation, NOT a claim about how the parts list
+    is keyed. ``build_bom`` writes its map under these VALUES; ``build_bom_from_genome`` writes its map under
+    these KEYS. Which one a given package carries is decided by ``_map_key_namespace``, not assumed here.
+
+    ``build_bom`` keys ``actuator_map`` by SEGMENT (``leg0_0``); the URDF/genome joint that drives that
+    segment is a different string (``leg0_0_joint``). Looking the joint name up in that map therefore missed
+    on every joint of every composed body: the hit rate was ZERO for whatever joint count the body has --
+    measured 0 of 14 on the composed quadruped used here (the count is that body's, not a constant; an earlier
+    note said 0/12 from a different body). A total failure that printed as a to-do on every row.
+    The relation is already recorded (the genome joint's ``child_link``, the URDF
+    joint's ``<child link=...>``), so it is READ rather than reconstructed by string surgery: an imported
+    model whose MJCF joint names do not follow ``<segment>_joint`` still resolves.
+    """
+    import xml.etree.ElementTree as ET
+
+    out: dict = {}
+    for j in genome.get("joints", []) or []:
+        if not isinstance(j, dict):
+            continue
+        name = j.get("name")
+        child = j.get("child_link") or j.get("child")
+        if isinstance(child, dict):
+            child = child.get("link")
+        if name and child:
+            out[str(name)] = str(child)
+    if urdf_text:
+        try:
+            root = ET.fromstring(urdf_text)
+        except ET.ParseError:
+            root = None
+        if root is not None:
+            for jnt in root.findall("joint"):
+                name, ch = jnt.get("name"), jnt.find("child")
+                if name and ch is not None and ch.get("link"):
+                    out.setdefault(str(name), str(ch.get("link")))
+    return out
+
+
+_NS_SEGMENT, _NS_JOINT, _NS_UNDETERMINED, _NS_EMPTY = "segment", "joint", "undetermined", "empty"
+
+
+def _segment_key(joint: str, seg_of: dict) -> str | None:
+    """The SEGMENT name this joint drives, or ``None`` when the package records none.
+
+    Recorded first (genome ``child_link`` / URDF ``<child link=...>``). Only when nothing is recorded does it
+    fall back to the ``<segment>_joint`` stem -- a naming convention, not a fact, and used only as a segment
+    name. It is never used as a joint-namespace key.
+    """
+    seg = seg_of.get(joint)
+    if seg:
+        return str(seg)
+    return joint[:-6] if joint.endswith("_joint") and len(joint) > 6 else None
+
+
+def _map_key_namespace(actuator_map: dict, joints: list, seg_of: dict, link_names=()) -> dict:
+    """DECIDE, ONCE PER MAP, which namespace a parts list keys ``actuator_map`` in -- from the body, not per joint.
+
+    ``bom_builder`` has two producers and they key DIFFERENTLY: ``build_bom`` by SEGMENT (``leg0_0``),
+    ``build_bom_from_genome`` by JOINT NAME (``base_yaw``). Both write ``robot/bill_of_materials.json``, so a
+    consumer reading one off disk cannot tell them apart from the file alone. Assuming either one is how the
+    strict-segment rule turned three correct manipulator rows into three nulls, and how the fall-through it
+    replaced let a known-but-unlisted segment borrow an unrelated part.
+
+    The evidence is the KEY SET against the body's own two name sets. ``n_seg`` = how many keys are segment
+    (link) names of this robot, ``n_joint`` = how many are joint names. Majority wins; a tie -- including a map
+    whose keys match NEITHER set, e.g. a previous robot's parts list -- is UNDETERMINED and is DISCLOSED rather
+    than guessed at. Majority rather than strict containment because a real segment-keyed list can carry a stray
+    joint-shaped key (tests/test_ros2_export.py pins exactly that case), and refusing to resolve there would
+    throw away rows the body itself decides.
+
+    Returns the record the emitted YAML prints, so the claim is only ever as strong as the evidence.
+    """
+    keys = {str(k) for k in actuator_map}
+    seg_names = ({str(v) for v in seg_of.values() if v}
+                 | {s for s in (_segment_key(j, seg_of) for j in joints) if s}
+                 | {str(l) for l in link_names if l})
+    joint_names = {str(j) for j in joints} | {str(k) for k in seg_of}
+    n_seg, n_joint = len(keys & seg_names), len(keys & joint_names)
+    if not keys:
+        ns = _NS_EMPTY
+    elif n_seg > n_joint:
+        ns = _NS_SEGMENT
+    elif n_joint > n_seg:
+        ns = _NS_JOINT
+    else:
+        ns = _NS_UNDETERMINED
+    return {"namespace": ns, "n_keys": len(keys), "n_seg": n_seg, "n_joint": n_joint}
+
+
+def _resolve_actuator(joint: str, actuator_map: dict, seg_of: dict, namespace: str) -> tuple:
+    """``(part_name_or_None, the key it looked for)`` for one joint, STRICTLY WITHIN ``namespace``.
+
+    Exactly ONE key is tried, and which one is decided by ``_map_key_namespace`` for the whole map before any
+    joint is resolved. In the SEGMENT namespace that key is the segment the joint drives; in the JOINT
+    namespace it is the joint's own name. Nothing falls through to the other namespace in either direction:
+      * segment -> joint fall-through was the original defect (a known-but-unlisted segment silently borrowing
+        an unrelated part -- 14 honest nulls became 14 confident wrong rows under a 100%-coverage header), and
+      * joint -> segment fall-through is its exact mirror (a joint with no entry of its own borrowing the part
+        that a SAME-NAMED segment carries, which belongs to a different joint entirely).
+    A genuine absence in the namespace the map is actually in is a GAP, and is reported as one.
+
+    UNDETERMINED (and an empty map) resolve NOTHING: the caller discloses that instead of guessing.
+    """
+    if namespace == _NS_JOINT:
+        part = actuator_map.get(joint)
+        return (str(part), joint) if part else (None, joint)
+    seg = _segment_key(joint, seg_of)
+    if namespace == _NS_SEGMENT:
+        if seg is None:
+            return None, f"{joint} (this package records no segment for it)"
+        part = actuator_map.get(seg)
+        return (str(part), seg) if part else (None, seg)
+    return None, (seg or joint)
+
+
+def _unresolved_joints(joints: list, actuator_map: dict, seg_of: dict, namespace: str) -> list:
+    """``[(joint, the_key_looked_for)]`` for every commandable joint the BOM names no part for.
+
+    ``namespace`` is REQUIRED on purpose: a default would let a future caller silently re-create the
+    strict-segment regression by forgetting to determine it.
+    """
+    out = []
+    for j in joints:
+        motor, key = _resolve_actuator(j, actuator_map, seg_of, namespace)
+        if motor is None:
+            out.append((j, key))
+    return out
 
 
 def _ros2_control_yaml(joints: list, mimic: dict | None = None) -> str:
@@ -285,13 +470,82 @@ def _ros2_control_yaml(joints: list, mimic: dict | None = None) -> str:
         "    state_interfaces: [position, velocity]\n")
 
 
-def _hardware_interface_yaml(joints: list, actuator_map: dict, mimic: dict | None = None) -> str:
+def _namespace_note(ns: dict) -> str:
+    """The comment block that says WHICH namespace the parts list was found to be keyed in, and on what evidence.
+
+    A reader cannot check a lookup they cannot see. The strict-segment regression was invisible to its author
+    because nothing printed said which key namespace the export had assumed.
+    """
+    n, k, s, j = ns["namespace"], ns["n_keys"], ns["n_seg"], ns["n_joint"]
+    if n == _NS_EMPTY:
+        return ""
+    if n == _NS_SEGMENT:
+        return (f"# KEY NAMESPACE: SEGMENT. {s} of this parts list's {k} keys are this robot's segment (link)\n"
+                f"# names and {j} are joint names, so each row is looked up under the segment its joint drives\n"
+                f"# and NOTHING else is tried -- a segment the list does not carry is a gap, never another part.\n")
+    if n == _NS_JOINT:
+        return (f"# KEY NAMESPACE: JOINT NAME. {j} of this parts list's {k} keys are this robot's joint names\n"
+                f"# and {s} are segment (link) names, so each row is looked up under the joint's OWN name and\n"
+                f"# NOTHING else is tried -- a joint the list does not carry is a gap, and a joint never takes\n"
+                f"# the part a same-named SEGMENT carries, because that part belongs to a different joint.\n")
+    return (f"# KEY NAMESPACE: UNDETERMINED -- NOTHING BELOW WAS RESOLVED FROM THIS PARTS LIST. Its {k} key(s)\n"
+            f"# match {s} of this robot's segment (link) names and {j} of its joint names; with no majority\n"
+            f"# there is no decidable answer to which namespace it is keyed in, and resolving anyway would mean\n"
+            f"# guessing. A list whose keys match NEITHER set is usually a DIFFERENT robot's parts list. Every\n"
+            f"# joint below is `actuator: null` for that reason -- it is not a claim that the list is empty.\n")
+
+
+def _hardware_interface_yaml(joints: list, actuator_map: dict, mimic: dict | None = None,
+                             seg_of: dict | None = None, actuator_map_source: str | None = None,
+                             namespace: dict | None = None) -> str:
+    seg_of = seg_of or {}
+    ns = namespace or _map_key_namespace(actuator_map, joints, seg_of)
+    nsk = ns["namespace"]
     rows = []
+    gaps: list = []
     for j in joints:
-        motor = actuator_map.get(j) or "GENERIC position actuator (set from the BOM)"
-        rows.append(f'  {j}:\n    actuator: "{motor}"\n    command_interface: position\n'
-                    f"    state_interfaces: [position, velocity]")
+        motor, key = _resolve_actuator(j, actuator_map, seg_of, nsk)
+        if motor is None:
+            # NAMED GAP, not an instruction. The old fallback string ("GENERIC position actuator (set from the
+            # BOM)") was phrased as a to-do, so a hardware team read a SILENT TOTAL FAILURE -- every row
+            # unresolved -- as a small piece of remaining setup. A null with the joint and the key it looked
+            # for cannot be mistaken for a part number, and `unresolved_joints:` below counts them.
+            gaps.append((j, key))
+            # The row states what actually happened to THIS joint. Under a determined namespace a key was
+            # looked up and was absent; under an UNDETERMINED one no key was looked up at all, and saying
+            # "no BOM entry ... (looked for X)" would assert both a lookup that never ran and an absence
+            # that was never established.
+            why = (f"no BOM entry for joint {j} (looked for the part assigned to {key})"
+                   if nsk != _NS_UNDETERMINED else
+                   f"not resolved: the key namespace of this package's parts list is undetermined, so no key "
+                   f"was looked up for {j} (see KEY NAMESPACE in the header)")
+            rows.append(
+                f"  {j}:\n"
+                f"    actuator: null\n"
+                f'    unresolved: "{why}"\n'
+                f"    command_interface: position\n"
+                f"    state_interfaces: [position, velocity]")
+        else:
+            rows.append(f'  {j}:\n    actuator: "{motor}"\n    bom_key: "{key}"\n'
+                        f"    command_interface: position\n"
+                        f"    state_interfaces: [position, velocity]")
     body = "\n".join(rows) or "  {}"
+    if gaps:
+        # The REASON must match what actually happened. Under a determined namespace the list genuinely names
+        # no part; under an UNDETERMINED one the list may well name parts and this export simply may not say
+        # which joint they belong to. Printing "names no part for them" there would be a false claim about the
+        # file sitting beside it -- the exact failure mode the strict-segment rule shipped.
+        why = ("# the bill of materials shipped with this package assigns no actuator to them.\n"
+               if nsk != _NS_UNDETERMINED else
+               "# the key namespace of this package's parts list could not be determined (see the header), so\n"
+               "# no key was looked up. The list may well assign each of them a part; this export cannot say\n"
+               "# which, and will not guess.\n")
+        # `looked_for:` may only name a key that was actually tried.
+        detail = ("".join(f"  - joint: {j}\n    looked_for: {k}\n" for j, k in gaps)
+                  if nsk != _NS_UNDETERMINED else
+                  "".join(f"  - joint: {j}\n    looked_for: null   # namespace undetermined\n" for j, _k in gaps))
+        body += ("\n\n# Joints this export could NOT name a real part for. Nothing below is a default motor:\n"
+                 + why + "unresolved_joints:\n" + detail)
     tail = ""
     if mimic:
         # These have NO motor to buy or command: they are the far end of a transmission the driver joint turns.
@@ -302,10 +556,28 @@ def _hardware_interface_yaml(joints: list, actuator_map: dict, mimic: dict | Non
                 + "".join(f'  {d}:\n    driven_by: "{m["joint"]}"\n    multiplier: {m["multiplier"]:.10g}\n'
                           f'    offset: {m["offset"]:.10g}\n    state_interfaces: [position, velocity]\n'
                           for d, m in mimic.items()))
+    n_named = len(joints) - len(gaps)
+    # PROVENANCE FIRST. The header used to assert "the bill of materials" without saying WHICH -- and on a
+    # rebuild into a reused directory that was the PREVIOUS robot's parts list, so a 100%-coverage claim sat
+    # above rows naming motors this package's own bill_of_materials.json does not assign. Name the source, so
+    # the claim is only ever as strong as what was actually read.
+    src = actuator_map_source or "source not recorded"
+    # WHAT the source assigns the part TO depends on the namespace it keys, so the sentence follows the finding
+    # rather than asserting one shape of parts list for every package.
+    assigned_to = ("the joint itself" if nsk == _NS_JOINT else "the link they drive")
+    head = (
+        f"# PARTS SOURCE: {src}.\n"
+        f"# {n_named} of {len(joints)} commandable joints are mapped to the actuator THAT source assigns to\n"
+        f"# {assigned_to}, plus the ros2_control interface each exposes. Set hardware_plugin to\n"
+        f"# your bus driver (Dynamixel / ODrive / CAN / EtherCAT) before deploying.\n"
+        + _namespace_note(ns))
+    if gaps and nsk != _NS_UNDETERMINED:
+        head += (f"# {len(gaps)} joint(s) are NOT mapped: this package's bill of materials names no part for them.\n"
+                 f"# They carry `actuator: null` and are listed again under `unresolved_joints:` -- that is a GAP\n"
+                 f"# in the parts list, not a step left for you to fill in with a motor of your choosing.\n")
     return (
-        "# Maps each robot joint to the REAL actuator from the bill of materials and the ros2_control interface it\n"
-        "# exposes. Set hardware_plugin to your bus driver (Dynamixel / ODrive / CAN / EtherCAT) before deploying.\n"
-        'hardware:\n  hardware_plugin: "REPLACE_WITH_YOUR_DRIVER  # e.g. dynamixel_hardware/DynamixelHardware"\n'
+        head
+        + 'hardware:\n  hardware_plugin: "REPLACE_WITH_YOUR_DRIVER  # e.g. dynamixel_hardware/DynamixelHardware"\n'
         "joints:\n" + body + "\n" + tail)
 
 
