@@ -11,7 +11,7 @@ breakdown of the worst (a large quadruped, 663.7 s end to end) says where it goe
     render        1.3 s
 
 This file guards the three fixes, and it is written to make the ONE THING THAT MUST NOT HAPPEN impossible: a
-build that quietly stops fitting. The fit is what makes an authored body walk (7/7 proportion variants,
+build that quietly stops fitting. The fit is what makes an authored body walk (7/7 proportion variants, commit 33e0800,
 docs/breaking_the_cotuning_wall.md), so every test here asserts on a DISCLOSURE, never on a duration -- a test
 that asserted "this finishes in under N seconds" would go red on a loaded machine and, worse, would tempt
 someone to buy the number by cutting the search.
@@ -223,7 +223,9 @@ def test_an_unbounded_build_never_produces_a_deadline():
 def test_no_eval_budget_by_default_which_is_the_whole_point():
     """THE HARD CONSTRAINT OF TASK #291, guarded at the one place a cap could become the default. A number here
     instead of ``None`` would silently truncate the per-body fit for every build in the product, and the fit is
-    what makes an authored body walk (7/7 proportion variants, docs/breaking_the_cotuning_wall.md)."""
+    what makes an authored body walk (7/7 proportion variants, commit 33e0800 -- six of the seven FELL BY ROLL-OVER at the
+    shipped default and reached CREDIBLE WALK with an op-point of their own; the 4/4 authored-animal run in
+    docs/breaking_the_cotuning_wall.md is a DIFFERENT experiment and does not carry this number)."""
     rep = BP.BuildProgress("t", printing=False)
     assert rep.evals_budget is None and rep.evals_remaining() is None
     rep.spend_evals(500)

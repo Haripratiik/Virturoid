@@ -1371,8 +1371,9 @@ def create_robot(args: dict) -> dict:
       corners of the parameter box all collapse in the first 2% of the horizon, no point between them can be
       ranked either. "A biped cannot be fitted" was proposed for this slot and REFUTED by the first measurement
       taken to justify it -- see ``gait_flywheel.crawl_deployment_match``.
-    * ``tune_gait`` still DEFAULTS TRUE. The fit is what makes an authored body walk at all (7/7 proportion
-      variants, docs/breaking_the_cotuning_wall.md); defaulting it off would buy a fast build that ships a body
+    * ``tune_gait`` still DEFAULTS TRUE. The fit is what makes an authored body walk at all (7/7 proportion variants,
+      commit 33e0800 -- six of the seven FELL at the shipped default and walked with an op-point of their
+      own; docs/breaking_the_cotuning_wall.md holds the separate 4/4 authored-animal run, not this one); defaulting it off would buy a fast build that ships a body
       tuned at another robot's operating point, which is the dishonesty the fit exists to remove.
 
     RE-MEASURED 2026-08-12 on this checkout, same three prompts, through ``call_tool`` with the defaults:

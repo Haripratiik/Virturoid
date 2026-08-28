@@ -1003,7 +1003,8 @@ _DEGENERATE_INTEGRATION_FRAC = 0.02
 #: see ``_budget_from_env`` for the override chain and ``search_gait``'s ``deadline`` for where it is enforced.
 #:
 #: WHY 180, AND WHY NOT SMALLER. The fit is the thing that makes an authored body walk at all (docs/
-#: breaking_the_cotuning_wall.md; 7/7 proportion variants), so the cost of cutting it too early is the whole
+#: 7/7 proportion variants, commit 33e0800 -- six of the seven FELL at the shipped
+#: default; breaking_the_cotuning_wall.md is the separate 4/4 authored-animal run), so the cost of cutting it too early is the whole
 #: correctness win. The number is therefore set from the measured ADOPTION times, NOT from the failure times.
 #: Every adoption on this checkout landed well inside a minute of searching — grounded authored hexapod 24.2 s
 #: / 3 evals, cat 56.0 s / 87 evals, and through ``call_tool`` a biped that adopted a +3.732 m robust walk at
