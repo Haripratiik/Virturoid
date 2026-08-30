@@ -8,7 +8,7 @@ It runs as a native desktop studio with a live 3D viewport, and the whole engine
 
 ![Virturoid pipeline: from a prompt to a trained, buildable robot](assets/architecture.svg)
 
-Every body below was generated from a one-line prompt by the same pipeline — no per-species templates:
+Every body below was generated from a one-line prompt by the same pipeline, no per-species templates:
 
 ![Robots generated from prompts: a manipulator, quadruped, hexapod, mobile base, humanoid, and octopod](assets/robot_gallery.png)
 
@@ -66,8 +66,8 @@ Every body below was generated from a one-line prompt by the same pipeline — n
 
 **Use it**
 - A native desktop studio with a live MuJoCo viewport, or a full command-line interface.
-- Edits a built robot in plain language — make it taller, give it carbon-fiber legs, or make it carry 10 kg — and re-engineers the body for it, sizing bigger motors and updating the bill of materials, then re-verifying.
-- Ingests an existing robot project: drop a folder with a URDF or MJCF model, a bill of materials, CAD meshes, and a plain-English description, and one agent parses all of it into a single editable, simulate-able robot — even when the referenced meshes are missing.
+- Edits a built robot in plain language, make it taller, give it carbon-fiber legs, or make it carry 10 kg, and re-engineers the body for it, sizing bigger motors and updating the bill of materials, then re-verifying.
+- Ingests an existing robot project: drop a folder with a URDF or MJCF model, a bill of materials, CAD meshes, and a plain-English description, and one agent parses all of it into a single editable, simulate-able robot, even when the referenced meshes are missing.
 - Runs and improves your own controller: hand it your control script or policy and it executes it in real physics, then tunes it into a better gait.
 - Exports a controller bundle, a runnable ROS 2 package, and browsable reports.
 - Hands off to NVIDIA Isaac Sim / Isaac Lab: exports an OpenUSD physics articulation (transcribed from the exact model Virturoid simulates, then re-read and round-tripped through OpenUSD to confirm it loads cleanly) plus a ready-to-edit Isaac Lab `ArticulationCfg` with real per-joint motor limits, a standalone spawn script, and, for legged robots, a velocity-tracking locomotion environment that subclasses Isaac Lab's own task. Virturoid designs and pre-screens the robot; your Isaac pipeline does the high-fidelity training and sim-to-real.
@@ -92,17 +92,17 @@ A design is only useful if you could actually build it, so Virturoid grounds eve
 
 ### 3. Learning to move
 
-The Robot Genome compiles to a MuJoCo model and runs in real physics. What ships today is a **scripted gait that is tuned per body by search** — and the tuning is real learning, not a lookup.
+The Robot Genome compiles to a MuJoCo model and runs in real physics. What ships today is a **scripted gait that is tuned per body by search**, and the tuning is real learning, not a lookup.
 
 A structural wave-gait engine drives any leg count, and a **CEM search** fits that gait's parameters to each new body against an un-gameable reward (forward travel counts only when the robot also stayed upright, kept a real step cadence, and survived the episode). Leg **stiffness** turned out to be the decisive dimension: on a spindly body the same gait is rejected as a *slide* at `kp=32` and passes as a **credible walk** at `kp=250`. An OpenAI-ES trainer for morphology-agnostic policies (an attention network reading one token per joint) also runs on CPU.
 
-**GPU training is wired but optional.** With a CUDA box attached, MJX runs PPO over thousands of parallel robots behind an enforced CPU↔GPU parity gate, and a policy is only banked if it earns a credible verdict on the CPU deploy path. PPO converges in simulation; closing the last of the sim-to-deploy gap into a banked neural walk is the open frontier, so **no learned neural policy ships as the default controller** — the honest headline is *tuned, verified gaits that compound as reusable assets*.
+**GPU training is wired but optional.** With a CUDA box attached, MJX runs PPO over thousands of parallel robots behind an enforced CPU↔GPU parity gate, and a policy is only banked if it earns a credible verdict on the CPU deploy path. PPO converges in simulation; closing the last of the sim-to-deploy gap into a banked neural walk is the open frontier, so **no learned neural policy ships as the default controller**, the honest headline is *tuned, verified gaits that compound as reusable assets*.
 
 Rather than learn a gait from a dead stop, the policy learns a **residual on top of a rhythmic gait prior**, using position control toward a default stance. A policy that starts from pure noise tends to collapse into a lunge, but giving it a rhythm to refine produces a robot that takes real steps and stays upright. Arms learn a **contact grasp** the same way. Training can run under **domain randomization** so a controller is robust to the gap between simulation and real hardware.
 
 ### 4. Running a task
 
-A robot is judged by whether it can do the job, not just whether it stands up. From the prompt, Virturoid **proposes a verifiable task**, checks it against the robot's morphology so the task fits the body, **generates a scene specific to that task** — sorting bins, a stacking target, a push goal, a lift shelf, a navigation course, or a maze sized to the robot — and runs the matching **real skill**: pick and place, sort, navigate, or locomote. The result is measured, and a build that fails its task is reported as such.
+A robot is judged by whether it can do the job, not just whether it stands up. From the prompt, Virturoid **proposes a verifiable task**, checks it against the robot's morphology so the task fits the body, **generates a scene specific to that task**, sorting bins, a stacking target, a push goal, a lift shelf, a navigation course, or a maze sized to the robot, and runs the matching **real skill**: pick and place, sort, navigate, or locomote. The result is measured, and a build that fails its task is reported as such.
 
 ![Each task generates its own scene, sized to the robot: sort, stack, push, lift, navigate, maze](assets/scene_generation.png)
 
@@ -113,9 +113,9 @@ A robot is judged by whether it can do the job, not just whether it stands up. F
 
 ### 6. The flywheel
 
-Every verified gait and skill is banked into a **morphology vector space** and a linked **project memory**. When you ask for a new robot, Virturoid finds its nearest neighbors and **warm-starts from their tuned parameters** instead of searching from scratch — a brand-new quadruped recalls real banked gait parameters, not the shipped defaults.
+Every verified gait and skill is banked into a **morphology vector space** and a linked **project memory**. When you ask for a new robot, Virturoid finds its nearest neighbors and **warm-starts from their tuned parameters** instead of searching from scratch, a brand-new quadruped recalls real banked gait parameters, not the shipped defaults.
 
-What is measured today is **asset compounding**: the library of verified, recallable gaits grows with use, and warm-started bodies start from a working region instead of zero. The harness that would prove *capability* compounding — a held-out success curve against shuffled-label and other controls — is built and unit-tested, but has not yet been run at corpus scale, so it is stated as designed, not proven.
+What is measured today is **asset compounding**: the library of verified, recallable gaits grows with use, and warm-started bodies start from a working region instead of zero. The harness that would prove *capability* compounding, a held-out success curve against shuffled-label and other controls, is built and unit-tested, but has not yet been run at corpus scale, so it is stated as designed, not proven.
 
 ### 7. The readiness gate
 
@@ -123,7 +123,7 @@ Each build is checked stage by stage against the artifacts actually on disk: rea
 
 ### 8. Bring your own robot
 
-Virturoid is not only a generator; it is a simulation home for robots you already have. Drop a project folder — a URDF or MJCF model, a bill of materials, CAD meshes, and a plain-English description like *"aluminum chassis, carbon-fiber legs, carries a 5 kg payload"* — and one ingestion agent parses all of it into a single editable robot. It imports the model (recovering the kinematic structure even when the referenced meshes are missing), reads the description into typed materials and payload and applies them, and folds in the parts list. From there the same tools that build a robot amend and improve it: ask it to carry more and it re-sizes the motors and updates the bill of materials. You can also hand it your own control script or policy — it runs the controller in real physics, then warm-starts a search from your parameters to tune it into a better gait, and keeps your controller if it cannot honestly beat it.
+Virturoid is not only a generator; it is a simulation home for robots you already have. Drop a project folder, a URDF or MJCF model, a bill of materials, CAD meshes, and a plain-English description like *"aluminum chassis, carbon-fiber legs, carries a 5 kg payload"*, and one ingestion agent parses all of it into a single editable robot. It imports the model (recovering the kinematic structure even when the referenced meshes are missing), reads the description into typed materials and payload and applies them, and folds in the parts list. From there the same tools that build a robot amend and improve it: ask it to carry more and it re-sizes the motors and updates the bill of materials. You can also hand it your own control script or policy, it runs the controller in real physics, then warm-starts a search from your parameters to tune it into a better gait, and keeps your controller if it cannot honestly beat it.
 
 ## Project structure
 
@@ -175,7 +175,7 @@ python scripts/run_mvp_demo.py --mini      # -> build/demo/index.html : robots b
 ```
 
 A self-contained gallery: every robot is composed from a prompt, simulated in MuJoCo, and labelled with the
-verdict it actually earned — including the ones that fail. Nothing here calls an LLM, so it runs on a fresh clone
+verdict it actually earned, including the ones that fail. Nothing here calls an LLM, so it runs on a fresh clone
 with no keys configured. Add `VIRTUROID_LLM_BACKEND=openai` + `OPENAI_API_KEY` to have a language model author
 the anatomy instead of the offline composer; the physics, verdicts, and exports are identical either way.
 
@@ -220,7 +220,7 @@ robot comes in with its own link names and structure preserved rather than repla
 
 Virturoid is agent-first: it runs on **your** LLM subscription, not ours. Point Claude Code / Claude Desktop
 (or any MCP client) at the built-in server and it can author, edit, verify, train, export, and **ingest** robots
-through one tool surface — with zero tokens billed to Virturoid.
+through one tool surface, with zero tokens billed to Virturoid.
 
 ```bash
 # start the server (stdio JSON-RPC; nothing is billed to us)
@@ -254,7 +254,7 @@ cp .env.example .env
 | `VIRTUROID_GPU_SSH` | SSH target of a GPU box for training, for example `user@host` |
 
 Bring your own subscription: set `VIRTUROID_LLM_BACKEND` to `openai`, `claude`, or `local` and supply the
-matching key/endpoint — the keys are yours and never leave your machine. Everything also runs fully offline
+matching key/endpoint, the keys are yours and never leave your machine. Everything also runs fully offline
 (`off`), which is the default.
 
 ## Roadmap
