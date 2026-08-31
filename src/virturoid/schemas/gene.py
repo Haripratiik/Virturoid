@@ -26,6 +26,34 @@ BASE_MOUNTS = {"floor", "table", "torso", "free"}  # "free" = a floating base (m
 END_EFFECTORS = {"gripper", "suction", "spray_nozzle", "hook", "none"}
 
 
+def _detached(value):
+    """A copy of ``value`` that shares no mutable container with the original.
+
+    ``to_dict``/``from_dict`` are this repo's copy idiom -- ``RobotGene.from_dict(gene.to_dict())`` is what
+    three call sites use to get "a COPY, because ground_gene mutates". They only ever copied the TOP level:
+    ``dict(self.metadata)`` is a new outer dict whose VALUES are the gene's own live nested dicts. So the copy
+    and the original shared ``metadata["embodied_mass"]``, and a re-ground of the copy reached back into the
+    original.
+
+    MEASURED, on ``submit_design`` of the taught quadruped: ``validate_gene_design`` (gene_validation.py:96)
+    grounds such a copy AFTER ``put_robot`` has written the session file. Grounding the copy rewrote the shared
+    ledger in place, so the held gene ended with ``balance_of_system_kg == {}`` while still carrying that
+    3.675 kg of battery/wiring on its torso -- the exact double-billing the ledger exists to prevent, since
+    ``structural_link_masses`` then reports the balance of system as aluminium a fabricator must buy. The
+    session file, written before the aliasing write, was the correct copy; the LIVE gene was the corrupted one.
+
+    Containers are copied recursively; anything else (numbers, strings, arrays, objects) is passed through --
+    a snapshot must not depend on deep-copying whatever a caller parked in ``metadata``.
+    """
+    if isinstance(value, dict):
+        return {k: _detached(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_detached(v) for v in value]
+    if isinstance(value, tuple):                        # keep the type: a tuple was already immutable-shaped
+        return tuple(_detached(v) for v in value)
+    return value
+
+
 @dataclass
 class GeneSegment:
     """One rigid link in the body, with the joint that attaches it to its parent."""
@@ -64,6 +92,12 @@ class RobotGene:
     segments: list[GeneSegment] = field(default_factory=list)
     parent_species: str | None = None  # the tree node this gene was amended from
     base_mount: str = "table"          # floor | table | torso
+    # How HIGH the fixed base sits, when the three named heights are not one of the answers. `base_mount` says
+    # what the robot is mounted TO; this says where that mount is. Measured need: a DELTA hangs from an overhead
+    # plate, and with table/floor/torso giving 0.025/0/0 its whole mechanism was built below the floor — the
+    # platform came out at z = -0.069 m. Overhead gantries, ceiling rails and bench-mounted arms have the same
+    # shape of problem. None sets it -> the named height, so every existing body is unchanged.
+    base_height_m: float | None = None
     end_effector_type: str = "gripper"
     # How the body was obtained is product evidence, not an ephemeral Python
     # attribute.  A fallback must survive serialization and be visible in every
@@ -71,6 +105,46 @@ class RobotGene:
     # are indistinguishable after the build ends.
     design_source: str = "unknown"
     composition_notes: list[str] = field(default_factory=list)
+    # CLOSED KINEMATIC LOOPS, as a separate list so `segments` stays a strict TREE.
+    #
+    # A gantry's bridge rests on BOTH columns; a delta's three arms meet at ONE platform. With one parent per
+    # segment neither is expressible, and the failure is quiet: our gantry rendered with a second column that
+    # carried no load, and driving the bridge along its rail walked it off that column into mid-air.
+    #
+    # Deliberately NOT a second `parent` on GeneSegment. MuJoCo models a loop as `<equality><connect>`, which
+    # does not touch the body tree either — it is a top-level constraint naming two existing bodies. Keeping the
+    # tree a tree means the ~40 places that walk parent->child keep working; making `parent` multi-valued would
+    # instead HANG several of them, which have no visited-set guard (gait_flywheel._leg_count,
+    # morphology_composer, heldout_set, grounded_physics, robot_probe, structural_validation).
+    #
+    # Each entry: {"a": segment, "b": segment, "anchor": [x, y, z] | None, "solref": [d, w] | None,
+    # "solimp": [dmin, dmax, width, mid, power] | None}. The anchor is the meeting point in `a`'s local frame;
+    # omitted, it is a's tip.
+    #
+    # `solref`/`solimp` are the SOLVER REFERENCE of this constraint — how stiffly the solver is asked to hold
+    # the two anchors together. They belong on the loop and not in the compiler because they are the SOURCE's
+    # number when the body was imported: Cassie ships `<equality solref="0.005 1"/>`, four times stiffer than
+    # MuJoCo's 0.02 default, and a four-bar linkage compiled at the softer default visibly separates at the
+    # joint under load. Omitted (None) means "the source did not say", and the compiler emits nothing so
+    # MuJoCo's own default applies — never a number we invented.
+    loop_closures: list[dict] = field(default_factory=list)
+    # COUPLED (mimic/slaved) DOF: one joint driven as a linear function of another.
+    #
+    # A Panda's two fingers are ONE gripper DOF, not two; a Robotiq 2F-85's right driver mirrors its left; a
+    # Stretch's four telescoping arm stages extend as one. MuJoCo writes this as `<equality><joint>`, and
+    # 96 of the constraints in the Menagerie corpus are of that kind. With no representation for it the twin's
+    # fingers moved independently — a gripper that opens one jaw is not the customer's gripper.
+    #
+    # Like `loop_closures` this is a TOP-LEVEL constraint list rather than a field on GeneSegment, for the same
+    # reason: it relates two segments without making `segments` anything other than a tree.
+    #
+    # Each entry: {"a": segment, "b": segment, "ratio": float, "offset": float, "solref": ..., "solimp": ...}.
+    # `a` is the DRIVEN joint and `b` the driver, and the relation is the one MuJoCo solves:
+    #     q_a = offset + ratio * q_b
+    # (MuJoCo's `polycoef` is a 5th-order polynomial; every coupling in the corpus is degree 1, and a
+    # higher-degree one is reported as unmodellable rather than truncated.) Both segments must carry a real
+    # joint — the compiler names joints `<segment>_joint`, so a welded segment has no joint to couple.
+    coupled_joints: list[dict] = field(default_factory=list)
     metadata: dict = field(default_factory=dict)
 
     # ---- tree helpers -------------------------------------------------------
@@ -127,6 +201,45 @@ class RobotGene:
                     seen.add(node.name)
                     node = self.segment(node.parent)
 
+        # Loop closures name real segments, and never restate an edge the TREE already has (a parent-child pair
+        # is already rigidly connected; asking the solver to also constrain it is a contradiction, not a loop).
+        _names = set(names)
+        _tree_edges = {frozenset((s.name, s.parent)) for s in self.segments if s.parent}
+        for i, lc in enumerate(self.loop_closures or []):
+            a, b = (lc or {}).get("a"), (lc or {}).get("b")
+            if a not in _names or b not in _names:
+                issues.append(f"loop_closure {i} joins {a!r} and {b!r}; both must be existing segments")
+            elif a == b:
+                issues.append(f"loop_closure {i} joins {a!r} to itself")
+            elif frozenset((a, b)) in _tree_edges:
+                issues.append(f"loop_closure {i} joins {a!r} and {b!r}, which are already parent and child")
+
+        # A coupling names two segments that each carry a REAL joint. The compiler emits joints as
+        # `<segment>_joint` and emits none at all for a weld, so a coupling onto a welded segment names a joint
+        # MuJoCo does not have and the whole model fails to compile — a loud failure, but at build time, far
+        # from the design that caused it. And a ratio of zero is not a coupling: it pins the driven joint to a
+        # constant, which is a different constraint than the one this field claims to model.
+        _jointed = {s.name for s in self.segments if s.joint_type in ("revolute", "prismatic")}
+        for i, cj in enumerate(self.coupled_joints or []):
+            a, b = (cj or {}).get("a"), (cj or {}).get("b")
+            if a not in _names or b not in _names:
+                issues.append(f"coupled_joint {i} joins {a!r} and {b!r}; both must be existing segments")
+            elif a == b:
+                issues.append(f"coupled_joint {i} couples {a!r} to itself")
+            elif a not in _jointed or b not in _jointed:
+                _weld = a if a not in _jointed else b
+                issues.append(f"coupled_joint {i} couples {a!r} and {b!r}, but {_weld!r} has no joint to couple")
+            else:
+                try:
+                    _ratio = float((cj or {}).get("ratio", 1.0))
+                    float((cj or {}).get("offset", 0.0) or 0.0)
+                except (TypeError, ValueError):
+                    issues.append(f"coupled_joint {i} has a non-numeric ratio/offset")
+                else:
+                    if _ratio == 0.0 or _ratio != _ratio or abs(_ratio) == float("inf"):
+                        issues.append(f"coupled_joint {i} has ratio {_ratio!r}; a coupling ratio must be finite "
+                                      "and non-zero")
+
         ees = [s for s in self.segments if s.is_end_effector]
         if len(ees) != 1:
             issues.append(f"exactly one segment must be the end effector, found {len(ees)}")
@@ -142,10 +255,17 @@ class RobotGene:
         return {
             "id": self.id, "species": self.species, "robot_class": self.robot_class,
             "parent_species": self.parent_species, "base_mount": self.base_mount,
-            "end_effector_type": self.end_effector_type,
+            "end_effector_type": self.end_effector_type, "base_height_m": self.base_height_m,
             "design_source": self.design_source,
             "composition_notes": list(self.composition_notes),
-            "metadata": dict(self.metadata),
+            # Round-trips, because the species tree persists genes through here — a field that vanishes on
+            # to_dict is a field the flywheel silently loses.
+            # DETACHED, not shallow-copied: this dict is a SNAPSHOT. The session writer persists it, the undo
+            # stack keeps it as history, and `from_dict(to_dict())` is how callers get an isolated copy — all
+            # three are wrong if a later in-place write to a nested value shows through (see :func:`_detached`).
+            "loop_closures": [_detached(lc) for lc in (self.loop_closures or [])],
+            "coupled_joints": [_detached(cj) for cj in (self.coupled_joints or [])],
+            "metadata": _detached(self.metadata),
             "segments": [
                 {"name": s.name, "parent": s.parent, "shape": s.shape, "length_m": s.length_m,
                  "radius_m": s.radius_m, "mass_kg": s.mass_kg, "joint_type": s.joint_type,
@@ -154,7 +274,8 @@ class RobotGene:
                  "actuator_torque_nm": s.actuator_torque_nm, "torque_req_nm": s.torque_req_nm,
                  "is_end_effector": s.is_end_effector,
                  "cross_section": list(s.cross_section) if s.cross_section else None,
-                 "geometry": s.geometry, "material": s.material}
+                 # A shape program is a nested dict on the segment; hand out a snapshot of it too.
+                 "geometry": _detached(s.geometry), "material": s.material}
                 for s in self.segments
             ],
         }
@@ -165,9 +286,14 @@ class RobotGene:
             id=d["id"], species=d["species"], robot_class=d["robot_class"],
             parent_species=d.get("parent_species"), base_mount=d.get("base_mount", "table"),
             end_effector_type=d.get("end_effector_type", "gripper"),
+            base_height_m=(None if d.get("base_height_m") is None else float(d["base_height_m"])),
             design_source=str(d.get("design_source", "unknown")),
             composition_notes=list(d.get("composition_notes", [])),
-            metadata=dict(d.get("metadata", {})),
+            # Detached for the mirror-image reason: a gene built from a dict the caller still holds (or from
+            # one already handed to another gene) must not write through into it when it is re-grounded.
+            loop_closures=[_detached(lc) for lc in (d.get("loop_closures") or [])],
+            coupled_joints=[_detached(cj) for cj in (d.get("coupled_joints") or [])],
+            metadata=_detached(d.get("metadata", {})),
             segments=[
                 GeneSegment(
                     name=s["name"], parent=s.get("parent"), shape=s.get("shape", "capsule"),
@@ -179,7 +305,7 @@ class RobotGene:
                     actuator_torque_nm=s.get("actuator_torque_nm"), torque_req_nm=s.get("torque_req_nm"),
                     is_end_effector=s.get("is_end_effector", False),
                     cross_section=(tuple(s["cross_section"]) if s.get("cross_section") else None),
-                    geometry=s.get("geometry"), material=s.get("material"),
+                    geometry=_detached(s.get("geometry")), material=s.get("material"),
                 )
                 for s in d["segments"]
             ],
@@ -203,6 +329,14 @@ def amend_gene(
     This is how a new customer's robot reuses an existing species: keep the parent body,
     override only what differs (scale a link, swap the end effector, add/remove a segment).
     ``segment_overrides`` maps segment name -> field overrides (e.g. {"length_m": 0.4}).
+
+    THE PARENT'S CONSTRAINTS COME WITH THE PARENT'S BODY. An amend that kept the segments but dropped
+    ``loop_closures``/``coupled_joints`` turned a closed-loop machine back into an open one and a one-DOF
+    gripper back into two, quietly, at the exact op a customer reaches for most (``design_critic``'s
+    ``add_parallel_gripper`` amends an imported arm). They are carried, FILTERED to what the amended body can
+    still satisfy: a constraint naming a segment this amend removed -- or one whose joint an override turned
+    into a weld -- is dropped, because keeping it would make every such amend raise on ``validate()`` instead
+    of amending.
     """
     removed = set(remove_segments or [])
     segments: list[GeneSegment] = []
@@ -212,6 +346,13 @@ def amend_gene(
         ov = (segment_overrides or {}).get(s.name)
         segments.append(replace(s, **ov) if ov else replace(s))
     segments.extend(add_segments or [])
+
+    _live = {s.name for s in segments}
+    _jointed = {s.name for s in segments if s.joint_type in ("revolute", "prismatic")}
+    _loops = [dict(lc) for lc in (parent.loop_closures or [])
+              if (lc or {}).get("a") in _live and (lc or {}).get("b") in _live]
+    _coupled = [dict(cj) for cj in (parent.coupled_joints or [])
+                if (cj or {}).get("a") in _jointed and (cj or {}).get("b") in _jointed]
     return RobotGene(
         id=new_id,
         species=species,
@@ -220,5 +361,7 @@ def amend_gene(
         parent_species=parent.species,
         base_mount=base_mount or parent.base_mount,
         end_effector_type=end_effector_type or parent.end_effector_type,
+        loop_closures=_loops,
+        coupled_joints=_coupled,
         metadata={**parent.metadata, **(metadata or {}), "amended_from": parent.id},
     )

@@ -92,19 +92,71 @@ def validate_gene_design(gene, *, material: str = "aluminum", payload_kg: float 
     total_mass = None
     try:
         from virturoid.schemas.gene import RobotGene
-        from virturoid.services.grounded_physics import ground_gene
+        from virturoid.services.grounded_physics import ground_gene, physical_prior_for
         g2 = RobotGene.from_dict(gene.to_dict())
-        total_mass = ground_gene(g2)["total_mass_kg"]
-        lo, hi = _MASS_BAND.get(cls, (0.1, 200.0))
-        checks["mass_budget"] = lo <= total_mass <= hi
-        if not (lo <= total_mass <= hi):
-            flag("mass_budget", "med", f"total mass {total_mass:.1f} kg is outside the plausible "
-                 f"{cls or 'robot'} band ({lo}-{hi} kg)", total_mass)
+        # A CARRIED LOAD IS NOT A LINK TO RE-WEIGH. ``edit_operators.set_payload`` puts the customer's stated
+        # payload on the robot as a real link and records it (``embodied_mass['payload_kg']``); re-deriving it
+        # here from box volume x aluminium would judge the design against a number nobody asked for -- measured
+        # on a composed quadruped, a 15.0 kg load came back as a 12.15 kg aluminium block.
+        carried = {str(n): float(v or 0.0) for n, v in
+                   ((((getattr(gene, "metadata", None) or {}).get("embodied_mass") or {})
+                     .get("payload_kg")) or {}).items()}
+        total_mass = ground_gene(g2, preserve_mass_links=set(carried))["total_mass_kg"]
+        prior = physical_prior_for(g2)
+        lo, hi = prior.mass_band_kg if prior is not None else _MASS_BAND.get(cls, (0.1, 200.0))
+        # THE BAND DESCRIBES AN UNLOADED MACHINE. A robot RATED to carry a load is genuinely heavier -- it is
+        # carrying bigger motors and thicker load-path links to hold that load -- so judging it against the
+        # unloaded band calls real hardware implausible (Spot: 32.5 kg, rated 14 kg). Widen the ceiling by the
+        # rating and nothing else: `payload_kg` when the caller states it, else the rating `set_payload` stamped
+        # on the gene. A body that never declared a payload is judged exactly as before.
+        rated = float(payload_kg or 0.0)
+        if not rated:
+            try:
+                rated = float((getattr(gene, "metadata", None) or {}).get("rated_payload_kg") or 0.0)
+            except (TypeError, ValueError):
+                rated = 0.0
+        hi_eff = hi + max(0.0, rated)
+        # ...AND WEIGH THE MACHINE, NOT WHAT IT IS HOLDING. The ``rated`` widening above is about the ROBOT
+        # growing -- bigger motors, thicker load-path links -- which is what a rating buys. The cargo's own
+        # kilograms are a different thing, and once ``set_payload`` started actually putting them on the body
+        # they were charged against the same allowance twice: measured on a composed quadruped rated for 15 kg,
+        # a 25.0 kg machine carrying 15.0 kg read as "37.2 kg outside the 12-15 + 15 band" and the amend gate
+        # auto-reverted the customer's own request -- the same auto-revert the rating was introduced to stop.
+        machine_mass = total_mass - sum(carried.values())
+        checks["mass_budget"] = lo <= machine_mass <= hi_eff
+        if not (lo <= machine_mass <= hi_eff):
+            _rated = f" + {rated:.1f} kg rated payload" if rated else ""
+            _load = (f" (excluding {sum(carried.values()):.1f} kg of carried load)" if carried else "")
+            flag("mass_budget", "med", f"total mass {machine_mass:.1f} kg is outside the plausible "
+                 f"{cls or 'robot'} band ({lo}-{hi} kg{_rated}){_load}", machine_mass)
     except Exception:  # noqa: BLE001
         pass
 
     # 4) + 5) + 6) MuJoCo rest-pose checks (best-effort): static stability, self-collision, MJCF round-trip.
     _mujoco_checks(gene, cls, checks, flag)
+
+    # 7) A contact-visible surface must agree with the geometry the simulator actually collides with. This
+    # catches the otherwise easy-to-miss failure where a decorative foot touches the floor while its collider
+    # floats above it (or the whole free-base body is spawned in mid-air). The check is executable rather than
+    # a class/template rule, so it applies to newly authored morphologies too.
+    try:
+        from virturoid.services.visual_physics_gate import audit_gene
+        visual_physics = audit_gene(gene)
+        checks["visual_physics"] = visual_physics.ok
+        if not visual_physics.ok:
+            detail = "; ".join(issue.detail for issue in visual_physics.issues[:3])
+            flag("visual_physics", "high", detail, visual_physics.support_gap_m)
+    except Exception:  # noqa: BLE001 - no MuJoCo -> analytic-only report
+        pass
+    try:
+        from virturoid.services.structural_assertions import evaluate_structural_assertions
+        structural_contract = evaluate_structural_assertions(gene)
+        checks["structural_seams"] = structural_contract.ok
+        if not structural_contract.ok:
+            failed = [a.detail for a in structural_contract.assertions if not a.ok]
+            flag("structural_seams", "high", "; ".join(failed[:3]), len(failed))
+    except Exception:  # noqa: BLE001 - optional MuJoCo geometry contract
+        pass
 
     parts_grounded = not [r for r in bom if r.get("under_spec")] if bom else True
     try:
@@ -141,6 +193,54 @@ def _mujoco_checks(gene, cls, checks, flag) -> None:
         if not checks["mjcf_roundtrip"]:
             flag("mjcf_roundtrip", "high",
                  f"compiled model exposes {m.nu} actuators but the gene has {len(gene.actuated_joints())}", m.nu)
+        # Every declared loop must survive compilation — an actuator count alone cannot see one, which is how a
+        # gantry with a decorative second column passed every gate it had.
+        _want_eq = len(getattr(gene, "loop_closures", None) or [])
+        checks["loop_closures_compiled"] = (int(m.neq) >= _want_eq)
+        if not checks["loop_closures_compiled"]:
+            flag("loop_closures_compiled", "high",
+                 f"the design declares {_want_eq} closed loop(s) but the compiled model carries {int(m.neq)}",
+                 int(m.neq))
+        # A `connect` locks in whatever offset the two parts have AT BUILD TIME. So declaring a loop between
+        # parts that are not already touching does not pull them together — it WELDS THE GAP, permanently, and
+        # says nothing. Measured on a delta: its arm tips sat 0.5045 m from the platform before stepping and
+        # 0.5045 m after 2000 steps, held exactly that far apart by the constraint meant to join them. The
+        # gantry worked only because its bridge was sized so the far end already landed on the column.
+        if _want_eq:
+            import numpy as _np
+            mujoco.mj_forward(m, d)
+            _far = []
+            for _lc in gene.loop_closures:
+                _a, _b = (_lc or {}).get("a"), (_lc or {}).get("b")
+                _ia = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, str(_a))
+                _ib = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, str(_b))
+                if _ia < 0 or _ib < 0:
+                    continue
+                _sa = next((s for s in gene.segments if s.name == _a), None)
+                _anc = (_lc or {}).get("anchor")
+                if not (isinstance(_anc, (list, tuple)) and len(_anc) == 3):
+                    _anc = (0.0, 0.0, float(getattr(_sa, "length_m", 0.0) or 0.0))
+                _pa = _np.asarray(d.xpos[_ia], dtype=float) + d.xmat[_ia].reshape(3, 3) @ _np.asarray(_anc,
+                                                                                                      dtype=float)
+                # Distance to b's SURFACE, not to its origin. A body's origin is wherever its frame happens to
+                # sit — for a column it is the base, so measuring there reports the column's own LENGTH as a gap
+                # and calls a perfect join broken. (The gantry's bridge tip is 0.0000 m from column_r's top and
+                # 0.9000 m from its origin.)
+                _gs = [_g for _g in range(m.ngeom) if int(m.geom_bodyid[_g]) == _ib]
+                if _gs:
+                    _gap = min(float(_np.linalg.norm(_pa - _np.asarray(d.geom_xpos[_g], dtype=float)))
+                               - float(m.geom_rbound[_g]) for _g in _gs)
+                    _gap = max(0.0, _gap)
+                else:
+                    _gap = float(_np.linalg.norm(_pa - _np.asarray(d.xpos[_ib], dtype=float)))
+                if _gap > 0.05:
+                    _far.append((f"{_a}<->{_b}", round(_gap, 4)))
+            checks["loop_closures_meet"] = not _far
+            if _far:
+                flag("loop_closures_meet", "high",
+                     "declared loop(s) join parts that are not touching, so the constraint holds the GAP instead "
+                     f"of closing it: {_far}. Place the two parts coincident in the design — a connect preserves "
+                     "the offset it is built with", _far[0][1])
     except Exception as exc:  # noqa: BLE001 - a body that won't compile/load is the worst failure
         flag("mjcf_roundtrip", "fatal", f"gene does not compile/load into MuJoCo: {exc}", None)
         return

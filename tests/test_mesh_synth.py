@@ -6,6 +6,7 @@ import importlib.util
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 _MUJOCO = importlib.util.find_spec("mujoco") is not None
 
@@ -67,6 +68,14 @@ class MeshSynthTests(unittest.TestCase):
         if os.environ.get("VIRTUROID_NO_LOCAL_ENV") == "1" and available_backend() is None:
             with tempfile.TemporaryDirectory() as tmp:
                 self.assertIsNone(synthesize_part("x", 0.1, 0.03, str(Path(tmp) / "p.stl")))
+
+    def test_gpu_box_requires_explicit_mesh_backend_opt_in(self):
+        from virturoid.services.mesh_synth import available_backend
+        clean = {"VIRTUROID_GPU_SSH": "user@gpu-box", "VIRTUROID_LLM_BACKEND": "off"}
+        with patch.dict("os.environ", clean, clear=True):
+            self.assertIsNone(available_backend())
+        with patch.dict("os.environ", {**clean, "VIRTUROID_MESH_BACKEND": "gpu_box"}, clear=True):
+            self.assertEqual("gpu_box", available_backend())
 
 
 if __name__ == "__main__":

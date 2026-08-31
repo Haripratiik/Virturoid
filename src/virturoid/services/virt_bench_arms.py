@@ -14,6 +14,7 @@ the next build priority (e.g. forward hexapod locomotion, which needs the learne
 
 from __future__ import annotations
 
+from virturoid.services.install_paths import anchored
 from virturoid.services.virt_bench import get_task, list_tasks, verify_submission
 
 
@@ -84,7 +85,7 @@ def run_arm_a(task_id: str, *, steps: int = 600, seed: int | None = None) -> dic
 
 def run_arm_b(task_id: str, *, steps: int = 600, max_evals: int = 12, on_node=None, use_memory: bool = True,
               use_gpu: bool = False, gpu_iters: int = 60, gpu_envs: int = 1024, gpu_hifi=None,
-              models_dir: str = "build/models", seed: int | None = None) -> dict:
+              models_dir: str = str(anchored("build/models")), seed: int | None = None) -> dict:
     """Full-harness arm with up to THREE candidate sources, all scored by the SAME independent verifier at the
     frozen horizon: (1) MEMORY -- recall the banked policy that best transfers to this body (the flywheel moat);
     (2) SEARCH the CPG gait direction on the cheap CPU rung; (3) GPU RESIDUAL (plan gap-closure WS1/#66) -- when
@@ -93,7 +94,10 @@ def run_arm_b(task_id: str, *, steps: int = 600, max_evals: int = 12, on_node=No
     trains the rung COLD, B warm from memory -- so ``transfer_delta`` isolates the flywheel, not the compute).
     Returns the best-verified verdict + ``searched``/``recalled``/``gpu_npz`` provenance, a per-arm ``budget``
     ledger (CPU evals, GPU iters, LLM calls -- N16 budget parity), and ``claimed_pass`` = the WINNING candidate's
-    own pre-verify belief (the honesty axis; over-claim = claimed but not verified)."""
+    own pre-verify belief (the honesty axis; over-claim = claimed but not verified). ``gpu_npz`` is populated only
+    when the GPU artifact wins promotion; ``gpu_candidate_npz`` and ``gpu_candidate_verdict`` retain the attempted
+    artifact and its independent verdict even when deploy verification rejects it.
+    """
     from virturoid.services.design_search import run_design_search
     from virturoid.services.search_adapters import cpg_grid_proposer, make_locomotion_evaluate
     task = get_task(task_id)
@@ -157,6 +161,8 @@ def run_arm_b(task_id: str, *, steps: int = 600, max_evals: int = 12, on_node=No
     # spend (AlphaEvolve cascade discipline); warm-start from the recalled seed iff memory is on (A+ cold, B warm).
     gpu_iters_spent = 0
     gpu_npz = None
+    gpu_candidate_verdict = None
+    gpu_error = None
     if use_gpu:
         try:
             from virturoid.services.morph_policy import MorphPolicy
@@ -173,11 +179,17 @@ def run_arm_b(task_id: str, *, steps: int = 600, max_evals: int = 12, on_node=No
                 gpu_npz = tr["npz"]
                 gp = MorphPolicy.from_npz(gpu_npz)
                 gv = verify_submission(task_id, gene, gp, seed=seed)   # independent FROZEN-horizon verify (honest gate)
+                gpu_candidate_verdict = {
+                    "verified_pass": bool(gv.get("verified_pass")),
+                    "failure_mode": gv.get("failure_mode"),
+                    "metrics": dict(gv.get("metrics") or {}),
+                    "verifier": dict(gv.get("verifier") or {}),
+                }
                 warm = "warm(mem)" if (use_memory and recalled) else "cold"
                 candidates.append((gv, f"GPU residual ({gpu_iters} iters, {warm})", {"gpu_npz": gpu_npz},
                                    bool(gv.get("verified_pass"))))     # selected by deploy verify: claim==verify
-        except Exception:  # noqa: BLE001 - GPU is best-effort; memory+search still stand
-            pass
+        except Exception as exc:  # noqa: BLE001 - GPU is best-effort; memory+search still stand
+            gpu_error = f"{type(exc).__name__}: {exc}"
 
     # keep the BEST-verified candidate: a pass beats a fail, then higher forward travel
     def _key(c):
@@ -188,13 +200,16 @@ def run_arm_b(task_id: str, *, steps: int = 600, max_evals: int = 12, on_node=No
     out["arm"] = "B"; out["method"] = method; out["n_evals"] = report.n_evals
     out["searched"] = best_cpg; out["recalled"] = recalled if extras.get("recalled") else None
     out["gpu_npz"] = extras.get("gpu_npz")
+    out["gpu_candidate_npz"] = gpu_npz
+    out["gpu_candidate_verdict"] = gpu_candidate_verdict
+    out["gpu_error"] = gpu_error
     out["claimed_pass"] = bool(claimed)                        # the WINNING candidate's own pre-verify belief
     out["budget"] = {"cpu_evals": int(report.n_evals), "gpu_iters": int(gpu_iters_spent), "llm_calls": 0}
     return out
 
 
 def run_scoreboard(*, split: str | None = "dev", steps: int = 600, max_evals: int = 12, use_memory: bool = True,
-                   models_dir: str = "build/models", families=("locomotion", "manipulation")) -> dict:
+                   models_dir: str = str(anchored("build/models")), families=("locomotion", "manipulation")) -> dict:
     """Run both arms over the tasks in ``split`` (``"dev"`` / ``"held_out"`` / ``None`` = all) whose family is in
     ``families`` (locomotion + manipulation by default) and return an honest, verifier-scored A-vs-B scoreboard.
     ``B_solved - A_solved`` is the measured value of the full harness -- the head-to-head number for "beats
@@ -230,7 +245,7 @@ def _metric(res: dict):
 
 
 def run_head_to_head(*, split: str | None = "held_out", steps: int = 600, max_evals: int = 12,
-                     models_dir: str = "build/models", families=("locomotion", "manipulation"),
+                     models_dir: str = str(anchored("build/models")), families=("locomotion", "manipulation"),
                      use_gpu: bool = False, gpu_iters: int = 60, gpu_envs: int = 1024, gpu_hifi=None,
                      seed: int | None = None, prereg_path: str | None = None,
                      with_baseline: bool = False, baseline_llm=None) -> dict:

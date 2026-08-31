@@ -94,20 +94,33 @@ def _poll_and_fetch(remote_npz: str, out_path: str, *, progress, timeout: float,
         try:
             out = _ssh(f"pgrep -f '[{proc_name[0]}]{proc_name[1:]}' >/dev/null && echo RUN || echo DONE; "
                        "grep -E 'iter|fwd_vel|reward|success|lift|saved|Error|Traceback' ~/app_train.log "
-                       "2>/dev/null | tail -1", timeout=40).stdout.decode("utf-8", "ignore")
+                       "2>/dev/null | tail -40", timeout=40).stdout.decode("utf-8", "ignore")
         except Exception:  # noqa: BLE001 - transient Tailscale hiccup; keep polling
             misses += 1
             if misses > 12:
                 break
             continue
         misses = 0
-        m = re.search(r"iter\s+(\d+).*?(fwd_vel=[-+]?\d*\.?\d+|reward=\s*[-+]?\d*\.?\d+|success[=:\s]+[-+]?\d*\.?\d+)", out)
-        if m:
-            last_iter = m.group(1)
-            say(f"training on the GPU — iter {m.group(1)}, {m.group(2)}  ({int(time.time() - started)}s elapsed)")
+        # R4: the babysitter reads the metric window and decides health. A hard failure (NaN / policy divergence
+        # / crash) is KILLED within one poll and reported — never left running detached; a soft alarm (reward
+        # climbing without forward progress = the hacking signature; a stall at zero) is surfaced, not hidden.
+        from virturoid.services.training_babysitter import assess_training_health
+        health = assess_training_health(out)
+        if health["latest_iter"] is not None:
+            last_iter = str(health["latest_iter"])
+            say(f"training on the GPU — {health['reason']}  ({int(time.time() - started)}s elapsed)")
         elif last_iter is None:
             # still compiling (no iter line yet): heartbeat so the user sees it's alive, not hung
             say(f"compiling on the GPU — {int(time.time() - started)}s elapsed (first iteration coming up)…")
+        if health["status"] == "warn":
+            say(f"⚠️  babysitter: {health['reason']}")
+        if health["kill"]:
+            say(f"babysitter is stopping this run early — {health['reason']}")
+            try:
+                _ssh(f"pkill -f '[{proc_name[0]}]{proc_name[1:]}'", timeout=30)
+            except Exception:  # noqa: BLE001
+                pass
+            break
         if out.startswith("DONE"):
             completed = True
             break
@@ -323,7 +336,7 @@ def train_gene_on_gpu(gene, *, out_path: str, iters: int = 80, envs: int = 1024,
                       decimation: int | None = None, action_lpf: float | None = None,
                       sphere_feet: bool = False, contact_dr: bool = False,
                       phase_obs: bool = False, dr_scale: float = 1.0,
-                      real_actuator: bool = False,
+                      real_actuator: bool = False, reward_expr: str = "",
                       keep_checkpoints: bool = False) -> str | None:
     """Sync repo+gene to the box, run MJX PPO, fetch the trained policy to ``out_path``. Returns the local
     npz path, or ``None`` on any failure so the caller can fall back to CPU. ``reward_weights`` (the AI gait
@@ -387,6 +400,9 @@ def train_gene_on_gpu(gene, *, out_path: str, iters: int = 80, envs: int = 1024,
         for k, v in (reward_weights or {}).items():          # critic weights -> --clear-w / --prog-w / ... flags
             if k in _REWARD_FLAGS:
                 extra += f" --{k.replace('_', '-')} {float(v)}"
+        if reward_expr:                                       # R1: an LLM-authored reward_dsl expression steers PPO
+            import shlex
+            extra += f" --reward-expr {shlex.quote(reward_expr)}"
         say(f"launching MJX PPO on the GPU ({iters} iters{', critic-tuned reward' if reward_weights else ''})…")
         # v7-F4: MEM_FRACTION caps XLA's arena so a killed/leaked trainer can't pin the whole 12 GB (the measured
         # ~9 GB leak-on-kill); previously this guard lived only in the nightshift ops track, not interactive runs.
@@ -400,6 +416,96 @@ def train_gene_on_gpu(gene, *, out_path: str, iters: int = 80, envs: int = 1024,
                                fetch_checkpoints=keep_checkpoints)
     except Exception:  # noqa: BLE001 - any failure -> caller uses the CPU trainer
         return None
+
+
+def _parse_screen_result(text: str) -> list[dict]:
+    """Parse the R3 screen result file: lines ``<idx> fwd_vel=<v> alive=<a>`` (or ``ERR`` on a failed run)."""
+    import re
+    out = {}
+    for m in re.finditer(r"^(\d+)\s+fwd_vel=([-+0-9.]+)\s+alive=([-+0-9.]+)", text, re.M):
+        out[int(m.group(1))] = {"fwd_vel": float(m.group(2)), "alive": float(m.group(3))}
+    for m in re.finditer(r"^(\d+)\s+ERR", text, re.M):
+        out.setdefault(int(m.group(1)), {"fwd_vel": 0.0, "alive": 0.0, "error": True})
+    return [out.get(i, {"fwd_vel": 0.0, "alive": 0.0, "pending": True}) for i in range(max(out) + 1 if out else 0)]
+
+
+def screen_rewards_on_mjx(gene, exprs, *, screen_iters: int = 10, envs: int = 256, poll_timeout: float = 600.0,
+                          progress=None) -> list[dict]:
+    """R3 (ASHA rung-0): screen a list of reward EXPRESSIONS on the MJX trainer cheaply — each candidate gets a
+    SHORT run on the shared box, and they are ranked by an honest SCREEN score (the magnitude of induced forward
+    motion gated on survival; the finalist is then trained + verified by the full classify gate downstream, which
+    is un-gameable). K candidates cost K short screens on the one 3060 — far less than K full runs. Runs the
+    candidates in ONE detached remote orchestrator (survives ssh drops), polled to completion. Returns
+    ``[{expr, screen_score, fwd_vel, alive, rank}]`` best-first, or ``[]`` on a total failure.
+
+    **NOT WIRED, deliberately — this function has no caller and should not get one as written.** Its screen
+    score is ``abs(fwd_vel)``, which is direction-blind (a reward that drives the body BACKWARD at 1 m/s ties
+    with one that walks forward at 1 m/s) and carries no reward-gaming check. The CPU screen it would replace
+    (``reward_dsl.select_reward`` over ``reward_loop._steered_rollout_fn``) ranks by the ``classify()``-gated
+    TRUSTED success and explicitly flags and drops gamed candidates, so swapping it in would buy GPU speed by
+    giving up the honesty property the whole reward loop exists for. Fix the score (signed forward progress,
+    plus a credibility gate) before calling this; do not call it as-is. ``reward_expr`` DOES reach the trainer
+    for the FINAL run — see ``reward_loop.train_selected_reward_on_gpu``."""
+    import json
+    import shlex
+    import time
+
+    def say(m):
+        if progress:
+            progress(m)
+    try:
+        _sync_repo(say)
+        _ssh("cat > ~/app_gene.json", timeout=60, stdin=json.dumps(gene.to_dict()).encode("utf-8"))
+        # a detached orchestrator: run each candidate a short screen, append its final fwd_vel + alive to a file.
+        runs = "\n".join(
+            f'run {i} {shlex.quote(e)}' for i, e in enumerate(exprs))
+        script = (
+            "#!/bin/bash\ncd ~/virturoid\nrm -f ~/screen_result.txt\n"
+            "run () {\n"
+            "  local i=\"$1\"; local expr=\"$2\"\n"
+            f"  PYTHONPATH=src XLA_PYTHON_CLIENT_MEM_FRACTION=.85 ~/rl/bin/python scripts/mjx_morph_attention.py "
+            f"--gene-json ~/app_gene.json --iters {int(screen_iters)} --envs {int(envs)} "
+            "--reward-expr \"$expr\" --save runs/screen_$i.npz > ~/screen_$i.log 2>&1\n"
+            "  if grep -qE 'Traceback|Error:' ~/screen_$i.log; then echo \"$i ERR\" >> ~/screen_result.txt; return; fi\n"
+            "  local fv=$(grep -oE 'fwd_vel=[-+0-9.]+' ~/screen_$i.log | tail -1 | cut -d= -f2)\n"
+            "  local al=$(grep -oE 'alive[= ]*[0-9.]+' ~/screen_$i.log | tail -1 | grep -oE '[0-9.]+' || echo 1)\n"
+            "  echo \"$i fwd_vel=${fv:-0} alive=${al:-1}\" >> ~/screen_result.txt\n"
+            "}\n" + runs + "\necho DONE >> ~/screen_result.txt\n")
+        _ssh("cat > ~/screen_run.sh", timeout=30, stdin=script.encode("utf-8"))
+        # launch detached; the echo can be lost to a Tailscale hiccup, so the POLL LOOP (not the echo) is the
+        # source of truth — the setsid orchestrator keeps running on the box regardless.
+        _ssh("cd ~ && setsid bash ~/screen_run.sh </dev/null >~/screen_orch.log 2>&1 & echo LAUNCHED", timeout=20)
+        say(f"R3: screening {len(exprs)} reward candidate(s) on MJX ({screen_iters} iters each)…")
+        deadline = time.time() + poll_timeout
+        while time.time() < deadline:
+            time.sleep(20)
+            try:
+                res = _ssh("cat ~/screen_result.txt 2>/dev/null", timeout=40).stdout.decode("utf-8", "ignore")
+            except Exception:  # noqa: BLE001 - transient hiccup; keep polling
+                continue
+            done = [ln for ln in res.splitlines() if ln and not ln.startswith("DONE")]
+            say(f"R3: {len(done)}/{len(exprs)} screened…")
+            if "DONE" in res:
+                break
+        res = _ssh("cat ~/screen_result.txt 2>/dev/null; "
+                   "pkill -f '[m]jx_morph_attention' 2>/dev/null; "
+                   "rm -f ~/screen_*.log ~/screen_run.sh ~/screen_orch.log ~/virturoid/runs/screen_*.npz",
+                   timeout=45).stdout.decode("utf-8", "ignore")
+        parsed = _parse_screen_result(res)
+        ranked = []
+        for i, e in enumerate(exprs):
+            r = parsed[i] if i < len(parsed) else {"fwd_vel": 0.0, "alive": 0.0, "error": True}
+            # SCREEN score: magnitude of induced forward motion, zeroed for a crashed run. This is a cheap PROXY
+            # to rank the fan-out; the finalist is trained + judged by the un-gameable classify() gate downstream.
+            score = 0.0 if r.get("error") else abs(float(r.get("fwd_vel", 0.0)))
+            ranked.append({"expr": e, "screen_score": round(score, 4), "fwd_vel": round(float(r.get("fwd_vel", 0.0)), 4),
+                           "error": bool(r.get("error"))})
+        ranked.sort(key=lambda d: d["screen_score"], reverse=True)
+        for rk, d in enumerate(ranked):
+            d["rank"] = rk
+        return ranked
+    except Exception:  # noqa: BLE001 - screening is best-effort; caller falls back to CPU screening
+        return []
 
 
 # Manipulation MJX trainers (the plan's #1 priority: arms first). Each is a residual policy on a scripted

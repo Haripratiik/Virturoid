@@ -141,13 +141,19 @@ DEFAULT_CONTROLLER_PARAMS = {
 
 def run_contact_pick_place_episode(gene, objects, assignments: dict, *, record_frames=None, frame_every: int = 12,
                                    kpj: float = 150.0, kdj: float = 18.0, kpf: float = 300.0, kdf: float = 10.0,
-                                   dq: float = 0.06, fclose: float = 0.05, steps_per_block: int = 420,
-                                   hover_z: float = 0.16, lift_z: float = 0.22, place_z: float = 0.12) -> dict:
+                                   dq: float = 0.06, fclose: float = 0.05, steps_per_block: int = 900,
+                                   hover_z: float = 0.16, lift_z: float = 0.22, place_z: float = 0.12,
+                                   approach_steps: int = 6000) -> dict:
     """REAL contact-grasp sort (NO _pin_block): for each assigned block, top-down grasp (close the finger
     actuators and hold the block by CONTACT FRICTION), lift, transport to its bin, lower, release. Drives the
     actual gripper; the block stays only by friction. Returns the same outcome shape as run_pick_place_episode
     plus ``grasp_model='contact'``. ``objects`` is the scene's SceneObject list; ``assignments`` maps block->bin.
-    De-risked in build/_grasp_transport_derisk.py (4/4 place, grip held through transport)."""
+    The default horizon is measured against the grounded manipulator dynamics
+    (including gearbox reflected inertia), rather than the earlier toy-inertia
+    model: it converges the hover TCP to about 5 mm before contact and leaves
+    enough time for lift/transport/release. De-risked in
+    build/_grasp_transport_derisk.py (4/4 place, grip held through transport).
+    """
     import mujoco
     import numpy as np
 
@@ -222,6 +228,7 @@ def run_contact_pick_place_episode(gene, objects, assignments: dict, *, record_f
 
     q_ref = np.array([float(d.qpos[arm_qadr[k]]) for k in range(len(arm_joints))])
     per_block: dict = {}
+    approach_diagnostics: dict[str, dict] = {}
     first = True
     p_settle, p_grip, p_lift, p_transport, p_lower, p_release = 0.12, 0.30, 0.40, 0.55, 0.82, 0.92
     for name, info in blocks.items():
@@ -240,7 +247,7 @@ def run_contact_pick_place_episode(gene, objects, assignments: dict, *, record_f
         # APPROACH: slew to THIS block's hover (fingers open) until the arm actually ARRIVES, so EVERY block starts
         # its grasp from the hover pose — not mid-slew from the previous bin. (The first-block-only pre-fold made
         # block 1 succeed but block 2+ missed: they never reached their hover before the timed descend fired.)
-        for _ in range(180):
+        for _ in range(max(180, int(approach_steps))):
             q_ref = q_ref + np.clip(Qa["above"] - q_ref, -dq, dq)
             q_star = np.zeros(nu)
             for k, u in enumerate(arm_u):
@@ -254,6 +261,12 @@ def run_contact_pick_place_episode(gene, objects, assignments: dict, *, record_f
             arm_q = np.array([float(d.qpos[a]) for a in arm_qadr])
             if float(np.max(np.abs(q_ref - Qa["above"]))) < 0.02 and float(np.max(np.abs(arm_q - Qa["above"]))) < 0.06:
                 break
+        arm_q = np.array([float(d.qpos[a]) for a in arm_qadr])
+        approach_diagnostics[name] = {
+            "reference_error_rad": round(float(np.max(np.abs(q_ref - Qa["above"]))), 4),
+            "tracking_error_rad": round(float(np.max(np.abs(arm_q - Qa["above"]))), 4),
+            "tcp_error_m": round(float(np.linalg.norm(d.site_xpos[tcp] - np.asarray([bx, by, hover_z]))), 4),
+        }
         if not stable:
             break
         first = False
@@ -312,7 +325,7 @@ def run_contact_pick_place_episode(gene, objects, assignments: dict, *, record_f
     return {"status": status, "failure_label": failure_label, "placed_count": placed_count,
             "block_count": len(per_block), "per_block": per_block, "grasp_model": "contact",
             "metrics": {"grasp_rate": round(grasped_count / n, 3), "place_rate": round(placed_count / n, 3),
-                        "stable": stable}}
+                        "stable": stable, "approach": approach_diagnostics}}
 
 
 def run_pick_place_episode(model, scene: dict, params: dict | None = None, perception=None, target_policy=None, record_frames=None, frame_every: int = 12, **overrides) -> dict:
@@ -326,6 +339,7 @@ def run_pick_place_episode(model, scene: dict, params: dict | None = None, perce
     import mujoco
     import numpy as np
 
+    explicit_phase_budget = "phase_steps" in (params or {}) or "phase_steps" in overrides
     cfg = {**DEFAULT_CONTROLLER_PARAMS, **(params or {}), **overrides}
     kp = float(cfg["kp"])
     kd = float(cfg["kd"])
@@ -377,8 +391,23 @@ def run_pick_place_episode(model, scene: dict, params: dict | None = None, perce
     elif reach_mode == "task":
         use_task_space = high_dof
     else:
-        use_task_space = high_dof and not _joint_pd_can_reach(
-            model, ee_site, actuated, clamps, kp, kd, objects, addrs, grasp_z)
+        # M9/#185 (2026-07-24 audit): a KINEMATICALLY REDUNDANT arm (>=7 revolute DOF) has a null space, so
+        # joint-PD to a single IK seed drifts (~0.22 m off, measured) and the grasp misses -> trust redundancy
+        # and go straight to task-space, which servos the EE directly. The single-seed reach PROBE was too
+        # optimistic here (it found a good seed config for the probe targets while the multi-seed episode
+        # drifted), forcing a wrong joint-PD pick. For the exactly-/under-determined 5-6 DOF range the probe is
+        # still the right call -- it catches a body that genuinely can't reach. 4-DOF stays joint-PD (high_dof).
+        redundant = n_revolute >= 7
+        use_task_space = high_dof and (redundant or not _joint_pd_can_reach(
+            model, ee_site, actuated, clamps, kp, kd, objects, addrs, grasp_z, engage_radius=engage_radius))
+    if use_task_space and not explicit_phase_budget:
+        # Redundant arms converge through iterative Cartesian servoing rather
+        # than a one-shot joint target.  On the grounded 7-DOF morphology the
+        # former 300-step default placed only 7/10 objects; 500 steps placed
+        # 9/10 across the same five seeded scenes in both the pre-ground and
+        # supplier-grounded lanes. Preserve an explicitly
+        # requested budget, but give the automatic mode enough settling time.
+        phase_steps = max(phase_steps, 500)
 
     def drive(targets, steps, grasp=None, engage=None, point=None):
         nonlocal stable, last_targets
@@ -588,7 +617,7 @@ def _pin_block(data, addrs: tuple[int, int], ee_pos) -> None:
 
 
 def joint_pd_reaches_point(model, ee_site, actuated, clamps, kp, kd, point,
-                           *, tol: float = 0.06, steps: int = 320) -> bool:
+                           *, tol: float = 0.06, steps: int = 320, full_3d: bool = False) -> bool:
     """Probe whether joint-PD to the seed-IK target can actually settle the EE onto ``point`` for THIS arm —
     on a throwaway copy of the state. Returns True (-> joint-PD reaches it precisely) or False (-> the arm is
     redundant/under-damped enough that task-space servoing is more reliable). One short rollout; lets any
@@ -612,15 +641,27 @@ def joint_pd_reaches_point(model, ee_site, actuated, clamps, kp, kd, point,
         mujoco.mj_step(model, d)
         if not np.all(np.isfinite(d.qpos)):
             return False
-    return float(np.linalg.norm(_ee_position(d, ee_site)[:2] - pt[:2])) < tol
+    ee = _ee_position(d, ee_site)
+    # M9/#185 (2026-07-24 audit): measure the FULL 3D residual when asked. The XY-only slice reported a redundant
+    # 7-DOF arm 'reachable' while it settled ~0.22 m off in Z and then missed the grasp — auto-select then wrongly
+    # kept joint-PD. spray_coverage still calls this XY-only (full_3d default False), so its behavior is unchanged.
+    err = (ee - pt) if full_3d else (ee[:2] - pt[:2])
+    return float(np.linalg.norm(err)) < tol
 
 
 def _joint_pd_can_reach(model, ee_site, actuated, clamps, kp, kd, objects, addrs, grasp_z,
-                        *, tol: float = 0.06, steps: int = 320) -> bool:
-    """Pick-place probe: can joint-PD settle the EE onto a representative grasp target (the first block)?"""
-    block = next(iter(addrs), None)
-    if block is None or block not in objects:
+                        *, engage_radius: float = 0.15, steps: int = 320) -> bool:
+    """Pick-place probe: can joint-PD settle the EE close enough to LATCH the grasp on the representative targets?
+
+    M9/#185: this decides joint-PD vs task-space for THIS arm. It now (1) measures the FULL 3D distance (not an
+    XY-only slice that ignored a 0.22 m Z error), (2) compares against a tolerance tied to the real ``engage_radius``
+    (0.15 m) with margin — joint-PD is only trusted if it lands comfortably inside the latch window — and (3)
+    probes EVERY block, not just the first, requiring joint-PD to reach ALL of them. A redundant 7-DOF arm that
+    settles ~0.22 m off now correctly fails the probe -> task-space (which reaches it), while a 6-DOF arm that
+    nails ~0.03 m still passes -> joint-PD. Empty scene -> True (nothing to disqualify joint-PD)."""
+    targets = [(objects[b][0], objects[b][1], grasp_z) for b in addrs if b in objects]
+    if not targets:
         return True
-    bx, by = objects[block][0], objects[block][1]
-    return joint_pd_reaches_point(model, ee_site, actuated, clamps, kp, kd, (bx, by, grasp_z),
-                                  tol=tol, steps=steps)
+    tol = 0.8 * float(engage_radius)                          # must land well inside the latch window, not just graze it
+    return all(joint_pd_reaches_point(model, ee_site, actuated, clamps, kp, kd, t,
+                                      tol=tol, steps=steps, full_3d=True) for t in targets)

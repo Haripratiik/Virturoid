@@ -11,6 +11,13 @@ uuid ids, daemon worker threads, ``?since`` polling) into a reusable, stdlib-onl
 * ``max_concurrent=1`` for physics work: MuJoCo builds are CPU-heavy and not reentrant,
   so extra jobs queue behind a semaphore instead of thrashing.
 
+Terminal statuses are the job-level VERDICT the UI renders as a chip, so "the worker returned"
+is not enough to earn ``succeeded``: an impossible prompt makes ``autonomous_build`` stop before
+generating an unrequested body, which used to finish as a green SUCCEEDED sitting on top of
+"success 0%" and "No robot package was generated". That honest refusal is a legitimate, GOOD
+outcome -- it is just not a success -- so it gets its own status, ``no_output``, and is never
+relabelled as ``failed`` (no error string, no error event).
+
 Purely additive: nothing else in the server changes behavior because this module exists.
 """
 
@@ -20,6 +27,8 @@ import threading
 import time
 import uuid
 from pathlib import Path
+
+from virturoid.services.package_status import has_robot_package
 
 
 class JobCancelled(Exception):
@@ -33,6 +42,14 @@ _ORDER: list[str] = []
 _HEAVY = threading.Semaphore(1)
 
 JOB_KINDS = ("autonomous_build", "tool", "train_gene")
+
+# Terminal statuses. ``no_output`` = the job ran honestly to completion and produced nothing the
+# user asked for (a refusal / clarification), which is NOT a success and NOT an error.
+SUCCEEDED = "succeeded"
+NO_OUTPUT = "no_output"
+FAILED = "failed"
+CANCELLED = "cancelled"
+TERMINAL_STATUSES = (SUCCEEDED, NO_OUTPUT, FAILED, CANCELLED)
 
 
 def _now() -> float:
@@ -158,7 +175,7 @@ def _run_job(job: dict, build_root: Path) -> None:
             else:
                 job["result"] = _run_tool(job)
             with _LOCK:
-                job["status"] = "succeeded"
+                job["status"] = _terminal_status(job)
         except JobCancelled:
             _emit(job, "cancelled", "Job cancelled; partial artifacts stay on disk (honest state).")
             with _LOCK:
@@ -171,6 +188,31 @@ def _run_job(job: dict, build_root: Path) -> None:
         finally:
             with _LOCK:
                 job["finished_at"] = _now()
+
+
+def _terminal_status(job: dict) -> str:
+    """The honest verdict for a worker that returned without raising.
+
+    A build job's promise is a robot package; when it deliberately produced none (impossible or
+    ambiguous prompt, ungrounded LLM design), the chip must not read SUCCEEDED.
+
+    A ``train_gene`` job's promise is a CONTROLLER ON THE HELD ROBOT, and it used to read SUCCEEDED
+    unconditionally — measured on a real Go2, ``train_held`` ran 15.0 s, finished ``succeeded``, and left the
+    gene byte-identical, which is a green chip on top of nothing. Now the same rule applies to it: the run
+    landed a controller (or was explicitly asked not to, ``apply='never'``) or the job did not do what it
+    promised. A worker that returned a refusal dict (``{"error": ...}``, e.g. no such held robot) is a FAILURE,
+    not a success carrying an error string."""
+    result = job.get("result")
+    if job["kind"] == "autonomous_build" and isinstance(result, dict) and not result.get("package_written"):
+        return NO_OUTPUT
+    if job["kind"] == "train_gene" and isinstance(result, dict):
+        if result.get("error"):
+            job["error"] = job["error"] or str(result["error"])
+            return FAILED
+        rep = result.get("applied_to_robot")
+        if isinstance(rep, dict) and not rep.get("applied") and str(rep.get("apply_mode") or "") != "never":
+            return NO_OUTPUT
+    return SUCCEEDED
 
 
 def _run_autonomous_build(job: dict, build_root: Path) -> dict:
@@ -194,9 +236,18 @@ def _run_autonomous_build(job: dict, build_root: Path) -> dict:
         getattr(decision, "stage", "") == "clarify_intent"
         for decision in getattr(report, "decisions", [])
     )
+    # Same predicate the package list uses, so "the build succeeded" and "the robot is in the
+    # library" can never disagree. It also catches the paths that stop AFTER clarify_intent (a
+    # rejected ungrounded LLM design writes a report but no robot).
+    package_written = has_robot_package(output_dir)
+    notes = [str(n) for n in (getattr(report, "notes", []) or [])]
+    blocked_reason = None if package_written else (
+        notes[0] if notes else "No robot package was generated.")
     return {
-        "output_name": None if requires_clarification else output_name,
+        "output_name": None if (requires_clarification or not package_written) else output_name,
         "package_dir": str(output_dir),
+        "package_written": package_written,
+        "blocked_reason": blocked_reason,
         "robot_class": getattr(report, "robot_class", None),
         "species": getattr(report, "species", None),
         "task_type": getattr(report, "task_type", None),

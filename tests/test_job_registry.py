@@ -14,7 +14,8 @@ def _wait_for_job(job_id: str, timeout_s: float = 10.0) -> dict:
     deadline = time.time() + timeout_s
     while time.time() < deadline:
         job = job_registry.get(job_id)
-        if job and job["status"] in {"succeeded", "failed", "cancelled"}:
+        # job_registry owns the terminal set; a copy here goes stale the moment a status is added.
+        if job and job["status"] in job_registry.TERMINAL_STATUSES:
             return job
         time.sleep(0.05)
     raise AssertionError(f"job {job_id} did not finish in {timeout_s}s")

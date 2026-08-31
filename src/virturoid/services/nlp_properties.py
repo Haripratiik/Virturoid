@@ -37,6 +37,59 @@ _GROUP_ALIASES = {
 }
 _LB_TO_KG = 0.45359237
 
+# ---- payload vs the robot's OWN mass ---------------------------------------------------------------------
+# A stated mass figure is one of three things and they must not be confused, because `set_payload` is not a
+# label: it raises joint torques, re-grounds to bigger motors and adds mass, so a misread silently RE-SPECS the
+# customer's robot -- and then emits its own "N joint(s) exceed the strongest catalog motor for this payload"
+# warning off the number it invented.
+_MASS_RE = r"(\d+(?:\.\d+)?)\s*(kg|kilograms?|kilos?|kgs|lbs?|pounds?)\b"
+# A payload NOUN may follow the figure ("2 kg payload", "10 kg load capacity"). Anchored, and whitespace-only
+# before the noun: a COMMA starts a new clause, so "35 kg, payload 5 kg" must not label the 35.
+_PAYLOAD_NOUN_AFTER = re.compile(
+    r"^\s*(?:of\s+)?(?:max(?:imum)?\s+|rated\s+|useful\s+)?(payload|load|capacity)\b")
+# A payload cue may precede it ("carries 5 kg", "payload: 10 kg", "rated for 8 kg"). Only searched BEFORE the
+# figure: a verb AFTER it governs the NEXT number ("a 40 kg base that carries 5 kg" is a 5 kg payload).
+_PAYLOAD_CUE_BEFORE = re.compile(
+    r"\b(payload|payloads|carry|carries|carrying|carried|lift|lifts|lifting|haul|hauls|hauling|"
+    r"hold|holds|holding|tote|totes|load|loads|capacity|rated for|rated to)\b")
+# Words that mark the figure as the robot's OWN mass -- never a load it carries.
+_SELF_MASS_CUE = re.compile(r"\b(weigh|weighs|weighed|weighing|weight|mass|masses|tare|curb|kerb|unladen)\b")
+
+
+def _cue_window(text: str, start: int, end: int, back: int = 44, fwd: int = 30) -> tuple[str, str]:
+    """The text just before/after a mass figure, TRUNCATED at the nearest OTHER mass figure.
+
+    A cue word only binds to the number it actually sits beside. In "24 kg, 2 kg payload" the word 'payload'
+    stands behind the 2 kg, so it must not reach back over that figure and mark the 24 kg as a payload too --
+    that reach is exactly what let the robot's own mass win the old ``max()``."""
+    before, after = text[max(0, start - back):start], text[end:min(len(text), end + fwd)]
+    prev = None
+    for mm in re.finditer(_MASS_RE, before):
+        prev = mm                                                # keep the last (closest) preceding mass figure
+    if prev:
+        before = before[prev.end():]
+    nxt = re.search(_MASS_RE, after)
+    if nxt:
+        after = after[:nxt.start()]
+    return before, after
+
+
+def _classify_mass(text: str, start: int, end: int) -> str:
+    """``"payload"`` (explicitly labelled), ``"self_mass"`` (the robot's own weight) or ``"bare"`` (unmarked).
+
+    Order matters: an anchored payload NOUN right after the figure is the strongest signal ("2 kg payload"),
+    then an explicit weight word in front ("weighs 12 kg"), then a carry/lift cue in front ("carries 5 kg")."""
+    before, after = _cue_window(text, start, end)
+    if _PAYLOAD_NOUN_AFTER.match(after):
+        return "payload"
+    if _SELF_MASS_CUE.search(before):
+        return "self_mass"
+    if _PAYLOAD_CUE_BEFORE.search(before):
+        return "payload"
+    if _SELF_MASS_CUE.search(after):
+        return "self_mass"
+    return "bare"
+
 
 @dataclass
 class ExtractedProperties:
@@ -80,7 +133,10 @@ def _find_group_near(text: str, start: int, end: int, window: int = 46) -> tuple
 
 def extract_properties(description: str) -> ExtractedProperties:
     """Deterministic NLP -> typed properties + edit ops. Materials are paired to the nearest body part; a lone
-    material ("made of aluminum") applies to the whole robot. Payload/DOF are parsed with unit handling."""
+    material ("made of aluminum") applies to the whole robot. DOF is parsed with unit handling and REPORTED.
+
+    Payload is only applied when the description actually MARKS a figure as a load; the robot's own mass is
+    never adopted, and an unmarked figure is surfaced in ``notes`` instead of guessed (see ``_classify_mass``)."""
     out = ExtractedProperties()
     if not description or not description.strip():
         return out
@@ -108,17 +164,25 @@ def extract_properties(description: str) -> ExtractedProperties:
         out.ops.append({"op": "set_material", "args": {"group": entry["group"], "material": entry["material"]}})
 
     # ---- payload -----------------------------------------------------------------------------------------
-    # a number + mass unit; prefer one near a carry/lift/payload cue, else the largest stated mass
-    candidates = []
-    for m in re.finditer(r"(\d+(?:\.\d+)?)\s*(kg|kilograms?|kilos?|kgs|lbs?|pounds?)\b", text):
+    # An EXPLICITLY LABELLED payload always beats a bare mass figure. This used to score each mass as
+    # (cue-word-within-the-window?, kilograms) and take the ``max`` -- "among equals, the larger load (the
+    # binding requirement)" -- but both numbers in a sentence fall inside the same +/-30 / 18-char window, so
+    # the labelled value LOST to the bigger unlabelled one. Measured: "A telescoping arm, 24 kg, 2 kg payload."
+    # applied 24 kg, and "Our Unitree G1 humanoid, 1.3 m tall, 35 kg, 29 joints." applied the robot's own 35 kg.
+    # A bare figure is NEVER adopted silently: it is surfaced as a note (the ingest path relays `notes` to the
+    # customer), the same way input_evidence turns a self-weight budget into a conflict + an intake question
+    # instead of a silent value. Guessing here re-specs someone's actuators.
+    candidates = []                                              # (kind, kg, evidence)
+    for m in re.finditer(_MASS_RE, text):
         val = float(m.group(1)); unit = m.group(2)
         kg = round(val * _LB_TO_KG, 2) if unit.startswith(("lb", "pound")) else val
-        ctx = text[max(0, m.start() - 30):min(len(text), m.end() + 18)]
-        cued = bool(re.search(r"\b(payload|carry|carries|lift|lifts|hold|holds|load|capacity)\b", ctx))
-        candidates.append((cued, kg, ctx.strip()))
-    if candidates:
-        # a cued mass beats an uncued one; among equals, the larger load (the binding requirement)
-        cued, kg, ctx = max(candidates, key=lambda c: (c[0], c[1]))
+        ctx = text[max(0, m.start() - 30):min(len(text), m.end() + 18)].strip()
+        candidates.append((_classify_mass(text, m.start(), m.end()), kg, ctx))
+    labelled = [c for c in candidates if c[0] == "payload"]
+    if labelled:
+        # among GENUINE payloads the larger is still the binding requirement -- the original intent, now applied
+        # only to figures that are actually marked as loads
+        _, kg, ctx = max(labelled, key=lambda c: c[1])
         if 0.1 <= kg <= 50.0:
             out.payload_kg = kg
             out.payload_evidence = ctx
@@ -126,6 +190,15 @@ def extract_properties(description: str) -> ExtractedProperties:
         elif kg > 50.0:
             out.notes.append(f"stated payload {kg} kg exceeds the safe amend range (0.1-50 kg); needs a larger "
                              "actuator class / gearbox -- not auto-applied")
+    elif any(c[0] == "bare" for c in candidates):
+        figs = ", ".join(f"{c[1]:g} kg" for c in candidates if c[0] == "bare")
+        out.notes.append(
+            f"{figs} is stated, but nothing marks it as a PAYLOAD rather than the robot's own mass -- NOT "
+            f"applied, because set_payload upsizes real actuators and adds mass. Say '<n> kg payload' or "
+            f"'carries <n> kg' to apply it as a load, or 'weighs <n> kg' if it is the robot's own mass.")
+    elif candidates:
+        figs = ", ".join(f"{c[1]:g} kg" for c in candidates)
+        out.notes.append(f"read {figs} as the robot's OWN mass, not a payload -- no payload applied")
 
     # ---- DOF (reported, not auto-applied) ----------------------------------------------------------------
     md = re.search(r"(\d+)\s*[-\s]?\s*(dof|d\.o\.f|degrees?\s+of\s+freedom|axis|axes)\b", text)

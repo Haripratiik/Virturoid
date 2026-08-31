@@ -22,7 +22,86 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 
-def main(argv=None) -> int:
+# ------------------------------------------------------------------ EXPLORATION-SIGMA BOUND (task #258)
+# WHY THIS EXISTS. The Gaussian exploration std is a LEARNED, UNBOUNDED, UNSCHEDULED parameter here. The PPO
+# objective is ``loss = pg + VF * vf - ENT * ent`` with ``ent = (logstd + const).sum()``, so d(loss)/d(logstd)
+# carries a CONSTANT ``-ENT`` = -5e-3 that pushes sigma UP on every minibatch, for the whole run, with nothing
+# pulling it back but the policy-gradient term. From the ``-0.5`` init (sigma 0.6065) that is enough to TRUNCATE
+# the episodes the objective is scored on: measured, arm L trained at ``--ep-len 500`` still collapsed because
+# every episode died at ~150 of 500 control steps (~1.25 s) — so a LONGER HORIZON ALONE does not fix the bug
+# that the objective never observes the fall (checkpoints fall at 1.33-1.51 s).
+#
+# MEASURED (task #258) — sweep sigma, score the SAME two checkpoints under the SAME objective (good vs bad):
+#     sigma 0.0000 ->  300.7 vs 220.3   ranks the GOOD checkpoint first
+#     sigma 0.1500 ->  244.7 vs 214.0   ranks the GOOD checkpoint first
+#     sigma 0.3000 ->  197.7 vs 206.9   FLIPS — now prefers the BAD checkpoint
+#     sigma 0.6065 ->  169.1 vs 183.1   flipped; and 0.6065 is exactly the DEFAULT init
+# i.e. above ~0.15-0.30 the exploration noise INVERTS the ranking the objective is meant to express. Bounding
+# sigma is therefore a correctness fix on the objective, not a tuning preference.
+#
+# It is a FLAG, not a hard-coded guess: ``--logstd-min/--logstd-max`` move the bound, and a wide range makes the
+# clip the identity, recovering the exact pre-bound behaviour (logstd never travels anywhere near +-20).
+LOGSTD_MIN, LOGSTD_MAX = -2.3, -0.7                    # sigma in [exp(-2.3), exp(-0.7)] = [0.100, 0.497]
+
+
+def bounded_logstd(logstd, lo: float = LOGSTD_MIN, hi: float = LOGSTD_MAX, xp=None):
+    """``clip(logstd, lo, hi)`` — the log-sigma the policy ACTUALLY samples with.
+
+    Applied at EVERY read of ``params["logstd"]`` (sampling, the PPO log-prob, the entropy term, the KL probe) so
+    the sigma that generates actions, the sigma the ratio is computed against and the entropy the loss reports are
+    the same number. Clipping the ENTROPY read matters on its own: outside the range the clip has zero gradient,
+    so the constant ``-ENT`` push stops at the cap instead of accumulating forever in a parameter nobody reads.
+    ``xp`` is numpy or jax.numpy — the same expression is traceable under jit and testable on CPU."""
+    if xp is None:
+        import numpy
+        xp = numpy
+    return xp.clip(logstd, lo, hi)
+
+
+def bounded_sigma(logstd, lo: float = LOGSTD_MIN, hi: float = LOGSTD_MAX, xp=None):
+    """The exploration sigma actually used: ``exp(clip(logstd, lo, hi))`` (see ``bounded_logstd``)."""
+    if xp is None:
+        import numpy
+        xp = numpy
+    return xp.exp(bounded_logstd(logstd, lo, hi, xp=xp))
+
+
+def trainer_meta(F, H, NT, fwd, *, adaptive=False, cpg=False, decimation=1, action_lpf=0.0,
+                 sphere_feet=False, phase_obs=False, logstd=None) -> list:
+    """The ``meta`` array ``_save`` writes, as a plain list of floats — extracted so the LAYOUT is testable
+    without a GPU. It MUST match ``MorphPolicy.from_npz``: [F, H, NT, fwd, adaptive@4, cpg@5, decimation@6,
+    action_lpf@7, sphere_feet@8, phase_obs@9, command@10, recipe@11, logstd@12].
+
+    meta[11] is always 1.0: the ONLY control law in this trainer is the recipe one (tgt = q_default + CPG +
+    ascale*tanh(a); tau = KP*err - KD*qd; terminate-on-fall). Deploy used to INFER "recipe" from obs_mean/cpg —
+    and a run WITHOUT --cpg banks neither, so it fell through to the legacy torque-residual rollout it was never
+    trained with, which also never terminates on a fall and ignores the meta[6]/meta[8] written right here
+    (task #257). meta[10] is a 0.0 spacer: this trainer has no velocity-command conditioning, which is exactly
+    what from_npz already infers.
+
+    meta[12] is the EFFECTIVE (bounded) logstd — ``exp(meta[12])`` is the exploration sigma this artifact was
+    trained under, the quantity whose invisibility was the whole of task #258. It follows the meta[11] convention
+    exactly: it is APPENDED, never reordered, so every existing reader is untouched, and ``logstd=None`` OMITS the
+    slot rather than writing a 0.0 — a 0.0 would be a positive claim of sigma 1.0, whereas a MISSING slot is the
+    honest "this artifact predates the instrumentation and cannot be retro-marked"."""
+    meta = [float(F), float(H), float(NT), float(fwd),
+            1.0 if adaptive else 0.0,                     # meta[4]: adaptive per-joint PD gains
+            1.0 if cpg else 0.0,                          # meta[5]: trot-CPG prior
+            float(decimation),                            # meta[6]: control decimation (T1.1); deploy==train
+            float(action_lpf),                            # meta[7]: action LPF (T1.2) so deploy matches train
+            1.0 if sphere_feet else 0.0,                  # meta[8]: sphere feet (T1.4); deploy==train
+            1.0 if phase_obs else 0.0,                    # meta[9]: P1 phase-clock obs; deploy==train
+            0.0,                                          # meta[10]: WS8/P6 velocity-command (never set here)
+            1.0]                                          # meta[11]: RECIPE controller; deploy==train
+    if logstd is not None:
+        meta.append(float(logstd))                        # meta[12]: effective logstd (exp -> training sigma)
+    return meta
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """The full CLI, at MODULE level so every flag and its default is testable without importing jax/mjx —
+    which this box cannot do at all (mjx lives on the GPU box). Previously the parser was built inside
+    ``main()``, so no flag could be exercised on CPU. Body moved verbatim; only the indentation changed."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--robot", default="quadruped")
     ap.add_argument("--iters", type=int, default=200)
@@ -106,7 +185,7 @@ def main(argv=None) -> int:
     ap.add_argument("--upright-hi", type=float, default=0.7, help="upright-ramp SATURATION height (fraction of "
                     "standing z where the continuous upright reward hits 1.0). Default 0.7 (byte-identical; the "
                     "quad walks). RAISE toward ~0.9 for bodies that FARM the reward by CROUCHING: at 0.7 a "
-                    "0.67-height slide already earns ~85% upright, so PPO never stands tall enough to swing its "
+                    "0.67-height slide already earns ~85%% upright, so PPO never stands tall enough to swing its "
                     "legs (the hexapod crouch-slide, cadence 0). Higher saturation -> a crouch earns far less -> "
                     "the policy stands up and STEPS. Fall line stays at 0.5*z_stand.")
     ap.add_argument("--vz-w", type=float, default=0.4, help="lin_vel_z penalty (legged_gym): penalize vertical "
@@ -140,6 +219,32 @@ def main(argv=None) -> int:
                     "randomization (canonical MuJoCo-Playground pattern: batch geom_friction/body_mass/dof_"
                     "armature/dof_frictionloss as vmapped mjx.Model leaves), targeting the MJX<->CPU CONTACT gap "
                     "for vigorous learned gaits. Off (default) -> in_axes=(None,0) = byte-identical single model.")
+    # MORPHOLOGY DR: the axis the co-design literature actually randomizes, and the one this repo was missing.
+    # Every existing DR knob varies DYNAMICS (friction, mass, gains, pushes); none varies GEOMETRY, so a policy
+    # trained here is fitted to exactly one set of link lengths. That is the measured blocker behind three
+    # reverted geometry improvements: bodies and the scripted gait's operating point are co-tuned, so changing
+    # limb proportions -- however anatomically right -- moved every body off the point its controller assumed.
+    # Randomizing LEG LENGTH per env (asymmetric fore/hind included) then finetuning per body is the published
+    # remedy (arxiv 2407.06770, quadruped parkour). Off by default -> byte-identical to the single-model path.
+    ap.add_argument("--morph-dr", action="store_true", help="per-env LIMB-LENGTH randomization: scale each limb's "
+                    "link lengths (geom half-length, child offsets, ipos, mass, inertia) per env, keeping the "
+                    "attachment points -- and therefore stance width -- fixed, so LENGTH is isolated from WIDTH. "
+                    "Also feeds the per-env lengths into the policy's own morphology tokens, so this CONDITIONS "
+                    "the policy rather than just making it robust. Off -> single shared model, byte-identical.")
+    ap.add_argument("--morph-dr-lo", type=float, default=0.75, help="lower limb-length scale for --morph-dr")
+    ap.add_argument("--morph-dr-hi", type=float, default=1.30, help="upper limb-length scale for --morph-dr")
+    ap.add_argument("--morph-dr-asym", action="store_true", help="sample each limb's scale INDEPENDENTLY so fore "
+                    "and hind legs differ (the paper's asymmetric case). Off -> one scale for all limbs per env, "
+                    "which varies size without varying proportion between limbs.")
+    ap.add_argument("--morph-dr-groups", type=int, default=0, help="how many DISTINCT bodies to spread over the "
+                    "envs (0 = one per env). This decouples morphology count from env count, which matters "
+                    "because batching the model is what stops large env counts compiling: measured, 1024 envs "
+                    "never reached iteration 0 in 30+ min, so the affordable env count is small -- and with one "
+                    "body per env, each morphology is then sampled exactly ONCE per iteration. Measured "
+                    "consequence at 64 envs / 64 bodies: reward peaked at iteration 10 (fwd_vel +0.123) then "
+                    "decayed to +0.038 while the KL-adaptive LR collapsed to its 1e-05 floor -- between-body "
+                    "variance swamped the gradient and the controller read it as instability. G=8 over 64 envs "
+                    "gives 8 samples per body instead of 1, at identical compile cost.")
     ap.add_argument("--dr-scale", type=float, default=1.0, help="P3 (plan v4): scale the contact-DR range WIDTH "
                     "(deviation from 1.0). 1.0=canonical Go1/Barkour ranges (default, byte-identical); <1 = milder "
                     "(e.g. 0.4) so a warm-started nominal policy adds robustness WITHOUT toppling under too-wide DR.")
@@ -181,7 +286,26 @@ def main(argv=None) -> int:
     ap.add_argument("--keep-checkpoints", action="store_true", help="plan v2 T0.1: also save NUMBERED checkpoints "
                     "(runs/<name>_it{N}.npz every 10 iters) so DEPLOY-SIM checkpoint selection can pick best-by-CPU "
                     "(MJX reward can rise while CPU deploy flips sign -- never select on train-sim reward).")
-    args = ap.parse_args(argv)
+    ap.add_argument("--logstd-min", type=float, default=LOGSTD_MIN, help="LOWER bound on the learned exploration "
+                    "log-sigma (task #258). See the LOGSTD_MIN/LOGSTD_MAX block at the top of this file for the "
+                    "measured sweep; default -2.3 -> sigma >= 0.100.")
+    ap.add_argument("--logstd-max", type=float, default=LOGSTD_MAX, help="UPPER bound on the learned exploration "
+                    "log-sigma (task #258, the load-bearing one). The entropy bonus adds a CONSTANT upward "
+                    "gradient on logstd with nothing to stop it, and measured, sigma>~0.3 INVERTS the objective's "
+                    "ranking of two checkpoints while truncating episodes to ~30%% of the horizon — so the "
+                    "objective never observes the fall it is supposed to learn from. Default -0.7 -> sigma <= "
+                    "0.497. Pass a wide range (e.g. --logstd-min -20 --logstd-max 20) to make the clip the "
+                    "identity and recover the exact pre-bound behaviour.")
+    ap.add_argument("--reward-expr", type=str, default="", help="R1 (agentic platform): an LLM-authored reward_dsl "
+                    "EXPRESSION over the 10 whitelisted features (forward_vel, upright, height_ratio, contact_frac, "
+                    "alive, slip, foot_clearance, energy, action_smooth, dist_to_goal). When set, it REPLACES the "
+                    "shaped legged_gym reward — the same reward the CPU gait search screened now steers MJX PPO, "
+                    "evaluated natively via reward_dsl.compile_reward_batched(xp=jax.numpy). Empty = shaped reward.")
+    return ap
+
+
+def main(argv=None) -> int:
+    args = build_parser().parse_args(argv)
     if args.smoke:
         args.envs, args.iters, args.ep_len, args.minibatches = 2, 2, 20, 1
 
@@ -293,6 +417,13 @@ def main(argv=None) -> int:
     TORQUE_W = args.torque_w                              # actuator-effort penalty (anti-crank stabilizer)
     PERIODIC_W = float(args.periodic_w)                   # P1 (plan v4): periodic gait-contact reward weight (0 = off)
     WTW_W = float(args.wtw_w)                              # physical-AI: slide-proof grounded-foot-speed penalty (0=off)
+    # R1 (agentic platform): an LLM-authored reward_dsl expression, compiled to a jax.numpy fn over the 10 features.
+    # When set it REPLACES the shaped reward below — the reward the CPU search screened now steers this MJX PPO run.
+    DSL_REWARD = None
+    if args.reward_expr:
+        from virturoid.services.reward_dsl import compile_reward_batched
+        DSL_REWARD = compile_reward_batched(args.reward_expr, xp=jp)
+        print(f"  R1: steering PPO with LLM-authored reward: {args.reward_expr}", flush=True)
     UPRIGHT_HI = max(0.55, float(args.upright_hi))        # upright-ramp saturation height (anti-crouch; default 0.7)
     # TROT-CPG PRIOR (opt-in --cpg): per-token feed-forward amplitude/phase from the SAME logic as the CPU recipe
     # (morph_policy._trot_cpg_tokens + CPG_DEFAULT), so a GPU-trained policy transfers to / replays on the CPU path.
@@ -363,6 +494,10 @@ def main(argv=None) -> int:
     H = args.hidden
     GAMMA, LAM, CLIP, ENT, VF, LR = 0.99, 0.95, 0.2, 5e-3, 0.5, 3e-4
     N, L = args.envs, max(5, args.ep_len // DECIM)       # L = CONTROL steps (physics time = L*DECIM ~ ep_len)
+    # task #258: the exploration sigma is bounded at EVERY read of params["logstd"] (see the module-level block).
+    LS_LO, LS_HI = float(args.logstd_min), float(args.logstd_max)
+    def _sigma(p):                                       # the sigma actually sampled with, as a traced scalar
+        return jp.exp(bounded_logstd(p["logstd"], LS_LO, LS_HI, xp=jp))[0]
 
     key = jax.random.PRNGKey(0)
     def W(k, shape, s=0.3):
@@ -389,14 +524,19 @@ def main(argv=None) -> int:
     opt = optax.chain(optax.clip_by_global_norm(1.0), optax.scale_by_adam())   # B0.3: LR applied manually below (KL-adaptive)
     opt_state = opt.init(params)
 
-    def obs_tokens(d):
-        """(NT, F) per env — same feature layout as morph_graph.observe (so params transfer to CPU)."""
+    def obs_tokens(d, st=static):
+        """(NT, F) per env — same feature layout as morph_graph.observe (so params transfer to CPU).
+
+        ``st`` is the per-token STATIC block. It defaults to the shared nominal one, and is passed per env only
+        under --morph-dr, where each env has different link lengths and the policy has to be told which body it
+        is driving. Without that the features would be identical across envs while the dynamics differed, which
+        trains robustness (implicit system identification) rather than morphology conditioning."""
         qpos = d.qpos[qadr]; qvel = d.qvel[vadr]
         dyn = jp.stack([qpos, qvel, jp.sin(qpos), jp.cos(qpos)], axis=1)
         q = d.qpos[base_qadr:base_qadr + 7]; qd = d.qvel[base_vadr:base_vadr + 6]
         upright = 1.0 - 2.0 * (q[4] ** 2 + q[5] ** 2)
         g = jp.array([1.0, q[2], upright, qd[0], qd[1], qd[2], qd[3], qd[4], qd[5]])
-        return jp.nan_to_num(jp.concatenate([static, dyn, jp.tile(g, (NT, 1))], axis=1))
+        return jp.nan_to_num(jp.concatenate([st, dyn, jp.tile(g, (NT, 1))], axis=1))
 
     from virturoid.services.morph_forward import attention_forward
 
@@ -424,6 +564,105 @@ def main(argv=None) -> int:
         vals = vmlp(P["vf"], pools)[:, 0]                                              # (N,)
         return means, vals
 
+    # MORPHOLOGY DR: per-env LIMB LENGTHS as batched mjx.Model leaves, plus the matching per-env morphology tokens.
+    #
+    # A "limb" is a branch hanging off the root body. Within a branch every body's OWN length scales, but the
+    # branch root's `body_pos` -- where the limb attaches to the trunk -- does NOT, which is what separates leg
+    # LENGTH from stance WIDTH. Deeper `body_pos` values do scale, so each link starts at its stretched parent's
+    # tip and the chain stays connected. Mass scales linearly (a longer rod of the same radius) and inertia
+    # cubically (rod about a transverse axis, m*L^2).
+    #
+    # The second half is what makes this CO-DESIGN and not just robustness: `graph.static` is computed once from
+    # the nominal model, so without patching it every env would show the policy IDENTICAL morphology features
+    # while behaving differently -- implicit system identification, not conditioning. Columns 5 (link_off) and 7
+    # (mass) of morph_graph's static layout are exactly the two the scale changes, so they are patched per env.
+    # Joint LIMIT columns are unaffected for hinges (morph_graph normalizes those by pi, not by link length).
+    MORPH_DR = bool(args.morph_dr)
+    static_v, _ST_AX, morph_scale = static, None, None
+    if MORPH_DR:
+        _par = np.asarray(mj.body_parentid, dtype=int)
+        _root = next((b for b in range(1, mj.nbody) if _par[b] == 0), 1)   # the robot's own root body
+        branch_of = np.full(mj.nbody, -1, dtype=int)          # which limb each body belongs to (-1 = trunk)
+        is_branch_root = np.zeros(mj.nbody, dtype=bool)
+        _limbs = [b for b in range(1, mj.nbody) if _par[b] == _root]
+        for _i, _b in enumerate(_limbs):
+            is_branch_root[_b] = True
+            _stack = [_b]
+            while _stack:
+                _x = _stack.pop()
+                branch_of[_x] = _i
+                _stack += [c for c in range(1, mj.nbody) if _par[c] == _x]
+        n_limbs = len(_limbs)
+        if n_limbs == 0:
+            print("morph-DR requested but the root has no limbs; falling back to the single model", flush=True)
+            MORPH_DR = False
+    if MORPH_DR:
+        # Which geom_size column carries LENGTH, per geom type. A sphere or a mesh has no length axis to stretch,
+        # and a foot pad should not become a stilt, so those are left alone.
+        _GT = np.asarray(mj.geom_type, dtype=int)
+        _GS = np.asarray(mj.geom_size, dtype=float)
+        len_col = np.full(mj.ngeom, -1, dtype=int)
+        for _g in range(mj.ngeom):
+            if _GT[_g] in (3, 5):                            # capsule, cylinder -> size = (radius, half-length, _)
+                len_col[_g] = 1
+            elif _GT[_g] in (4, 6):                          # ellipsoid, box -> stretch the axis that is longest
+                len_col[_g] = int(np.argmax(_GS[_g][:3]))
+        size_hot = np.zeros((mj.ngeom, _GS.shape[1]), dtype=float)
+        for _g in range(mj.ngeom):
+            if len_col[_g] >= 0:
+                size_hot[_g, len_col[_g]] = 1.0
+        gbody = np.asarray(mj.geom_bodyid, dtype=int)
+        in_limb = (branch_of >= 0).astype(float)                      # trunk stays nominal
+        pos_scales = in_limb * (~is_branch_root).astype(float)        # attachment points fixed -> width preserved
+        b_idx = np.maximum(branch_of, 0)
+
+        _J_BODY = np.asarray([int(mj.jnt_bodyid[int(mj.actuator_trnid[u, 0])]) for u in np.asarray(graph.act_u)])
+
+        def _limb_scales(rng):
+            if args.morph_dr_asym:
+                return jax.random.uniform(rng, (n_limbs,), minval=args.morph_dr_lo, maxval=args.morph_dr_hi)
+            one = jax.random.uniform(rng, (), minval=args.morph_dr_lo, maxval=args.morph_dr_hi)
+            return jp.full((n_limbs,), one)
+
+        # G distinct bodies tiled over N envs (G=0 -> one body per env). See --morph-dr-groups for why: the env
+        # count is capped by compile cost, so one-body-per-env leaves each morphology with a single sample per
+        # iteration and the gradient becomes between-body noise.
+        _G = int(args.morph_dr_groups) or N
+        _G = max(1, min(_G, N))
+        _keys = jax.random.split(jax.random.PRNGKey(11), _G)
+        _s_g = jax.vmap(_limb_scales)(_keys)                            # (G, n_limbs)
+        _reps = int(np.ceil(N / _G))
+        _s_limb = jp.tile(_s_g, (_reps, 1))[:N]                         # (N, n_limbs), G distinct rows
+        _bi = jp.asarray(b_idx)
+        s_body = jp.where(jp.asarray(in_limb) > 0, _s_limb[:, _bi], 1.0)          # (N, nbody)
+        s_pos = jp.where(jp.asarray(pos_scales) > 0, _s_limb[:, _bi], 1.0)        # (N, nbody)
+        s_geom = s_body[:, jp.asarray(gbody)]                                     # (N, ngeom)
+
+        _size_mult = 1.0 + jp.asarray(size_hot)[None] * (s_geom[..., None] - 1.0)
+        mx_v = mx.replace(
+            geom_size=mx.geom_size[None] * _size_mult,
+            geom_pos=mx.geom_pos[None] * s_geom[..., None],
+            body_pos=mx.body_pos[None] * s_pos[..., None],
+            body_ipos=mx.body_ipos[None] * s_body[..., None],
+            body_mass=mx.body_mass[None] * s_body,
+            body_inertia=mx.body_inertia[None] * (s_body ** 3)[..., None],
+        )
+        mx_axes = jax.tree_util.tree_map(lambda _x: None, mx).replace(
+            geom_size=0, geom_pos=0, body_pos=0, body_ipos=0, body_mass=0, body_inertia=0)
+        # Tell the POLICY what body it is driving: patch link_off (col 5) and mass (col 7) per env.
+        s_tok = s_body[:, jp.asarray(_J_BODY)]                                    # (N, NT)
+        static_v = jp.broadcast_to(static, (N,) + static.shape)
+        static_v = static_v.at[:, :, 5].multiply(s_tok).at[:, :, 7].multiply(s_tok)
+        _ST_AX, morph_scale = 0, _s_limb
+        print(f"morph-DR ON: {n_limbs} limbs, {_G} distinct bodies over {N} envs ({N // _G} envs/body), "
+              f"length scale [{args.morph_dr_lo:.2f}, {args.morph_dr_hi:.2f}]"
+              f"{' asymmetric per limb' if args.morph_dr_asym else ' shared per body'}; "
+              f"stance width fixed; policy tokens carry the per-env lengths", flush=True)
+        if CONTACT_DR:
+            print("NOTE: --contact-dr with --morph-dr would overwrite body_mass; morph-DR owns mass here.",
+                  flush=True)
+            CONTACT_DR = False
+
     # CONTACT-PARAM DR (T1.5): batch per-env mjx.Model leaves (friction/mass/armature/frictionloss) + a matching
     # in_axes Model; vmap step/forward over (model, data). The canonical MuJoCo-Playground pattern, targeting the
     # MJX<->CPU CONTACT gap for vigorous learned gaits. OFF -> mx_v=mx, mx_axes=None -> in_axes=(None,0) = the
@@ -448,16 +687,49 @@ def main(argv=None) -> int:
         mx_axes = jax.tree_util.tree_map(lambda _x: None, mx).replace(
             geom_friction=0, body_mass=0, dof_armature=0, dof_frictionloss=0)
         print(f"contact-DR ON: per-env friction/mass/armature/frictionloss over {N} envs", flush=True)
-    else:
+    elif not MORPH_DR:                                    # morph-DR already batched the model; don't undo it
         mx_v, mx_axes = mx, None
     step_v = jax.vmap(mjx.step, in_axes=(mx_axes, 0))
 
     _spawn = jp.asarray(spawn_qpos) if spawn_qpos is not None else None  # imported robot's home pose
 
+    # PER-ENV SPAWN HEIGHT. With per-env leg lengths a single shared base z is wrong for every env but one: a
+    # longer-legged body starts with its feet through the floor (ejected on the first step) and a shorter one
+    # starts falling. Measure it instead of deriving it -- forward-kinematic each env at its default pose, find
+    # its lowest geom, and lift the base so that point rests just above the floor. This is exactly what
+    # gene_compiler.standing_spawn_z does on CPU, done once per env at startup rather than analytically.
+    _spawn_z = None
+    if MORPH_DR:
+        _d_probe = jax.vmap(lambda _: mjx.make_data(mx, naconmax=NACON, njmax=NJMAX))(jp.arange(N))
+        if _spawn is not None:
+            _d_probe = _d_probe.replace(qpos=jp.broadcast_to(_spawn, (N, _spawn.shape[0])))
+        _d_probe = jax.vmap(mjx.forward, in_axes=(mx_axes, 0))(mx_v, _d_probe)
+        _not_plane = jp.asarray(np.asarray(mj.geom_type) != 0)
+        _rb = jp.asarray(np.asarray(mj.geom_rbound, dtype=float))          # per-geom bounding radius
+        _z = _d_probe.geom_xpos[:, :, 2] - _rb[None, :]                    # (N, ngeom) lowest point of each geom
+        _BIG = 1.0e6                                          # not jp.inf: casting inf to f32 warns "overflow in cast"
+        _zmin = jp.min(jp.where(_not_plane[None, :], _z, _BIG), axis=1)    # (N,)
+        _spawn_z = 0.02 - _zmin                                           # lift so the lowest point sits at 2 cm
+        print(f"morph-DR spawn heights: base z shifted by {float(jp.min(_spawn_z)):+.3f}..."
+              f"{float(jp.max(_spawn_z)):+.3f} m across envs so every body starts standing", flush=True)
+        # PER-ENV STANDING HEIGHT. z_stand was one scalar taken from the NOMINAL body, and it does not merely
+        # scale a reward -- `fell = z < 0.5*z_stand` TERMINATES the episode, and `height`/`up` are both ratios of
+        # it. With per-env leg lengths the standing heights differ by ~9 cm here, so a short-legged env was being
+        # killed as "fallen" while standing perfectly while a tall one never tripped the fall line even collapsed.
+        # That is contradictory supervision no learning-rate schedule can rescue, and it is what the first two
+        # runs actually died of (peak fwd_vel at iteration 10, then decay to NEGATIVE by 50).
+        # Same shape of defect as _pose_keyframe's hardcoded identity quaternion: a constant that was only ever
+        # right because there was exactly one body.
+        z_stand = z_stand + _spawn_z                                      # (N,) -- broadcasts everywhere z_stand did
+        print(f"morph-DR standing heights: {float(jp.min(z_stand)):.3f}..{float(jp.max(z_stand)):.3f} m "
+              f"(fall line and height ratio are now PER BODY, not the nominal body's)", flush=True)
+
     def reset(key):
         data = jax.vmap(lambda _: mjx.make_data(mx, naconmax=NACON, njmax=NJMAX))(jp.arange(N))
         if _spawn is not None:                            # spawn every env at the robot's standing home pose
             data = data.replace(qpos=jp.broadcast_to(_spawn, (N, _spawn.shape[0])))
+        if _spawn_z is not None:                          # per-env: each morphology stands on its own feet
+            data = data.replace(qpos=data.qpos.at[:, 2].add(_spawn_z))
         return jax.vmap(mjx.forward, in_axes=(mx_axes, 0))(mx_v, data)
 
     def legacy_reward_of(d):
@@ -471,18 +743,21 @@ def main(argv=None) -> int:
         return fwd * height * height + 0.3 * upright + 0.1 * height, fwd
 
     CHUNK = 5
+    # The rollout runs whole CHUNKs, so the horizon actually stepped is L rounded DOWN to a multiple of CHUNK.
+    # It is the honest denominator for the mean-episode-length readout below (L itself would flatter a run).
+    L_ROLL = max(CHUNK, (L // CHUNK) * CHUNK)
     LEGACY = bool(args.legacy_control)
 
     @functools.partial(jax.jit, static_argnums=())
     def roll_chunk(params, dr, carry, keys):
-        std = jp.exp(params["logstd"])[0]
+        std = _sigma(params)                             # task #258: BOUNDED exploration sigma (see LOGSTD_MIN/MAX)
         gain_s, kp_s, kd_s = dr                          # per-env sim2real scales (all ones when --dr off)
 
         def body(carry, key):
             # alive (N,): 1.0 until this env first falls; air_time/last_contact (N, n_feet): feet_air_time state;
             # stance_time (N, n_feet): per-foot GROUNDED duration (P1 periodic reward; symmetric to air_time).
             data, alive, a_prev, air_time, last_contact, stance_time = carry
-            obs = jax.vmap(obs_tokens)(data)              # (N, NT, F)
+            obs = jax.vmap(obs_tokens, in_axes=(0, _ST_AX))(data, static_v)   # (N, NT, F)
             pkey = key
             if DR_ON:                                     # sim2real: noisy obs + (below) randomized dynamics + pushes
                 key, okey, pkey = jax.random.split(key, 3)
@@ -618,7 +893,17 @@ def main(argv=None) -> int:
                 # rewards can't fund a reversed gait. Scales with how backward it goes -> backward is driven to 0
                 # reward (never a basin) while a forward gait pays nothing. Kills the MJX backward-convergence.
                 back_pen = BACK_W * jp.maximum(0.0, -fwd) * up
-                rew = alive2 * jp.maximum(0.0, step_r - back_pen)       # non-negative; zero after a fall or if reversing
+                if DSL_REWARD is not None:
+                    # R1: the LLM-authored reward REPLACES the shaped one. The 10 features come from the SAME
+                    # rollout quantities the shaped reward uses, so the CPU-screened reward steers MJX PPO natively.
+                    n_feet = fz.shape[-1]
+                    feats = {"forward_vel": fwd, "upright": upr, "height_ratio": z / (z_stand + 1e-6),
+                             "contact_frac": n_stance / n_feet, "alive": alive2, "slip": jp.abs(qd[:, 1]),
+                             "foot_clearance": clearance, "energy": effort, "action_smooth": -sm,
+                             "dist_to_goal": jp.zeros_like(fwd)}
+                    rew = alive2 * DSL_REWARD(feats)                    # alive gate keeps a fallen episode at 0
+                else:
+                    rew = alive2 * jp.maximum(0.0, step_r - back_pen)   # non-negative; zero after a fall or if reversing
             # carry the action basis used for smoothness next step (applied offset for recipe; clipped for legacy)
             a_next = a_clip if LEGACY else off
             outs = (obs, act, logp, rew, val, fwd, alive2)
@@ -635,7 +920,8 @@ def main(argv=None) -> int:
             last_pcpt = jax.vmap(_phase_percept_1)(data_last.time)   # bootstrap value uses the clock at data_last too
         else:
             obs, act, logp, rew, val, fwd, alive = traj; pcpt = last_pcpt = None
-        _, last_val = act_and_value(params, jax.vmap(obs_tokens)(data_last), last_pcpt)
+        _, last_val = act_and_value(
+            params, jax.vmap(obs_tokens, in_axes=(0, _ST_AX))(data_last, static_v), last_pcpt)
 
         def gae(carry, x):
             nextval, next_alive, adv = carry
@@ -650,7 +936,13 @@ def main(argv=None) -> int:
             adv = (delta + GAMMA * LAM * next_alive * adv) * alive_t
             return (val_t, alive_t, adv), adv
         _, advs = jax.lax.scan(gae, (last_val, jp.ones(N), jp.zeros(N)), (rew, val, alive), reverse=True)
-        return obs, act, logp, advs, advs + val, rew.sum(0).mean(), fwd.mean(0).mean(), pcpt
+        # MEAN EPISODE LENGTH (task #258): `alive` is 1.0 per control step until this env first falls and 0.0
+        # after, so summing over time and meaning over envs IS the observed episode length in CONTROL steps.
+        # Nothing logged it, and its invisibility WAS the bug: at the default horizon both a good and a bad
+        # checkpoint survive every step, so alive_bonus is EXACTLY equal for both and the objective carries zero
+        # gradient about the fall; and when a longer horizon is used, exploration noise truncates episodes to a
+        # fraction of it. Printed against the horizon so a truncated run is visible on the FIRST iteration.
+        return obs, act, logp, advs, advs + val, rew.sum(0).mean(), fwd.mean(0).mean(), alive.sum(0).mean(), pcpt
 
     def rollout(params, key):
         rkey, key = jax.random.split(key)
@@ -669,7 +961,7 @@ def main(argv=None) -> int:
         carry = (data, jp.ones(N), jp.zeros((N, nu)), jp.zeros((N, n_feet)), jp.ones((N, n_feet)),
                  jp.zeros((N, n_feet)))                          # + stance_time (P1 periodic reward; feet start grounded)
         chunks = []
-        for _ in range(L // CHUNK):
+        for _ in range(L_ROLL // CHUNK):
             key, ck = jax.random.split(key)
             carry, out = roll_chunk(params, dr, carry, jax.random.split(ck, CHUNK))
             jax.block_until_ready(carry[0].qpos)
@@ -678,13 +970,19 @@ def main(argv=None) -> int:
         return finish(params, carry[0], traj)
 
     def loss_fn(params, obs, act, old_logp, adv, ret, percept=None):
-        std = jp.exp(params["logstd"])[0]
+        ls = bounded_logstd(params["logstd"], LS_LO, LS_HI, xp=jp)   # task #258: bound EVERY read, this one included
+        std = jp.exp(ls)[0]
         means, val = act_and_value(params, obs, percept)
         logp = (-0.5 * (((act - means) / std) ** 2 + 2 * jp.log(std) + jp.log(2 * jp.pi))).sum(-1)
         ratio = jp.exp(logp - old_logp)
         adv = (adv - adv.mean()) / (adv.std() + 1e-8)
         pg = jp.maximum(-adv * ratio, -adv * jp.clip(ratio, 1 - CLIP, 1 + CLIP)).mean()
-        ent = (params["logstd"] + 0.5 * jp.log(2 * jp.pi * jp.e)).sum()
+        # ENTROPY: bounded too, and that is load-bearing rather than cosmetic. ``ent`` is LINEAR in logstd, so
+        # d(loss)/d(logstd) picks up a CONSTANT -ENT = -5e-3 pushing sigma up every minibatch, unscheduled and
+        # with no opposing term. Reading the CLIPPED logstd makes that gradient ZERO outside the range, so the
+        # push stops AT the cap instead of accumulating forever in a parameter the rollout no longer obeys —
+        # and the entropy the loss reports is the entropy of the policy that actually acted.
+        ent = (ls + 0.5 * jp.log(2 * jp.pi * jp.e)).sum()
         return pg + VF * ((val - ret) ** 2).mean() - ENT * ent
 
     @jax.jit
@@ -708,7 +1006,7 @@ def main(argv=None) -> int:
             return (params, opt_state, key), None
         (params, opt_state, _), _ = jax.lax.scan(epoch, (params, opt_state, key), jp.arange(args.epochs))
         # B0.3 KL-adaptive-LR signal: k3 KL estimator (Schulman) on one minibatch, using only old_logp (>= 0).
-        std = jp.exp(params["logstd"])[0]
+        std = _sigma(params)                                 # task #258: the SAME bounded sigma the rollout used
         pc0 = percept[:mb] if percept is not None else None
         means_k, _ = act_and_value(params, obs[:mb], pc0)
         lp_k = (-0.5 * (((act[:mb] - means_k) / std) ** 2 + 2 * jp.log(std) + jp.log(2 * jp.pi))).sum(-1)
@@ -733,17 +1031,18 @@ def main(argv=None) -> int:
             extra["cpg_arr"] = np.asarray([CPG_PARAMS["freq"], CPG_PARAMS["thigh_amp"], CPG_PARAMS["calf_amp"],
                                            CPG_PARAMS["calf_phase"], CPG_PARAMS["residual_scale"],
                                            1.0 if CPG_PARAMS.get("leg_flip") else 0.0])
+        # The meta LAYOUT lives in the module-level ``trainer_meta`` (so it is testable without a GPU) — see its
+        # docstring for the full slot-by-slot contract, meta[11] (task #257) and meta[12] (task #258).
+        meta = trainer_meta(F, H, NT, float(fwd), adaptive=args.adaptive, cpg=CPG_ON, decimation=DECIM,
+                            action_lpf=ACTION_LPF, sphere_feet=args.sphere_feet, phase_obs=PHASE_OBS,
+                            # meta[12]: the EFFECTIVE (bounded) logstd, so a banked artifact RECORDS the
+                            # exploration noise it was trained under -- exp(meta[12]) is that sigma. Without it,
+                            # nothing on disk says which of two checkpoints was explored at a sigma that inverts
+                            # the objective's own ranking (task #258), and the run cannot be reconstructed.
+                            logstd=float(bounded_logstd(np.asarray(p["logstd"]), LS_LO, LS_HI)[0]))
         np.savez(dst, We=np.asarray(a["We"]), be=np.asarray(a["be"]), Wq=np.asarray(a["Wq"]),
                  Wk=np.asarray(a["Wk"]), Wv=np.asarray(a["Wv"]), Wo=np.asarray(a["Wo"]),
-                 Wh=np.asarray(a["Wh"]), bh=np.asarray(a["bh"]), **extra,
-                 # meta layout MUST match MorphPolicy.from_npz: [F,H,NT,fwd, adaptive@4, cpg@5, decimation@6,
-                 # action_lpf@7, sphere_feet@8] so CPU replay reads the right flags (adaptive gains + trot-CPG prior +
-                 # control rate + action filter + foot contact model) and reproduces the gait it was trained with.
-                 meta=np.asarray([F, H, NT, float(fwd),
-                                  1.0 if args.adaptive else 0.0, 1.0 if CPG_ON else 0.0, float(DECIM),
-                                  float(ACTION_LPF),           # meta[7]: action LPF (T1.2) so deploy matches train
-                                  1.0 if args.sphere_feet else 0.0,      # meta[8]: sphere feet (T1.4); deploy==train
-                                  1.0 if PHASE_OBS else 0.0]))           # meta[9]: P1 phase-clock obs; deploy==train
+                 Wh=np.asarray(a["Wh"]), bh=np.asarray(a["bh"]), **extra, meta=np.asarray(meta))
 
     if args.eval_npz:                                   # EVAL: deterministic single-env MJX rollout (recipe control)
         dd = np.load(args.eval_npz)
@@ -787,7 +1086,7 @@ def main(argv=None) -> int:
     lr = LR; DESIRED_KL = 0.01                            # B0.3: KL-adaptive learning rate (rsl_rl's most-copied trick)
     for it in range(args.iters):
         key, rk, uk = jax.random.split(key, 3)
-        obs, act, logp, adv, ret, ep_rew, ep_fwd, pcpt = rollout(params, rk)   # pcpt = gait clock (None w/o phase-obs)
+        obs, act, logp, adv, ret, ep_rew, ep_fwd, ep_len, pcpt = rollout(params, rk)   # pcpt = clock (None w/o phase-obs)
         flat = lambda a: a.reshape((-1,) + a.shape[2:])
         _lr = jp.asarray(lr, jp.float32)                     # pass as a TRACED scalar so a changing lr never re-jits
         if PHASE_OBS:                                        # P1: flatten + pass the clock so PPO minibatches carry it
@@ -801,7 +1100,14 @@ def main(argv=None) -> int:
         elif kl < 0.5 * DESIRED_KL:
             lr = min(lr * 1.5, 1e-2)
         if it % 10 == 0 or it == args.iters - 1:
+            # task #258 INSTRUMENTATION. ep_len: the two quantities the objective is actually made of were both
+            # invisible — if ep_len pins at the horizon, alive_bonus is identical for every checkpoint and the
+            # reward carries NO information about falling; if it sits far below, exploration is truncating the
+            # episodes the objective is scored on. sigma: the learned exploration std, trailed by '*' when the
+            # bound is clipping it (i.e. the entropy bonus has driven the raw parameter past the cap).
+            _sg = float(_sigma(params)); _raw = float(jp.exp(params["logstd"])[0])
             print(f"  iter {it:>4}  ep_reward={float(ep_rew):8.2f}  fwd_vel={float(ep_fwd):+.3f}  "
+                  f"ep_len={float(ep_len):5.1f}/{L_ROLL}  sigma={_sg:.3f}{'*' if abs(_raw - _sg) > 1e-6 else ''}  "
                   f"lr={lr:.1e} kl={kl:.4f}  ({(time.time()-t0):.0f}s)", flush=True)
         # CHECKPOINT often — the WSL2 GPU watchdog (TDR) kills long kernels mid-run (observed: a hang ~iter 20),
         # and every-30 lost everything before the first checkpoint. Every 10 keeps a fetchable policy (CPG-primed,

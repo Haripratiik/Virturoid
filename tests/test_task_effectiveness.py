@@ -125,7 +125,20 @@ class LearnedLocomotionTests(unittest.TestCase):
             learn_locomotion(g, generations=10, pop=10, steps=200, models_dir=d)
             self.assertIsNotNone(banked_policy_for(g, models_dir=d))         # now banked (flywheel reuse)
             r = locomotion_episode(g, horizon=1500, models_dir=d)
-            self.assertIn(r["source"], ("learned", "scripted"))
+            # `assertIn(r["source"], ("learned", "scripted"))` used to stand here and asserted NOTHING:
+            # those are the only two strings `locomotion_episode` can put in that field. Worse, the word in
+            # this test's NAME — BEATS — was never checked at all. The function's contract is "always returns
+            # whichever controller travelled FURTHER FORWARD", so that contract is what gets asserted: the
+            # returned episode must be at least as good as the scripted baseline measured on the same body.
+            import mujoco
+
+            from virturoid.services.gene_compiler import compile_gene_to_mjcf
+            from virturoid.services.locomotion_controller import run_locomotion_episode
+            scripted = run_locomotion_episode(
+                mujoco.MjModel.from_xml_string(compile_gene_to_mjcf(g)), horizon=1500)
+            self.assertGreaterEqual(r["forward_m"], float(scripted["forward_m"]) - 1e-9,
+                                    f"the loop returned {r['source']} at {r['forward_m']} m, WORSE than the "
+                                    f"scripted trot's {scripted['forward_m']} m — it must never regress")
             self.assertIn("forward_m", r)
             # The loop returns whichever travelled FURTHER forward; when it picks the LEARNED policy, that policy
             # must show positive forward displacement. (A regression that collapses the recipe to a stand-still or

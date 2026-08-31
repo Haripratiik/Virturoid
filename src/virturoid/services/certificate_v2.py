@@ -13,13 +13,25 @@ credibility-per-FLOP (§9.1):
      verdict was earned under the clamp (URDF-only actuators *fail to walk* on real hardware — ETH 2025).
   3. **Per-joint torque/thermal margins** from the verified trajectory — reused from ``bom_certificate`` (peak vs
      motor peak, RMS vs continuous rating, speed, mechanical power). The numbers a builder computes first.
-  4. **Numerics invariance** — re-verdict at halved timestep (a knife-edge integrator exploit alarm).
+  4. **Numerics sensitivity** — re-verdict at a halved rollout budget (a knife-edge-result alarm). This is a
+     BUDGET probe, not the halved-timestep integrator sweep §9.1 asks for; it says so on every certificate and
+     it reports ``probed: False`` on bodies it cannot run on, instead of a free ``invariant: True``.
   5. **Model-sanity gate** — certificate VOID unless green: physically-valid inertias (triangle inequality),
      joint limits present, finite BOM-consistent mass.
 
 Design rules (§9.2): margins + failure boundaries, never bare booleans; the **scope / not_modeled** block is
 load-bearing; ``use_history.predictivity_srcc`` starts **null** ("unmeasured") and becomes the certificate's own
-credibility flywheel as real builds close the loop. Honest limits (§9.3) are mandatory, not boilerplate.
+credibility flywheel as real builds close the loop.
+
+**Honest limits (§9.3) are DERIVED, not declared.** ``scope.valid_iff``, ``scope.not_modeled``,
+``scope.claim_ceiling`` and ``honest_limits`` used to be four string constants — byte-identical on every
+certificate for every robot, in this same module that calls them "mandatory, not boilerplate". ``claim_ceiling``
+asserted unconditionally that "the failure modes we can model were swept and passed with the stated margins",
+which was false on every certificate built with ``run_dr=False`` (nothing was swept), on every DR sweep that
+passed less than all of its draws, and on every body whose headline verdict was FELL. They are now computed from
+what THIS run actually did; the residue that genuinely cannot be measured (failure categories outside
+rigid-body sim, the standing sim-optimism caveat) is kept but LABELLED ``declared`` and separated from the
+measured half, which carries the number it came from.
 """
 from __future__ import annotations
 
@@ -27,8 +39,14 @@ import math
 import random
 from dataclasses import replace
 
+# The rung labels are CLAIMS, so they say only what the code does. L1 used to read "datasheet torque-speed
+# clamp + PD + latency"; the clamp and the PD are real (``actuator_model.clamp_torque``, the recipe gains) and
+# the LATENCY was not -- there is no actuation-delay representation anywhere in the compiled model or the
+# rollout loop, which ``sysid.calibration.model_represents_actuation_delay`` now checks rather than assumes.
+# A label is the shortest thing on a certificate and the most likely to be quoted, so it does not get to
+# claim a term the simulator does not carry.
 ACTUATOR_LEVELS = {0: "L0 ideal (no actuator model)",
-                   1: "L1 datasheet torque-speed clamp + PD + latency (SHIPPED)",
+                   1: "L1 datasheet torque-speed clamp + PD (SHIPPED; actuation latency NOT modelled)",
                    2: "L2 bench-identified actuator",
                    3: "L3 learned actuator-network"}
 
@@ -152,18 +170,61 @@ def model_sanity(gene) -> dict:
 
 # ------------------------------------------------------------------ actuator fidelity level
 def actuator_fidelity_level(gene) -> dict:
-    """Declare the actuator model the verdict was earned under. We clamp joints to the BOM servo's torque limit
-    (the control-side real_actuator clamp) → L1. Without any torque limit set it would be L0 (ideal)."""
+    """Declare the actuator model the verdict was earned under, and EARN the rung rather than assert it.
+
+    L0/L1 are structural: no per-joint torque clamp → L0 (ideal); joints clamped to the BOM servo's datasheet
+    limit → L1. L2 is *bench-identified actuator*, and it is now a computed verdict rather than a dead
+    constant: ``sysid.calibration.l2_requirements`` checks six things — a fit is attached, the log it was
+    fitted to was measured on physical hardware, the fit covers the machine, applying it measurably improves
+    how the simulator TRACKS that log, the identified actuation delay is APPLIED and not merely reported, and
+    the torque-speed envelope is identified rather than taken from the datasheet — and reports which ones are
+    missing with the evidence for each.
+
+    The tracking requirement is the one that is not about the experiment. The other five can all be satisfied
+    by a fit whose parameters are absorbing an error they do not name: a robot built with 30% heavier links
+    came back "identified" on every joint, with intervals excluding the truth, having made tracking marginally
+    WORSE. Coverage counts APPLIED parameters and that fit applies none, so the rung is refused twice over.
+
+    On this build the rung does NOT move. Three of the six block on our own best fit, and two of those three
+    are ours rather than the customer's: there is nowhere in
+    the compiled model to put an identified transport delay, and a safe excitation (bounded well under
+    datasheet peak torque and no-load speed, because it runs on somebody's robot) cannot reach the saturation
+    regime where the torque-speed knee lives. A fitted robot therefore reports **L1 with its joint dissipation
+    and reflected inertia bench-identified** — which is more than L1 and less than L2, and says so — instead of
+    being promoted to a rung whose label it does not satisfy.
+    """
     actuated = gene.actuated_joints()
     clamped = [s for s in actuated if getattr(s, "actuator_torque_nm", None)]
     level = 1 if actuated and len(clamped) >= max(1, int(0.8 * len(actuated))) else 0
+    try:
+        from virturoid.services.sysid.calibration import l2_requirements
+        l2 = l2_requirements(gene)
+    except Exception as exc:  # noqa: BLE001
+        l2 = {"earned": False, "requirements": [], "blocked_by": ["the L2 check could not run"],
+              "verdict": f"L2 NOT evaluated: {type(exc).__name__}: {exc}"[:160],
+              "bench_identified": {"parameters": [], "n_joints": 0}}
+    if l2.get("earned") and level >= 1:
+        level = 2
+    bench = l2.get("bench_identified") or {}
+    if level == 2:
+        note = ("the actuator is bench-identified against a hardware log and every L2 requirement is met.")
+    elif level == 1 and bench.get("n_joints"):
+        note = ("the verdict was earned with joints clamped to their datasheet torque limits (L1), and "
+                f"{', '.join(bench.get('parameters') or [])} are BENCH-IDENTIFIED on "
+                f"{bench['n_joints']} joint(s) from a system-identification fit. The rung stays at L1 "
+                f"because: {'; '.join(l2.get('blocked_by') or [])}.")
+    elif level == 1:
+        note = ("the verdict was earned with joints clamped to their datasheet torque limits (L1). URDF-only "
+                "ideal actuators (L0) routinely fail to walk on real hardware; L2/L3 (bench/learned actuator "
+                "ID) are the next fidelity rungs.")
+    else:
+        note = ("no per-joint torque clamp detected (L0 ideal) — margins below are advisory only; ground the "
+                "gene (grounded_physics) to size real motors and earn an L1 verdict.")
     return {"level": level, "label": ACTUATOR_LEVELS[level],
             "clamped_joints": len(clamped), "actuated_joints": len(actuated),
-            "note": ("the verdict was earned with joints clamped to their datasheet torque limits (L1). URDF-only "
-                     "ideal actuators (L0) routinely fail to walk on real hardware; L2/L3 (bench/learned actuator "
-                     "ID) are the next fidelity rungs." if level == 1 else
-                     "no per-joint torque clamp detected (L0 ideal) — margins below are advisory only; ground the "
-                     "gene (grounded_physics) to size real motors and earn an L1 verdict.")}
+            "bench_identified": bench,
+            "l2": {k: v for k, v in l2.items() if k != "bench_identified"},
+            "note": note}
 
 
 # ------------------------------------------------------------------ per-joint margins (reuse bom_certificate)
@@ -271,69 +332,247 @@ def dr_sweep(gene, gait_params=None, *, draws: int = 16, seed: int = 0, with_bou
 
 # ------------------------------------------------------------------ numerics invariance
 def numerics_invariance(gene, gait_params=None) -> dict:
-    """Re-verdict the frozen policy at a halved control/eval budget as a cheap knife-edge-integrator probe (a
-    credible verdict that flips under coarser numerics was a solver exploit). 2 rollouts."""
+    """Re-verdict the frozen policy at a HALVED ROLLOUT BUDGET (500 -> 250 steps) as a cheap knife-edge alarm: a
+    credible verdict that only exists at one episode length is a knife-edge result. 2 rollouts.
+
+    This is deliberately NOT what the plan's "halved timestep" line describes, and it must not be read as one —
+    a shorter rollout changes how long you watch, not how finely the integrator steps, so it cannot detect a
+    solver exploit. It is the probe available without reaching into ``morph_policy`` internals.
+
+    ``probed`` is the honest half of the contract. The re-run only exists on a legged body with gait params; on
+    anything else the function used to compare a value with itself and report ``invariant: True``, i.e. a free
+    pass earned by never running. Now it reports ``probed: False`` and ``invariant: None``.
+    """
     base_c, base_f = _credible_under(gene, gait_params)
-    # a shorter rollout is a coarse numerics/robustness probe available without touching morph_policy internals
     from virturoid.services.task_matched_eval import robot_kind
     if robot_kind(gene) == "legged" and gait_params:
         from virturoid.services.gait_search import evaluate_gait
         r = evaluate_gait(gene, gait_params, steps=250)
         alt_c = bool(r.get("survived") and float(r.get("forward", 0)) >= 0.12)
-    else:
-        alt_c = base_c
-    return {"nominal_credible": base_c, "coarse_budget_credible": alt_c,
-            "invariant": bool(base_c == alt_c),
-            "note": "a credible verdict that flips under a coarser evaluation budget is a knife-edge result; "
-                    "full timestep/solver-iteration sweeps are the Tier-2 numerics refinement"}
+        return {"probed": True, "nominal_credible": base_c, "coarse_budget_credible": alt_c,
+                "invariant": bool(base_c == alt_c),
+                "probe": "the SAME frozen controller re-run at 250 steps instead of 500 (a budget probe)",
+                "note": "a credible verdict that flips under a shorter evaluation budget is a knife-edge result. "
+                        "This does NOT test integrator/timestep invariance — the halved-timestep and "
+                        "solver-iteration sweeps are the Tier-2 numerics refinement and have not been run."}
+    return {"probed": False, "nominal_credible": base_c, "coarse_budget_credible": None, "invariant": None,
+            "probe": None,
+            "note": "not probed: the budget re-run needs a legged body with frozen gait params. Reported as "
+                    "UNMEASURED rather than invariant — a check that never ran is not a check that passed."}
 
 
 # ------------------------------------------------------------------ the certificate (NASA-STD-7009 schema)
-_NOT_MODELED = ["backlash", "cable routing", "thermal transients", "battery voltage sag", "wear", "assembly "
-                "tolerance stack-ups", "firmware jitter", "ESD", "friction µ (Tier-2)", "control latency (Tier-2)"]
+#
+# THE SCOPE / HONESTY BLOCK IS DERIVED. See the module docstring for what these four fields used to be and why
+# that was the worst defect in the file. Everything below that is still a constant is named `_DECLARED_*` and is
+# reported under `provenance: declared`, so a reader can tell an engineering assumption from a measurement.
+
+# Failure categories that live outside rigid-body simulation entirely. No run can measure these, so they are
+# DECLARED — but they are declared, and labelled as such, rather than presented as a finding.
+_DECLARED_NOT_MODELED = ["backlash", "cable routing", "thermal transients", "battery voltage sag", "wear",
+                         "assembly tolerance stack-ups", "firmware jitter", "ESD",
+                         "friction µ (model-level perturbation; Tier-2, never swept here)",
+                         "control latency (model-level perturbation; Tier-2, never swept here)"]
+
+# The standing caveat that is true of every simulation verdict this system can produce.
+_DECLARED_LIMITS = ("Physics-verified in simulation, not on hardware. Sim is optimistic by construction "
+                    "(Simulation Optimization Bias > 0); every robustness claim is w.r.t. the DECLARED "
+                    "perturbation distribution only. Contact/manipulation verdicts carry a lower ceiling "
+                    "than locomotion. Whole failure categories (assembly, cabling, firmware, thermal "
+                    "derating, ESD) live outside physics sim.")
+
+
+def _scope_block(*, sanity: dict, act: dict, credible: bool, verdict_str: str,
+                 robustness: dict | None, margins: dict | None, numerics: dict | None) -> tuple:
+    """Build ``scope`` (valid_iff / not_modeled / claim_ceiling) and ``honest_limits`` FROM THIS RUN.
+
+    ``robustness`` / ``margins`` / ``numerics`` are ``None`` when the corresponding stage did not run — which is
+    the case the old constants got wrong: they described a swept envelope on certificates where nothing was
+    swept. Returns ``(scope, honest_limits_text, measured_limits)``.
+    """
+    level = int(act.get("level", 0))
+    n_clamped, n_actuated = int(act.get("clamped_joints", 0)), int(act.get("actuated_joints", 0))
+    ranges = robustness.get("swept_ranges") if robustness else None
+    pass_rate = robustness.get("pass_rate") if robustness else None
+    draws = int(robustness.get("draws", 0)) if robustness else 0
+    cp = (robustness or {}).get("clopper_pearson_failure_bound") or {}
+    margins_ok = bool(margins and margins.get("available"))
+
+    # ---- valid_iff: the conditions this certificate's claim is actually conditional on, each with its evidence.
+    conds: list[dict] = [{"condition": "model_sanity is green",
+                          "established": bool(sanity.get("ok")),
+                          "evidence": (f"{sanity.get('n_bodies')} bodies, total mass "
+                                       f"{sanity.get('total_mass_kg')} kg, inertia triangle inequality "
+                                       f"{'holds' if sanity.get('inertia_valid') else 'VIOLATED'}"
+                                       if sanity.get("ok") else f"issues: {sanity.get('issues')}")}]
+    if level >= 1:
+        conds.append({"condition": "the built joints stay inside the datasheet torque limits the verdict was "
+                                   "earned under",
+                      "established": True,
+                      "evidence": f"{ACTUATOR_LEVELS[level]}; {n_clamped}/{n_actuated} joints clamped"})
+    if robustness is not None:
+        conds.append({"condition": "the real robot's mass, actuator strength and payload lie inside the SWEPT "
+                                   "envelope",
+                      "established": True,
+                      "evidence": f"swept {ranges} over {draws} Monte-Carlo draws; pass_rate {pass_rate}"})
+    else:
+        conds.append({"condition": "the real robot matches the NOMINAL model — no perturbation envelope was "
+                                   "swept on this certificate, so there is no envelope for it to lie inside",
+                      "established": False,
+                      "evidence": "run_dr was False: the robustness block is absent from this certificate"})
+    if margins_ok:
+        conds.append({"condition": "no joint is driven past the motor the BOM sized for it",
+                      "established": bool(margins.get("pass")),
+                      "evidence": f"weakest joint headroom {margins.get('weakest_joint_headroom')}; "
+                                  f"{margins.get('n_gates_pass')} datasheet gate(s) passed"})
+    valid_iff = " AND ".join(c["condition"] for c in conds)
+
+    # ---- not_modeled: the declared categories PLUS what this particular run left unmeasured.
+    unmeasured: list[str] = []
+    if robustness is None:
+        unmeasured.append("mass / actuator-strength / payload variation (no DR sweep ran on this certificate)")
+    if not margins_ok:
+        why = (margins or {}).get("error") or "not requested"
+        unmeasured.append(f"per-joint torque / thermal margins ({why})")
+    if level == 0:
+        unmeasured.append("the actuator's real torque-speed limit (L0 ideal: no per-joint clamp was applied, so "
+                          "the verdict assumes motors that cannot saturate)")
+    if numerics is not None and not numerics.get("probed"):
+        unmeasured.append("sensitivity to the evaluation budget (the numerics probe does not run on this body)")
+    if numerics is None:
+        unmeasured.append("sensitivity to the evaluation budget (the numerics probe did not run)")
+
+    # ---- claim_ceiling: the strongest sentence THIS certificate is entitled to.
+    if not sanity.get("ok"):
+        ceiling = ("this certificate is VOID — model_sanity failed, so it claims nothing at all about this "
+                   "robot beyond the sanity issues listed.")
+    elif not credible:
+        ceiling = (f"this certificate does NOT claim the robot works. The headline verdict is {verdict_str!r} "
+                   f"and every field below describes a body that did not pass it.")
+    elif robustness is None:
+        ceiling = ("a single NOMINAL verdict under the stated assumptions. Nothing was perturbed, so this "
+                   "certificate makes NO robustness claim — not 'robust', not 'will work when built'. Re-export "
+                   "with dr_sweep=true to earn one.")
+    elif pass_rate is not None and pass_rate >= 1.0:
+        ceiling = (f"the failure modes we can model were swept ({draws} draws over {ranges}) and ALL passed; "
+                   f"the true failure rate inside that envelope is at most {cp.get('hi')} at 95% confidence. "
+                   f"NOT 'will work when built' — that awaits use_history.")
+    else:
+        ceiling = (f"the swept envelope ALREADY CONTAINS FAILURES: {cp.get('k_fail')}/{draws} draws over "
+                   f"{ranges} were not credible (pass_rate {pass_rate}, true failure rate in "
+                   f"[{cp.get('lo')}, {cp.get('hi')}] at 95%). This certificate claims a nominal verdict plus a "
+                   f"measured failure rate — it does not claim robustness.")
+
+    # ---- honest_limits: the declared caveat, then the limits THIS run measured about itself.
+    measured: list[str] = []
+    if not credible:
+        measured.append(f"the headline verdict is {verdict_str!r} — not credible")
+    if robustness is None:
+        measured.append("no DR sweep ran (run_dr=False): the robustness block is ABSENT, which is not the same "
+                        "as passed")
+    else:
+        measured.append(f"the DR sweep scores each draw with `survived and forward >= 0.25 and height_ratio >= "
+                        f"0.55` at 500 steps — a WEAKER bar than the classify() verdict quoted above, so "
+                        f"pass_rate {pass_rate} is not a re-run of the headline verdict")
+    if numerics is not None and numerics.get("probed"):
+        measured.append("the numerics check re-ran at a shorter ROLLOUT (250 vs 500 steps), not a halved "
+                        "timestep — it cannot detect an integrator/solver exploit")
+    else:
+        measured.append("numerics sensitivity is UNMEASURED on this body (the budget probe needs a legged body "
+                        "with frozen gait params)")
+    if level == 0:
+        measured.append("actuator fidelity is L0 (ideal, unclamped) — margins below are advisory only")
+    if not margins_ok:
+        measured.append("per-joint margins were not computed, so no torque/thermal claim is made")
+    measured.append("use_history is N=0 and has no writer in this build, so predictivity_srcc reads null and "
+                    "will keep reading null until real-build outcomes are recorded")
+
+    honest_limits = _DECLARED_LIMITS + " MEASURED ON THIS RUN: " + "; ".join(measured) + "."
+    scope = {
+        "valid_iff": valid_iff,
+        "valid_iff_conditions": conds,
+        "not_modeled": _DECLARED_NOT_MODELED + unmeasured,
+        "not_modeled_provenance": {
+            "declared": _DECLARED_NOT_MODELED,
+            "unmeasured_on_this_run": unmeasured,
+            "note": "'declared' entries are failure categories outside rigid-body sim and are the same on every "
+                    "certificate; 'unmeasured_on_this_run' is derived from which stages actually executed here",
+        },
+        "claim_ceiling": ceiling,
+    }
+    return scope, honest_limits, measured
 
 
 def build_certificate_v2(gene, verdict: dict, *, gait_params=None, task: str = "", robot_id: str | None = None,
                          memory_dir: str = "build/memory", run_dr: bool = True, dr_draws: int = 12,
-                         run_margins: bool = True) -> dict:
+                         run_margins: bool = True, body_parity: dict | None = None,
+                         shipped_controller: dict | None = None) -> dict:
     """Assemble the tiered NASA-STD-7009-mapped certificate. Always computes the cheap Tier-1 (model_sanity,
     actuator level); the DR sweep + margins (bounded rollouts) are on by default but can be disabled for a fast
-    export. VOID (``valid: False``) unless model_sanity is green — every downstream claim depends on it."""
+    export. VOID (``valid: False``) unless model_sanity is green — every downstream claim depends on it.
+
+    ``shipped_controller`` is the export writer's record of the control program the package DEPLOYS (see
+    ``verdict_certificate.build_certificate``). It defaults to whatever ``gene_build`` stamped on the gene when it
+    wrote ``software/control_program.json`` — the export writes the URDF/ROS2/controller bundle before it builds
+    the certificate, so by the time this runs the stamp is there. That default is what lets the certificate judge
+    deploy==measure on the CONTROLLER as well as the body without every caller having to be rewired; pass the
+    argument explicitly to override, or ``{}`` to force "unknown".
+    """
     from virturoid.services.verdict_certificate import build_certificate
-    base = build_certificate(gene, verdict, task=task, robot_id=robot_id, memory_dir=memory_dir)
+    if shipped_controller is None:
+        try:
+            from virturoid.services.gene_build import exported_controller_stamp
+            shipped_controller = exported_controller_stamp(gene)
+        except Exception:  # noqa: BLE001 - no stamp -> controller_parity reads "unknown", never "matches"
+            shipped_controller = None
+    base = build_certificate(gene, verdict, task=task, robot_id=robot_id, memory_dir=memory_dir,
+                             body_parity=body_parity, shipped_controller=shipped_controller or None)
     sanity = model_sanity(gene)
     act = actuator_fidelity_level(gene)
+    # RUN THE EVIDENCE FIRST, then describe it. The scope/honesty block is derived from which of these actually
+    # executed and what they returned, so it cannot claim a swept envelope on a certificate that swept nothing.
+    margins = joint_margins(gene) if (sanity["ok"] and run_margins) else None
+    robustness = dr_sweep(gene, gait_params, draws=dr_draws) if (sanity["ok"] and run_dr) else None
+    numerics = numerics_invariance(gene, gait_params) if (sanity["ok"] and run_dr) else None
+    scope, honest_limits, measured_limits = _scope_block(
+        sanity=sanity, act=act, credible=bool(base.get("credible")),
+        verdict_str=str(base.get("verdict", "unverified")),
+        robustness=robustness, margins=margins, numerics=numerics)
     cert = {
         "artifact": "virturoid_verification_certificate", "version": 2, "tier": 1,
         "valid": bool(sanity["ok"]),
         "identity": {"robot_id": robot_id, "species": getattr(gene, "species", None),
                      "robot_class": getattr(gene, "robot_class", None), "kind": base.get("kind"),
                      "n_segments": len(gene.segments), "dof": len(gene.actuated_joints())},
-        "verdict": {k: base.get(k) for k in ("verdict", "credible", "checks", "gait_source", "verified_with")},
+        # ``rollout_ran`` travels with the rest: without it a reader has to infer "never measured" from a null
+        # ``deploy_is_measure``, and the null is exactly what used to be a confident ``true``.
+        # ``controller_parity`` travels with ``body_parity`` for the same reason ``rollout_ran`` travels with
+        # ``deploy_is_measure``: the flag is a conjunction, and a reader who sees it go null or false has to be
+        # able to see WHICH half moved without leaving the file.
+        "verdict": {k: base.get(k) for k in ("verdict", "credible", "checks", "gait_source", "verified_with",
+                                             "deploy_is_measure", "deploy_is_measure_parts", "rollout_ran",
+                                             "body_parity", "controller_parity")},
         "model_sanity": sanity,
         "actuator_fidelity_level": act,
         "flywheel_provenance": base.get("flywheel_provenance"),
-        "scope": {
-            "valid_iff": "model_sanity is green AND the real robot's parameters lie inside the swept envelope",
-            "not_modeled": _NOT_MODELED,
-            "claim_ceiling": ("the failure modes we can model were swept and passed with the stated margins under "
-                              "the stated assumptions — NOT 'will work when built' (that awaits use_history)"),
-        },
+        "scope": scope,
         "use_history": {"builds_attempted": 0, "predictivity_srcc": None,
-                        "note": "predictivity is unmeasured at N=0 real builds; each real build closes the loop and "
-                                "the running rank-correlation becomes this certificate's own credibility flywheel"},
-        "honest_limits": ("Physics-verified in simulation, not on hardware. Sim is optimistic by construction "
-                          "(Simulation Optimization Bias > 0); every robustness claim is w.r.t. the DECLARED "
-                          "perturbation distribution only. Contact/manipulation verdicts carry a lower ceiling "
-                          "than locomotion. Whole failure categories (assembly, cabling, firmware, thermal "
-                          "derating, ESD) live outside physics sim."),
+                        "measured": False,
+                        "note": "predictivity is unmeasured at N=0 real builds. Stated plainly: NO writer for "
+                                "these two fields exists in this build, so they are a declared placeholder, not "
+                                "a count of builds that happened to be zero. Each real build would close the "
+                                "loop and the running rank-correlation would become this certificate's own "
+                                "credibility flywheel."},
+        "honest_limits": honest_limits,
+        "honest_limits_measured": measured_limits,
+        "honest_limits_declared": _DECLARED_LIMITS,
     }
     if not sanity["ok"]:
         cert["voided_reason"] = f"model_sanity failed: {sanity['issues']}"
         return cert
     if run_margins:
-        cert["margins"] = joint_margins(gene)
+        cert["margins"] = margins
     if run_dr:
-        cert["robustness"] = dr_sweep(gene, gait_params, draws=dr_draws)
-        cert["numerics"] = numerics_invariance(gene, gait_params)
+        cert["robustness"] = robustness
+        cert["numerics"] = numerics
     return cert

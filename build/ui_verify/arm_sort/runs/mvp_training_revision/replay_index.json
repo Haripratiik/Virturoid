@@ -12,8 +12,8 @@
   ],
   "compiled_scene_index_uri": "simulation/mujoco/compiled_scene_index.json",
   "compiled_scene_xml_uris": [
-    "simulation/mujoco/scenes/revision/revision_regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_000.xml",
-    "simulation/mujoco/scenes/revision/revision_regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_001.xml",
-    "simulation/mujoco/scenes/revision/revision_regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_002.xml"
+    "simulation/mujoco/scenes/revision/rev_regr_scene_938c34b8_stress_000.xml",
+    "simulation/mujoco/scenes/revision/rev_regr_scene_938c34b8_stress_001.xml",
+    "simulation/mujoco/scenes/revision/rev_regr_scene_938c34b8_stress_002.xml"
   ]
 }

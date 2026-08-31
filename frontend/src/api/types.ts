@@ -16,10 +16,26 @@ export interface PackageHonesty {
   spec_constraints?: number;
 }
 
+/** The ONE robot-status verdict, derived server-side in services/package_status.py. Every surface
+ * renders this object; the individual facts below it (contract_ok / buildable) are reported under
+ * their own names, because they mean different things and must never all read "valid". */
+export interface PackageStatus {
+  label: string;                    // EXPORT-READY | EXPORT BLOCKED | PACKAGE INCOMPLETE | UNVERIFIED | NO ROBOT
+  kind: "ok" | "bad" | "warn" | "muted";
+  detail: string;
+  notes: string[];
+  contract_ok: boolean | null;      // declared artifacts exist + parse (file integrity)
+  safe_to_export: boolean | null;   // every REQUIRED readiness gate attained a real result
+  buildable: boolean | null;        // real actuators cover every joint + structure survives loads
+  highest_attained: string | null;
+}
+
 export interface PackageMeta {
   id: string;
   scene_count: number;
   has_meshes: boolean;
+  status: PackageStatus;
+  /** Raw package-contract fact, kept on the wire for older clients. Render `status`, not this. */
   valid: boolean | null;
   robot_class: string | null;
   species: string | null;
@@ -28,9 +44,20 @@ export interface PackageMeta {
   honesty: PackageHonesty | null;
 }
 
+/** Present only when `packages` is empty: which directory was scanned, and how to fill it.
+ *  An empty library is a legitimate first-run state; the panel must be able to say so
+ *  rather than leave a newcomer guessing whether the app is broken. */
+export interface PackagesEmpty {
+  scanned: string;
+  exists: boolean;
+  reason: string;
+  next_steps: string[];
+}
+
 export interface PackagesResponse {
   build_root: string;
   packages: PackageMeta[];
+  empty?: PackagesEmpty;
 }
 
 export interface AssistantStatus {
@@ -95,6 +122,70 @@ export interface DesignBrainResponse {
   headline?: string;
   error?: string;
   [key: string]: unknown;
+}
+
+// ---- The verified-morphology memory (/api/moat) ----
+// Mirrors services/moat_panel.py. Losses and ties are first-class fields, not derived from wins, because the
+// panel's whole job is to be able to render a memory that is currently NOT paying off.
+
+export interface MoatRecallKind {
+  kind: string;
+  means: string;
+  edges: number;
+  mean_delta_m: number | null;
+  wins: number;
+  losses: number;
+  ties: number;
+  decided_win_rate: number | null;
+  direction: "helps" | "hurts" | "neutral";
+}
+
+export interface MoatRecallEvent {
+  when: string | null;
+  kind: string;
+  gene_id: string;
+  region: string | null;
+  delta_m: number | null;
+  source?: string | null;
+  selected?: string | null;
+  hint_forward_m?: number | null;
+  default_forward_m?: number | null;
+  hint_credible?: boolean | null;
+  default_credible?: boolean | null;
+}
+
+export interface MoatResponse {
+  memory_dir?: string;
+  db_present?: boolean;
+  error?: string;
+  bank?: {
+    task: string;
+    rows: number;
+    by_task: Record<string, number>;
+    by_gate: Record<string, number>;
+    gated_rows: number;
+    gated_fraction: number;
+    by_door: Record<string, number>;
+    by_source: Record<string, number>;
+    by_class: Record<string, number>;
+    bodies: {
+      distinct: number;
+      largest_share_body: string | null;
+      largest_share_rows: number;
+      largest_share_fraction: number;
+    };
+  };
+  recall?: { kinds: MoatRecallKind[]; dominant_kind: string | null; headline: string };
+  this_build?: {
+    matched: boolean;
+    gene_ids: string[];
+    events: MoatRecallEvent[];
+    event_count?: number;
+    kept?: number;
+    mean_delta_m?: number | null;
+    summary: string;
+  };
+  notes?: string[];
 }
 
 export interface EpisodeGeom {
@@ -242,7 +333,9 @@ export interface SpecCompliance {
 
 // ---- Jobs (the additive /api/jobs surface) ----
 
-export type JobStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
+/** `no_output` = the job ran honestly to completion and produced nothing that was asked for (an
+ * impossible/ambiguous prompt, a rejected ungrounded design). NOT a success, NOT an error. */
+export type JobStatus = "queued" | "running" | "succeeded" | "no_output" | "failed" | "cancelled";
 
 export interface JobEvent {
   seq: number;

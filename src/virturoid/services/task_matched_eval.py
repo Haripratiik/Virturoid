@@ -15,66 +15,47 @@ from __future__ import annotations
 from virturoid.schemas.gene import RobotGene
 
 
-def _has_wheels(segs) -> bool:
-    """A wheel is a cylinder on a CONTINUOUS (unbounded) revolute joint — it spins freely. A leg link is also a
-    cylinder on a revolute joint, but a BOUNDED one (anatomical limits). Requiring the joint to be unbounded is
-    the canonical URDF wheel-vs-leg distinction, and it is exactly how this system emits them: our composed
-    wheels carry joint_lower/upper = None, while every leg/arm joint (incl. an imported Unitree Go2's, measured
-    hip/knee limits like -2.72..-0.84) is bounded. Before this, a Go2's cylinder legs read as wheels, so the
-    quadruped was routed to the DRIVING rubric and verified 'TIPPED while driving' -- a dishonest verdict (#218)."""
-    return any(getattr(s, "shape", None) == "cylinder" and s.joint_type == "revolute"
-               and s.joint_lower is None and s.joint_upper is None for s in segs)
+from virturoid.services.body_kind import body_kind, has_wheels as _has_wheels  # noqa: F401 - re-export
 
 
 def robot_kind(gene: RobotGene) -> str:
     """Classify a robot by STRUCTURE, not its (LLM-authored) class string — so a 'hexapod', 'spider',
     'frog', 'octopod', 'snake' etc. route by what they physically ARE: wheels→mobile, a free-floating
     jointed body→legged, a gripper/hand→manipulator, a spray nozzle→spray. Topology generalizes to any
-    morphology the LLM designs; string-matching the four anticipated class names does not."""
-    ee = gene.end_effector_type or "none"
-    segs = gene.segments
-    md = getattr(gene, "metadata", None) or {}
-    if (gene.robot_class or "") == "aerial" or md.get("rotor_offsets"):
-        return "aerial"                                  # a quadcopter: rotor-thrust driven, no wheels/gripper/legs
-    if (gene.robot_class or "") == "aquatic" or md.get("aquatic"):
-        return "aquatic"                                 # an undulator: a serial spine that swims, not a land walker
-    has_wheels = _has_wheels(segs)
-    n_revolute = sum(1 for s in segs if s.joint_type == "revolute")
-    if ee == "spray_nozzle":
-        return "spray"
-    if has_wheels:
-        return "mobile"
-    if ee in ("gripper", "hand"):
-        return "manipulator"
-    if gene.base_mount == "free" and n_revolute >= 2:    # free-floating, jointed, no wheels/gripper → legged
-        return "legged"
-    return "manipulator"
+    morphology the LLM designs; string-matching the four anticipated class names does not.
+
+    The rules themselves now live in ``body_kind`` — ONE derivation, because this function's private copy of
+    them kept drifting from the other classifiers and picking the wrong rubric for real robots (it checked
+    HANDS before LEGS, so an imported Talos came out "manipulator" and was scored on pick-place; and a drone
+    with zero joints fell through every branch to the same answer). See that module for the bug history."""
+    return body_kind(gene).kind
 
 
 def robot_capabilities(gene: RobotGene) -> set[str]:
     """The SET of skill-morphologies a body can satisfy. ``robot_kind`` returns one PRIMARY kind for dispatch,
     but a COMPOSITE has more than one: a mobile_manipulator (wheels + a gripper arm) is BOTH 'mobile' and
     'manipulator', so the task verifier must let it run pick_place AND navigate — the deep-analysis carrybot
-    was wrongly rejected from its own pick task because kind()='mobile' hid the arm it physically carries."""
+    was wrongly rejected from its own pick task because kind()='mobile' hid the arm it physically carries.
+
+    The extra capabilities are ADDED to the primary kind, never derived independently of it: the old copy of
+    the legged test here ('floating + 2 revolute + no cylinder wheels') handed the LEGGED capability to an
+    imported Tiago — a wheeled base — so a walking task read as feasible for a robot that cannot walk."""
+    bk = body_kind(gene)
     ee = gene.end_effector_type or "none"
-    segs = gene.segments
-    md = getattr(gene, "metadata", None) or {}
-    has_wheels = _has_wheels(segs)
-    n_revolute = sum(1 for s in segs if s.joint_type == "revolute")
-    caps: set[str] = set()
-    if (gene.robot_class or "") == "aerial" or md.get("rotor_offsets"):
-        caps.add("aerial")
-    if (gene.robot_class or "") == "aquatic" or md.get("aquatic"):
-        caps.add("aquatic")
-    if has_wheels:
-        caps.add("mobile")
-    if ee in ("gripper", "hand"):
+    caps: set[str] = {bk.kind}
+    if ee in ("gripper", "hand", "suction"):
         caps.add("manipulator")
     if ee == "spray_nozzle":
         caps.add("spray")
-    if gene.base_mount == "free" and n_revolute >= 2 and not has_wheels:
+    # A body can WALK while its primary kind is its end effector's (a legged sprayer routes to coverage, but it
+    # still locomotes). Measured legs settle it when body_kind compiled the body; otherwise the long-standing
+    # structural presumption stands — minus the bodies now known to roll or fly, which is the Tiago fix.
+    if bk.kind == "legged" or (bk.n_legs or 0) >= 2:
         caps.add("legged")
-    return caps or {robot_kind(gene)}
+    elif (bk.n_legs is None and bk.kind not in ("mobile", "aerial", "aquatic")
+          and gene.base_mount == "free" and sum(1 for s in gene.segments if s.joint_type == "revolute") >= 2):
+        caps.add("legged")
+    return caps
 
 
 def evaluate_robot(gene: RobotGene, *, prompt: str = "", controller_params: dict | None = None,

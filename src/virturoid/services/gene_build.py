@@ -14,6 +14,8 @@ gene + a report) that the existing 3D viewer can replay via ``simulation/scene_s
 from __future__ import annotations
 
 import json
+import os
+import re
 from pathlib import Path
 
 from virturoid.schemas.gene import RobotGene
@@ -212,15 +214,13 @@ def _export_real_cad(gene: RobotGene, output_dir: Path) -> dict | None:
     here (that is exactly the 479-byte placeholder the product audit flagged). The gene path holds a real
     ``RobotGene`` with ``.segments``, so ``export_gene_cad`` (proven: 30-290 KB real STEPs) applies directly."""
     try:
-        import json as _json
-
         from virturoid.services.cad_geometry import export_gene_cad
+        # ``export_gene_cad`` writes ``cad/cad_manifest.json`` ITSELF now, and prunes only after that write
+        # succeeds. It used to be written here instead, one call later -- which meant a zero-part export
+        # returned None from this function without touching the manifest, leaving it claiming the PREVIOUS
+        # robot's 9 parts over a ``cad/step/`` the prune had just emptied. One writer, one order, no gap.
         manifest = export_gene_cad(gene, str(Path(output_dir) / "cad"))
-        if manifest.get("part_count"):
-            (Path(output_dir) / "cad" / "cad_manifest.json").write_text(
-                _json.dumps(manifest, indent=2), encoding="utf-8")
-            return manifest
-        return None
+        return manifest if manifest.get("part_count") else None
     except ImportError:  # build123d absent -> NON-SILENT: tell the user how to get real CAD (don't fake it)
         import warnings
         warnings.warn("build123d is not installed, so this build ships NO CAD (the readiness ledger will mark "
@@ -229,6 +229,319 @@ def _export_real_cad(gene: RobotGene, output_dir: Path) -> dict | None:
         return None
     except Exception:  # noqa: BLE001 - kernel failure -> honest 'no real CAD', never fake
         return None
+
+
+# A limb must be able to HOUSE the actuator that drives it: the visual housing may exceed the limb
+# radius by at most this factor. 1.5x keeps a believable "shell over motor" look while still letting
+# the real datasheet envelope show; beyond it the render reads as a drum threaded on a pencil.
+_MAX_HOUSING_TO_LIMB = 1.5
+
+
+#: what ``ground_and_repair`` uses for a body that has NEVER been grounded (the validated-trainable B0 config).
+DEFAULT_GROUNDING = {"material": "carbon_fiber", "fill": 0.25}
+
+
+def grounding_config(gene: RobotGene) -> dict:
+    """How this body's masses were derived -- so re-grounding REPRODUCES it instead of re-deriving it.
+
+    ``metadata['mass_source'] == 'source_model'`` (an imported customer robot) means the per-link masses are
+    the manufacturer's own and must never be replaced by our primitive-volume estimate; ``preserve_mass`` is
+    then True and the material only sizes actuators. Otherwise the material/fill ``ground_gene`` last recorded
+    wins, falling back to :data:`DEFAULT_GROUNDING`.
+
+    ``preserve_geometry`` is the same rule for SHAPE, and it is keyed on ``metadata['imported_from']``: every
+    link length and radius on an imported body is a measurement of a machine that already exists, so the two
+    geometry-editing passes in :func:`ground_and_repair` (stress thickening, actuator-housing fit) must report
+    what they find rather than silently re-cut the customer's robot. It stays True across an amend, because
+    what a customer holds and verifies after their own edit is still what the export door has to ship
+    unchanged; a deliberate edit moves the geometry through ``edit_operators``, which is the customer asking.
+    """
+    meta = getattr(gene, "metadata", None) or {}
+    rec = meta.get("grounding") if isinstance(meta.get("grounding"), dict) else {}
+    try:
+        fill = float(rec.get("fill", DEFAULT_GROUNDING["fill"]))
+    except (TypeError, ValueError):
+        fill = float(DEFAULT_GROUNDING["fill"])
+    return {
+        "material": str(rec.get("material") or DEFAULT_GROUNDING["material"]),
+        "fill": fill if 0.0 < fill <= 1.0 else float(DEFAULT_GROUNDING["fill"]),
+        "preserve_mass": str(meta.get("mass_source") or "") == "source_model",
+        "preserve_geometry": bool(str(meta.get("imported_from") or "")
+                                  or str(meta.get("mass_source") or "") == "source_model"),
+        "source": ("imported" if str(meta.get("mass_source") or "") == "source_model"
+                   else ("recorded" if rec else "default")),
+    }
+
+
+def ground_and_repair(gene: RobotGene, *, task: str = "") -> dict:
+    """GROUND a body to real actuators + material mass, then structurally repair under-margined links and
+    re-ground so mass tracks the fix. This is the SINGLE grounding path both exit doors share -- the
+    package builder (``build_gene_package``) and the agent's ``export_held`` -- so one prompt ships the SAME
+    buildable robot (mass, actuators, safety factor) whichever door it leaves by. Before this was shared, the
+    two doors diverged (export_held emitted the ungrounded 3.57 kg fantasy body while the builder grounded to
+    ~8 kg with real motors).
+
+    GROUND THE BODY WE WERE HANDED, NOT A DIFFERENT ONE. This used to hardcode ``carbon_fiber``/0.25, and
+    ``ground_gene`` re-derives every link mass from geometry x density x fill -- so a body grounded anywhere
+    else silently changed weight on its way out the door. Measured: a Go2 held and VERIFIED at 27.362 kg
+    (aluminium, 2700 kg/m3) exported at 19.151 kg (carbon fibre, 1600) -- 1600/2700 = 0.593 exactly, on all 13
+    links -- while the certificate travelling in the same package still claimed the verdict was signed by the
+    body that deploys. An IMPORTED robot was worse: its manufacturer's real per-link masses were replaced by
+    primitive-volume estimates (Menagerie Go2, 15.206 -> 13.235 kg, base 6.921 -> 6.107).
+
+    So: honour the gene's OWN recorded grounding (``metadata['grounding']``, stamped by ``ground_gene``), and
+    PRESERVE authoritative masses outright (``metadata['mass_source'] == 'source_model'`` -- an imported
+    customer robot). carbon_fiber/0.25 remains the default for a body that has never been grounded, which is
+    the case this function was written for and the validated-trainable config from the B0 GPU runs.
+
+    Rationale (fidelity gap-closure §G3): ``ground_gene`` sizes real actuators on RATED torque and sets link
+    mass = structure + motor, so sim, eval, spec sheet and BOM all describe one robot. §G3b: the added actuator
+    mass can drop a link below the SF>=2.0 structural target the readiness ledger fail-closes on, so thicken
+    only the under-margined links (SF ~ r^3, +5% headroom) and re-ground -- walking legs stay inside the
+    slenderness band (length/diameter >= 2.25) so the fix never re-creates stub legs. Fail-open: a grounding
+    error is reported, never raised.
+
+    ...AND THE SAME PROTECTION FOR SHAPE AS FOR MASS. Both of those passes RE-CUT the body, which is right for
+    a body we drew and wrong for one the customer handed us: on an imported robot every radius is a measurement
+    of hardware that exists. Measured on a Menagerie Go2 once the importer started reading the customer's real
+    torque limits (23.7/23.7/45.43 N.m instead of a 0.7-5.1 N.m structural guess): the housing-fit pass sized
+    the catalog equivalent of their knee motor at 110 mm and grew all four calves 0.02903 -> 0.03667 m (+26%)
+    and all four hips 0.02674 -> 0.02733 m, at unchanged mass -- so the shipped URDF had a different inertia
+    than the body the verdict was earned on, and ``export_held`` correctly reported ``same_as_verified: false``
+    on a robot nobody had edited. The premise does not even hold on real hardware: a Go2's knee actuator sits
+    at the joint, not inside the shin, and a one-radius capsule cannot say so. So for an imported body both
+    passes REPORT (``housing_over_limb``, ``understrength_links``) instead of editing, and the parts list still
+    names the part that covers the joint -- what changes is that we stop reshaping their robot to fit it."""
+    _g = grounding_config(gene)
+    _mat, _fill, _keep = _g["material"], _g["fill"], _g["preserve_mass"]
+    _hold_shape = bool(_g["preserve_geometry"])
+    _findings: dict = {}
+    try:
+        from virturoid.services.grounded_physics import ground_gene
+        report = ground_gene(gene, material=_mat, fill=_fill, preserve_mass=_keep)
+        from virturoid.services.structural_validation import validate_structure
+        for _ in range(3):
+            _st = validate_structure(gene)
+            if _st.get("ok", False):
+                break
+            if _hold_shape:                       # their shape, their call: name the weak links, don't re-cut them
+                _findings["understrength_links"] = [
+                    {"link": str(_l.get("name")), "safety_factor": round(float(_l.get("safety_factor") or 0.0), 2)}
+                    for _l in _st.get("links", []) if not _l.get("feasible")][:12]
+                break
+            _by_name = {s.name: s for s in gene.segments}
+            for _link in _st.get("links", []):
+                _s = _by_name.get(str(_link.get("name")))
+                _sf = float(_link.get("safety_factor") or 0.0)
+                if _link.get("feasible") or _s is None or _sf <= 0.0 or float(_s.radius_m) <= 0.0:
+                    continue
+                _f = min(1.6, 1.05 * (2.0 / _sf) ** (1.0 / 3.0))
+                _r = float(_s.radius_m) * _f
+                if ("leg" in _s.name.lower() and (_s.joint_type or "").lower() == "revolute"
+                        and float(_s.length_m) > 0):
+                    _r = min(_r, float(_s.length_m) / 4.5)
+                _s.radius_m = round(max(float(_s.radius_m), _r), 5)
+            report = ground_gene(gene, material=_mat, fill=_fill, preserve_mass=_keep)
+        # A LINK MUST BE BIG ENOUGH TO HOUSE THE MOTOR THAT DRIVES IT (visual-fidelity defect T1). Actuator
+        # housings are drawn at their true datasheet envelope, which is right -- but nothing forced the LIMB to
+        # be able to carry that part, so the compiler emitted a 5.6 mm rod mounting a 98 mm-diameter T-Motor
+        # AK10-9 (housing/limb = 8.86x on a hexapod hip; 3.23x worst on the dog). That is both physically
+        # impossible and the single most damaging "toy" cue in every render: fat drums threaded on pencil
+        # sticks. Real limbs enclose their actuator, so GROW THE LIMB rather than shrink an honest datasheet.
+        # Bounded by the same slenderness rule the loop above uses, so a leg never becomes a stub, and followed
+        # by a re-ground so mass/inertia track the new geometry.
+        #
+        # ON AN IMPORTED BODY THE CONCLUSION FLIPS. There the datasheet part is a catalog EQUIVALENT for a motor
+        # the customer already owns and already fitted, so a limb thinner than our stand-in is evidence our
+        # stand-in is bigger than their motor -- not evidence their limb is wrong. Record the ratio and leave
+        # the measurement alone; ``spec_sheet``/``ingest_project`` surface it.
+        try:
+            from virturoid.services.component_geometry import actuator_for_joint
+            _grew, _over = False, []
+            for _s in gene.segments:
+                _ds = actuator_for_joint(_s)
+                if _ds is None or float(_s.radius_m or 0.0) <= 0.0:
+                    continue
+                _env = _ds["envelope_m"]
+                _need = (max(float(_env[0]), float(_env[1])) / 2.0) / _MAX_HOUSING_TO_LIMB
+                # NB: no slenderness clamp here. That rule exists to stop the STRESS pass above from fattening a
+                # long limb into a stub, but applied to physical fit it does the opposite harm: a SHORT segment
+                # (a hip abduction block) would be pinned thinner than the motor bolted to it -- which is how the
+                # hexapod ended up as a 5.6 mm rod under a 98 mm motor. A short, chunky joint housing is what a
+                # real hip assembly looks like; fitting the part is the honest constraint, so let it win.
+                if _need <= float(_s.radius_m):
+                    continue
+                if _hold_shape:
+                    _over.append({"link": _s.name, "catalog_part": _ds.get("part"),
+                                  "part_diameter_m": round(max(float(_env[0]), float(_env[1])), 4),
+                                  "limb_diameter_m": round(2.0 * float(_s.radius_m), 4),
+                                  "ratio": round(_need / float(_s.radius_m), 2)})
+                    continue
+                _s.radius_m = round(_need, 5)
+                _grew = True
+            if _over:
+                _findings["housing_over_limb"] = _over[:12]
+            if _grew:
+                report = ground_gene(gene, material=_mat, fill=_fill, preserve_mass=_keep)
+        except Exception:  # noqa: BLE001 - housing fit is a fidelity pass, never a build blocker
+            pass
+    except Exception as _ge:  # noqa: BLE001
+        report = {"error": f"{type(_ge).__name__}: {_ge}"}
+    # ...AND THEN BOLT ON THE PARTS THE PARTS LIST ALREADY SPECIFIES. Grounding gives a link its structure and
+    # its motor; the battery, the compute and the sensors were still weightless, so the verdict, the actuator
+    # sizing and the torque margins were all signed against a body lighter than the machine the customer would
+    # build (MEASURED: an authored hexapod 15.043 kg simulated vs 17.894 kg of real parts, 19%). It runs LAST,
+    # after every re-ground above, because a re-ground re-derives link masses and would drop what it added --
+    # and it declines outright on an imported body, whose manufacturer masses already include their own
+    # electronics. Fail-open, like everything else here: a parts list that cannot be built is reported.
+    #
+    # ``task`` MATTERS HERE and must be the one the shipped parts list is built with. The sensor suite is
+    # task-adaptive -- a navigator gets a LiDAR, an inspector a thermal camera -- so embodying against a
+    # task-neutral BOM and then shipping ``_emit_bom(task=prompt)`` puts different hardware in the two, and the
+    # sim/BOM equality this exists to establish quietly fails by the difference (measured on a warehouse rover:
+    # 0.655 kg of LiDAR and drive hardware the body never carried).
+    try:
+        from virturoid.services.grounded_physics import embody_component_masses
+        _emb = embody_component_masses(gene, task=task)
+        if isinstance(report, dict):
+            report["component_embodiment"] = _emb
+    except Exception:  # noqa: BLE001 - embodiment is a fidelity pass, never a build blocker
+        pass
+    if isinstance(report, dict):
+        report["geometry_preserved"] = _hold_shape
+        report.update(_findings)
+    return report
+
+
+class MixedRobotPackageError(RuntimeError):
+    """A build was asked to write into a directory that already describes a DIFFERENT KIND of robot."""
+
+
+#: The four build paths ``build_gene_package`` dispatches to, keyed by the ``package_type`` each one stamps into
+#: ``reports/robot_package_contract.json``. That contract is an existing document written by every path, so the
+#: identity of a package directory does not need a new file to be readable.
+_PACKAGE_TYPE_TO_PATH = {
+    "gene_package": "manipulation",
+    "gene_navigation_package": "navigation",
+    "gene_freemotion_package": "freemotion",
+    "gene_locomotion_package": "locomotion",
+}
+
+#: Artifacts ONLY the locomotion path writes. They are the direct evidence for a package-contract-less directory
+#: (an interrupted or pre-contract build), and they are also the exact files that made a mixed package
+#: dangerous: every one of them is written by a branch-conditional writer, so a manipulation rebuild neither
+#: refreshes nor removes them, and no index of ours points at them for a pruner to follow.
+_LOCOMOTION_ONLY_ARTIFACTS = ("simulation/locomotion_qpos.json", "software/gait_controller.py",
+                              "software/control_program.json", "simulation/robot_visual.xml",
+                              "simulation/viewer_mesh_index.json")
+
+#: What a rebuild on a different path leaves behind pointing at the WRONG robot. Listed in the refusal so the
+#: message is actionable rather than an abstract objection.
+_BRAIN_ARTIFACTS = _LOCOMOTION_ONLY_ARTIFACTS + (
+    "software/controller/controller.py", "software/controller/policy_params.json",
+    "export/ros2/virturoid_robot/virturoid_robot/controller.py",
+    "export/ros2/virturoid_robot/virturoid_robot/policy_params.json",
+    "fusion/config/ekf.yaml", "simulation/viewer_assets")
+
+
+def _build_path_for(gene: RobotGene) -> str:
+    """Which of the four builders in this module will run for ``gene``. This, not ``robot_kind``, is the unit of
+    "same kind of package": two bodies that take the same path write and overwrite the same artifact set."""
+    from virturoid.services.task_matched_eval import robot_kind
+
+    kind = robot_kind(gene)
+    if kind == "legged":
+        return "locomotion"
+    if kind in ("aerial", "aquatic"):
+        return "freemotion"
+    if kind == "mobile":
+        return "navigation"
+    return "manipulation"
+
+
+def _existing_package_path(output_dir: Path) -> tuple:
+    """``(build path this directory already holds or None, how we know)``."""
+    contract = Path(output_dir) / "reports" / "robot_package_contract.json"
+    if contract.is_file():
+        try:
+            ptype = str(json.loads(contract.read_text(encoding="utf-8")).get("package_type", ""))
+        except (OSError, ValueError):
+            ptype = ""
+        if ptype in _PACKAGE_TYPE_TO_PATH:
+            return _PACKAGE_TYPE_TO_PATH[ptype], f"reports/robot_package_contract.json says package_type={ptype!r}"
+    # No usable contract (an interrupted build, or one written before contracts). Fall back to direct evidence
+    # for the one case that actually ships a wrong brain: a locomotion package under a non-legged rebuild.
+    present = [rel for rel in _LOCOMOTION_ONLY_ARTIFACTS if (Path(output_dir) / rel).exists()]
+    if present:
+        return "locomotion", ("this directory carries " + ", ".join(present)
+                              + ", which only a locomotion build writes")
+    return None, "this directory carries no package of ours"
+
+
+def _guard_package_is_one_robot(gene: RobotGene, output_dir: Path) -> None:
+    """A PACKAGE DIRECTORY DESCRIBES ONE ROBOT, AND ONE KIND OF ROBOT. Refuse to make it describe two.
+
+    Build a quadruped and then an arm into the same directory and the customer used to get, measured:
+    ``export/ros2/virturoid_robot/config/robot.yaml`` listing the ARM's 8 joints beside
+    ``policy_type: "trot_cpg_gait"`` and ``has_controller: true``; an installed ``controller.py`` that is
+    verbatim the quadruped's trot CPG (``class GaitController``); a ``policy_params.json`` keyed to
+    ``genome_built_quadruped_18seg`` with a 12-joint default pose; and stale ``viewer_mesh_index.json``,
+    ``robot_visual.xml``, ``locomotion_qpos.json``, ``gait_controller.py`` and ``fusion/config/ekf.yaml``.
+
+    THE GEOMETRY PRUNE MADE THIS WORSE RATHER THAN BETTER. Before it, 36 obviously-quadruped STLs told a
+    customer at a glance that something was wrong. After it, every surface a human checks first -- the meshes,
+    the CAD, the URDF, the deployment guide -- is a correct arm, and the only thing still wrong is the thing
+    that COMMANDS THE HARDWARE. And the prune cannot be extended to cover it: these writers are
+    BRANCH-CONDITIONAL (``write_packaged_visual_mjcf`` has one caller, on the locomotion path), so a non-legged
+    rebuild never runs them and an in-writer prune never executes; the indexes are stale too, so "follow the
+    manifest" saves no one here either.
+
+    So the honest close is the one the mechanism forces: a rebuild of a different CLASS of robot may not reuse
+    the directory silently. It is refused, and the refusal is written into the package as ``PACKAGE_CONFLICT.md``
+    so it exists on disk and not only in a traceback. Rebuilding the SAME kind of robot -- which is what
+    ``autonomous_build`` does after an accepted redesign -- is untouched: every artifact on that path is
+    rewritten by the rebuild.
+
+    ``VIRTUROID_ALLOW_MIXED_PACKAGE=1`` downgrades the refusal to the same written warning without the raise.
+    It exists for someone who knows exactly what they are doing with a scratch directory; the resulting package
+    ships a controller for a different robot, and ``PACKAGE_CONFLICT.md`` says so.
+    """
+    output_dir = Path(output_dir)
+    want = _build_path_for(gene)
+    have, why = _existing_package_path(output_dir)
+    if have is None or have == want:
+        for rel in ("PACKAGE_CONFLICT.md", "reports/package_conflict.json"):
+            try:                                 # our own note from a refused build; this one is compatible
+                (output_dir / rel).unlink(missing_ok=True)
+            except OSError:
+                pass
+        return
+    stale = [rel for rel in _BRAIN_ARTIFACTS if (output_dir / rel).exists()]
+    msg = (f"{output_dir} already holds a '{have}' robot package and this build is a '{want}' one ({why}). "
+           f"Rebuilding over it would leave {len(stale)} artifact(s) describing the previous robot that this "
+           f"build never rewrites -- including the controller the exported ROS 2 package installs and runs on "
+           f"real hardware: " + ", ".join(stale[:8]) + (", ..." if len(stale) > 8 else "")
+           + ". Build into a new directory, or remove this one yourself; a robot package is not something this "
+             "build will silently mix two robots into.")
+    try:
+        (output_dir / "reports").mkdir(parents=True, exist_ok=True)
+        (output_dir / "reports" / "package_conflict.json").write_text(json.dumps(
+            {"existing_package_path": have, "requested_package_path": want, "evidence": why,
+             "stale_artifacts": stale, "gene_id": gene.id, "robot_class": gene.robot_class,
+             "allowed_anyway": bool(os.environ.get("VIRTUROID_ALLOW_MIXED_PACKAGE"))}, indent=2),
+            encoding="utf-8")
+        (output_dir / "PACKAGE_CONFLICT.md").write_text(
+            "# This directory was asked to hold two different robots\n\n" + msg + "\n\n"
+            "The artifacts below describe the PREVIOUS robot and are not rewritten by a "
+            f"'{want}' build:\n\n" + "".join(f"- `{rel}`\n" for rel in stale) + "\n", encoding="utf-8")
+    except OSError:
+        pass
+    if os.environ.get("VIRTUROID_ALLOW_MIXED_PACKAGE"):
+        import warnings
+        warnings.warn("VIRTUROID_ALLOW_MIXED_PACKAGE is set, so this mixed package is being built anyway. "
+                      + msg, RuntimeWarning, stacklevel=2)
+        return
+    raise MixedRobotPackageError(msg)
 
 
 def build_gene_package(gene: RobotGene, prompt: str, output_dir: Path, scene_count: int = 6,
@@ -250,40 +563,8 @@ def build_gene_package(gene: RobotGene, prompt: str, output_dir: Path, scene_cou
     composed gene (no genome->gene reconstruction), so the gate scores exactly the robot that was built.
     """
     output_dir = Path(output_dir)
-    # G3 (fidelity gap-closure): GROUND the body BEFORE anything compiles/evaluates. The e2e test proved the
-    # product shipped the fantasy body (dog 4.54 kg vs its Go2-class ~15 kg; arm 3.04 kg vs UR5e-class 20.6 kg):
-    # ground_gene sizes real actuators on RATED torque and sets link mass = structure + motor, so sim, eval,
-    # spec sheet and BOM all describe the SAME buildable robot. carbon_fiber/0.25 is the validated-trainable
-    # config from the B0 GPU runs. Fail-open: a grounding error is reported, never silently skipped.
-    try:
-        from virturoid.services.grounded_physics import ground_gene
-        _ground_report = ground_gene(gene, material="carbon_fiber", fill=0.25)
-        # G3b: grounding adds the REAL actuator masses, and the heavier body can drop a link below the
-        # SF>=2.0 structural target the readiness ledger fail-closes on (physics_evaluated=collision).
-        # Repair the STRUCTURE for the grounded masses: thicken only the under-margined links (SF ~ r^3,
-        # +5% headroom) and re-ground so mass tracks the new geometry — the shipped gene is grounded AND
-        # structurally sound, re-checked after its last mutation. Walking legs stay strictly inside the
-        # slenderness band (length/diameter >= 2.25) so the structural fix never re-creates stub legs.
-        from virturoid.services.structural_validation import validate_structure
-        for _ in range(3):
-            _st = validate_structure(gene)
-            if _st.get("ok", False):
-                break
-            _by_name = {s.name: s for s in gene.segments}
-            for _link in _st.get("links", []):
-                _s = _by_name.get(str(_link.get("name")))
-                _sf = float(_link.get("safety_factor") or 0.0)
-                if _link.get("feasible") or _s is None or _sf <= 0.0 or float(_s.radius_m) <= 0.0:
-                    continue
-                _f = min(1.6, 1.05 * (2.0 / _sf) ** (1.0 / 3.0))
-                _r = float(_s.radius_m) * _f
-                if ("leg" in _s.name.lower() and (_s.joint_type or "").lower() == "revolute"
-                        and float(_s.length_m) > 0):
-                    _r = min(_r, float(_s.length_m) / 4.5)
-                _s.radius_m = round(max(float(_s.radius_m), _r), 5)
-            _ground_report = ground_gene(gene, material="carbon_fiber", fill=0.25)
-    except Exception as _ge:  # noqa: BLE001
-        _ground_report = {"error": f"{type(_ge).__name__}: {_ge}"}
+    _guard_package_is_one_robot(gene, output_dir)     # before ANY file is written into a directory we may refuse
+    _ground_report = ground_and_repair(gene, task=prompt)
     try:                                                   # persist grounding + the executable-on-BOM certificate
         import json as _json
         _rep_dir = output_dir / "reports"
@@ -375,7 +656,7 @@ def build_gene_package(gene: RobotGene, prompt: str, output_dir: Path, scene_cou
 
     # A genome-from-gene so reports/viewer have the structure (links/joints/ee from the gene).
     (output_dir / "robot").mkdir(parents=True, exist_ok=True)
-    _write_genome_and_urdf(gene, output_dir)
+    _write_genome_and_urdf(gene, output_dir, task=prompt)
 
     cad = _export_real_cad(gene, output_dir)   # REAL B-rep STEP/STL (the gene path shipped no CAD before)
     summary = evaluate_gene_on_task(gene, spec, scenes, params=controller_params)
@@ -590,7 +871,7 @@ def _build_navigation_package(gene: RobotGene, prompt: str, output_dir: Path, co
 
     output_dir = Path(output_dir)
     (output_dir / "robot").mkdir(parents=True, exist_ok=True)
-    _write_genome_and_urdf(gene, output_dir)
+    _write_genome_and_urdf(gene, output_dir, task=prompt)
 
     # Prompt-driven scene set (navigation course or maze) — the SAME general generator the gallery uses, so a
     # "navigate a maze" build renders an actual maze and "navigate to the goal" renders a course.
@@ -671,7 +952,7 @@ def _build_freemotion_package(gene: RobotGene, prompt: str, output_dir: Path, co
     from virturoid.services.task_matched_eval import evaluate_robot
     output_dir = Path(output_dir)
     (output_dir / "robot").mkdir(parents=True, exist_ok=True)
-    _write_genome_and_urdf(gene, output_dir)
+    _write_genome_and_urdf(gene, output_dir, task=prompt)
     # a single bare scene (the robot in free space) so the viewer has something to render
     rel = "simulation/mujoco/scenes/variation/free.xml"
     (output_dir / rel).parent.mkdir(parents=True, exist_ok=True)
@@ -716,7 +997,7 @@ def _build_legged_package(gene: RobotGene, prompt: str, output_dir: Path, contro
 
     output_dir = Path(output_dir)
     (output_dir / "robot").mkdir(parents=True, exist_ok=True)
-    _write_genome_and_urdf(gene, output_dir)
+    _write_genome_and_urdf(gene, output_dir, task=prompt)
 
     # Write the LOCOMOTION scene (robot on flat ground) as a real compiled MJCF + index. A walker's
     # "simulation" is the locomotion rollout, not object scenes — but it IS a compiled, loadable scene, so
@@ -756,8 +1037,36 @@ def _build_legged_package(gene: RobotGene, prompt: str, output_dir: Path, contro
     # else the BARE trot-CPG (pol=None). The old code fell back to a no-CPG scripted eval when no policy was banked,
     # so every un-banked composed walker (six-legged, a fresh quad) read 'fell'/0.0 here while the viewport walked it
     # on the bare CPG -- the headline contradicted the 3D replay. A genuinely unstable anatomy body still reads 'fell'.
-    use_pol = pol if (pol is not None and getattr(pol, "obs_mean", None) is not None) else None
+    # "Is this a RECIPE policy?" comes from the artifact's EXPLICIT marker (``recipe_control``, meta[11]), falling
+    # back VERBATIM to the legacy obs_mean inference when unmarked (pre-marker artifacts must behave as before).
+    # This is not a controller choice -- both branches run recipe_rollout_morph -- it decides whether the BANKED
+    # policy is used AT ALL, and pol=None there is NOT a zero-residual baseline: recipe_rollout_morph constructs a
+    # RANDOM policy. So inferring from obs_mean discarded every GPU artifact (that trainer banks no normalizer) and
+    # scored the species' headline -- and the qpos trace the viewer replays -- on a random stand-in instead.
+    _pol_recipe = getattr(pol, "recipe_control", None) if pol is not None else None
+    if _pol_recipe is None:
+        _pol_recipe = getattr(pol, "obs_mean", None) is not None
+    use_pol = pol if (pol is not None and _pol_recipe) else None
     rr = recipe_rollout_morph(gene, use_pol, steps=900, record_qpos=True)   # qpos -> classify's ROLL/PITCH gate
+    # M1/#212 (2026-07-24 audit): the build must not report EXPORT-BLOCKED for a body that verify_robot / create_robot
+    # certify as a CREDIBLE WALK. Those use the tuned CRAWL gait; the trot recipe above drifts a fresh composed quad
+    # BACKWARD. So ALSO score the walkable crawl gait (the exact controller verify_robot uses, with the gene's cached
+    # tuned params) and keep whichever is the better credible walk -- the build headline then agrees with the
+    # product's own verdict instead of contradicting it. The winning rollout's frames drive the viewer replay below,
+    # so headline == viewport still holds.
+    try:
+        from virturoid.services.gait_quality import classify as _classify
+        from virturoid.services.morph_policy import crawl_gait_rollout
+        rr_crawl = crawl_gait_rollout(gene, steps=900, record_qpos=True)
+        _recipe_cred = _classify(rr).startswith("CREDIBLE")
+        _crawl_cred = _classify(rr_crawl).startswith("CREDIBLE")
+        _crawl_wins = (_crawl_cred and not _recipe_cred) or (
+            _crawl_cred == _recipe_cred
+            and abs(float(rr_crawl.get("forward", 0.0))) > abs(float(rr.get("forward", 0.0))))
+        if _crawl_wins:
+            rr = rr_crawl
+    except Exception:  # noqa: BLE001 - the crawl cross-check is an honesty accelerant; a miss keeps the recipe score
+        pass
     forward_m = float(rr.get("forward", 0.0))
     cadence = float(rr.get("cadence", 0.0)); upright_frac = float(rr.get("upright_frac", 0.0))
     n_feet = int(rr.get("n_feet", 0))
@@ -803,6 +1112,21 @@ def _build_legged_package(gene: RobotGene, prompt: str, output_dir: Path, contro
     cad = _export_real_cad(gene, output_dir)   # REAL B-rep STEP/STL for the walker too
     summary["cad_real"] = bool(cad)
     summary["cad_part_count"] = (cad or {}).get("part_count", 0)
+    # M1/#212: persist the WINNING rollout's qpos trace so the viewer replays the SAME gait the headline scored
+    # (when the walkable crawl beat the trot, the viewer must show that forward walk, not the trot's drift). The
+    # viewer replays these qpos on the robot model and falls back to its live rollout if the shape doesn't match.
+    try:
+        _qf = rr.get("qpos_frames") or []
+        if _qf and float(rr.get("forward", 0.0)) != 0.0:
+            _stride = max(1, len(_qf) // 150)                  # ~150 frames is plenty for a smooth replay
+            (output_dir / "simulation").mkdir(parents=True, exist_ok=True)
+            (output_dir / "simulation" / "locomotion_qpos.json").write_text(json.dumps({
+                "nq": len(_qf[0]), "frame_every": _stride,
+                "qpos_frames": [[round(float(v), 6) for v in _qf[i]] for i in range(0, len(_qf), _stride)],
+                "forward_m": round(float(rr.get("forward", 0.0)), 4),
+            }), encoding="utf-8")
+    except Exception:  # noqa: BLE001 - the replay trace is a presentation aid; never break the build
+        pass
     (output_dir / "reports").mkdir(parents=True, exist_ok=True)
     (output_dir / "reports" / "gene_evaluation_report.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     summary["bom"] = _emit_bom(gene, output_dir, task=prompt)  # real per-joint actuators + sensors + materials
@@ -888,6 +1212,20 @@ def _emit_bom(gene: RobotGene, output_dir: Path, task: str = "") -> dict:
         (output_dir / "reports").mkdir(parents=True, exist_ok=True)
         (output_dir / "reports" / "bill_of_materials.md").write_text(format_bom_markdown(bom), encoding="utf-8")
         gene.metadata["bom"] = bom
+        # The sensor-fusion stack is DERIVED from these same BOM sensors: an EKF/AHRS/odometry config referencing
+        # exactly the parts above, on the links they mount to. Colocated with the BOM so every build ships it.
+        try:
+            from virturoid.services.sensor_fusion_compiler import write_sensor_fusion
+            write_sensor_fusion(gene, output_dir, task=task)   # -> output_dir/fusion/{config,launch}/...
+        except Exception:  # noqa: BLE001 - fusion configs are value-add; never break a build
+            pass
+        # The operational control scripts (obs-assembler, safety filter clamped to these actuators' peak torque,
+        # state machine, watchdog, teleop, calibration) -- each compile-checked + sim-dry-run before it ships.
+        try:
+            from virturoid.services.control_script_compiler import write_control_scripts
+            write_control_scripts(gene, output_dir, task=task)  # -> output_dir/software/scripts/*.py
+        except Exception:  # noqa: BLE001 - control scripts are value-add; never break a build
+            pass
         return bom.get("totals", {})
     except Exception:  # noqa: BLE001 - the BOM is value-add; never let it break a build
         return {}
@@ -1018,25 +1356,236 @@ if __name__ == "__main__":
 '''
 
 
-def _verify_exported_gait(gene) -> dict:
-    """Run the EXPORTED bare feed-forward trot-CPG gait on the body (recipe rollout, ZERO learned residual = exactly
-    the exported control law) and classify it — so the control program can state HONESTLY whether this gait walks
-    the body, instead of unconditionally claiming it does. Same un-gameable principle as the flywheel bank: a
-    slide/crouch/fall is not a walk. Best-effort: an unverifiable body reports credible=False (conservative)."""
+#: THE RATE THE EXPORTED CONTROLLER IS DEPLOYED AT — and, by construction, the rate its own verification rollout
+#: samples it at. It used to be the bare literal ``20.0`` written onto every control program, with nothing behind
+#: it: the number beside it was produced by a rollout that recomputed the target EVERY PHYSICS STEP (dt 0.002 s =
+#: 500 Hz), so the file declared one rate and quoted a distance measured at another, 25x faster. That gap is not
+#: cosmetic — measured on a real Menagerie Unitree Go2, the same exported controller travels +0.035 m at 20 Hz,
+#: +0.311 m at 50 Hz and +0.330 m continuous, so 20 Hz throws away 89% of the travel the file was advertising.
+#: 50 Hz is where this body recovers 94% of the continuous-time result, and it is the rate
+#: ``control_script_compiler`` already declares for the OTHER controller a package can ship, so one package no
+#: longer names two deployment rates. ``_run_exported_controller`` decimates to exactly this rate, so whatever
+#: value stands here, the quoted distance is the distance AT it.
+_EXPORT_CONTROL_HZ = 50.0
+#: The downstream PD gains the quoted distance was produced with. The control law "a downstream PD loop tracks
+#: these targets" is not a controller until the gains are named: the same targets tracked at a different
+#: stiffness are a different machine. The crawl plan carries its own fitted ``kp``/``kd``; the trot program had
+#: none, and was silently measured at these.
+_EXPORT_PD_KP, _EXPORT_PD_KD = 32.0, 1.5
+
+
+#: Where the export writer records WHICH CONTROLLER the package ships and what it measured, so the verification
+#: certificate can say whether the rollout it signs is the rollout that deploys. The certificate is assembled from
+#: the gene (``build_certificate_v2(gene, verdict, ...)``) and never sees the output directory, so the gene is the
+#: channel; the stamp carries a ``program_fingerprint`` that also appears in ``software/control_program.json``, so
+#: a reader holding only the two files can confirm they describe the same controller.
+_CONTROLLER_STAMP_KEY = "exported_controller"
+
+
+def _stamp_exported_controller(gene, program: dict | None) -> None:
+    """Record (or CLEAR) the shipped-controller stamp on ``gene.metadata``. Cleared first on every write so a body
+    that ships no control program this time cannot carry one from a previous export — a stale stamp would make the
+    certificate name a controller that is not in the package, which is the exact class of defect this closes."""
     try:
-        from virturoid.services.gait_quality import classify
-        from virturoid.services.morph_graph import encode_robot
-        from virturoid.services.morph_policy import (CPG_DEFAULT, MorphPolicy, compiled_model,
-                                                     recipe_rollout_morph, robot_mjcf)
-        graph = encode_robot(compiled_model(robot_mjcf(gene)))
-        pol = MorphPolicy(graph.feature_dim, seed=0)
-        pol.cpg = CPG_DEFAULT                                    # zero residual + CPG prior == the exported bare gait
-        r = recipe_rollout_morph(gene, pol, steps=1200)
-        verdict = classify(r)
-        return {"credible": verdict.startswith("CREDIBLE"), "forward_m": abs(float(r.get("forward", 0.0))),
-                "survived": bool(r.get("survived", False)), "verdict": verdict}
-    except Exception:  # noqa: BLE001 - verification is best-effort; default to the conservative (non-credible) claim
-        return {"credible": False, "forward_m": 0.0, "survived": False, "verdict": "unverified"}
+        md = dict(getattr(gene, "metadata", None) or {})
+        if program is None:
+            md.pop(_CONTROLLER_STAMP_KEY, None)
+        else:
+            md[_CONTROLLER_STAMP_KEY] = {
+                "policy_type": program.get("policy_type"),
+                "entrypoint": program.get("entrypoint"),
+                "parameters_file": "software/control_program.json",
+                "program_fingerprint": program.get("program_fingerprint"),
+                "control_frequency_hz": program.get("control_frequency_hz"),
+                "pd_gains": program.get("pd_gains"),
+                "verified_walk": program.get("verified_walk"),
+                "sim_forward_m": program.get("sim_forward_m"),
+                "sim_verdict": program.get("sim_verdict"),
+                "measured_by": program.get("measured_by"),
+            }
+        gene.metadata = md
+    except Exception:  # noqa: BLE001 - the stamp is provenance; it must never break a package write
+        pass
+
+
+def exported_controller_stamp(gene) -> dict | None:
+    """The controller this body's package deploys, as recorded by :func:`_write_gait_control_program`, or None if
+    this body exports no control program. Read by ``verdict_certificate`` to judge deploy==measure."""
+    st = (getattr(gene, "metadata", None) or {}).get(_CONTROLLER_STAMP_KEY)
+    return dict(st) if isinstance(st, dict) else None
+
+
+def _program_fingerprint(program: dict) -> str:
+    """A stable content hash of the control program, so the certificate and ``software/control_program.json`` can
+    be checked against each other by a reader with nothing but the two files. Excludes the measurement fields
+    (which are ABOUT the program) so the fingerprint names the CONTROLLER, not the run that scored it."""
+    import hashlib
+    payload = {k: v for k, v in sorted(program.items())
+               if k not in ("verified_walk", "sim_forward_m", "sim_verdict", "notes", "measured_by",
+                            "program_fingerprint", "sim_cadence_hz", "sim_upright_frac")}
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
+
+
+def _run_exported_controller(gene, program: dict, controller_source: str, *, steps: int = 1200,
+                             control_hz: float = _EXPORT_CONTROL_HZ) -> dict:
+    """DRIVE THE CONTROLLER THIS PACKAGE SHIPS, and measure what it does. deploy==measure, made literal.
+
+    The exported gait used to be "verified" by ``recipe_rollout_morph(gene, MorphPolicy(seed=0), cpg=CPG_DEFAULT)``
+    under a comment reading "zero residual + CPG prior == the exported bare gait". Measured on a real Menagerie
+    Unitree Go2, that rollout is a different controller in four independent ways, and the number it produced was
+    wrong in a fifth:
+
+      1. **The residual is not zero.** ``MorphPolicy(feature_dim, seed=0)`` initialises its weights from
+         ``rng.normal(0, 0.3)``; ``morph_policy`` says so itself, and warns that such a rollout "measures the
+         SEED, not the body". Seeds 0/1/2 gave -0.488 / -0.572 / -0.475 m on the Go2 — a 0.10 m spread that
+         nothing in the package disclosed.
+      2. **The PD attractor is a different pose.** ``recipe_rollout_morph`` resets with ``mj_resetData`` (all
+         joints 0) while the exported ``default_pose`` is read after ``_reset_to_rest`` (the body's own home
+         keyframe). On the Go2 those differ by **1.8 rad** on 8 of 12 joints: the file tells the customer to hold
+         the crouched Unitree home stance and the verifying rollout drove the robot with its legs straight out.
+      3. **No position-limit clamp.** The shipped ``GaitController.infer`` clamps every target to the joint's
+         range; the recipe rollout did not.
+      4. **A different control rate** — every physics step (500 Hz) against a file declaring 20 Hz.
+      5. And the result was passed through ``abs()``, so a body walking BACKWARD reported forward travel. The Go2
+         moved **-0.488 m** and its shipped control program advertised ``sim_forward_m: 0.488``.
+
+    So this runs the real thing instead: ``exec`` the exact controller source the package writes to
+    ``software/gait_controller.py``, instantiate it on the exact ``program`` dict written to
+    ``software/control_program.json``, sample it at the declared ``control_hz`` (holding the target between
+    samples, as a real loop does), and track the targets with the program's own PD gains, clipped to the model's
+    actuator limits. Returns the anti-Goodhart metric dict ``gait_quality.classify`` consumes plus a
+    ``measured_by`` block naming every knob of the experiment. Same body, same controller, same file.
+    """
+    import mujoco
+    import numpy as np
+
+    from virturoid.services.gait_quality import classify
+    from virturoid.services.morph_graph import encode_robot
+    from virturoid.services.morph_policy import (_reset_to_rest, compiled_model, robot_mjcf,
+                                                 upright_height_ratio)
+
+    ns: dict = {}
+    exec(compile(controller_source, "<exported software/gait_controller.py>", "exec"), ns)   # noqa: S102
+    controller = ns["GaitController"](program)                   # the SHIPPED class on the SHIPPED parameters
+
+    model = compiled_model(robot_mjcf(gene), solver_iterations=20)
+    data = mujoco.MjData(model)
+    _reset_to_rest(model, data)                                  # the same reset the program's default_pose came from
+    mujoco.mj_forward(model, data)
+    graph = encode_robot(model)
+    if graph.base_jid < 0 or graph.n_tokens == 0:
+        raise ValueError("no floating base or no actuated joints: nothing to drive")
+    qadr = np.asarray(graph.qadr, dtype=int); vadr = np.asarray(graph.vadr, dtype=int)
+    act_u = np.asarray(graph.act_u, dtype=int); clamps = np.asarray(graph.clamps, dtype=float)
+    names = list(program["joint_names"])
+    if len(names) != graph.n_tokens:
+        raise ValueError(f"program covers {len(names)} joints, body has {graph.n_tokens}")
+    # RESOLVE BY NAME, not by position. Both emitters enumerate ``graph.act_u`` so the orders agree today, and a
+    # silent disagreement would apply the shoulder's target to the knee while still producing a plausible-looking
+    # distance — the exact failure class this whole function exists to remove. Names come from the same model, so
+    # a mismatch is a bug, not a degradation: it raises.
+    _jid_of = {mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, int(model.actuator_trnid[int(u), 0])): k
+               for k, u in enumerate(act_u)}
+    order = [_jid_of.get(n) for n in names]
+    if any(o is None for o in order):
+        raise ValueError(f"program names joints this body does not actuate: "
+                         f"{[n for n, o in zip(names, order) if o is None][:4]}")
+    order = np.asarray(order, dtype=int)
+    kp = float(program.get("kp", _EXPORT_PD_KP)); kd = float(program.get("kd", _EXPORT_PD_KD))
+    dt = float(model.opt.timestep)
+    # DECIMATE TO THE DECLARED RATE: recompute the target every `dec` physics steps and HOLD it between, which is
+    # what a `control_hz` loop physically does. dec>=1, so a declared rate above the physics rate degrades to
+    # every-step rather than pretending to sample faster than the simulator ticks.
+    dec = max(1, int(round(1.0 / (max(1e-6, float(control_hz)) * dt))))
+    bq = graph.base_qadr
+    x0 = float(data.qpos[bq]); z0 = float(data.qpos[bq + 2]) or 1.0
+    frame_every = max(5, int(steps) // 300)
+    tau_up = None
+    # foot set + cadence/support bookkeeping, mirroring recipe_rollout_morph so `classify` reads the same signals
+    gz0 = np.asarray(data.geom_xpos[:, 2], dtype=float)
+    body_g = [gi for gi in range(model.ngeom) if int(model.geom_bodyid[gi]) != 0]
+    if body_g:
+        zmin = min(float(gz0[gi]) for gi in body_g)
+        feet = [gi for gi in body_g if float(gz0[gi]) < zmin + 0.05] or body_g
+    else:
+        feet = []
+    feet_idx = np.asarray(feet, dtype=int)
+    fz0 = gz0[feet_idx] if len(feet_idx) else np.zeros(0)
+    c_prev = (np.asarray(data.geom_xpos[feet_idx, 2]) < fz0 + 0.02) if len(feet_idx) else np.zeros(0, bool)
+    tau_up = upright_height_ratio(len(feet_idx))
+    lifts = up_steps = support_steps = 0
+    alive = int(steps); hr = 1.0; qpos_frames = []; tgt = None
+    for t in range(int(steps)):
+        if t % dec == 0:
+            out = controller.infer(t * dt)                       # THE SHIPPED CONTROLLER, at the declared rate
+            tgt = np.empty(graph.n_tokens)
+            for n, k in zip(names, order):                       # name -> this body's own token index
+                tgt[k] = float(out[n])
+        for k in range(graph.n_tokens):
+            tau = kp * (float(tgt[k]) - float(data.qpos[qadr[k]])) - kd * float(data.qvel[vadr[k]])
+            data.ctrl[act_u[k]] = float(np.clip(tau, -clamps[k], clamps[k]))
+        mujoco.mj_step(model, data)
+        if not np.all(np.isfinite(data.qpos)):
+            alive = t; break
+        if t % frame_every == 0:
+            qpos_frames.append(data.qpos.copy())
+        q = data.qpos[bq + 3:bq + 7]
+        upr = 1.0 - 2.0 * (float(q[1]) ** 2 + float(q[2]) ** 2)
+        z = float(data.qpos[bq + 2]); hr = min(1.0, max(0.0, z / z0))
+        if z < 0.5 * z0:                                         # FALLEN -> terminate (same bar as the recipe rollout)
+            alive = t; break
+        if z > tau_up * z0 and upr > 0.6:
+            up_steps += 1
+        if len(feet_idx):
+            c_now = np.asarray(data.geom_xpos[feet_idx, 2]) < fz0 + 0.02
+            lifts += int(np.sum(c_prev & ~c_now))
+            ng = int(np.sum(c_now))
+            support_steps += int(0 < ng < len(feet_idx))
+            c_prev = c_now
+    forward = float(data.qpos[bq] - x0)                          # SIGNED: backward travel is not forward travel
+    r = {"finite": True, "forward": round(forward, 3), "height_ratio": round(hr, 3), "alive": alive,
+         "survived": bool(alive >= int(steps) and hr > 0.6),
+         "speed": round(forward / max(1, int(steps)) / dt, 3),
+         "cadence": round(lifts / max(1e-9, max(1, alive) * dt), 2),
+         "upright_frac": round(up_steps / max(1, alive), 3),
+         "support_frac": round(support_steps / max(1, alive), 3),
+         "n_feet": int(len(feet_idx)), "steps": int(steps), "frame_every": frame_every,
+         "qpos_frames": qpos_frames}
+    r["verdict"] = classify(r)
+    r["measured_by"] = {
+        "what_was_driven": "software/gait_controller.py (GaitController.infer) on software/control_program.json",
+        "control_law": str(program.get("policy_type")),
+        "control_hz": round(float(control_hz), 3),
+        "control_period_physics_steps": int(dec),
+        "physics_timestep_s": dt,
+        "physics_hz": round(1.0 / dt, 1),
+        "horizon_steps": int(steps),
+        "horizon_s": round(int(steps) * dt, 3),
+        "pd_kp": kp, "pd_kd": kd,
+        "torque_clamp": "per-joint, the compiled model's own actuator limits",
+        "initial_condition": "the body's rest keyframe (_reset_to_rest) — the pose default_pose was read at",
+        "note": ("deploy==measure for THIS file: the number beside it was produced by executing this exact "
+                 "controller source on these exact parameters. It is rate-dependent — reproduce it at "
+                 f"{round(float(control_hz), 3)} Hz with kp={kp}/kd={kd} or expect a different distance."),
+    }
+    return r
+
+
+def _verify_exported_gait(gene, program: dict, controller_source: str, *, steps: int = 1200) -> dict:
+    """Measure the exported control program by RUNNING IT (see :func:`_run_exported_controller`), and classify the
+    result — so the program can state honestly whether the controller it ships walks this body. Best-effort: a
+    body the rollout cannot run on reports credible=False (conservative) and says why."""
+    try:
+        r = _run_exported_controller(gene, program, controller_source, steps=steps)
+        return {"credible": str(r["verdict"]).startswith("CREDIBLE"), "forward_m": float(r["forward"]),
+                "survived": bool(r.get("survived", False)), "verdict": str(r["verdict"]),
+                "measured_by": r["measured_by"], "cadence_hz": r.get("cadence"),
+                "upright_frac": r.get("upright_frac"), "support_frac": r.get("support_frac")}
+    except Exception as exc:  # noqa: BLE001 - verification is best-effort; default to the conservative claim
+        return {"credible": False, "forward_m": 0.0, "survived": False,
+                "verdict": f"UNVERIFIED — the exported controller could not be run ({type(exc).__name__})",
+                "measured_by": {"what_was_driven": None,
+                                "note": f"no rollout: {type(exc).__name__}: {exc}"[:200]}}
 
 
 def _write_gait_control_program(gene: RobotGene, genome: dict, output_dir: Path) -> None:
@@ -1048,52 +1597,101 @@ def _write_gait_control_program(gene: RobotGene, genome: dict, output_dir: Path)
     HONESTY: the program VERIFIES the exported gait in sim and reports ``verified_walk`` + the measured distance,
     instead of unconditionally claiming the gait walks -- so a customer building from the package is never told a
     body walks when the bare feed-forward gait only crouches/slides on it (many composed bodies walk via a learned
-    residual or the crawl wave gait, NOT this bare trot-CPG)."""
+    residual or the crawl wave gait, NOT this bare trot-CPG).
+
+    ...and the verification now runs THIS FILE. Both branches used to quote a number from a DIFFERENT rollout than
+    the one the package deploys: the trot branch from ``recipe_rollout_morph`` under a random neural residual, a
+    zero-pose PD attractor, no limit clamp and no rate decimation (see :func:`_run_exported_controller` for the
+    five measured discrepancies), and the crawl branch from the tuning rollout inside
+    ``extract_crawl_gait_params`` rather than from the frozen target program that tuning produced. Both now go
+    through :func:`_verify_exported_gait`, which executes the exact controller source and parameter dict written
+    to disk. Whatever ``sim_forward_m`` says, that is what THIS controller did.
+    """
     from virturoid.services.morph_policy import extract_crawl_gait_params, extract_gait_params
 
+    # CLEAR FIRST. Whatever happens below — no legged gait, an exception, an early return — this body must not
+    # leave a previous export's controller stamp behind for the certificate to describe.
+    _stamp_exported_controller(gene, None)
     try:
         gait = extract_crawl_gait_params(gene)
     except Exception:  # noqa: BLE001 - retain the explicit legacy starter if extraction cannot run
         gait = None
     controller_source = _CRAWL_CONTROLLER_SOURCE if gait else _GAIT_CONTROLLER_SOURCE
+    tuned = None
     if gait:
-        v = {"credible": True, "forward_m": gait["sim_forward_m"], "verdict": gait["sim_verdict"]}
+        # What the TUNING rollout reported, kept for comparison but no longer quoted as the program's own result.
+        tuned = {"forward_m": gait.get("sim_forward_m"), "verdict": gait.get("sim_verdict")}
     else:
         gait = extract_gait_params(gene)
         if not gait:
+            _stamp_exported_controller(gene, None)
             return
-        v = _verify_exported_gait(gene)
-    walks = bool(v["credible"])
-    note = (f"Deterministic feed-forward trot gait from the Virturoid recipe CPG prior. VERIFIED: this bare gait "
-            f"produced a CREDIBLE walk in simulation ({v['forward_m']:.2f} m forward, upright). A learned residual "
-            f"policy (morph_policy npz) refines it further."
-            if walks else
-            f"Deterministic feed-forward trot gait from the Virturoid recipe CPG prior. NOTE: the bare feed-forward "
-            f"gait did NOT achieve a credible walk on this body in simulation ({v['verdict']}, {v['forward_m']:.2f} m) "
-            f"— it is a STARTING POINT. Train a closed-loop residual policy (Virturoid train) or tune the gait before "
-            f"relying on it to walk.")
-    if gait.get("policy_type") == "crawl_wave_gait":
-        note = (f"Frozen crawl-wave gait VERIFIED in simulation ({v['forward_m']:.2f} m forward; {v['verdict']}). "
-                "The exported controller uses this measured wave direction and structural joint map without a deployment-time probe.")
+    # The parameter dict the controller is constructed from must be complete BEFORE it is measured, or the
+    # measurement is of something other than the shipped file. Build it, run it, then fold the result back in.
+    is_crawl = gait.get("policy_type") == "crawl_wave_gait"
     program = {
         "id": f"gait_control_program_{genome.get('id', 'robot')}",
         "robot_genome_id": genome.get("id"),
         "entrypoint": "software/gait_controller.py",
         "control_law": ("frozen crawl-wave swing/stance targets over the exported structural leg map; downstream PD "
-                        "tracks the targets" if gait.get("policy_type") == "crawl_wave_gait" else
+                        "tracks the targets" if is_crawl else
                         "target[j] = default_pose[j] + amplitude[j]*sin(2*pi*frequency_hz*t + phase_offset[j]); "
                         "a downstream PD / ros2_control loop tracks these joint-position targets"),
-        "control_frequency_hz": 20.0,
-        "verified_walk": walks,                                 # did the EXPORTED gait credibly walk the body in sim?
-        "sim_forward_m": round(float(v["forward_m"]), 3),
-        "sim_verdict": v["verdict"],
+        # THE CONTROLLER'S OWN DEPLOYMENT RATE, and the rate the distance below was measured at. NOT the sysid
+        # bench's `control_hz` (100 Hz): that is the command rate of a hardware system-IDENTIFICATION experiment
+        # (`sysid.excitation.build_excitation`) which drives an excitation trajectory to fit actuator parameters.
+        # Two different rates for two different things; a package that names both must say which is which.
+        "control_frequency_hz": float(_EXPORT_CONTROL_HZ),
+        "control_frequency_hz_meaning": (
+            "the rate a downstream loop must call GaitController.infer(t) at. sim_forward_m below was measured at "
+            "exactly this rate and is rate-dependent. Distinct from the sysid excitation plan's `control_hz`, "
+            "which is a hardware identification EXPERIMENT's command rate, not this controller's."),
+        "pd_gains": {"kp": float(gait.get("kp", _EXPORT_PD_KP)), "kd": float(gait.get("kd", _EXPORT_PD_KD)),
+                     "note": "the downstream PD gains sim_forward_m was produced with; other gains, other robot"},
         **gait,
-        "notes": [note],
     }
+    v = _verify_exported_gait(gene, program, controller_source)
+    walks = bool(v["credible"])
+    if is_crawl and walks:
+        note = (f"Frozen crawl-wave gait, VERIFIED BY RUNNING THIS FILE ({v['forward_m']:+.2f} m; {v['verdict']}) "
+                f"at {_EXPORT_CONTROL_HZ:.0f} Hz. The exported controller uses this measured wave direction and "
+                "structural joint map without a deployment-time probe.")
+    elif is_crawl:
+        # The wave plan was CREDIBLE under the tuning rollout and is NOT credible as a frozen open-loop program
+        # on this body. That disagreement is the finding, not something to smooth over.
+        note = (f"Frozen crawl-wave gait. NOTE: RUNNING THIS FILE at {_EXPORT_CONTROL_HZ:.0f} Hz did NOT reproduce "
+                f"a credible walk ({v['verdict']}, {v['forward_m']:+.2f} m) even though the gait search that "
+                "produced these parameters did — it is a STARTING POINT. The frozen open-loop program is not the "
+                "closed-loop probe that tuned it; train a residual policy or re-tune before relying on it.")
+    elif walks:
+        note = (f"Deterministic feed-forward trot gait from the Virturoid recipe CPG prior. VERIFIED BY RUNNING "
+                f"THIS FILE: a CREDIBLE walk in simulation ({v['forward_m']:+.2f} m forward, upright) at "
+                f"{_EXPORT_CONTROL_HZ:.0f} Hz. A learned residual policy (morph_policy npz) refines it further.")
+    else:
+        note = (f"Deterministic feed-forward trot gait from the Virturoid recipe CPG prior. NOTE: RUNNING THIS FILE "
+                f"did NOT produce a credible walk on this body in simulation ({v['verdict']}, "
+                f"{v['forward_m']:+.2f} m at {_EXPORT_CONTROL_HZ:.0f} Hz) — it is a STARTING POINT. Train a "
+                "closed-loop residual policy (Virturoid train) or tune the gait before relying on it to walk.")
+    notes = [note]
+    if tuned and tuned.get("forward_m") is not None and abs(float(tuned["forward_m"]) - v["forward_m"]) > 0.05:
+        # The tuner and the frozen program disagreeing is a fact about this export, not something to hide: the
+        # tuning rollout is closed-loop over its own probe, the shipped program is a frozen open-loop target law.
+        notes.append(f"the gait SEARCH that produced these parameters reported {float(tuned['forward_m']):+.2f} m "
+                     f"({tuned['verdict']}); the frozen program shipped here measures {v['forward_m']:+.2f} m. The "
+                     "second number is the one this file can reproduce — it came from running this file.")
+    program.update({
+        "verified_walk": walks,                                 # did the SHIPPED controller credibly walk the body?
+        "sim_forward_m": round(float(v["forward_m"]), 3),       # SIGNED: backward travel is not forward travel
+        "sim_verdict": v["verdict"],
+        "measured_by": v.get("measured_by"),
+        "notes": notes,
+    })
+    program["program_fingerprint"] = _program_fingerprint(program)
     sw = output_dir / "software"
     sw.mkdir(parents=True, exist_ok=True)
     (sw / "control_program.json").write_text(json.dumps(program, indent=2), encoding="utf-8")
     (sw / "gait_controller.py").write_text(controller_source, encoding="utf-8")
+    _stamp_exported_controller(gene, program)
     # Also drop the controller into software/controller/ so the ROS2 exporter embeds it and its node RUNS the
     # gait (policy_type "trot_cpg_gait") instead of publishing a neutral pose.
     bundle = sw / "controller"
@@ -1102,13 +1700,62 @@ def _write_gait_control_program(gene: RobotGene, genome: dict, output_dir: Path)
     (bundle / "controller.py").write_text(controller_source, encoding="utf-8")
 
 
-def _write_genome_and_urdf(gene: RobotGene, output_dir: Path) -> None:
+def _record_stale_removal(output_dir: Path, where: str, pruned: dict) -> None:
+    """Append one prune's outcome to ``reports/stale_removed.json`` so NO removal this package performs is
+    silent. The CAD path says it in ``cad_manifest.json``'s ``removed_stale`` and the MJCF writers say it in
+    their return value; the mesh prunes on the URDF/ROS 2 side had nowhere to say it, and a rebuild that
+    deletes geometry without telling anyone is exactly the kind of thing a customer discovers too late.
+    ``left_not_ours`` is here for the same reason from the other side: files we found and deliberately did NOT
+    touch, so a directory that looks fuller than the manifest has a written explanation."""
+    if not (pruned.get("removed") or pruned.get("kept_foreign") or pruned.get("kept_modified")):
+        return
+    try:
+        p = Path(output_dir) / "reports" / "stale_removed.json"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        log = {}
+        if p.is_file():
+            try:
+                log = json.loads(p.read_text(encoding="utf-8"))
+            except ValueError:
+                log = {}
+        if not isinstance(log, dict):
+            log = {}
+        log.setdefault("what", "geometry this rebuild removed from directories a previous build of ours staged, "
+                               "and files it found there that were not ours to remove")
+        log[where] = {"removed_stale": pruned.get("removed", []),
+                      "left_not_ours": pruned.get("kept_foreign", []),
+                      "left_modified_or_locked": pruned.get("kept_modified", [])}
+        p.write_text(json.dumps(log, indent=2), encoding="utf-8")
+    except OSError:  # a report we cannot write must not fail the export
+        pass
+
+
+def _write_genome_and_urdf(gene: RobotGene, output_dir: Path, task: str = "") -> Path | None:
     """Write robot/robot_genome.json AND robot/robot.urdf for a gene-built package. The gene path shipped the genome
     + MJCF but no URDF, so gene-built robots (any creature) had no standard robot description for ROS/Gazebo and
-    wouldn't render in the viewer's Robot mode. Best-effort URDF -- the MJCF replay never needs it."""
+    wouldn't render in the viewer's Robot mode. Best-effort URDF -- the MJCF replay never needs it.
+
+    Returns the ROS 2 package root THIS call wrote, or ``None`` when no package was produced. It used to return
+    nothing, so a caller that wanted the package had to go looking for it on disk -- and ``export_held`` did that
+    with ``glob("export/ros2/*")[0]``, which is unordered and returns a SIBLING from an earlier export whenever
+    the directory holds more than one. That is not hypothetical: it handed a reviewer's disk-only re-export the
+    wrong package and produced 14 of 14 fabricated disagreements. The writer knows which package it wrote; there
+    is no reason for anyone to guess."""
     (output_dir / "robot").mkdir(parents=True, exist_ok=True)
     genome = _gene_to_genome(gene)
     (output_dir / "robot" / "robot_genome.json").write_text(json.dumps(genome, indent=2), encoding="utf-8")
+    urdf_path = output_dir / "robot" / "robot.urdf"
+    # What the PREVIOUS robot.urdf claimed, read before it is overwritten. Together with robot/meshes/'s own
+    # staging ledger this is how the prune below knows which STLs are OURS to remove -- either proof alone is
+    # enough, so a customer who deletes the ledger still gets a clean rebuild and a customer who drops their own
+    # mesh into robot/meshes/ still keeps it.
+    prior_mesh_refs: set[str] = set()
+    if urdf_path.is_file():
+        try:
+            prior_mesh_refs = {os.path.basename(r) for r in
+                               re.findall(r'filename="([^"]+)"', urdf_path.read_text(encoding="utf-8"))}
+        except OSError:
+            prior_mesh_refs = set()
     try:
         # Correct-for-ANY-body URDF: transcribe the compiled MuJoCo model (legs spread to their real mounts), NOT
         # the arm-centric compute_arm_layout that stacked every leg vertically at the torso tip. Falls back to the
@@ -1116,8 +1763,18 @@ def _write_genome_and_urdf(gene: RobotGene, output_dir: Path) -> None:
         from virturoid.services.gene_urdf import gene_to_urdf
         # mesh_dir = the package's robot/meshes/ so the URDF's <mesh filename="meshes/X.stl"> resolves next to
         # robot.urdf: the shipped body renders its real shape programs in Studio, not the collider primitive.
-        (output_dir / "robot" / "robot.urdf").write_text(
-            gene_to_urdf(gene, mesh_dir=str(output_dir / "robot" / "meshes")), encoding="utf-8")
+        urdf_path.write_text(gene_to_urdf(gene, mesh_dir=str(output_dir / "robot" / "meshes")),
+                             encoding="utf-8")
+        # AFTER the write, never before, and only files a previous run of ours staged: the URDF now on disk is
+        # the authority for what robot/meshes/ should hold, so the two can no longer disagree even if this
+        # process dies here. Disclosed rather than silent -- reports/stale_removed.json is this path's
+        # equivalent of the CAD manifest's ``removed_stale``, since neither this function nor ``gene_to_urdf``
+        # has a natural place in the artifact to say it.
+        from virturoid.services.gene_compiler import prune_staged_dir
+        _kept = {os.path.basename(r) for r in
+                 re.findall(r'filename="([^"]+)"', urdf_path.read_text(encoding="utf-8"))}
+        _pruned = prune_staged_dir(output_dir / "robot" / "meshes", _kept, prior=prior_mesh_refs)
+        _record_stale_removal(output_dir, "robot/meshes", _pruned)
     except Exception:  # noqa: BLE001 - URDF is a nicety; the MJCF replay works without it
         try:
             from virturoid.schemas.robot import RobotGenome
@@ -1142,10 +1799,35 @@ def _write_genome_and_urdf(gene: RobotGene, output_dir: Path) -> None:
     try:
         # Installable ROS2 (ament_python) harness from the genome + URDF + (for legged robots) the gait-controller
         # bundle, so gene-built robots are ROS2-deployable like the legacy path's. Best-effort.
+        #
+        # The actuator map is handed over rather than left to be read off disk: `_emit_bom` runs AFTER this
+        # function in `build_gene_package` (bom at :555, this at :527), so `robot/bill_of_materials.json` does
+        # not exist yet and the hardware interface named a real motor on ZERO joints. It is the SAME call
+        # `_emit_bom` makes, so the shipped YAML cannot disagree with the shipped parts list, and it is cheap
+        # enough to make unconditional: 0.17 ms median (min 0.15, max 0.21, warm, 14-joint quadruped).
+        #
+        # UNCONDITIONALLY. This used to be skipped when `robot/bill_of_materials.json` already existed, which
+        # made a REBUILD INTO A REUSED DIRECTORY (autonomous_build re-runs `build_gene_package` into the dir
+        # from :932 after a redesign) read the PREVIOUS robot's parts list: measured on a second build of a
+        # rescaled quadruped, 14 of 14 rows named a motor that is not the one this package's own
+        # `bill_of_materials.json` assigns (`leg1_l_0_joint` -> "Dynamixel XM540-W270-T" vs the shipped
+        # "Harmonic Drive FHA-40C-160"), under a header claiming "14 of 14 ... mapped to the REAL actuator".
+        # The gene in hand is the only trustworthy source; disk is for callers that do not have one.
+        try:
+            from virturoid.services.bom_builder import build_bom
+            amap = (build_bom(gene, task=task) or {}).get("actuator_map") or {}
+            src = "computed for this build by bom_builder.build_bom on the gene being exported"
+        except Exception as _bom_exc:  # noqa: BLE001
+            # NOT a fall-back to disk: whatever is on disk may belong to a previous build of a different
+            # robot. An empty map makes every row a named gap, which is the honest answer here.
+            amap, src = {}, (f"NOT AVAILABLE - the bill of materials could not be computed for this build "
+                             f"({type(_bom_exc).__name__}); no parts list was read")
         from virturoid.services.ros2_exporter import maybe_export_ros2_package
-        maybe_export_ros2_package(output_dir)
+        pkg = maybe_export_ros2_package(output_dir, actuator_map=amap, actuator_map_source=src)
+        return Path(pkg) if pkg else None
     except Exception:  # noqa: BLE001 - the ROS2 package is best-effort; the core package works without it
         pass
+    return None
 
 
 def _gene_to_genome(gene: RobotGene) -> dict:

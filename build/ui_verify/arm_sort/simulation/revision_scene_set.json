@@ -5,9 +5,9 @@
   "purpose": "revision",
   "scenes": [
     {
-      "id": "revision_regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_000",
+      "id": "rev_regr_scene_938c34b8_stress_000",
       "version": "0.1.0",
-      "name": "Revised Regression for dropped: Real MuJoCo pick-place: dropped in scene scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_000.",
+      "name": "Revised Regression for dropped: Real MuJoCo pick-place: dropped in scene scene_938c34b8_stress_000.",
       "backend_targets": [
         "mujoco"
       ],
@@ -115,7 +115,7 @@
         "background_texture": "speckled",
         "failure_type": "dropped",
         "source_failure_id": "failure_episode_run_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_010",
-        "source_scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_000",
+        "source_scene_id": "scene_938c34b8_variation_000",
         "counterfactual": "lower_lift_slower_transport",
         "changed_variable": "controller",
         "controller_adjustment": {
@@ -139,9 +139,9 @@
       ]
     },
     {
-      "id": "revision_regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_001",
+      "id": "rev_regr_scene_938c34b8_stress_001",
       "version": "0.1.0",
-      "name": "Revised Regression for dropped: Real MuJoCo pick-place: dropped in scene scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_001.",
+      "name": "Revised Regression for dropped: Real MuJoCo pick-place: dropped in scene scene_938c34b8_stress_001.",
       "backend_targets": [
         "mujoco"
       ],
@@ -249,7 +249,7 @@
         "background_texture": "wood",
         "failure_type": "dropped",
         "source_failure_id": "failure_episode_run_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_011",
-        "source_scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_001",
+        "source_scene_id": "scene_938c34b8_variation_001",
         "counterfactual": "lower_lift_slower_transport",
         "changed_variable": "controller",
         "controller_adjustment": {
@@ -273,9 +273,9 @@
       ]
     },
     {
-      "id": "revision_regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_002",
+      "id": "rev_regr_scene_938c34b8_stress_002",
       "version": "0.1.0",
-      "name": "Revised Regression for dropped: Real MuJoCo pick-place: dropped in scene scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_002.",
+      "name": "Revised Regression for dropped: Real MuJoCo pick-place: dropped in scene scene_938c34b8_stress_002.",
       "backend_targets": [
         "mujoco"
       ],
@@ -383,7 +383,7 @@
         "background_texture": "plain",
         "failure_type": "dropped",
         "source_failure_id": "failure_episode_run_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_012",
-        "source_scene_id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_002",
+        "source_scene_id": "scene_938c34b8_variation_002",
         "counterfactual": "lower_lift_slower_transport",
         "changed_variable": "controller",
         "controller_adjustment": {

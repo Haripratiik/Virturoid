@@ -51,10 +51,18 @@ class GeneralGaitTests(unittest.TestCase):
         from virturoid.services.gene_compiler import compile_gene_to_mjcf
         from virturoid.services.locomotion_controller import run_locomotion_episode
 
+        # THE GEN-2 CLAIM IS "WALKS", AND `distance_m` CANNOT SAY IT. `run_locomotion_episode` returns
+        # `distance_m = norm(p1 - p0)` — unsigned planar travel — and `locomotion_status`'s own docstring says
+        # in as many words that a body which "lurches backward half a metre has travelled far while failing the
+        # requested forward task". PROVEN 2026-08-09 by construction: the SAME bodies under a reversed
+        # propulsive sweep (hip_amp=-0.4) travel forward_m -1.007 / -0.541 / -0.490 m, report status 'stalled',
+        # and cleared the old `distance_m > 0.3` line at every leg count. Assert SIGNED forward and the
+        # product's own status, so a gait engine that generalises BACKWARD to a new leg count fails here.
         for n in (4, 6, 8):
             mj = mujoco.MjModel.from_xml_string(compile_gene_to_mjcf(_radial_legged(n)))
             r = run_locomotion_episode(mj)
-            self.assertGreater(r["distance_m"], 0.3, f"{n}-leg body should locomote, got {r}")
+            self.assertGreater(r["forward_m"], 0.3, f"{n}-leg body should walk FORWARD, got {r}")
+            self.assertEqual(r["status"], "walked", f"{n}-leg body should earn a walk verdict, got {r}")
             self.assertTrue(r["upright"], f"{n}-leg body should stay upright, got {r}")
 
     def test_evaluate_robot_routes_a_hexapod_to_locomotion(self):

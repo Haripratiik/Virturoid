@@ -18,10 +18,12 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 from pathlib import Path
 from xml.sax.saxutils import escape
 
 from virturoid.schemas.gene import RobotGene
+from virturoid.services.install_paths import anchored
 
 TABLE_TOP_Z = 0.025  # shared with the scene exporter
 _MOUNT_Z = {"table": TABLE_TOP_Z, "floor": 0.0, "torso": 0.0, "free": 0.1}  # "free" spawns above the floor
@@ -63,7 +65,13 @@ _ROBOT_MATERIALS = (
     # contrast reads; a limb in this + mat_joint housings gives the unified dark-limb look real quadrupeds use.
     '    <material name="mat_cf" rgba="0.155 0.165 0.185 1" specular="0.45" shininess="0.4" reflectance="0.06"/>\n'
     '    <material name="mat_ti" rgba="0.60 0.60 0.65 1" specular="0.5" shininess="0.55" reflectance="0.1"/>\n'
-    '    <material name="mat_shell" rgba="0.20 0.42 0.72 1" specular="0.4" shininess="0.5" reflectance="0.05"/>\n'
+    # mat_shell = the BODYWORK finish (torso/chassis/head/limb fairings). Was a saturated primary blue
+    # (0.20 0.42 0.72), the one colour in this palette that no shipping robot wears: against the charcoal
+    # limbs and gunmetal housings the chassis read as a painted toy block, and "a blue box with a blue ball
+    # for a head" was the first thing a reviewer said about the demo. Real quadruped bodywork is a light
+    # composite shell over a dark structural frame (ANYmal, B2, Franka); that also gives the strongest
+    # value contrast against mat_cf limbs, so the machined detail on the chassis actually reads.
+    '    <material name="mat_shell" rgba="0.80 0.81 0.84 1" specular="0.42" shininess="0.52" reflectance="0.07"/>\n'
     '    <material name="mat_metal" rgba="0.47 0.49 0.53 1" specular="0.78" shininess="0.78" reflectance="0.22"/>\n'
     '    <material name="mat_rubber" rgba="0.13 0.13 0.15 1" specular="0.15" shininess="0.15"/>\n'
 )
@@ -95,11 +103,102 @@ _THREE_LIGHTS = (
     '    <light name="fill" pos="-2.4 1.8 2.2" dir="0.50 -0.40 -1" diffuse="0.24 0.25 0.28" castshadow="false"/>\n'
     '    <light name="rim" pos="-1.4 -2.4 1.8" dir="0.35 0.62 -0.7" diffuse="0.20 0.20 0.23" specular="0.35 0.35 0.40" castshadow="false"/>\n'
 )
+# THE SOLVER CONTRACT, EMITTED ONCE AND SHARED BY BOTH COMPILE PATHS (plain + scene). It used to be two
+# copies of the same literal, which is exactly how a train/deploy divergence starts.
+#
+# `iterations` was never chosen. The fidelity pass that added `integrator="implicitfast"` and the friction
+# cone (bceca7e, "implicitfast, elliptic contacts, structure-aware damping...") set no caps, so MuJoCo's
+# defaults applied BY OMISSION -- Newton at 100 iterations / 50 line-search steps -- while the CPU rollouts
+# separately call `morph_policy.compiled_model(..., solver_iterations=20)`, which overwrites `opt.iterations`
+# AFTER compile. So a generated body was DEPLOYED at 20 iterations on CPU and TRAINED at 100 on MJX: a silent
+# train/deploy split. Emitting 20 closes it -- the CPU override becomes a no-op and both paths step the
+# identical solver -- and it costs no CPU physics, because MuJoCo's Newton solver EARLY-EXITS on tolerance and
+# these bodies converge in a handful of iterations. On MJX/GPU it is NOT free: the jitted kernel cannot branch
+# on convergence and runs the FULL nominal count every step, every env, which is why GPU throughput looked
+# like a mysterious env-count cliff. 20 (not the 10 that would maximise GPU throughput) is deliberate: 10
+# would leave CPU at 20 and GPU at 10, re-creating the very divergence this constant exists to close.
+#
+# WHAT IS DELIBERATELY *NOT* CAPPED HERE, AND WHY -- both were tried and both were measured to cost real
+# product behaviour, so the cheap-looking extra speed is not free:
+#
+#   * `ls_iterations="8"` SUBSTITUTES A CUSTOMER'S BODY. `ensure_walkable_quad` measures a composed body and
+#     swaps in a generic template when it reads as not walking, and the shorter line search pushes one across
+#     that threshold: MEASURED, `compose_robot("a large quadruped robot")` returns the authored
+#     `anatomy_creature_91b931bf` (20 segments, 2.241 m, 3.569 kg) with the line search at its default and the
+#     generic `built_quadruped_18seg` (18 segments, 1.890 m, 14.917 kg) with it at 8. Capping `iterations`
+#     alone leaves composer output BYTE-IDENTICAL for that prompt and for "a small quadruped robot dog".
+#   * `cone="pyramidal"` costs a verdict. `test_customer_ingest::test_adopt_control_script_utilises_and_
+#     improves` tunes the authored quad dog to a credible walk under every other combination but not under
+#     pyramidal+caps at its shipped 4x10 search budget (it recovers at 8x20). It is also not needed for
+#     parity: CPU deploy and MJX train were already BOTH elliptic for generated bodies.
+#
+# See [[body-and-gait-are-co-tuned]] -- the bodies are shaped against this contact model, so the contact model
+# and the line search are controller-level changes that each need their own measured before/after.
+#
+# The contact-rich manipulation call sites (grasp_skill, grasp_eval, push_eval, pick_place_controller on CPU;
+# every mjx_residual_*/mjx_push_*/mjx_grasp_* script on GPU) pin their own iterations after compile -- 30/12
+# and 10/8 respectively -- so this line does not move them at all.
+_PHYSICS_OPTION = ('  <option timestep="0.002" gravity="0 0 -9.81" integrator="implicitfast" cone="elliptic"'
+                   ' iterations="20"/>')
+
+
+def _base_z_for(gene: RobotGene) -> float:
+    """The fixed base's height: an explicit `base_height_m` when the design gave one, else the named mount.
+
+    `base_mount` says what the robot is bolted TO; it cannot say how high that is. A delta hangs from an overhead
+    plate, and table/floor/torso give 0.025/0/0, so its whole mechanism compiled BELOW the floor."""
+    h = getattr(gene, "base_height_m", None)
+    if h is not None:
+        return float(h)
+    return _MOUNT_Z.get(gene.base_mount, TABLE_TOP_Z)
+
+
+def _with_source_meshes(gene: RobotGene, meshes: dict | None, *, physics_only: bool) -> dict | None:
+    """Fill in each segment's OWN imported mesh when the caller supplied no mesh map of its own.
+
+    An imported segment carries ``geometry={"family": "source_mesh", "path": ...}`` — that link's real geometry,
+    baked into the segment's frame by ``robot_import``. It is part of the gene exactly as ``shape`` and
+    ``length_m`` are, so a compiler that ignores it is describing a robot the gene does not declare. Only the
+    render path ever read it, via ``build_visual_meshes``; every consumer that compiles the gene directly — the
+    exported ``robot.xml`` above all — emitted bare primitives. Measured on a Menagerie Unitree Go2 ingested
+    through the product's own front door: the package a customer opens contained 21 capsules and 25 cylinders
+    and ZERO meshes, against 16 in the file they handed us, and rendered as an unrecognisable pile of pills.
+
+    Three deliberate limits:
+
+      * VISUAL ONLY. These become ``class="visual"`` geoms (``mass=0 contype=0 conaffinity=0``) over the
+        unchanged primitive collider, so the collision set — every geom the physics, the gait and the verdict
+        are computed from — is byte-identical with and without them.
+      * NEVER under ``physics_only``. That model exists to be MJX-safe, and mesh assets are exactly the kind of
+        decoration it strips.
+      * ONLY when the caller passed nothing. A caller that supplies ``meshes`` is managing the asset set and its
+        portability (``write_packaged_visual_mjcf`` rewrites every path relative to the package); quietly adding
+        a machine-local absolute path to that map would put a reference outside the package into a file whose
+        whole purpose is to survive being copied.
+
+    A path that is not on disk is dropped rather than emitted: MuJoCo refuses to compile a model with a mesh it
+    cannot read, so one missing STL would turn a fidelity gain into a total outage for that robot.
+    """
+    if physics_only or meshes:
+        return meshes
+    found: dict[str, str] = {}
+    for s in gene.segments:
+        g = getattr(s, "geometry", None)
+        if not (isinstance(g, dict) and g.get("family") == "source_mesh"):
+            continue
+        p = str(g.get("path") or "")
+        try:
+            if p and Path(p).is_file():
+                found[s.name] = p.replace("\\", "/")
+        except OSError:                              # unreadable path (dead drive, permissions) -> primitive
+            continue
+    return found or meshes
 
 
 def compile_gene_to_mjcf(gene: RobotGene, *, include_floor: bool = True, spawn_z: float | None = None,
                          meshes: dict | None = None, show_actuators: bool = False,
-                         sensor_geoms: dict | None = None, physics_only: bool = False) -> str:
+                         sensor_geoms: dict | None = None, physics_only: bool = False,
+                         source_meshes: bool = True) -> str:
     """Compile a validated gene to a MuJoCo MJCF XML string.
 
     ``spawn_z`` overrides the free-base spawn height — pass ``standing_spawn_z(gene)`` for locomotion so the
@@ -116,13 +215,26 @@ def compile_gene_to_mjcf(gene: RobotGene, *, include_floor: bool = True, spawn_z
     because MJX precompiles a collision function per geom-type-pair PRESENT, and cylinder collisions are
     unimplemented in MJX, so a single visual cylinder crashes ``mjx.put_model`` even at contype=0. The colliders
     that matter (box/capsule/sphere/plane) and the joints/actuators/sites are kept, so the trained dynamics are
-    the same physics the CPU model uses. Use this for the GPU PPO path (``scripts/mjx_*``)."""
+    the same physics the CPU model uses. Use this for the GPU PPO path (``scripts/mjx_*``).
+
+    ``source_meshes=False`` builds the PURE PRIMITIVE model: an imported link's own STL is not resolved and not
+    referenced, so MuJoCo has no asset to read off disk. Everything that decides physics is unchanged (the
+    source meshes are ``class="visual"``, mass=0/contype=0/conaffinity=0), which is exactly why a caller that
+    only wants a measurement should not pay for them. MEASURED on the Menagerie models: resolving and loading
+    them costs a Unitree G1 0.159 s and a Go2 0.251 s PER COMPILE against 0.032 s / 0.024 s without — a 5-10x
+    tax on what ``standing_spawn_z(meshed=False)`` documents as the cheap path. The second reason is not speed:
+    ``ai_native_tools.render_sim_parity`` compares the MESHED spawn height against the PRIMITIVE one, and once
+    the primitive model carried the same meshes that check compared a number with itself (measured identical to
+    the digit on the G1 and the Go2 — 0.8805 and 0.3384 both sides). A tautological gate reads exactly like a
+    passing one."""
     issues = gene.validate()
     if issues:
         raise ValueError(f"cannot compile invalid gene {gene.id}: {'; '.join(issues)}")
 
+    if source_meshes:
+        meshes = _with_source_meshes(gene, meshes, physics_only=physics_only)
     root = gene.root()
-    base_z = _MOUNT_Z.get(gene.base_mount, TABLE_TOP_Z)
+    base_z = _base_z_for(gene)
     if spawn_z is not None and gene.base_mount == "free":
         base_z = float(spawn_z)
     body_xml = _body_xml(gene, root, pos=(0.0, 0.0, base_z), indent=4, meshes=meshes,
@@ -130,9 +242,25 @@ def compile_gene_to_mjcf(gene: RobotGene, *, include_floor: bool = True, spawn_z
     self_collision_excludes = _self_collision_excludes_xml(gene)
     actuators = _actuator_xml(gene)
     keyframe = _pose_keyframe(gene, base_z)   # render the body in its baked rest stance (if any)
+    sensors = "" if physics_only else _sensor_xml(gene)
 
+    # An imported link is drawn from the CUSTOMER'S baked STL, which has no length field an amend can scale --
+    # so ``scale_group``/``set_height`` used to move the child body to the link's new tip while the drawn mesh
+    # kept its original size, and the render came apart into floating chunks. ``geometry['scale']`` carries the
+    # per-axis factor those edits accumulate; fold it into the asset's own scale (base 0.001 = mm -> m).
+    _mesh_scale = {}
+    for _s in gene.segments:
+        _g = getattr(_s, "geometry", None)
+        _sc = (_g or {}).get("scale") if isinstance(_g, dict) else None
+        if isinstance(_sc, (list, tuple)) and len(_sc) == 3:
+            _mesh_scale[_s.name] = tuple(float(v) for v in _sc)
     mesh_assets = "".join(
-        f'    <mesh name="{escape(n)}_vis" file="{p}" scale="0.001 0.001 0.001"/>\n'
+        # ``p`` is escaped because a mesh path can now come from the CUSTOMER'S filesystem (an imported link's
+        # baked STL), and a directory containing '&' would otherwise emit XML MuJoCo cannot parse.
+        '    <mesh name="{n}_vis" file="{p}" scale="{sx:.9g} {sy:.9g} {sz:.9g}"/>\n'.format(
+            n=escape(n), p=escape(str(p)), sx=0.001 * _mesh_scale.get(n, (1.0, 1.0, 1.0))[0],
+            sy=0.001 * _mesh_scale.get(n, (1.0, 1.0, 1.0))[1],
+            sz=0.001 * _mesh_scale.get(n, (1.0, 1.0, 1.0))[2])
         for n, p in (meshes or {}).items()
     )
     floor = (
@@ -143,11 +271,13 @@ def compile_gene_to_mjcf(gene: RobotGene, *, include_floor: bool = True, spawn_z
     return (
         f'<mujoco model="{escape(gene.id)}">\n'
         '  <compiler angle="radian" autolimits="true"/>\n'
-        '  <option timestep="0.002" gravity="0 0 -9.81"/>\n'
+        f'{_PHYSICS_OPTION}\n'
         f'{_VISUAL_XML}'
         '  <default>\n'
-        '    <joint damping="0.8" armature="0.01"/>\n'
+        '    <joint damping="0.8" armature="0.01" frictionloss="0.05"/>\n'
         '    <geom friction="1 0.05 0.001"/>\n'
+        '    <default class="visual"><geom mass="0" contype="0" conaffinity="0"/></default>\n'
+        '    <default class="collision"><geom friction="1 0.05 0.001"/></default>\n'
         '  </default>\n'
         '  <asset>\n'
         f'{_SCENE_ASSETS}'
@@ -160,10 +290,83 @@ def compile_gene_to_mjcf(gene: RobotGene, *, include_floor: bool = True, spawn_z
         f'{body_xml}'
         '  </worldbody>\n'
         f'{self_collision_excludes}'
+        f'{_equality_xml(gene)}'
         f'{actuators}'
+        f'{sensors}'
         f'{keyframe}'
         '</mujoco>\n'
     )
+
+
+def _solver_ref_attrs(spec: dict) -> str:
+    """`solref`/`solimp` for one constraint, or "" when the design did not state them.
+
+    THE OMISSION IS DELIBERATE AND LOAD-BEARING. An absent attribute means MuJoCo applies its own default,
+    which is exactly what "the source did not say" should compile to — writing a number here instead would put
+    OUR guess into the customer's model and then let a calibration run "identify" it. Only a value the design
+    actually carries is emitted.
+    """
+    out = []
+    for key, n in (("solref", 2), ("solimp", 5)):
+        v = (spec or {}).get(key)
+        if isinstance(v, (list, tuple)) and len(v) == n and all(isinstance(x, (int, float)) for x in v):
+            out.append(f' {key}="{" ".join(f"{float(x):.6g}" for x in v)}"')
+    return "".join(out)
+
+
+def _equality_xml(gene: RobotGene) -> str:
+    """Emit the `<equality>` block: `<connect>` per closed kinematic loop, `<joint>` per coupled DOF.
+
+    A gantry's bridge is supported at BOTH columns; a delta's three arms meet at ONE platform. `segments` is a
+    strict tree, so those were inexpressible — and the failure was quiet rather than loud: the gantry compiled
+    with the right 3 prismatic DOF, rendered convincingly, and its second column carried no load at all. Driving
+    the bridge along its rail walked it off that column into mid-air.
+
+    A Panda's two fingers are likewise ONE gripper DOF, and its `<equality><joint>` is what makes them one.
+    Both constraint kinds live here for the same reason: neither touches the body tree, they are top-level
+    constraints naming things MuJoCo already has, so the gene can model them without `segments` ceasing to be
+    a tree.
+
+    NOTE `connect` is a SOFT constraint solved with the rest of the system, not a rigid weld — how hard the
+    solver is asked to hold it is `solref`/`solimp`, and those are carried per-constraint from the source
+    rather than defaulted here. Measured over the 9 Menagerie packages that declare a `<connect>`, worst anchor
+    separation across 2000 stepped frames: Cassie 32.83 -> 14.82 mm, ToddlerBot 2.55 -> 0.01 mm, Robotiq 2F-85
+    19.21 -> 0.93 mm, TidyBot 17.79 -> 0.90 mm, xArm7 0.03 -> 0.01 mm.
+    """
+    names = {s.name for s in gene.segments}
+    jointed = {s.name for s in gene.segments if s.joint_type in _JOINT_KIND}
+    lines = ["  <equality>"]
+    for lc in (getattr(gene, "loop_closures", None) or []):
+        a, b = (lc or {}).get("a"), (lc or {}).get("b")
+        if a not in names or b not in names or a == b:
+            continue                                  # validate() reports these; never emit a broken model
+        seg = next((s for s in gene.segments if s.name == a), None)
+        anchor = (lc or {}).get("anchor")
+        if not (isinstance(anchor, (list, tuple)) and len(anchor) == 3):
+            anchor = (0.0, 0.0, float(getattr(seg, "length_m", 0.0) or 0.0))   # a's tip, in a's own frame
+        ax, ay, az = (float(v) for v in anchor)
+        lines.append(f'    <connect body1="{escape(a)}" body2="{escape(b)}" '
+                     f'anchor="{ax:.5f} {ay:.5f} {az:.5f}"{_solver_ref_attrs(lc)}/>')
+    for cj in (getattr(gene, "coupled_joints", None) or []):
+        a, b = (cj or {}).get("a"), (cj or {}).get("b")
+        # A coupling onto a WELDED segment names `<segment>_joint`, which `_body_xml` never emitted — MuJoCo
+        # would refuse the whole model. validate() reports it; the compiler must still not produce a broken one.
+        if a not in jointed or b not in jointed or a == b:
+            continue
+        try:
+            ratio = float((cj or {}).get("ratio", 1.0))
+            offset = float((cj or {}).get("offset", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if ratio == 0.0:
+            continue
+        # MuJoCo solves  q_a - q_a0 = c0 + c1*(q_b - q_b0) + c2*(...)^2 + ...  — degree 1 is the whole corpus.
+        lines.append(f'    <joint joint1="{escape(a)}_joint" joint2="{escape(b)}_joint" '
+                     f'polycoef="{offset:.8g} {ratio:.8g} 0 0 0"{_solver_ref_attrs(cj)}/>')
+    if len(lines) == 1:
+        return ""
+    lines.append("  </equality>")
+    return "\n".join(lines) + "\n"
 
 
 def _self_collision_excludes_xml(gene: RobotGene) -> str:
@@ -181,6 +384,14 @@ def _self_collision_excludes_xml(gene: RobotGene) -> str:
         while ancestor is not None:
             pairs.append((ancestor, seg.name))
             ancestor = parents.get(ancestor)
+    # A LOOP-JOINED pair meets by design, exactly as a parent and child do — but they are not ancestor and
+    # descendant, so the walk above never reaches them. Left colliding, the contact solver pushes the two apart
+    # while the equality constraint pulls them together, and the model fights itself at the one joint the design
+    # cares most about.
+    for lc in (getattr(gene, "loop_closures", None) or []):
+        a, b = (lc or {}).get("a"), (lc or {}).get("b")
+        if a and b and a != b:
+            pairs.append((a, b))
     if not pairs:
         return ""
     lines = ["  <contact>"]
@@ -192,17 +403,45 @@ def _self_collision_excludes_xml(gene: RobotGene) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _euler_xyz_to_quat(a: float, b: float, c: float) -> tuple[float, float, float, float]:
+    """MuJoCo ``euler="a b c"`` (default ``eulerseq="xyz"``, i.e. R = Rx(a) @ Ry(b) @ Rz(c)) as (w, x, y, z).
+
+    Needed because a free base's ``qpos`` quaternion has to AGREE with the orientation baked into the root
+    ``<body euler=...>`` tag; MuJoCo derives ``qpos0`` from that tag, so writing a different quaternion in a
+    keyframe silently reorients the whole robot."""
+    import math
+
+    def mul(p, q):
+        w1, x1, y1, z1 = p
+        w2, x2, y2, z2 = q
+        return (w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
+                w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+                w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
+                w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2)
+
+    qx = (math.cos(a / 2.0), math.sin(a / 2.0), 0.0, 0.0)
+    qy = (math.cos(b / 2.0), 0.0, math.sin(b / 2.0), 0.0)
+    qz = (math.cos(c / 2.0), 0.0, 0.0, math.sin(c / 2.0))
+    return mul(mul(qx, qy), qz)
+
+
 def _pose_keyframe(gene: RobotGene, base_z: float) -> str:
     """Emit a MuJoCo ``<keyframe>`` from ``gene.metadata['rest_pose']`` (joint_name -> angle) so the body
     renders/spawns in a recognizable baked stance instead of a default straight-out star. The qpos vector
-    follows MuJoCo's joint order EXACTLY: a free base contributes 7 (xyz + identity quat) then each actuated
-    joint contributes 1, in the same pre-order DFS as ``_body_xml``. No-op when there is no rest pose."""
-    pose = (getattr(gene, "metadata", None) or {}).get("rest_pose")
-    if not pose:
-        return ""
+    follows MuJoCo's joint order EXACTLY: a free base contributes 7 (xyz + the ROOT'S OWN quat) then each
+    actuated joint contributes 1, in the same pre-order DFS as ``_body_xml``. Every actuated/free body gets a
+    named ``home`` key; ``rest`` is retained as a compatibility alias for existing rollout/render paths.
+
+    The base quaternion must mirror the root's ``mount_euler``, not be hardcoded to identity. Composed bodies
+    have an unrotated root so identity was right by accident; an IMPORTED root carries the rotation that aligns
+    its reconstructed link frame (``robot_import._rot_z_to``), and overwriting that with identity threw the whole
+    robot into a ~19 deg pitch — an imported Go2 measured 0.803 m tall against a real 0.394 m, legs splayed."""
+    pose = (getattr(gene, "metadata", None) or {}).get("rest_pose") or {}
     qpos: list[float] = []
     if gene.base_mount == "free":
-        qpos += [0.0, 0.0, float(base_z), 1.0, 0.0, 0.0, 0.0]
+        root_euler = getattr(gene.root(), "mount_euler", None) or (0.0, 0.0, 0.0)
+        qw, qx, qy, qz = _euler_xyz_to_quat(*(float(v) for v in root_euler))
+        qpos += [0.0, 0.0, float(base_z), qw, qx, qy, qz]
     base_len = len(qpos)
 
     def walk(seg) -> None:
@@ -215,10 +454,11 @@ def _pose_keyframe(gene: RobotGene, base_z: float) -> str:
     if len(qpos) == base_len:                 # nothing actuated -> a keyframe adds nothing
         return ""
     qstr = " ".join(f"{v:.5f}" for v in qpos)
-    return f'  <keyframe>\n    <key name="rest" qpos="{qstr}"/>\n  </keyframe>\n'
+    return (f'  <keyframe>\n    <key name="home" qpos="{qstr}"/>\n'
+            f'    <key name="rest" qpos="{qstr}"/>\n  </keyframe>\n')
 
 
-def gene_to_meshed_mjcf(gene: RobotGene, cache_dir: str = "build/_viewmesh", *,
+def gene_to_meshed_mjcf(gene: RobotGene, cache_dir: str = str(anchored("build/_viewmesh")), *,
                         include_floor: bool = True, spawn_z: float | None = None,
                         kitbash: bool = False, synth: bool = False, show_actuators: bool = True,
                         task: str = "") -> str:
@@ -236,7 +476,10 @@ def gene_to_meshed_mjcf(gene: RobotGene, cache_dir: str = "build/_viewmesh", *,
     meshes: dict | None = None
     try:
         from virturoid.services.cad_geometry import build_visual_meshes
-        meshes = build_visual_meshes(gene, cache_dir, kitbash=kitbash, synth=synth) or None
+        # actuator_in_mesh=not show_actuators: whoever is NOT drawing the datasheet _act geom owns the motor.
+        # Letting both draw it put two coincident cans in the same place and z-fought into a sawtooth seam.
+        meshes = build_visual_meshes(gene, cache_dir, kitbash=kitbash, synth=synth,
+                                     actuator_in_mesh=not show_actuators) or None
     except Exception:  # noqa: BLE001 - missing CAD kernel / mesh-gen failure -> primitive fallback
         meshes = None
     sensor_geoms = None
@@ -251,6 +494,272 @@ def gene_to_meshed_mjcf(gene: RobotGene, cache_dir: str = "build/_viewmesh", *,
             sensor_geoms = None
     return compile_gene_to_mjcf(gene, include_floor=include_floor, spawn_z=spawn_z, meshes=meshes,
                                 show_actuators=show_actuators, sensor_geoms=sensor_geoms)
+
+
+def stage_mesh(src, dst_dir, owner: str, claimed: dict) -> "Path":
+    """Copy ONE link's mesh into a package directory under a name no OTHER link can take. Returns the path.
+
+    Every exporter that ships meshes has to answer the same question — what do I call this file next to the
+    model? — and every one of them answered it with the source basename, which is not unique. Two links whose
+    baked STLs share a basename land on one file and the second link silently renders as the first; the package
+    still opens, nothing errors, and the robot is just wrong. So the naming rule lives here, once, and both the
+    MJCF and the URDF exporters use it.
+
+    The rule: keep the readable name (``meshes/FL_hip.stl`` reads far better in a shipped package than a hash),
+    and only when it is already claimed BY A DIFFERENT LINK append that link's sanitized name, then a digest, so
+    the disambiguation itself cannot collide. ``claimed`` maps filename -> owning link and must be shared across
+    one export.
+
+    An existing destination is reused only when it is byte-identical to the source (``filecmp`` with
+    ``shallow=False``); a same-size-different-content leftover from an earlier export of a different robot would
+    otherwise be silently shipped as this robot's geometry.
+    """
+    import filecmp
+    import hashlib
+    import shutil
+
+    src, dst_dir = Path(src), Path(dst_dir)
+    name = src.name
+    if claimed.setdefault(name, owner) != owner:
+        safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(owner)).strip("_") or "link"
+        name = f"{src.stem}__{safe}{src.suffix}"
+        if claimed.setdefault(name, owner) != owner:
+            name = f"{src.stem}__{hashlib.md5(str(owner).encode('utf-8', 'replace')).hexdigest()[:8]}{src.suffix}"
+            claimed.setdefault(name, owner)
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    dst = dst_dir / name
+    if not (dst.is_file() and filecmp.cmp(str(src), str(dst), shallow=False)):
+        shutil.copyfile(src, dst)
+    return dst
+
+
+#: Where a staged directory records WHAT WE PUT THERE, so a later export can tell its own leftovers from the
+#: customer's files. It sits beside the files it describes, so it travels with a copied package.
+STAGE_LEDGER_NAME = ".virturoid_staged.json"
+
+
+def _file_digest(path) -> str:
+    import hashlib
+
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def read_stage_ledger(dst_dir) -> dict:
+    """``{filename: {"size", "sha256"}}`` -- what OUR last export wrote into ``dst_dir``.
+
+    ``{}`` for a directory we have never staged into AND for one whose ledger has been deleted; the two are
+    deliberately indistinguishable, because the safe answer is the same in both cases: we know of nothing here
+    that is ours to remove. The redundancy that makes a deleted ledger survivable is the ``prior`` argument of
+    ``prune_staged_dir`` -- the index document THIS repo wrote next to the directory (the CAD manifest, the
+    URDF's own ``filename=`` refs, ``viewer_mesh_index.json``), which names the same files from the other side.
+    """
+    p = Path(dst_dir) / STAGE_LEDGER_NAME
+    try:
+        rec = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    wrote = rec.get("wrote")
+    return wrote if isinstance(wrote, dict) else {}
+
+
+def prune_staged_dir(dst_dir, keep, suffixes=(".stl",), *, prior=(), dry_run=False) -> dict:
+    """Remove the files A PREVIOUS RUN OF OURS left in a staged directory. Never anything else.
+
+    Returns ``{"removed", "kept_foreign", "kept_modified"}`` -- names, not paths, all sorted.
+
+    ``stage_mesh`` above answers "what do I call this file", and this answers the question that has to be asked
+    with it: what is still sitting there from LAST time? A build into a REUSED output directory (which is what
+    ``autonomous_build`` does after a redesign, and what ``export_held`` does on every re-export of the same
+    ``robot_id``) only ever ADDED files. Measured on a second build of a different body into one directory:
+    ``cad/step/`` held 27 STEPs of which 18 belonged to a DISCARDED quadruped, and the arm's ROS 2 package
+    shipped 25 meshes of which its URDF referenced 7. Every index we write -- the CAD manifest, the URDF's
+    ``<mesh filename=>``, the MJCF's ``file=`` -- named only the current robot, so a reader that follows an
+    index was safe and a customer running ``glob("cad/step/*.step")`` assembled a chimera out of two robots.
+    Documenting that is not a fix: globbing a directory of STEP files is not an unreasonable thing to do.
+
+    REMOVAL IS BY PROVENANCE, NOT BY SHAPE. The first version of this function deleted everything matching a
+    suffix that was not in ``keep``, on the reasoning that "these directories have exactly one writer". That is
+    true of OUR writers and says nothing about the customer: ``output_dir`` is theirs (``compose.py`` exposes
+    ``--build OUTPUT_DIR`` and hands it straight to ``build_gene_package``), and re-exporting THE SAME ROBOT
+    into a directory with files planted in it measured five deletions of files we had never written --
+    ``cad/reference_fixture.step``, ``cad/step/my_custom_bracket.step``, ``cad/stl/customer_scan.STL`` (matched
+    case-insensitively), ``robot/meshes/customer_endeffector.stl`` and the same file inside the ROS 2 package.
+    So a file is removable only when we can show it is ours:
+
+      * it is recorded in this directory's ledger (``STAGE_LEDGER_NAME``) AND still byte-identical to what we
+        wrote -- a file the customer has since edited is theirs now and is reported in ``kept_modified``; or
+      * ``prior`` names it. ``prior`` is what OUR OWN previously-written index for this directory claimed --
+        the last ``cad_manifest.json``'s part list, the last URDF's ``filename=`` refs, the last
+        ``viewer_mesh_index.json``. That is the redundancy that makes the scheme survive a customer who deletes
+        the ledger, and it is also what lets the first post-fix export clean up a directory staged before the
+        ledger existed.
+
+    Anything else is left where it is and reported in ``kept_foreign``. An undeletable file (locked, read-only)
+    is left alone and reported in ``kept_modified``; an export is never failed over one.
+
+    Call this AFTER the document that references the survivors has been written, never before -- see
+    ``write_exported_mjcf`` for why. ``dry_run`` computes the same answer without touching the directory or the
+    ledger, so a caller can name the removals inside the artifact it is about to write and then commit them.
+    """
+    d = Path(dst_dir)
+    if not d.is_dir():
+        return {"removed": [], "kept_foreign": [], "kept_modified": []}
+    keep = {str(k) for k in keep}
+    prior = {str(k) for k in prior}
+    sfx = tuple(s.lower() for s in suffixes)
+    ours = read_stage_ledger(d)
+    removed, kept_foreign, kept_modified = [], [], []
+    for p in sorted(d.iterdir()):
+        if not p.is_file() or p.name == STAGE_LEDGER_NAME:
+            continue
+        if p.suffix.lower() not in sfx or p.name in keep:
+            continue
+        rec = ours.get(p.name)
+        if isinstance(rec, dict):
+            try:
+                unchanged = (p.stat().st_size == rec.get("size")
+                             and _file_digest(p) == rec.get("sha256"))
+            except OSError:
+                unchanged = False
+            if not unchanged:                        # we wrote it; they changed it -- it is theirs now
+                kept_modified.append(p.name)
+                continue
+        elif p.name not in prior:
+            kept_foreign.append(p.name)              # never ours: not in the ledger, not in our last index
+            continue
+        if dry_run:
+            removed.append(p.name)
+            continue
+        try:
+            p.unlink()
+        except OSError:                              # locked/read-only -> leave it; never fail an export over it
+            kept_modified.append(p.name)
+            continue
+        removed.append(p.name)
+    if not dry_run:
+        # DROP the records for what we removed; do NOT re-stamp what we kept. This line was
+        # ``_write_stage_ledger(d, keep)``, which re-digested every surviving file with no carry-over --
+        # so a mesh the customer had hand-edited, which the cache had served rather than rewritten, was
+        # silently re-adopted as ours. MEASURED: edit a file in viewer_assets/, rebuild the SAME robot
+        # (the path the package guard explicitly permits), and the ledger swore their bytes were ours;
+        # the next rebuild of a different body deleted it and filed it under ``removed_stale``. The
+        # digest is the only thing separating "ours, untouched" from "ours once, theirs now", and a
+        # prune has no business refreshing it -- only the writer that actually wrote a file may claim it,
+        # via ``note_staged``.
+        _ledger = read_stage_ledger(d)
+        if _ledger:
+            _gone = set(removed)
+            _write_stage_ledger(d, (), carry_over={k: v for k, v in _ledger.items() if k not in _gone})
+    return {"removed": sorted(removed), "kept_foreign": sorted(kept_foreign),
+            "kept_modified": sorted(kept_modified)}
+
+
+def note_staged(dst_dir, names) -> None:
+    """Add ``names`` -- files this export JUST WROTE -- to a directory's staging ledger, removing nothing.
+
+    Call it as soon as files are staged, before the document that will reference them is written. If the export
+    then fails, the files it left behind are still recorded as ours, so the NEXT export can clear them instead
+    of having to leave them forever as unattributable.
+
+    Records already in the ledger for OTHER names are carried over UNCHANGED, digest included. Re-stamping them
+    would quietly re-adopt a file the customer has edited since we wrote it -- the digest is the only thing that
+    tells "ours, untouched" from "ours once, theirs now", and a helper that refreshes it would hand the next
+    prune permission to delete their edit.
+    """
+    d = Path(dst_dir)
+    if not d.is_dir():
+        return
+    _write_stage_ledger(d, names, carry_over=read_stage_ledger(d))
+
+
+def _write_stage_ledger(dst_dir, names, *, carry_over: dict | None = None) -> None:
+    """Record the files this export staged into ``dst_dir``, with a digest each, so the NEXT export can prove
+    which of them are its own to remove. ``names`` are files written by THIS run, so their digests are taken
+    now; ``carry_over`` entries survive verbatim for any name not in ``names``. Best-effort: a ledger we cannot
+    write costs a future prune, never this export -- and a missing ledger degrades to leaving files alone."""
+    d = Path(dst_dir)
+    names = {str(n) for n in names}
+    wrote: dict = {k: v for k, v in (carry_over or {}).items() if k not in names}
+    for name in sorted(names):
+        p = d / name
+        try:
+            if p.is_file():
+                wrote[name] = {"size": p.stat().st_size, "sha256": _file_digest(p)}
+        except OSError:
+            continue
+    try:
+        (d / STAGE_LEDGER_NAME).write_text(json.dumps(
+            {"version": 1,
+             "what": "files written into this directory by a Virturoid export; the next export removes only "
+                     "these, never anything else it finds here",
+             "wrote": dict(sorted(wrote.items()))}, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def write_exported_mjcf(gene: RobotGene, xml_path: str | Path, *, include_floor: bool = True,
+                        spawn_z: float | None = None) -> dict:
+    """Write the shipped ``robot.xml`` SELF-CONTAINED: any link mesh it references is copied next to it and
+    addressed relatively, so the package opens on a machine that has never seen this one.
+
+    ``compile_gene_to_mjcf`` now resolves an imported link's own mesh (``_with_source_meshes``) to wherever that
+    STL happens to live — under ``build/_importmesh`` on the machine that did the import. Writing that string
+    straight to a file would ship a model whose every mesh reference is an absolute path into somebody else's
+    filesystem: it opens perfectly for whoever exported it and fails for everyone they send it to, which is the
+    worst of the three possible outcomes because nothing looks wrong until it is in a customer's hands. There is
+    direct precedent — the ROS2 export shipped 22 dangling references by copying a URDF and leaving its meshes
+    behind — so the export copies first and references second.
+
+    Returns ``{"path", "meshes", "mesh_dir"}``. Bodies with no meshes at all (anything we generated, which draws
+    from primitives) simply write the same XML they always did and report ``meshes: 0``.
+    """
+    xml_path = Path(xml_path)
+    xml_path.parent.mkdir(parents=True, exist_ok=True)
+    # What the PREVIOUS robot.xml in this directory claimed, read before we overwrite it: our own index, and so
+    # the second proof of provenance the prune below needs if this package's staging ledger has been deleted.
+    prior_meshes: set[str] = set()
+    if xml_path.is_file():
+        try:
+            prior_meshes = {Path(m).name for m in
+                            re.findall(r'file="([^"]+)"', xml_path.read_text(encoding="utf-8"))}
+        except OSError:
+            prior_meshes = set()
+    if spawn_z is None:
+        spawn_z = standing_spawn_z(gene)
+    meshes = _with_source_meshes(gene, None, physics_only=False) or {}
+    local: dict[str, str] = {}
+    if meshes:
+        mesh_dir = xml_path.parent / "meshes"
+        claimed: dict[str, str] = {}                 # destination filename -> the segment that owns it
+        for name, src in meshes.items():
+            try:
+                # ``stage_mesh`` keeps the customer's own link filename but never lets two links land on one
+                # file: link names come from their file, so two that differ only in a character we sanitize
+                # would otherwise silently overwrite each other's geometry.
+                dst = stage_mesh(src, mesh_dir, name, claimed)
+                # Relative to the XML, which is how MuJoCo resolves a mesh ``file=`` (and how Isaac's and
+                # RViz's importers resolve one that is not a package:// URI).
+                local[name] = os.path.relpath(dst, start=xml_path.parent).replace("\\", "/")
+            except OSError:                          # unreadable source -> that link ships as its primitive
+                continue
+        note_staged(mesh_dir, {Path(p).name for p in local.values()})   # ours even if the compile below fails
+    xml = compile_gene_to_mjcf(gene, include_floor=include_floor, spawn_z=spawn_z,
+                               meshes=local or None)
+    xml_path.write_text(xml, encoding="utf-8")
+    # ONLY NOW. Whatever an EARLIER export into this same directory left in meshes/ is a different robot's
+    # geometry -- this XML references none of it -- but the removal has to come AFTER the XML that references
+    # the survivors is on disk. Pruning first meant any failure in ``compile_gene_to_mjcf`` (which this function
+    # lets propagate) left the previous robot's model beside none of its meshes: a package that USED to load.
+    pruned = prune_staged_dir(xml_path.parent / "meshes", {Path(p).name for p in local.values()},
+                              prior=prior_meshes)
+    return {"path": str(xml_path), "meshes": len(local),
+            "mesh_dir": str(xml_path.parent / "meshes") if local else None,
+            "removed_stale": pruned["removed"], "left_not_ours": pruned["kept_foreign"],
+            "left_modified": pruned["kept_modified"]}
 
 
 def write_packaged_visual_mjcf(gene: RobotGene, package_dir: str | Path, *,
@@ -271,12 +780,34 @@ def write_packaged_visual_mjcf(gene: RobotGene, package_dir: str | Path, *,
     root = Path(package_dir)
     model_path = root / model_uri
     asset_dir = model_path.parent / "viewer_assets"
+    index_path = root / "simulation" / "viewer_mesh_index.json"
+    # What the PREVIOUS index in this package claimed -- read before anything overwrites it, and used below as
+    # the standing proof of which viewer_assets/ files are ours when the directory's own ledger is gone.
+    prior_assets: set[str] = set()
+    try:
+        prior_assets = {Path(m.get("uri", "")).name for m
+                        in json.loads(index_path.read_text(encoding="utf-8")).get("meshes", {}).values()}
+    except (OSError, ValueError, AttributeError):
+        prior_assets = set()
     try:
         from virturoid.services.cad_geometry import build_visual_meshes
 
-        absolute_meshes = build_visual_meshes(gene, str(asset_dir), cache=True) or {}
+        # This package compiles with show_actuators=True below, so the compiler draws the motors; leaving them
+        # in the mesh too would double-draw every joint (see build_visual_meshes' actuator_in_mesh).
+        # ``wrote`` IS THE CLAIM, NOT ``absolute_meshes``. ``build_visual_meshes`` serves a cached file on
+        # EXISTENCE alone (generated links) or on matching SIZE (source links), so the returned map names
+        # files this call did not touch. Claiming those re-digested a mesh the customer had hand-edited in
+        # ``viewer_assets/`` -- the ledger then swore their bytes were ours, the package shipped their
+        # geometry attributed to us, and the next rebuild of a different body DELETED it and filed it under
+        # ``removed_stale`` as our own. Measured end to end. A file we did not write keeps whatever the
+        # ledger already said about it: ours-and-untouched if it still matches, otherwise left alone.
+        wrote_now: set[str] = set()
+        absolute_meshes = build_visual_meshes(gene, str(asset_dir), cache=True, actuator_in_mesh=False,
+                                              wrote=wrote_now) or {}
         if not absolute_meshes:
             return None
+        # Claim them now, so a failure below leaves files that are still provably ours to clear next time.
+        note_staged(asset_dir, wrote_now)
         model_path.parent.mkdir(parents=True, exist_ok=True)
         # MuJoCo resolves a mesh filename from the XML's directory.  Store a relative filename in the XML,
         # but a package-relative URI in the sidecar for Three.js/API consumers.
@@ -301,13 +832,24 @@ def write_packaged_visual_mjcf(gene: RobotGene, package_dir: str | Path, *,
                 for name, path in absolute_meshes.items()
             },
         }
-        index_path = root / "simulation" / "viewer_mesh_index.json"
         index_path.parent.mkdir(parents=True, exist_ok=True)
         index_path.write_text(json.dumps(mesh_index, indent=2), encoding="utf-8")
+        # ONLY NOW, and only files a previous run of ours put here. viewer_assets/ is this package's own asset
+        # directory (not the shared bake cache) and it accumulated across rebuilds: a second build shipped the
+        # FIRST robot's 18 link STLs beside this one's, unreachable through the index and reachable through the
+        # directory. Pruning BEFORE the two writes above turned this function's documented fail-open into a
+        # broken package: force ``compile_gene_to_mjcf`` to raise and it still returns None, but on disk
+        # viewer_mesh_index.json named 18 meshes of which ZERO existed and MjModel.from_xml_path failed outright
+        # -- measured, against a package that loaded before the prune was added.
+        pruned = prune_staged_dir(asset_dir, {Path(p).name for p in absolute_meshes.values()},
+                                  prior=prior_assets)
         return {
             "model_uri": mesh_index["model_uri"],
             "mesh_index_uri": "simulation/viewer_mesh_index.json",
             "mesh_count": len(mesh_index["meshes"]),
+            "removed_stale": pruned["removed"],
+            "left_not_ours": pruned["kept_foreign"],
+            "left_modified": pruned["kept_modified"],
         }
     except Exception:  # noqa: BLE001 - visual fidelity must never make the core simulator unusable
         return None
@@ -337,19 +879,24 @@ def standing_spawn_z(gene: RobotGene, *, clearance: float | None = None, meshed:
     collider, which was the visible foot-penetration bug); pass ``meshed=False`` on hot training paths to
     measure the cheap primitive model instead. Falls back to the legacy height if MuJoCo is unavailable.
 
-    ``clearance`` default is kind-aware: a WHEELED body rests on its wheels (~2 mm) instead of hovering the
-    legged 30 mm foot-safety margin — a rover spawned 30 mm up reads as 'floating wheels' in the viewport
-    (measured bug) and only touched down after a settle. Legged bodies keep the 30 mm margin so a mesh foot
-    that hangs below its collider doesn't spawn penetrating."""
+    ``meshed=False`` means PRIMITIVE, and it has to keep meaning that. When ``compile_gene_to_mjcf`` learned to
+    resolve an imported link's own STL, this branch silently started loading every one of the customer's meshes
+    too: measured, the "cheap" path on a Unitree G1 went 0.032 -> 0.159 s and on a Go2 0.024 -> 0.251 s, and the
+    two branches returned the same number to the digit because they had become the same model. So it asks for
+    ``source_meshes=False`` explicitly rather than relying on a default that has already changed once.
+
+    ``clearance`` defaults to 2 mm for every free body. Visual/collision disagreement is rejected by the
+    visual-physics gate instead of being hidden behind an airborne legged-body safety margin."""
     if clearance is None:
-        has_wheels = any(getattr(s, "shape", None) == "cylinder" and s.joint_type == "revolute"
-                         for s in gene.segments)
-        clearance = 0.002 if has_wheels else 0.03
+        # The former 30 mm legged margin hid foot visual/collider mismatches by spawning robots visibly airborne.
+        # The visual-physics CI gate now rejects those mismatches, so every free body starts at its real contact.
+        clearance = 0.002
     if gene.base_mount != "free":
-        return _MOUNT_Z.get(gene.base_mount, TABLE_TOP_Z)
+        return _base_z_for(gene)
     ref = _MOUNT_Z["free"]                                       # measure the body's downward reach at 0.1
     for build_xml in ((lambda: gene_to_meshed_mjcf(gene, include_floor=False, spawn_z=ref)) if meshed else None,
-                      lambda: compile_gene_to_mjcf(gene, include_floor=False, spawn_z=ref)):
+                      lambda: compile_gene_to_mjcf(gene, include_floor=False, spawn_z=ref,
+                                                   source_meshes=False)):
         if build_xml is None:
             continue
         try:
@@ -384,7 +931,7 @@ def compile_gene_with_scene(gene: RobotGene, scene_objects, *, table: bool = Tru
     if issues:
         raise ValueError(f"cannot compile invalid gene {gene.id}: {'; '.join(issues)}")
     root = gene.root()
-    base_z = _MOUNT_Z.get(gene.base_mount, TABLE_TOP_Z)
+    base_z = _base_z_for(gene)
     scene_objects = list(scene_objects)
     # A scene that brings its own ground/walls (navigation, maze) is a FLOOR scene: drop the tabletop so the
     # robot drives on the scene's own floor instead of a 0.7x0.45 m table.
@@ -396,11 +943,13 @@ def compile_gene_with_scene(gene: RobotGene, scene_objects, *, table: bool = Tru
     lines = [
         f'<mujoco model="{escape(gene.id)}">',
         '  <compiler angle="radian" autolimits="true"/>',
-        '  <option timestep="0.002" gravity="0 0 -9.81"/>',
+        _PHYSICS_OPTION,
         _VISUAL_XML.rstrip("\n"),
         '  <default>',
-        '    <joint damping="0.8" armature="0.01"/>',
-        '    <geom friction="1 0.1 0.01"/>',
+        '    <joint damping="0.8" armature="0.01" frictionloss="0.05"/>',
+        '    <geom friction="1 0.05 0.001"/>',
+        '    <default class="visual"><geom mass="0" contype="0" conaffinity="0"/></default>',
+        '    <default class="collision"><geom friction="1 0.05 0.001"/></default>',
         '  </default>',
         '  <asset>',
         '    <material name="mat_red" rgba="0.8 0.1 0.1 1"/>',
@@ -419,10 +968,19 @@ def compile_gene_with_scene(gene: RobotGene, scene_objects, *, table: bool = Tru
         # compile path already does this (line ~162), but the scene path omitted it, so a body in a scene solved
         # spurious impulses against its own structure. Robot↔scene-object + floor contacts stay enabled.
         _self_collision_excludes_xml(gene).rstrip("\n"),
+        _equality_xml(gene).rstrip("\n"),          # closed loops, in the scene path too — see _equality_xml
         _actuator_xml(gene).rstrip("\n") or "  <actuator></actuator>",
+        *( [] if physics_only else [_sensor_xml(gene).rstrip("\n")] ),
+        _pose_keyframe(gene, base_z).rstrip("\n"),
         '</mujoco>',
     ]
     return "\n".join(lines) + "\n"
+
+
+def _is_source_mesh(seg) -> bool:
+    """True when this segment is drawn from the geometry the CUSTOMER imported, not from geometry we generated."""
+    g = getattr(seg, "geometry", None)
+    return isinstance(g, dict) and g.get("family") == "source_mesh"
 
 
 def _body_xml(gene: RobotGene, seg, pos: tuple[float, float, float], indent: int,
@@ -447,9 +1005,11 @@ def _body_xml(gene: RobotGene, seg, pos: tuple[float, float, float], indent: int
         rng = ""
         if seg.joint_lower is not None and seg.joint_upper is not None:
             rng = f' range="{seg.joint_lower:.4f} {seg.joint_upper:.4f}"'
+        damping, armature, frictionloss = _joint_dynamics(gene, seg)
         lines.append(
             f'{pad}  <joint name="{escape(seg.name)}_joint" type="{_JOINT_KIND[seg.joint_type]}" '
-            f'axis="{ax}"{rng}/>'
+            f'axis="{ax}"{rng} damping="{damping:.4f}" armature="{armature:.4f}" '
+            f'frictionloss="{frictionloss:.4f}"/>'
         )
 
     # Per-part MATERIAL drives the colour/finish: a coloured shell body, metal feet/hands, dark carbon limbs,
@@ -461,7 +1021,26 @@ def _body_xml(gene: RobotGene, seg, pos: tuple[float, float, float], indent: int
     material = _MATERIAL_KEY_TO_MJCF.get(seg.material or "") or (
         "mat_joint" if seg.joint_type == "prismatic" else "mat_cf")
     meshed = bool(meshes) and seg.name in meshes and not physics_only
+    # TWO-TONE LIMB on the MESHED path. `_detail_geoms_xml` gives a primitive limb a shell-accent fairing over
+    # its proximal segment precisely so a leg reads as bodywork over dark structure (the Go2/Spot language) --
+    # but that whole block is skipped when the segment has a visual mesh, which is every render and every
+    # viewport. So on the path a customer actually looks at, a leg was one undifferentiated dark mass: a
+    # charcoal mesh, a charcoal 82 mm motor can, repeated four times. Paint the HIP/abduction housing in shell
+    # instead, which is what carries the body colour on a real quadruped. Appearance only -- `seg.material`
+    # (which drives density, the BOM and every mass) is untouched, so this cannot move a gram.
+    if meshed and _anatomy_role_of(seg) == "quad_hip":
+        material = "mat_shell"
+    # Same appearance-only treatment for the FOOT. `_ROLE_MATERIAL` maps every foot/paw/hoof to "metal", so the
+    # part that meets the ground rendered as a pale specular metal paddle — the one surface on a real legged
+    # robot that is never bare metal, because it is the compliant rubber pad that provides traction. The foot's
+    # collider is a capsule with `friction="1 0.05 0.001"`, i.e. the sim is already modelling a high-friction
+    # contact; drawing it as polished metal contradicted the physics being run. As above this touches only the
+    # MJCF material reference, never `seg.material`, so density, the BOM and every mass are untouched.
+    elif meshed and _anatomy_role_of(seg) == "foot_pad":
+        material = "mat_rubber"
     lines.append(_geom_xml(seg, pad + "  ", material=material, meshed=meshed, physics_only=physics_only))
+    if seg.parent is None and not physics_only:
+        lines.append(f'{pad}  <site name="imu_site" pos="0 0 {seg.length_m / 2.0:.5f}" size="0.005" rgba="0 0 0 0"/>')
     # physics_only strips ALL visual-only decoration (cylinder motor cans, collars, housings, sensor pucks)
     # so the model is MJX/GPU-safe — those cosmetic cylinders crash mjx.put_model even at contype=0.
     if not meshed and not physics_only:    # the visual mesh already has housings/collars; primitives get them added
@@ -471,7 +1050,18 @@ def _body_xml(gene: RobotGene, seg, pos: tuple[float, float, float], indent: int
         if detail:
             lines.append(detail)
     # Real off-the-shelf actuator: render the datasheet-sized housing of the part that drives this joint.
-    if show_actuators and not physics_only and seg.joint_type == "revolute":
+    #
+    # NOT on a link the CUSTOMER shipped. Their mesh already contains their own motor, gearbox and bearing
+    # housings, so drawing our catalog part on top adds a component that is not on their machine — measured on
+    # an imported Go2, 13 real link meshes were rendered under 26 boxes and 49 cylinders of ours, which is why
+    # the ingested robot read as "a Go2 wearing grey drums" instead of as a Go2. This is the same reasoning that
+    # already suppresses ``_detail_geoms_xml`` for any meshed link; the datasheet housing simply never got the
+    # same treatment because for a body WE designed it is the truthful thing to draw. Appearance only: every
+    # geom involved is mass=0/contype=0/conaffinity=0, and the BOM still cites the actuator it always did.
+    # Keyed on ``meshed and`` source-mesh, not on the geometry spec alone: if the customer's STL could not be
+    # read this link falls back to a primitive, and a bare primitive with no housing at all is worse than today.
+    if (show_actuators and not physics_only and seg.joint_type == "revolute"
+            and not (meshed and _is_source_mesh(seg))):
         from virturoid.services.component_geometry import actuator_housing_xml
         act = actuator_housing_xml(seg, pad + "  ")
         if act:
@@ -506,6 +1096,11 @@ def _body_xml(gene: RobotGene, seg, pos: tuple[float, float, float], indent: int
             lines.append(
                 f'{pad}  <geom name="{escape(seg.name)}_palm" type="box" pos="0 0 {seg.length_m:.5f}" '
                 f'size="{hx:.5f} {hy:.5f} {hz:.5f}" material="mat_joint" mass="0" contype="0" conaffinity="0"/>')
+    name_l = (seg.name or "").lower()
+    if (not physics_only and seg.joint_type in (None, "fixed")
+            and any(token in name_l for token in ("foot", "paw", "leg", "hoof"))):
+        lines.append(f'{pad}  <site name="{escape(seg.name)}_touch" pos="0 0 {seg.length_m:.5f}" '
+                     f'type="sphere" size="{seg.radius_m:.5f}" rgba="0 0 0 0"/>')
 
     # Children attach at this segment's distal tip (0,0,length), plus any translational mount_offset
     # (lets e.g. two gripper fingers sit side-by-side in y rather than overlapping at the tip).
@@ -519,12 +1114,215 @@ def _body_xml(gene: RobotGene, seg, pos: tuple[float, float, float], indent: int
     return "\n".join(lines) + "\n"
 
 
+def _joint_dynamics(gene: RobotGene, seg) -> tuple[float, float, float]:
+    """Conservative identified-dynamics priors selected from structure, not a closed class taxonomy.
+
+    A table/floor-mounted articulated chain has the reflected inertia and transmission friction of an arm;
+    rolling joints and free-base load-bearing limbs use their own lighter priors. New named robot classes still
+    receive a useful prior because topology, mounting and the joint's physical role drive the choice.
+
+    A MEASUREMENT OUTRANKS A PRIOR. When a system-identification fit has been applied to this gene
+    (``sysid.apply_calibration``), the fitted value for this joint replaces the structural guess below --
+    which is the whole point of the calibration wedge: the customer runs one bench experiment and the
+    simulator stops being a set of plausible constants. Only parameters that passed the identifiability gates
+    are ever in that record, the prior each one replaced is stored beside it, and
+    ``sysid.revert_calibration`` puts every joint back on this function. Everything else about the emitted
+    joint -- axis, range, name -- is untouched.
+    """
+    prior = _joint_dynamics_prior(gene, seg)
+    fitted = _calibrated_dynamics(gene, seg.name)
+    if not fitted:
+        return prior
+    damping, armature, frictionloss = prior
+    return (float(fitted.get("damping", damping)), float(fitted.get("armature", armature)),
+            float(fitted.get("frictionloss", frictionloss)))
+
+
+#: The joint-side drivetrain parameters a compiled source model states about the CUSTOMER'S MACHINE, as
+#: opposed to about the solver that was integrating it. ``armature`` is deliberately absent -- see
+#: :func:`_declared_joint_dynamics`.
+DECLARED_DRIVETRAIN_PARAMS = ("damping", "frictionloss")
+
+
+def _declared_joint_dynamics(gene: RobotGene, seg) -> tuple[float, float] | None:
+    """``(damping, frictionloss)`` as the SOURCE FILE declared them, or ``None``. **Not armature.**
+
+    Only imported genes carry ``metadata['source_joint_dynamics']`` (``robot_import`` is its only writer), so
+    a composed body is untouched and keeps the structural prior. Defensive for the same reason
+    ``_calibrated_dynamics`` is: this runs inside the compile, ``metadata`` is a free-form dict that survives
+    a JSON round trip, and a pasted string or a NaN must fall back rather than reach ``dof_damping``.
+    Both or neither -- a half-carried drivetrain is a third value that matches neither model.
+
+    WHY ARMATURE IS RECORDED AND NOT CARRIED, which is the one asymmetry here and was measured the hard way.
+    Carrying all three moved simulated dynamics globally and broke eight gates that had held; a
+    one-parameter-at-a-time ablation across every one of them put ARMATURE alone on the wrong side of all of
+    them, and damping and frictionloss on the right side of all of them::
+
+        gate                                      prior     all 3     damping   armature  frictionloss
+        pal_talos coupling residual (rad)         0.00338   0.15944   0.00332   0.13119   0.00285
+        toddlerbot coupling residual (rad)        0.02373   1.52841   0.01370   1.88989   0.02371
+        cassie loop-closure gap / default          0.495     0.672     0.496     0.720     0.492
+        boston_dynamics_spot holds home pose       True      False     True      True      True
+
+    Two independent reasons, and either alone is sufficient:
+
+    * **A compiled ``dof_armature`` of 0 is not a declaration.** MuJoCo's default is 0 and a compiled model
+      keeps no record of which attributes the XML wrote, so 0 means "declared zero" OR "never mentioned" and
+      nothing can tell them apart. On 14 of the 59 cached Menagerie packages EVERY joint reads 0 --
+      anymal_b/c, spot, talos, kinova_gen3, kuka_iiwa_14, tiago, tiago_dual, stretch, leap_hand, tidybot,
+      wxai, z1, allegro. Real machines with real harmonic drives and real rotor inertia, all of it un-set.
+      Adopting that 0 as the customer's number is a DEFAULT OF MUJOCO'S applied where the source said nothing,
+      which is the same class of over-claim as the substitution this whole carry-through exists to remove.
+    * **Armature is referenced to a model, not to a machine.** It is added to the diagonal of ``qM``, so what
+      it buys is conditioning *relative to the rest of that model* -- and our twin is not that model. We emit
+      our own ``<equality>`` couplings and loop closures at the source's own tight ``solref`` (Cassie's
+      ``0.005 1`` is 2.5 timesteps), driven by ``<motor>`` actuators under our PD rather than the source's
+      ``<position>``, over primitive link inertias. On Cassie the source's armature is 5% of joint inertia
+      where our prior is 20%; taking the 5% removes the margin those constraints are solved with. That is a
+      number the twin cannot inherit, whatever the source declares.
+
+    Damping and frictionloss carry, because both ARE statements about the hardware: 2.0 N.m.s/rad of joint
+    damping is a property of the Go2's drivetrain, and the 0.45 N.m of Coulomb friction we used to invent on a
+    Panda joint whose author declared none was a fiction. ``robot_import`` discloses armature as recorded and
+    not carried, with our number beside theirs.
+    """
+    import math
+
+    meta = getattr(gene, "metadata", None)
+    if not isinstance(meta, dict):
+        return None
+    # THE RECORD IS KEPT EVEN WHEN IT IS NOT CARRIED. ``robot_import`` clears this flag for the one case where
+    # the customer's declaration makes OUR twin unsteppable (their drivetrain is declared against their link
+    # inertias; ours are primitives) -- it falls back to the prior, says so in full, and keeps their numbers
+    # verbatim so nothing is lost. Reading the table without reading the flag would re-apply exactly the
+    # values that diverge. Absent flag means carried, so a gene serialized before this existed is unaffected.
+    if meta.get("source_joint_dynamics_carried") is False:
+        return None
+    # ``isinstance`` on the CONTAINER too, not only on the row: a metadata dict that round-tripped through
+    # JSON as a list (or anything else without ``.get``) would otherwise raise inside the compile, which is
+    # the one thing this function exists to prevent.
+    table = meta.get("source_joint_dynamics")
+    if not isinstance(table, dict):
+        return None
+    row = table.get(getattr(seg, "name", "") or "")
+    if not isinstance(row, dict):
+        return None
+    out = []
+    for param in DECLARED_DRIVETRAIN_PARAMS:
+        v = row.get(param)
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            return None
+        v = float(v)
+        if not math.isfinite(v) or v < 0.0:
+            return None
+        out.append(v)
+    # A record missing ``armature`` is still MALFORMED and still falls back whole: ``robot_import`` writes all
+    # three or none, so a row without it did not come from an import we understand.
+    a = row.get("armature")
+    if isinstance(a, bool) or not isinstance(a, (int, float)) or not math.isfinite(float(a)) or float(a) < 0.0:
+        return None
+    return (out[0], out[1])
+
+
+def _calibrated_dynamics(gene: RobotGene, seg_name: str) -> dict:
+    """``{param: fitted_value}`` from an applied sysid calibration, or ``{}``.
+
+    Imported lazily and guarded: ``sysid`` needs MuJoCo, and ``gene_compiler`` is imported by paths that run
+    without it. A compile must never fail because the calibration package could not load -- it falls back to
+    the structural prior, which is the pre-calibration behaviour. The key check comes BEFORE the import so an
+    uncalibrated gene -- which is every gene, on every compile, on every path -- does not reach across into
+    another package once per joint to be told nothing changed.
+    """
+    meta = getattr(gene, "metadata", None)
+    if not isinstance(meta, dict) or "calibration" not in meta:
+        return {}
+    try:
+        from virturoid.services.sysid.calibration import calibrated_joint_dynamics
+        return calibrated_joint_dynamics(gene, seg_name)
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _joint_dynamics_prior(gene: RobotGene, seg) -> tuple[float, float, float]:
+    """The baseline before any BENCH MEASUREMENT. Split out so a calibrated build can still recompute the
+    baseline it replaced (``calibration_report`` uses exactly this to flag a stale record).
+
+    A NUMBER THE CUSTOMER DECLARED IS NOT A PRIOR OF OURS, so it wins -- for the two parameters where the
+    source is stating something about the MACHINE. ``robot_import`` reads damping/frictionloss off the
+    customer's own compiled model and records them on the gene; before this they were recorded and then
+    ignored here, and the structural guess below stood in. Measured on a real Menagerie Go2, which declares
+    ``damping=2.0 frictionloss=0.2`` on all 12 leg joints, the emitted model carried 0.8 (-60%) and 0.12
+    (-40%); on a Panda (``damping=1.0``, no dry friction at all) 2.0 and 0.45 -- i.e. we invented 0.45 N.m of
+    Coulomb friction on a joint whose author declared none.
+
+    ARMATURE IS THE EXCEPTION AND STAYS OURS: it is a solver-conditioning term referenced to the model it was
+    declared in, and 24% of the corpus leaves it at MuJoCo's 0 so the record cannot even say whether it was
+    declared. See :func:`_declared_joint_dynamics` for the ablation that put armature alone on the wrong side
+    of every gate that moved. The overlay is written as prior-then-override rather than an early return so
+    that this stays true by construction: whatever the record says, ``armature`` comes from below.
+
+    Why it belongs HERE and not one level up in ``_joint_dynamics``: ``sysid.fit`` reads each parameter's
+    ``from:`` straight off the compiled model's ``dof_*`` arrays, and ``sysid.calibration.calibration_report``
+    re-runs THIS function to decide whether a stored fit has gone stale. Putting the declared value anywhere
+    else makes the fit quote its correction against a baseline the staleness check cannot reproduce, and every
+    imported joint reads as stale. With it here, all three surfaces agree by construction -- and a fit stops
+    "identifying" a substitution of ours and starts measuring the customer's hardware.
+
+    The record carries what the customer's own MuJoCo integrates AT THE JOINT, so an undeclared damping
+    arrives as the 0.0 their file leaves there. That zero is carried: an invented 0.45 N.m of stiction is not
+    a safer error than none, it is just a less visible one. It is also not the whole story on 18 of 59
+    packages, which put their velocity feedback in a ``<position kv=...>`` actuator our ``<motor>`` emitter
+    has nowhere to put -- ``robot_import`` names that hole rather than letting "0" imply an undamped machine.
+    """
+    damping_o, friction_o = _declared_joint_dynamics(gene, seg) or (None, None)
+
+    def _out(damping: float, armature: float, frictionloss: float) -> tuple[float, float, float]:
+        return (damping if damping_o is None else damping_o, armature,
+                frictionloss if friction_o is None else friction_o)
+
+    name = (seg.name or "").lower()
+    # The mount that decides the DRIVETRAIN prior, which is not always the mount the body is compiled with: a
+    # sysid bench rig welds a free-base robot to a stand to isolate its actuators, and that weld must not
+    # convert every leg joint into an industrial arm axis. `sysid.bench_rig.bench_model` is the only writer.
+    mount = (getattr(gene, "metadata", None) or {}).get("joint_dynamics_base_mount") or gene.base_mount
+    if seg.joint_type == "prismatic":
+        return _out(1.2, 0.02, 0.12)
+    if _segment_role(seg) == "wheel" or "wheel" in name or "drive" in name:
+        return _out(0.25, 0.02, 0.05)
+    if mount in ("table", "floor", "torso"):
+        # Scale reflected inertia/friction with the selected actuator instead of
+        # assigning a shoulder-sized gearbox to every wrist. The fixed 0.45 Nm
+        # Coulomb loss left a grounded 0.52 Nm wrist only 0.07 Nm to move, so the
+        # arm could never reach its physically valid grasp pose.
+        capacity = max(0.1, abs(float(getattr(seg, "actuator_torque_nm", 0.0) or 0.0)))
+        # A fixed-base industrial/manipulator axis carries gearbox and motor
+        # inertia even when its output-torque rating is small. Keep the
+        # identified manipulator floor for reflected inertia/damping; only
+        # Coulomb friction scales down for a light wrist so it can still move.
+        damping = max(1.0, min(2.0, 0.2 + 0.08 * capacity))
+        armature = max(0.1, min(0.14, 0.003 * capacity))
+        friction = max(0.01, min(0.45, 0.02 * capacity))
+        return _out(damping, armature, friction)
+    if any(token in name for token in ("leg", "hip", "knee", "ankle", "thigh", "shin", "calf")):
+        # Preserve the tuned quadruped's measured reflected inertia anchor. A
+        # 0.04 armature shifted the closed-loop damping ratio by 37% and broke
+        # policy/control parity; the arm/cobot branch retains its identified 0.14.
+        return _out(0.8, 0.01, 0.12)
+    return _out(0.6, 0.03, 0.08)
+
+
 def _geom_xml(seg, pad: str, material: str = "mat_body", meshed: bool = False, physics_only: bool = False) -> str:
     name = f'{escape(seg.name)}_geom'
     # When meshed, the primitive becomes collision-only: invisible (alpha 0) + group 3, but its shape/size/
     # mass are untouched, so dynamics & contacts stay byte-identical to the primitive model. The visible
     # surface is the detailed mesh appended below.
-    surf = ' rgba="0 0 0 0" group="3"' if meshed else f' material="{material}"'
+    contact = ""
+    name_l = (seg.name or "").lower()
+    if seg.joint_type in (None, "fixed") and any(token in name_l for token in ("foot", "paw", "leg", "hoof")):
+        contact = ' condim="6" priority="1" solimp="0.9 0.95 0.001"'
+    surf = (' class="collision" rgba="0 0 0 0" group="3"' if meshed
+            else f' class="collision" material="{material}"')
+    surf += contact
     if seg.shape == "sphere":
         coll = (f'{pad}<geom name="{name}" type="sphere" pos="0 0 {seg.radius_m:.5f}" '
                 f'size="{seg.radius_m:.5f}" mass="{seg.mass_kg:.5f}"{surf}/>')
@@ -538,11 +1336,16 @@ def _geom_xml(seg, pad: str, material: str = "mat_body", meshed: bool = False, p
         # MJX has no cylinder collision; in physics_only mode a cylinder COLLIDER becomes a capsule (the closest
         # MJX-safe round primitive) so a cylinder-shaped link can still train on GPU.
         gtype = "cylinder" if (seg.shape == "cylinder" and not physics_only) else "capsule"
-        coll = (f'{pad}<geom name="{name}" type="{gtype}" fromto="0 0 0 0 0 {seg.length_m:.5f}" '
+        # A wheel's mount offset denotes its axle CENTER; ordinary links attach at their proximal end. The old
+        # shared [0,L] convention shifted both mirrored wheels in the same local direction, leaving one side
+        # visibly detached and the other buried in the chassis.
+        fromto = (f'0 0 {-seg.length_m / 2.0:.5f} 0 0 {seg.length_m / 2.0:.5f}'
+                  if _segment_role(seg) == "wheel" else f'0 0 0 0 0 {seg.length_m:.5f}')
+        coll = (f'{pad}<geom name="{name}" type="{gtype}" fromto="{fromto}" '
                 f'size="{seg.radius_m:.5f}" mass="{seg.mass_kg:.5f}"{surf}/>')
     if not meshed:
         return coll
-    vis = (f'{pad}<geom name="{escape(seg.name)}_vis" type="mesh" mesh="{escape(seg.name)}_vis" '
+    vis = (f'{pad}<geom class="visual" name="{escape(seg.name)}_vis" type="mesh" mesh="{escape(seg.name)}_vis" '
            f'material="{material}" mass="0" contype="0" conaffinity="0"/>')
     return coll + "\n" + vis
 
@@ -559,10 +1362,20 @@ def _detail_geoms_xml(seg, pad: str, *, suppress_motor: bool = False) -> str:
     """
     R = float(seg.radius_m)
     L = float(seg.length_m)
-    vis = ' mass="0" contype="0" conaffinity="0"'
+    vis = ' class="visual" mass="0" contype="0" conaffinity="0"'
     parts: list[str] = []
+    name_l = (seg.name or "").lower()
+    is_limb = any(k in name_l for k in _LIMB_HINT)
+    welded_limb_tip = is_limb and (seg.joint_type or "") not in ("revolute", "prismatic")
     if seg.shape == "cylinder":
-        return ""                          # a WHEEL is a clean cylinder — no motor-can/collar/fairing limb hardware
+        if _segment_role(seg) == "wheel":
+            # A centered axle hub extends past the tire sidewalls and visually mates the wheel to its chassis.
+            # It stays above the contact patch, so the tire remains the only contact-visible surface.
+            half = L / 2.0 + min(0.025, R * 0.3)
+            return (f'{pad}<geom name="{escape(seg.name)}_hub" type="cylinder" '
+                    f'fromto="0 0 {-half:.5f} 0 0 {half:.5f}" size="{R * 0.42:.5f}" '
+                    f'material="mat_joint"{vis}/>')
+        return ""
     # Actuator housing: a slightly-fat "motor can" coaxial with the joint axis, centered at the joint
     # (which sits at this body's local origin). This is the single biggest "robot vs toy" cue.
     if seg.joint_type == "revolute" and not suppress_motor:
@@ -577,29 +1390,35 @@ def _detail_geoms_xml(seg, pad: str, *, suppress_motor: bool = False) -> str:
             f'size="{cr:.5f}" material="mat_joint"{vis}/>'
         )
     # Distal collar/flange on a slender structural link (skip boxes, fingers, and short stubs).
-    if seg.shape in ("capsule", "cylinder") and L > 0.06 and seg.joint_type != "prismatic":
+    if (seg.shape in ("capsule", "cylinder") and L > 0.06 and seg.joint_type != "prismatic"
+            and not welded_limb_tip):
         t = min(0.012, L * 0.10)
         parts.append(
             f'{pad}<geom name="{escape(seg.name)}_collar" type="cylinder" '
-            f'fromto="0 0 {L - t:.5f} 0 0 {L + t:.5f}" size="{R * 1.22:.5f}" material="mat_joint"{vis}/>'
+            f'fromto="0 0 {L - 2 * t:.5f} 0 0 {L:.5f}" size="{R:.5f}" material="mat_joint"{vis}/>'
         )
     # R2 FAIRING + BOOT (visual-only): give a walking limb bodywork so it reads as a DESIGNED limb, not a bare
     # capsule chain (the render's remaining toy tell after styling + proportions). The PROXIMAL segments get a
     # shell-accent fairing sleeve over the mid-span (clear of the joint cans); the welded terminal segment (the
     # foot) gets a rubber boot at its contact tip. Distal structural segments stay bare dark, so the limb reads
     # two-tone — accent bodywork over dark structure, the Go2/Spot design language validated in the A/B/C study.
-    name_l = (seg.name or "").lower()
-    if any(k in name_l for k in _LIMB_HINT):
+    if is_limb:
         welded = (seg.joint_type or "") not in ("revolute", "prismatic")
         tail = name_l.rsplit("_", 1)
         idx = int(tail[1]) if len(tail) == 2 and tail[1].isdigit() else 0
         if welded and 0.02 < L:                        # terminal welded segment == foot -> rubber boot pad
-            # Center the boot UP the foot so its distal extent (pos + boot_r) aligns with the foot capsule's own
-            # distal cap (L + R) — a boot at the tip with a bigger radius hangs below the collision contact and
-            # reads as a spawn penetration (the standing-spawn test measures EVERY geom's oriented AABB). Aligned,
-            # the visible pad wraps the foot without ever protruding past the surface the robot actually stands on.
-            boot_r = R * 1.35
-            boot_z = L + R - boot_r
+            # Center the boot UP the foot so its distal surface lands exactly on the segment's own COLLISION
+            # extent — a pad hanging below the contact surface reads as a spawn penetration (the standing-spawn
+            # test measures every geom's oriented AABB) and makes the robot look like it is sinking into the floor.
+            # That extent is shape-dependent: a capsule's distal cap is at L + R, but a BOX or cylinder foot ends
+            # flat at L. This assumed a capsule for every foot, and the composer emits BOX feet — so every walking
+            # body carried a pad protruding R (38 mm on a quadruped) past the surface it actually stands on. It
+            # went unseen because the foot's VISUAL mesh used to be an oversized brick that reached even further,
+            # so standing_spawn_z (which measures the meshed model) lifted the body enough to cover it. Fixing the
+            # foot mesh removed that accidental cover and exposed this.
+            distal = L + R if seg.shape == "capsule" else L
+            boot_r = max(0.004, min(R, 0.45 * L))
+            boot_z = distal - boot_r
             parts.append(
                 f'{pad}<geom name="{escape(seg.name)}_boot" type="sphere" pos="0 0 {boot_z:.5f}" '
                 f'size="{boot_r:.5f}" material="mat_rubber"{vis}/>')
@@ -614,6 +1433,22 @@ def _detail_geoms_xml(seg, pad: str, *, suppress_motor: bool = False) -> str:
     return "\n".join(parts)
 
 
+def _segment_role(seg) -> str:
+    geometry = getattr(seg, "geometry", None)
+    return str(geometry.get("semantic_role") or "").lower() if isinstance(geometry, dict) else ""
+
+
+def _anatomy_role_of(seg) -> str:
+    """The detailed-solid role this segment is BUILT from, by either vocabulary: the hard-coded composer
+    recipes emit ``family="role"``, the general anatomy compiler stamps ``anatomy_role``."""
+    geometry = getattr(seg, "geometry", None)
+    if not isinstance(geometry, dict):
+        return ""
+    if str(geometry.get("family") or "").lower() == "role":
+        return str(geometry.get("role") or "").lower()
+    return str(geometry.get("anatomy_role") or "").lower()
+
+
 def _actuator_xml(gene: RobotGene) -> str:
     """Torque (motor) actuators — the pick-place controller PD-computes torques and writes
     them to data.ctrl, clamped to forcerange. Must match the legacy exporter (gear=1 motors),
@@ -626,7 +1461,26 @@ def _actuator_xml(gene: RobotGene) -> str:
         effort = float(s.actuator_torque_nm or 10.0)
         lines.append(
             f'    <motor name="{escape(s.name)}_motor" joint="{escape(s.name)}_joint" '
-            f'gear="1" forcerange="{-effort:.2f} {effort:.2f}"/>'
+            f'gear="1" ctrllimited="true" ctrlrange="{-effort:.2f} {effort:.2f}" '
+            f'forcerange="{-effort:.2f} {effort:.2f}"/>'
         )
     lines.append("  </actuator>")
+    return "\n".join(lines) + "\n"
+
+
+def _sensor_xml(gene: RobotGene) -> str:
+    """Shipped proprioception: IMU, joint state and contact sensors over sites emitted by ``_body_xml``."""
+    lines = ['  <sensor>',
+             '    <accelerometer name="imu_accel" site="imu_site"/>',
+             '    <gyro name="imu_gyro" site="imu_site"/>']
+    for seg in gene.actuated_joints():
+        name = escape(seg.name)
+        lines.append(f'    <jointpos name="{name}_position" joint="{name}_joint"/>')
+        lines.append(f'    <jointvel name="{name}_velocity" joint="{name}_joint"/>')
+    for seg in gene.segments:
+        name_l = (seg.name or "").lower()
+        if seg.joint_type in (None, "fixed") and any(token in name_l for token in ("foot", "paw", "leg", "hoof")):
+            name = escape(seg.name)
+            lines.append(f'    <touch name="{name}_contact" site="{name}_touch"/>')
+    lines.append('  </sensor>')
     return "\n".join(lines) + "\n"

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from virturoid.services.install_paths import policy_bank_dir
 
 _GEOM_TYPE = {0: "plane", 2: "sphere", 3: "capsule", 4: "ellipsoid", 5: "cylinder", 6: "box", 7: "mesh"}
 
@@ -74,7 +75,13 @@ def simulate_episode_for_viewer(package_dir: Path, scene_set_uri: str = "simulat
                     model = mujoco.MjModel.from_xml_path(str(robot_only))
                     geoms = _geom_metadata(model)
                     replay_model_uri = _package_relative_uri(package_dir, robot_only)
-        outcome = _locomotion_episode(model, package_dir, record_frames=frames)
+        # M1/#212: if the build saved the WINNING gait's qpos trace (the walkable crawl beat the trot), replay
+        # THAT on this model so the viewport shows the same forward walk the headline scored -- not the trot's
+        # drift. Guarded: only when the trace's nq matches THIS model (else the per-joint mapping would be wrong),
+        # and it falls through to the live rollout on any mismatch/error.
+        outcome = _replay_locomotion_qpos(model, package_dir, record_frames=frames)
+        if outcome is None:
+            outcome = _locomotion_episode(model, package_dir, record_frames=frames)
     elif is_navigation:
         from virturoid.services.navigation_controller import run_navigation_episode
 
@@ -156,15 +163,45 @@ def _load_locomotion_policy(package_dir: Path, feature_dim: int, models_dir: str
         species = genome.get("species")
     except Exception:  # noqa: BLE001
         species = None
-    for cand in ([Path(models_dir) / ("learned_" + str(species).replace("/", "_") + ".npz")] if species else []):
+    for cand in ([policy_bank_dir(models_dir) / ("learned_" + str(species).replace("/", "_") + ".npz")] if species else []):
         if cand.exists():
             try:
                 pol = MorphPolicy.from_npz(str(cand))
-                if pol.feature_dim == feature_dim:
+                if pol.accepts_feature_dim(feature_dim):
                     return pol
             except Exception:  # noqa: BLE001
                 pass
     return None
+
+
+def _replay_locomotion_qpos(model, package_dir: Path, *, record_frames: list):
+    """M1/#212: replay the build's saved WINNING-gait qpos trace (simulation/locomotion_qpos.json) on ``model``,
+    recording geom frames, so the viewport shows the exact forward walk the build headline scored. Returns an
+    outcome dict, or None to signal the caller to fall back to the live rollout -- when no trace exists, its nq
+    doesn't match THIS model (the per-joint mapping would be wrong), or anything goes sideways."""
+    import mujoco
+
+    from virturoid.services.pick_place_controller import _capture_geom_frame
+
+    trace_path = package_dir / "simulation" / "locomotion_qpos.json"
+    if not trace_path.exists():
+        return None
+    try:
+        trace = json.loads(trace_path.read_text(encoding="utf-8"))
+        qpos_frames = trace.get("qpos_frames") or []
+        if not qpos_frames or int(trace.get("nq", -1)) != int(model.nq):
+            return None                                       # shape mismatch -> live rollout keeps the mapping right
+        data = mujoco.MjData(model)
+        for qp in qpos_frames:
+            data.qpos[:] = qp
+            mujoco.mj_forward(model, data)
+            record_frames.append(_capture_geom_frame(data, model))
+        if not record_frames:
+            return None
+        return {"status": "walked", "failure_label": None, "placed_count": 0, "block_count": 0,
+                "forward_m": float(trace.get("forward_m", 0.0)), "note": "replay of the scored gait"}
+    except Exception:  # noqa: BLE001 - a malformed/absent trace just falls back to the live rollout
+        return None
 
 
 def _locomotion_episode(model, package_dir: Path, *, record_frames: list, steps: int = 900,
@@ -207,7 +244,7 @@ def _locomotion_episode(model, package_dir: Path, *, record_frames: list, steps:
     cpg_freq = float(cpg["freq"]); res_scale = float(cpg.get("residual_scale", 0.3))
     two_pi = 2.0 * np.pi; dt = float(model.opt.timestep)
     for t in range(steps):
-        obs = gr.observe(model, data)
+        obs = pol.adapt_observation(gr.observe(model, data))
         a = (pol.act((obs - pol.obs_mean) / pol.obs_std) if normalizer else pol.act(obs)) if has_policy else None
         cphase = two_pi * cpg_freq * t * dt if cpg_gate else 0.0
         for k in range(gr.n_tokens):
@@ -397,7 +434,21 @@ def _geom_metadata(model, mesh_uris: dict | None = None) -> list:
             "type": _GEOM_TYPE.get(int(model.geom_type[gid]), "box"),
             "size": [round(float(v), 4) for v in model.geom_size[gid]],
             "rgba": rgba,
+            "metalness": 0.08,
+            "roughness": 0.68,
         }
+        if matid >= 0:
+            # MuJoCo 3 exposes native PBR values.  Older/generated models generally use
+            # specular + shininess, so translate those conservatively instead of making
+            # every part look like the same grey plastic in Studio.
+            if hasattr(model, "mat_metallic"):
+                item["metalness"] = round(float(model.mat_metallic[matid]), 3)
+            else:
+                item["metalness"] = round(0.55 * float(model.mat_specular[matid]), 3)
+            if hasattr(model, "mat_roughness"):
+                item["roughness"] = round(float(model.mat_roughness[matid]), 3)
+            else:
+                item["roughness"] = round(max(0.12, 1.0 - float(model.mat_shininess[matid])), 3)
         mesh = (mesh_uris or {}).get(name)
         if item["type"] == "mesh" and isinstance(mesh, dict) and isinstance(mesh.get("uri"), str):
             item["mesh_uri"] = mesh["uri"]

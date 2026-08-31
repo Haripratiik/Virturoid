@@ -1,5 +1,37 @@
 import { create } from "zustand";
-import type { Job, JobEvent } from "@/api/types";
+import type { Job, JobEvent, JobStatus } from "@/api/types";
+import type { VerdictKind } from "@/components/ui";
+
+// ---- Job verdict: ONE derivation of the chip every job surface renders ----
+// The backend decides the verdict (services/job_registry.py): a build that produced no robot
+// package finishes as `no_output`, never as a green `succeeded`. An honest refusal is a legitimate
+// outcome, so it is deliberately NOT rendered as a failure.
+
+const JOB_STATUS_LABEL: Record<JobStatus, string> = {
+  queued: "queued",
+  running: "running",
+  succeeded: "succeeded",
+  no_output: "no robot built",
+  failed: "failed",
+  cancelled: "cancelled",
+};
+
+const JOB_STATUS_KIND: Record<JobStatus, VerdictKind> = {
+  queued: "skip",
+  running: "skip",
+  succeeded: "ok",
+  no_output: "warn",
+  failed: "bad",
+  cancelled: "warn",
+};
+
+export function jobStatusLabel(status: Job["status"]): string {
+  return JOB_STATUS_LABEL[status] ?? status;
+}
+
+export function jobStatusKind(status: Job["status"]): VerdictKind {
+  return JOB_STATUS_KIND[status] ?? "skip";
+}
 
 // The backend emits ~18 raw honest stages; the UI groups them into 5 phases.
 // Mapping lives in the FRONTEND so the backend event stream stays raw and honest.
@@ -71,11 +103,13 @@ export function phaseStates(events: JobEvent[], jobStatus: Job["status"]): Recor
     if (idx > lastIdx) lastIdx = idx;
   }
   for (let i = 0; i <= lastIdx; i += 1) states[order[i]] = "done";
-  const finished = jobStatus === "succeeded" || sawDone;
+  const finished = jobStatus === "succeeded" || jobStatus === "no_output" || sawDone;
   if (!finished && lastIdx >= 0 && (jobStatus === "running" || jobStatus === "queued")) {
     states[order[lastIdx]] = "active";
   }
   if (finished) for (const p of order) if (states[p] === "active") states[p] = "done";
+  // Only a job that actually delivered gets its Report row ticked — a refused build stops where it
+  // stopped, which is exactly what the unticked Build/Evaluate/Improve rows already showed.
   if (jobStatus === "succeeded") states.report = "done";
   if (jobStatus === "failed" && lastIdx >= 0) states[order[lastIdx]] = "failed";
   return states;

@@ -50,7 +50,7 @@ def certify_policy_on_bom(gene, policy=None, *, steps: int = 900, n_seeds: int =
     Returns a JSON-able dict: ``{"pass": bool, "gates": [...], "joints": [...], "bom": [...], "summary": str}``.
     ``envelope_tol`` is the allowed fraction of driving samples that may exceed the torque-speed envelope (G4).
     """
-    taus, qvs, survived_all, clamps = [], [], True, None
+    taus, qvs, survived_all, clamps, segs = [], [], True, None, None
     for s in range(max(1, n_seeds)):
         r = recipe_rollout_morph(gene, policy, steps=steps, seed=s, cpg=cpg,
                                  record_actuation=True, **rollout_kw)
@@ -60,6 +60,7 @@ def certify_policy_on_bom(gene, policy=None, *, steps: int = 900, n_seeds: int =
         taus.append(np.asarray(r["tau_cmd"], dtype=float))     # (T_s, n_joints)
         qvs.append(np.asarray(r["qvel"], dtype=float))
         clamps = np.asarray(r["clamps"], dtype=float)          # per-joint torque capacity -> the SHIPPED servo
+        segs = r.get("joint_segments")                         # column -> segment name, for the BOM lookup below
         survived_all = survived_all and bool(r.get("survived", False))
 
     if not taus:                                               # the policy never produced a controllable step
@@ -71,27 +72,70 @@ def certify_policy_on_bom(gene, policy=None, *, steps: int = 900, n_seeds: int =
 
     tau = np.concatenate(taus, axis=0)                         # (sum_T, n_joints) APPLIED torque
     qv = np.concatenate(qvs, axis=0)
-    cert = grade_actuation(tau, qv, clamps=clamps, margin=margin, knee_frac=knee_frac, envelope_tol=envelope_tol,
+    cert = grade_actuation(tau, qv, clamps=clamps, parts=_ordered_parts(gene, segs, tau.shape[1]),
+                           margin=margin, knee_frac=knee_frac, envelope_tol=envelope_tol,
                            survived_all=survived_all, steps=steps, n_seeds=len(taus))
     if out_path:
         _write(out_path, cert)
     return cert
 
 
-def grade_actuation(tau, qv, *, clamps=None, margin: float = 1.3, knee_frac: float = 0.5,
+def _ordered_parts(gene, segs, n_joints: int) -> list[str] | None:
+    """Per joint column, THE PART bom.json ORDERS for it -- or None when the parts list cannot be built.
+
+    The certificate used to re-derive a servo per joint from that joint's torque clamp. That agreed with the
+    BOM only while the clamp happened to BE a catalog motor's peak, and two deliberate improvements broke the
+    coincidence from opposite ends: ``bom_builder`` now STANDARDISES onto <=3 SKUs (a joint whose group was
+    rolled up is ordered a larger part than it was sized), and ``grounded_physics`` now PRESERVES an imported
+    robot's declared limit (so the clamp is the customer's 23.7 N.m, not a catalog peak, and re-deriving from
+    it picks a smaller motor than the one the BOM buys to cover it with margin). Measured on a Menagerie Go2:
+    bom.json listed 8x T-Motor AK80-64 + 4x Unitree M107 while the certificate's own margins.bom listed
+    8x Unitree GO-M8010-6 + 4x T-Motor AK10-9 -- one package, two motor selections, and a buyer procuring
+    from it gets different part numbers depending on which file they open.
+
+    So cite -- and grade against -- the datasheet of the motor that is actually ordered. That is also the
+    stricter reading of the question this certificate exists to answer ("could this motion run on the real
+    motors we would ship?"): the motors we would ship are the ones on the parts list. Roll-ups only ever go
+    up and sizing covers the requirement with margin, so the ordered part is never weaker than the clamp the
+    trajectory was produced under -- the grade is against real hardware, not a relaxed stand-in.
+    """
+    try:
+        import copy as _copy
+
+        from virturoid.services.bom_builder import build_bom
+        # a COPY: build_bom resolves materials on the gene it is handed, and computing a certificate must not
+        # edit the body being certified.
+        amap = (build_bom(_copy.deepcopy(gene)) or {}).get("actuator_map") or {}
+        if not amap:
+            return None
+        names = list(segs) if segs else [s.name for s in gene.actuated_joints()]
+        if len(names) != n_joints:
+            return None
+        parts = [amap.get(n) for n in names]
+        return parts if all(parts) else None
+    except Exception:  # noqa: BLE001 - no parts list -> fall back to sizing from the clamp, as before
+        return None
+
+
+def grade_actuation(tau, qv, *, clamps=None, parts=None, margin: float = 1.3, knee_frac: float = 0.5,
                     envelope_tol: float = 0.02, survived_all: bool = True, steps: int = 0, n_seeds: int = 1) -> dict:
     """Pure grader (no physics): given APPLIED per-joint torque ``tau`` and joint speed ``qv``, both ``(T, n)``,
     grade the trained motion against the SHIPPED servo per joint on 6 datasheet gates. Split out so it is
     deterministically testable on synthetic traces and reused by any rollout source (CPU eval, MJX replay,
     hardware log).
 
+    ``parts`` = the part number bom.json ORDERS for each joint (see :func:`_ordered_parts`). Given, it wins: the
+    certificate grades the trajectory against the datasheet of the motor that is actually on the parts list, so
+    one package cannot describe two motor selections.
+
     ``clamps`` = per-joint torque CAPACITY (the compiled joint's torque limit = the grounding-selected actuator's
-    peak). We size the servo that covers it -- the SAME part the control-side ``real_actuator`` clamp enforces, so
-    the certificate grades exactly the motor the robot ships, and a policy trained under that clamp respects the
-    torque-speed envelope (G4) by construction. When ``clamps`` is None we fall back to sizing from the joint's
+    peak, or an imported robot's own declared limit). With no ``parts`` we size the servo that covers it -- the
+    SAME part the control-side ``real_actuator`` clamp enforces, so a policy trained under that clamp respects
+    the torque-speed envelope (G4) by construction. When both are None we fall back to sizing from the joint's
     peak DEMAND with the safety margin (synthetic tests + un-grounded bodies)."""
     tau = np.asarray(tau, dtype=float); qv = np.asarray(qv, dtype=float)
     n_joints = tau.shape[1]
+    parts = list(parts) if parts is not None else None
 
     joints, bom, viol_frac_all = [], [], []
     worst_headroom, thermal_ratio, speed_ratio, power_ratio = np.inf, 0.0, 0.0, 0.0
@@ -101,11 +145,14 @@ def grade_actuation(tau, qv, *, clamps=None, margin: float = 1.3, knee_frac: flo
         demand_peak = _pct(tj, 99.0)                           # p99 to shrug off single-step spikes
         demand_rms = float(np.sqrt(np.mean(tau[:, j] ** 2)))
         speed_peak = _pct(wj, 99.0)
-        # grade against the SHIPPED servo (covers the joint's torque capacity) so the cert matches the clamp; else
-        # size the real part from the measured duty (peak w/ margin, continuous, AND speed) for un-grounded bodies
-        servo = (select_actuator(float(clamps[j]), margin=1.0) if clamps is not None
-                 else select_actuator(demand_peak, margin=margin,
-                                      required_speed_radps=speed_peak, continuous_torque_nm=demand_rms))
+        # grade against the ORDERED servo when the parts list is available (one package, one motor selection);
+        # else the servo that covers this joint's torque capacity, so the cert matches the clamp; else size the
+        # real part from the measured duty (peak w/ margin, continuous, AND speed) for un-grounded bodies
+        servo = _by_part(parts[j]) if parts else None
+        if servo is None:
+            servo = (select_actuator(float(clamps[j]), margin=1.0) if clamps is not None
+                     else select_actuator(demand_peak, margin=margin,
+                                          required_speed_radps=speed_peak, continuous_torque_nm=demand_rms))
         tau_pk, tau_rated, qd_max = servo.peak_torque_nm, servo.rated_torque_nm, servo.max_speed_radps
         qd_knee = knee_speed(qd_max, frac=knee_frac)
 
@@ -166,6 +213,11 @@ def grade_actuation(tau, qv, *, clamps=None, margin: float = 1.3, knee_frac: flo
 def _CAT():
     from virturoid.services.component_catalog import ACTUATORS
     return ACTUATORS
+
+
+def _by_part(name):
+    """The catalog Actuator behind a bom.json part number, or None if the name is not a motor we stock."""
+    return next((x for x in _CAT() if x.name == name), None)
 
 
 def _write(path: str, cert: dict) -> None:

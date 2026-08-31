@@ -102,7 +102,7 @@ def _revise_scene_set(source: SceneSet, feedback: dict) -> SceneSet:
         revised_objects = [_revise_scene_object(item) for item in scene.objects]
         revised_scenes.append(
             SceneGraph(
-                id=f"revision_{scene.id}",
+                id=f"rev_{scene.id}",
                 name=f"Revised {scene.name}",
                 backend_targets=list(scene.backend_targets),
                 robot_spawn_xyz_rpy=scene.robot_spawn_xyz_rpy,

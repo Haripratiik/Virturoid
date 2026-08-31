@@ -335,5 +335,202 @@ class AnatomyCompilerTests(unittest.TestCase):
         self.assertEqual(g.validate(), [])
 
 
+# --------------------------------------------------------------------------------------------- task #213
+# A SECOND BODY AXIS: limbs at stations ALONG a parent, not only on the root or at a part's tip.
+_TRUNK_PAIRS = 5
+SEGMENTED = {
+    "robot_class": "legged", "name": "segmented",
+    "parts": [
+        {"name": "forebody", "role": "body", "size": 0.10, "girth": 0.11, "aspect": "wide"},
+        {"name": "trunk", "role": "segment", "parent": "forebody", "attach": "rear_mid", "aim": "back",
+         "size": 0.46, "girth": 0.055, "segments": _TRUNK_PAIRS, "joint": "revolute",
+         "axis": [1.0, 0.0, 0.0], "lower": -0.35, "upper": 0.35},
+        *[{"name": f"leg{i + 1}", "role": "leg", "parent": "trunk",
+           "attach": {"along": (i + 0.5) / _TRUNK_PAIRS, "lateral": 1.0, "height": 0.30},
+           "aim": "down_out", "size": 0.28, "girth": 0.0126, "segments": 4,
+           "symmetry": "left_right", "joint": "revolute"} for i in range(_TRUNK_PAIRS)],
+    ],
+}
+
+
+class StationAttachTests(unittest.TestCase):
+    """``attach`` used to be read ONLY when the parent was the ROOT; every other part welded its children to
+    its chain TIP at offset (0,0,0). So a segmented trunk could carry limbs at exactly one place, and the only
+    many-legged topology the compiler could express was a radial fan from one disc."""
+
+    def _chain_roots(self, gene):
+        return [s for s in gene.segments if s.name.endswith("_0") and s.name.startswith("leg")]
+
+    def test_leg_pairs_land_on_DIFFERENT_trunk_links(self):
+        g = build_from_anatomy(SEGMENTED)
+        self.assertEqual(g.validate(), [])
+        parents = {s.parent for s in self._chain_roots(g)}
+        # the regression this closes: every pair used to resolve to the LAST link ("trunk_4")
+        self.assertEqual(len(parents), _TRUNK_PAIRS,
+                         f"each pair must sit on its own trunk link; got {sorted(parents)}")
+
+    def test_a_mirrored_pair_straddles_its_link_on_the_SIDE_IT_AIMS_AT(self):
+        # `_aim_R` sends local +y to world -y for a part aimed backwards, so expressing `lateral` in the
+        # parent's local frame put every left leg's mount on the RIGHT flank and the pair crossed underneath.
+        import mujoco
+        g = build_from_anatomy(SEGMENTED)
+        by = {s.name: s for s in g.segments}
+        for s in self._chain_roots(g):
+            side = s.name.rsplit("_", 2)[1]                       # leg3_l_0 -> 'l'
+            self.assertNotEqual(by[s.name].mount_offset[:2], (0.0, 0.0),
+                                f"{s.name}: a station mount must be offset from the parent's axis")
+        if not _MUJOCO:
+            return
+        from virturoid.services.morph_policy import compiled_model, robot_mjcf
+        m = compiled_model(robot_mjcf(g))
+        d = mujoco.MjData(m)
+        mujoco.mj_forward(m, d)
+        for s in self._chain_roots(g):
+            side = s.name.rsplit("_", 2)[1]
+            bid = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, s.name)
+            if bid < 0:
+                continue
+            y = float(d.xpos[bid][1])
+            self.assertTrue(y > 0 if side == "l" else y < 0,
+                            f"{s.name} mounted at y={y:+.4f}: the pair crossed under the body")
+
+    def test_the_body_is_a_CHAIN_not_a_fan(self):
+        g = build_from_anatomy(SEGMENTED)
+        kids: dict = {}
+        for s in g.segments:
+            kids.setdefault(s.parent, []).append(s.name)
+        root = next(s for s in g.segments if s.parent is None)
+        # a radial body hangs every limb off the root; a segmented one hangs ONE chain off it
+        self.assertEqual(len(kids[root.name]), 1, "a segmented body has a single trunk chain off its root")
+        depth, node = 0, kids[root.name][0]
+        while kids.get(node):
+            node = kids[node][0]
+            depth += 1
+        self.assertGreaterEqual(depth, _TRUNK_PAIRS, "the trunk must be a serial chain of links")
+
+    def test_a_body_axis_link_is_wider_than_tall_and_does_not_taper_away(self):
+        # a trunk is not a limb: limbs thin distally because they carry less load; a trunk is not cantilevered.
+        g = build_from_anatomy(SEGMENTED)
+        links = [s for s in g.segments if s.name.startswith("trunk_")]
+        self.assertEqual(len(links), _TRUNK_PAIRS)
+        first, last = links[0], links[-1]
+        self.assertGreater(last.radius_m / first.radius_m, 0.85,
+                           "a body-axis chain must stay a trunk, not taper into a tail")
+        for s in links:                                   # half_y (lateral) > half_x (vertical)
+            hx = max(abs(p[0]) for p in s.geometry["profile"])
+            hy = max(abs(p[1]) for p in s.geometry["profile"])
+            self.assertGreater(hy, hx, f"{s.name}: a body segment is wider than it is tall")
+
+    def test_omitting_the_station_keeps_the_historical_tip_weld(self):
+        # every graph that does not use the dict form must compile exactly as before.
+        parts = [dict(p) for p in SEGMENTED["parts"]]
+        for p in parts:
+            if isinstance(p.get("attach"), dict):
+                p["attach"] = "tip"
+        g = build_from_anatomy({**SEGMENTED, "parts": parts})
+        tip = f"trunk_{_TRUNK_PAIRS - 1}"
+        self.assertEqual({s.parent for s in self._chain_roots(g)}, {tip})
+        for s in self._chain_roots(g):
+            self.assertEqual(tuple(s.mount_offset), (0.0, 0.0, 0.0))
+
+
+class SegmentedCrawlerTests(unittest.TestCase):
+    """The offline body plan for a request with more leg pairs than a rigid trunk can station."""
+
+    def test_a_many_legged_request_builds_a_chain_not_a_radial_fan(self):
+        from virturoid.services.novel_anatomy import build_spider
+        g = compose_robot("a centipede robot", llm=None)
+        root = next(s for s in g.segments if s.parent is None)
+        n_root_children = sum(1 for s in g.segments if s.parent == root.name)
+        self.assertNotEqual(g.id, "proc_spider", "a centipede must not be the radial arachnid archetype")
+        # the radial body puts 16 children on its root disc; a segmented one puts the trunk + a pair of antennae
+        self.assertLess(n_root_children, 6, f"{n_root_children} parts radiate from the root — that is a fan")
+        self.assertEqual(sum(1 for s in build_spider(n_legs=14).segments
+                             if s.parent == "cephalothorax"), 16)     # the premise this test replaces
+
+    def test_the_leg_count_the_request_named_is_the_count_built(self):
+        for prompt, want in (("a centipede robot", 14), ("a millipede robot", 16),
+                             ("a 12-legged walking robot", 12)):
+            g = compose_robot(prompt, llm=None)
+            chains = {s.name.rsplit("_", 1)[0] for s in g.segments
+                      if s.name.startswith("leg") and s.name.endswith("_0")}
+            self.assertEqual(len(chains), want, f"{prompt!r} -> {sorted(chains)}")
+
+    def test_the_pair_count_is_bounded_by_what_appendage_discovery_can_read(self):
+        from virturoid.services.anatomy_compiler import SEGMENTED_MAX_PAIRS, segmented_crawler_gene
+        g = segmented_crawler_gene(n_legs=1000)
+        links = [s for s in g.segments if s.name.startswith("trunk_")]
+        self.assertEqual(len(links), SEGMENTED_MAX_PAIRS)
+        self.assertLessEqual(SEGMENTED_MAX_PAIRS, 8,
+                             "appendage_map.main_paths stops descending a branching stub at depth 8")
+
+    @unittest.skipUnless(_MUJOCO, "needs MuJoCo")
+    def test_every_leg_is_DISCOVERED_and_they_are_ordered_head_to_tail(self):
+        # the metachronal wave gait (>=10 legs) phases legs by their foot's fore-aft station. A radial fan
+        # gives it legs clustered around one disc; a segmented body gives it a real head->tail ordering.
+        from virturoid.services.appendage_map import build_appendage_map
+        from virturoid.services.morph_policy import compiled_model, robot_mjcf
+        g = compose_robot("a centipede robot", llm=None)
+        amap = build_appendage_map(compiled_model(robot_mjcf(g)))
+        self.assertEqual(amap.n_legs, 14)
+        stations = {round(lg.tip_xy[0], 2) for lg in amap.legs}
+        self.assertEqual(len(stations), 7, f"7 leg pairs must sit at 7 fore-aft stations, got {stations}")
+        span = max(stations) - min(stations)
+        self.assertGreater(span, 0.3, "the stations must span the body, not cluster on a disc")
+
+    @unittest.skipUnless(_MUJOCO, "needs MuJoCo")
+    def test_the_stance_is_sprawled_wider_than_the_body(self):
+        from virturoid.services.appendage_map import build_appendage_map
+        from virturoid.services.morph_policy import compiled_model, robot_mjcf
+        g = compose_robot("a centipede robot", llm=None)
+        m = compiled_model(robot_mjcf(g))
+        amap = build_appendage_map(m)
+        ys = [lg.tip_xy[1] for lg in amap.legs]
+        body_w = 2.0 * max(float(s.radius_m) for s in g.segments if s.name.startswith("trunk_"))
+        self.assertGreater(max(ys) - min(ys), 2.0 * body_w,
+                           "the feet must plant OUTSIDE the body, not under it")
+
+    def test_it_clears_the_morphology_gate(self):
+        from virturoid.services.morphology_priors import validate_morphology
+        r = validate_morphology(compose_robot("a centipede robot", llm=None))
+        self.assertTrue(r.ok, r.issues)
+
+    def test_the_composed_body_says_it_is_segmented(self):
+        # the plan chose the trunk-link count on a structural rule; the caller must be told, not handed
+        # "a supported specialist body plan" (which `_fallback_gene` used to overwrite it with).
+        notes = " ".join(compose_robot("a centipede robot", llm=None).composition_notes).lower()
+        self.assertIn("segmented", notes)
+        self.assertIn("14 legs", notes)
+
+    @unittest.skipUnless(_MUJOCO, "needs MuJoCo")
+    def test_it_walks_at_the_horizon_its_fitter_judges_it_at(self):
+        """The claim this task ships, pinned. GROUNDED, at ``gait_flywheel._SETTLE_STEPS``, under the course gate.
+
+        The horizon is load-bearing and is NOT a free choice: ``classify`` gates on an absolute ``forward >= 0.3``
+        while ``fit_gait_for_body`` searches and deploys at 6000, so a slow-but-steady body reads FORWARD BUT
+        SHORT at 1500 (0.179 m) and CREDIBLE WALK at 6000 (0.567 m), and 6000 is the one the fitter's own
+        adopt/decline decision is made at. Measured here: 0.567 m, cadence 35.7, support 1.000, rate holding
+        0.119 -> 0.095 per 1000 steps, straightness 0.574 against the 0.5 floor -- that last is the TIGHT gate,
+        so a change that makes this body wander will show up here first.
+
+        The body this replaces did not walk under any horizon: grounded ``build_spider(14)`` travels 0.037 m in
+        6000 steps with cadence 0.0 and support 0.000 -- it never lifts a foot.
+        """
+        import virturoid.services.gait_flywheel as gf
+        from virturoid.services.gait_quality import classify, settling
+        from virturoid.services.gene_build import ground_and_repair
+        from virturoid.services.morph_policy import crawl_gait_rollout
+        g = compose_robot("a centipede robot", llm=None)
+        ground_and_repair(g)
+        r = crawl_gait_rollout(g, steps=gf._SETTLE_STEPS, record_qpos=True)
+        s = settling(r) or {}
+        self.assertEqual(classify(r), "CREDIBLE WALK",
+                         f"forward={r['forward']:.3f} cadence={r.get('cadence')} "
+                         f"support={r.get('support_frac')} straightness={r.get('straightness')} "
+                         f"rate {s.get('rate_early')} -> {s.get('rate_full')}")
+        self.assertGreater(r.get("support_frac", 0.0), 0.25)      # it STEPS; the radial body scored 0.000
+        self.assertGreater(r.get("cadence", 0.0), 1.0)            # ...and lifts feet; the radial body scored 0.0
+
+
 if __name__ == "__main__":
     unittest.main()

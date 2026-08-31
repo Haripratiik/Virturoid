@@ -286,8 +286,16 @@ def _scene_object_xml(item: SceneObject, floor: bool = False) -> str:
         _fh = round((0.16 if floor else 0.06) * s, 4)
         hx, hy, hz = _half_xyz(item, _fh, _fh, 0.006)
         base_z = 0.0 if floor else TABLE_TOP_Z
+        # Start/goal/place zones are task annotations, not physical speed
+        # bumps. A colliding 6 mm start marker trapped heavy mobile bases and
+        # made route success depend on marker geometry. Keep the visible pad
+        # while removing it completely from contact dynamics.
+        # Spell the visual-only contract directly instead of depending on a
+        # named default class. Scene objects are also compiled independently
+        # by dataset/validation tools whose minimal MJCF has no class tree.
         return (f'    <geom name="{name}" type="box" size="{hx} {hy} {hz}" '
-                f'pos="{x} {y} {round(base_z + hz, 4)}" rgba="{_rgba_for(item, "green")}"/>')
+                f'pos="{x} {y} {round(base_z + hz, 4)}" rgba="{_rgba_for(item, "green")}" '
+                f'mass="0" contype="0" conaffinity="0"/>')
 
     # ---- floor obstacle / pillar to steer around (navigation / maze) ----
     if floor and item.object_type == "obstacle":

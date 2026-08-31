@@ -5,7 +5,7 @@
   "purpose": "edge_case",
   "scenes": [
     {
-      "id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_000",
+      "id": "scene_938c34b8_edge_case_000",
       "version": "0.1.0",
       "name": "Sort colored blocks edge_case scene 1",
       "backend_targets": [
@@ -154,7 +154,7 @@
       ]
     },
     {
-      "id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_001",
+      "id": "scene_938c34b8_edge_case_001",
       "version": "0.1.0",
       "name": "Sort colored blocks edge_case scene 2",
       "backend_targets": [
@@ -303,7 +303,7 @@
       ]
     },
     {
-      "id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_002",
+      "id": "scene_938c34b8_edge_case_002",
       "version": "0.1.0",
       "name": "Sort colored blocks edge_case scene 3",
       "backend_targets": [

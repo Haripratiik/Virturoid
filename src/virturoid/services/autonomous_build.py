@@ -905,6 +905,23 @@ def _maybe_gene_build(prompt, output_dir, target, memory_dir, emit, *, train: bo
     else:
         gene, keystone_follower, keystone_res = _maybe_keystone_codesign(gene, prompt, memory_dir, emit)
 
+    # M1/#212 (2026-07-24 audit): UNIFY on create_robot's walkable path so the Studio suggestion-chip build
+    # (this autonomous_build) ships the SAME credible-walking quadruped as create_robot, not a 0%/EXPORT-BLOCKED
+    # one. create_robot composes ensure_walkable=True + tune_crawl_gait; this path did NEITHER, so its legged
+    # bodies kept the un-fanned stance and the quad-tuned default gait and collapsed. Apply both to the FINAL gene
+    # (after any flywheel reuse / keystone co-design), covering the composed AND fixture-fallback paths.
+    # ensure_walkable_quad's adopt gate keeps whichever body walks better, so an already-walking keystoned body
+    # is never clobbered; it is a no-op for non-legged morphologies.
+    try:
+        from virturoid.services.task_matched_eval import robot_kind
+        if robot_kind(gene) == "legged":
+            from virturoid.services.anatomy_compiler import ensure_walkable_quad
+            gene = ensure_walkable_quad(gene, prompt)
+            from virturoid.services.morph_policy import tune_crawl_gait
+            tune_crawl_gait(gene)
+    except Exception:  # noqa: BLE001 - walkability tuning must never block the build; defaults still apply
+        pass
+
     from virturoid.services.compute_provenance import RealComputeMeter
     from virturoid.services.gene_build import build_gene_package
 

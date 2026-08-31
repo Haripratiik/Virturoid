@@ -61,6 +61,80 @@ def test_certificate_v2_schema_and_scope(monkeypatch):
     assert "optimistic by construction" in cert["honest_limits"]
 
 
+# ---------------------------------------------------------------- the honesty block is DERIVED, not declared
+#
+# The regression these guard: `scope.valid_iff`, `scope.not_modeled`, `scope.claim_ceiling` and `honest_limits`
+# were four string CONSTANTS, byte-identical on every certificate for every robot, in a module whose docstring
+# calls them "mandatory, not boilerplate". `claim_ceiling` in particular asserted "the failure modes we can
+# model were swept and passed with the stated margins" on certificates where run_dr=False (nothing swept) and
+# on bodies whose headline verdict was FELL.
+def _canned_sweep(pass_rate=1.0, draws=12):
+    k_fail = int(round((1.0 - pass_rate) * draws))
+    return {"draws": draws, "pass_rate": pass_rate, "swept_ranges": C2.DR_RANGES,
+            "clopper_pearson_failure_bound": C2.clopper_pearson(k_fail, draws),
+            "failure_boundaries": {}, "scope_note": "friction is not swept"}
+
+
+def test_the_four_honesty_fields_are_derived_from_the_run_not_hardcoded(monkeypatch):
+    """Same robot, two runs that MEASURED different things -> all four fields must read differently."""
+    body, v_ok = _legged(), {"verdict": "CREDIBLE", "credible": True}
+    bare = C2.build_certificate_v2(body, v_ok, run_dr=False, run_margins=False)
+
+    monkeypatch.setattr(C2, "dr_sweep", lambda *a, **k: _canned_sweep())
+    monkeypatch.setattr(C2, "numerics_invariance", lambda *a, **k: {"probed": True, "invariant": True})
+    monkeypatch.setattr(C2, "joint_margins", lambda *a, **k: {"available": True, "pass": True,
+                                                              "weakest_joint_headroom": 1.9, "n_gates_pass": 6})
+    full = C2.build_certificate_v2(body, v_ok, run_dr=True, run_margins=True)
+
+    assert bare["scope"]["valid_iff"] != full["scope"]["valid_iff"]
+    assert bare["scope"]["claim_ceiling"] != full["scope"]["claim_ceiling"]
+    assert bare["scope"]["not_modeled"] != full["scope"]["not_modeled"]
+    assert bare["honest_limits"] != full["honest_limits"]
+
+    # ...and each one states the truth about ITS OWN run.
+    assert "NO robustness claim" in bare["scope"]["claim_ceiling"]
+    assert "no DR sweep ran" in bare["honest_limits"]
+    assert any("no DR sweep ran" in s for s in bare["scope"]["not_modeled"])
+    assert "12 draws" in full["scope"]["claim_ceiling"] and "ALL passed" in full["scope"]["claim_ceiling"]
+    assert "SWEPT envelope" in full["scope"]["valid_iff"]
+    assert "no perturbation envelope was swept" in bare["scope"]["valid_iff"]
+    # the declared residue is still there, but LABELLED declared instead of passed off as a finding
+    assert full["scope"]["not_modeled_provenance"]["declared"] == C2._DECLARED_NOT_MODELED
+    assert full["honest_limits_declared"] == C2._DECLARED_LIMITS
+
+
+def test_claim_ceiling_admits_failures_inside_the_swept_envelope(monkeypatch):
+    monkeypatch.setattr(C2, "dr_sweep", lambda *a, **k: _canned_sweep(pass_rate=0.75))
+    monkeypatch.setattr(C2, "numerics_invariance", lambda *a, **k: {"probed": True, "invariant": True})
+    cert = C2.build_certificate_v2(_legged(), {"verdict": "CREDIBLE", "credible": True},
+                                   run_dr=True, run_margins=False)
+    ceiling = cert["scope"]["claim_ceiling"]
+    assert "ALREADY CONTAINS FAILURES" in ceiling and "3/12" in ceiling
+    assert "passed" not in ceiling.lower()          # it may never claim the sweep passed
+
+
+def test_a_failed_verdict_cannot_carry_a_passing_claim_ceiling():
+    cert = C2.build_certificate_v2(_legged(), {"verdict": "FELL", "credible": False},
+                                   run_dr=False, run_margins=False)
+    assert "does NOT claim the robot works" in cert["scope"]["claim_ceiling"]
+    assert "FELL" in cert["scope"]["claim_ceiling"]
+    assert "not credible" in cert["honest_limits"]
+
+
+def test_numerics_probe_reports_unmeasured_rather_than_a_free_invariant_true(monkeypatch):
+    monkeypatch.setattr(C2, "_credible_under", lambda g, p: (True, 1.0))
+    n = C2.numerics_invariance(_legged(), gait_params=None)      # nothing to re-run -> it must not claim a pass
+    assert n["probed"] is False and n["invariant"] is None
+    assert "not probed" in n["note"]
+
+
+def test_use_history_says_it_has_no_writer():
+    cert = C2.build_certificate_v2(_legged(), {"verdict": "CREDIBLE", "credible": True},
+                                   run_dr=False, run_margins=False)
+    assert cert["use_history"]["measured"] is False
+    assert "no writer" in cert["use_history"]["note"].lower()
+
+
 def test_certificate_is_void_when_model_sanity_red(monkeypatch):
     monkeypatch.setattr(C2, "model_sanity", lambda g: {"ok": False, "issues": ["forced red"],
                                                        "inertia_valid": False, "mass_finite": True,
@@ -86,3 +160,34 @@ def test_full_tier1_certificate_on_a_real_walker():
     assert "friction" in rob["scope_note"].lower()          # honestly scopes what it did NOT sweep
     assert cert["margins"]["available"] in (True, False)     # margins attempted from the verified trajectory
     assert "invariant" in cert["numerics"]
+
+
+# ---------------------------------------------------------------- controller parity (the OTHER half of the claim)
+# `body_parity` has been checked since a Go2 certificate quoted a body 8 kg lighter. The controller half went
+# unasked, and measured on a real Menagerie Go2 the answer was no: the certificate signed a `default_crawl`
+# rollout while the same package deployed a `trot_cpg_gait` from software/control_program.json.
+def test_v2_carries_controller_parity_and_reads_the_gene_stamp():
+    from virturoid.services.gene_build import _stamp_exported_controller
+    g = _legged()
+    _stamp_exported_controller(g, {"policy_type": "trot_cpg_gait", "entrypoint": "software/gait_controller.py",
+                                   "program_fingerprint": "f00d", "control_frequency_hz": 50.0,
+                                   "sim_forward_m": 0.311, "sim_verdict": "CROUCH", "verified_walk": False,
+                                   "parameters_file": "software/control_program.json"})
+    cert = C2.build_certificate_v2(g, {"verdict": "CROUCH", "survived": True, "forward_m": 0.119,
+                                       "gait_source": "default_crawl"},
+                                   run_dr=False, run_margins=False)
+    cp = cert["verdict"]["controller_parity"]
+    assert cp["same"] is False, "a crawl rollout is not the trot program this package deploys"
+    assert cp["shipped_controller"]["program_fingerprint"] == "f00d"     # picked the stamp up off the gene
+    assert cert["verdict"]["deploy_is_measure"] is False
+    assert cert["verdict"]["deploy_is_measure_parts"]["same_controller"] is False
+    assert "deploy==measure" not in cert["verdict"]["verified_with"]
+
+
+def test_v2_without_a_stamp_reports_unknown_not_agreement():
+    cert = C2.build_certificate_v2(_legged(), {"verdict": "CREDIBLE", "credible": True, "survived": True,
+                                               "forward_m": 0.8, "gait_source": "default_crawl"},
+                                   run_dr=False, run_margins=False)
+    assert cert["verdict"]["controller_parity"]["same"] is None
+    assert cert["verdict"]["deploy_is_measure"] is None
+    assert "deploy==measure" not in cert["verdict"]["verified_with"]

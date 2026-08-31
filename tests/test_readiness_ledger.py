@@ -110,5 +110,46 @@ class ReadinessLedgerTests(unittest.TestCase):
             self.assertTrue(ledger.safe_to_export)
 
 
+class B3dGateConsistencyTests(unittest.TestCase):
+    """B3d: the REQUESTED task gates export consistently across archetypes, and BOM power/torque
+    infeasibility is a gate (not a buried note)."""
+
+    def _pkg(self, reports: dict) -> Path:
+        d = Path(tempfile.mkdtemp()); (d / "reports").mkdir()
+        for name, obj in reports.items():
+            (d / "reports" / name).write_text(json.dumps(obj), encoding="utf-8")
+        return d
+
+    def test_failing_requested_task_is_not_masked_by_a_generic_grasp_cert(self):
+        # arm asked to SORT scores 0%, but a generic real contact grasp+lift passes -> must still BELOW_GATE
+        pkg = self._pkg({
+            "grasp_evaluation_report.json": {"grasp_model": "contact", "success_rate": 0.9, "mean_lift_m": 0.08},
+            "gene_evaluation_report.json": {"task_type": "sort", "success_rate": 0.0, "adapter_name": "real_mjx"},
+        })
+        led = build_product_readiness_ledger(pkg, require=["physics_evaluated"])
+        self.assertEqual(BELOW_GATE, led.by_stage["physics_evaluated"].status)
+        self.assertFalse(led.safe_to_export)
+
+    def test_honest_grasp_cert_still_attains_when_no_requested_task_failed(self):
+        pkg = self._pkg({"grasp_evaluation_report.json":
+                         {"grasp_model": "contact", "success_rate": 0.9, "mean_lift_m": 0.08}})
+        led = build_product_readiness_ledger(pkg, require=["physics_evaluated"])
+        self.assertEqual(ATTAINED, led.by_stage["physics_evaluated"].status)
+
+    def test_infeasible_bom_certificate_blocks_export(self):
+        pkg = self._pkg({"bom_certificate.json": {"pass": False, "n_gates_pass": 4,
+                         "gates": [{"name": "G5_mechanical_power", "passed": False}]}})
+        led = build_product_readiness_ledger(pkg, require=["actuators_feasible"])
+        self.assertEqual(BELOW_GATE, led.by_stage["actuators_feasible"].status)
+        self.assertFalse(led.safe_to_export)
+
+    def test_absent_bom_certificate_does_not_block(self):
+        # a build that never ran the cert must not be blocked by its absence (NOT_REQUIRED counts as real)
+        pkg = self._pkg({})
+        led = build_product_readiness_ledger(pkg, require=["actuators_feasible"])
+        self.assertTrue(led.by_stage["actuators_feasible"].real)
+        self.assertTrue(led.safe_to_export)
+
+
 if __name__ == "__main__":
     unittest.main()

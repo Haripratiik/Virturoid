@@ -20,7 +20,28 @@ from __future__ import annotations
 import hashlib
 import re
 
-HELD_OUT_VERSION = "v1"
+# v2 (2026-08-08, task #281) — the many-limb predicate stopped counting NECKS AND TAILS as limbs.
+#
+# MEASURED before the change: every prompt in the corpus factory's own legged bank composed to a body the guard
+# called ``many_limb`` — 18 of 18, 100%. The composer's quadruped is a torso with four legs, a neck and a tail:
+# six actuated chains hanging off the root, and ``_leg_chain_count`` counts chains, not legs. So the niche whose
+# documented job is "octopod, hexapod-and-up" was reserving THE MAIN FAMILY, and the corpus factory could not
+# bank a single quadruped no matter what it proposed.
+#
+# The fix narrows ``many_limb`` to what it always said it was: >= 6 chains carrying >= 2 actuated joints each.
+# Measured on the composer's own bodies, that separates cleanly with room to spare — quadruped 4, hexapod 6,
+# spider 8, octopod 8, centipede 14 — because a neck or a tail is a ONE-joint stub and a limb you step with is
+# a 3-joint chain. Nothing else about the partition moves: the reserved-prompt list, the aquatic/aerial/wheel-leg
+# niches and the manifest are untouched, and every reserved specific body stays reserved through its prompt.
+#
+# WHAT THE PARTITION LOSES, STATED PLAINLY. A reserved quadruped-shaped body (the fox, the tripod surveyor)
+# presented WITHOUT its originating prompt used to be caught structurally; now it is not. That catch was never a
+# property of the holdout design — it was the bug, which reserved every quadruped ever composed and so caught the
+# fox the way a net that covers the ocean catches one fish. Closing that hole properly needs a structural
+# signature for the reserved BODIES (``body_key`` exists and its docstring says so), not a niche predicate that
+# swallows the family. Left undone deliberately: the keys can only be computed by composing all 25 reserved
+# prompts, which is neither pure nor cheap, and this module's callers consult the guard in a hot loop.
+HELD_OUT_VERSION = "v2"
 
 # ------------------------------------------------------------------ reserved specific bodies (interpolation)
 # Named prompts inside common families, reserved so the compounding curve is scored on bodies the corpus never
@@ -96,6 +117,41 @@ def _leg_chain_count(gene) -> int:
     return chains
 
 
+# A chain is a LIMB — something the body could step on — rather than a neck/tail/antenna stub when it carries at
+# least this many actuated joints. Measured across the composer's own bodies: neck 1, tail 1, walking leg 3,
+# spider leg 3, tentacle 4. The threshold sits in the empty gap between 1 and 3, so it is not a knife edge.
+LIMB_ARTICULATION_MIN = 2
+MANY_LIMB_MIN = 6                  # limbs that make a body "many-limbed" (hexapod-and-up)
+
+
+def _chain_actuated_joints(gene, child) -> int:
+    """Actuated joints in the whole subtree hanging off one root child (its own joint included)."""
+    n = 1 if child.joint_type in ("revolute", "prismatic") else 0
+    stack = list(gene.children_of(child.name))
+    while stack:
+        s = stack.pop()
+        if s.joint_type in ("revolute", "prismatic"):
+            n += 1
+        stack.extend(gene.children_of(s.name))
+    return n
+
+
+def locomotor_limb_count(gene) -> int:
+    """How many of the root's chains are LIMBS (>= ``LIMB_ARTICULATION_MIN`` actuated joints), as opposed to the
+    single-joint appendages — a neck, a tail — that ``_leg_chain_count`` cannot tell apart from a leg.
+
+    Deliberately a SECOND function rather than a fix to ``_leg_chain_count``: that one is a body-descriptor used
+    by the MAP-Elites niche key, the exemplar features, the morphology-dynamics vector and design-bench's
+    ``legs`` constraint, and it is honestly named — it counts limb CHAINS. Only the holdout predicate needed the
+    stricter reading, so only the holdout predicate gets it, and no banked embedding or niche key moves.
+    """
+    root = gene.root() if hasattr(gene, "root") else None
+    if root is None:
+        return 0
+    return sum(1 for c in gene.children_of(root.name)
+               if _chain_actuated_joints(gene, c) >= LIMB_ARTICULATION_MIN)
+
+
 def _niche_aquatic(gene) -> bool:
     return _kind(gene) == "aquatic"
 
@@ -105,9 +161,12 @@ def _niche_aerial(gene) -> bool:
 
 
 def _niche_many_limb(gene) -> bool:
-    """Radial / many-limbed bodies (octopod, hexapod-and-up): >=6 limb chains. A frontier for scripted control
-    and a genuine structural extrapolation target — held out wholesale."""
-    return _kind(gene) == "legged" and _leg_chain_count(gene) >= 6
+    """Radial / many-limbed bodies (octopod, hexapod-and-up): >= ``MANY_LIMB_MIN`` LIMBS. A frontier for scripted
+    control and a genuine structural extrapolation target — held out wholesale.
+
+    Counts limbs (``locomotor_limb_count``), not chains. Counting chains meant a torso with four legs, a neck and
+    a tail read as a six-limbed body; see the HELD_OUT_VERSION note."""
+    return _kind(gene) == "legged" and locomotor_limb_count(gene) >= MANY_LIMB_MIN
 
 
 def _niche_wheel_leg_hybrid(gene) -> bool:
@@ -179,6 +238,51 @@ def is_held_out(gene, *, prompt: str | None = None) -> bool:
     return False
 
 
+def explain(gene, *, prompt: str | None = None) -> dict:
+    """``is_held_out`` with its REASONS — the surface a proposer steers by.
+
+    A boolean can only be filtered on: the caller learns that a slot was wasted and nothing about what to do
+    differently, which is why the corpus factory could resample four times into the same reserved niche and
+    report the same waste it was written to prevent. This returns the verdict PLUS the measurements behind it
+    (which niche, what the limb count was, whether it was the prompt rather than the structure), so a proposer
+    can retarget instead of re-rolling. Same cost as ``is_held_out`` — pure structure, no sim, no LLM.
+    """
+    niche = niche_of(gene)
+    by_prompt = bool(prompt is not None and is_held_out_prompt(prompt))
+    limbs = locomotor_limb_count(gene)
+    if niche == "many_limb":
+        reason = f"{limbs} limbs >= the reserved many-limb floor of {MANY_LIMB_MIN}"
+    elif niche:
+        reason = f"structurally {niche}, a wholesale-reserved niche"
+    elif by_prompt:
+        reason = "the originating prompt is a reserved specific body"
+    else:
+        reason = ""
+    return {"held_out": bool(niche is not None or by_prompt), "niche": niche, "by_prompt": by_prompt,
+            "kind": _kind(gene), "locomotor_limbs": limbs, "limb_chains": _leg_chain_count(gene),
+            "reason": reason, "version": HELD_OUT_VERSION}
+
+
+def design_constraints() -> dict:
+    """What a body must AVOID to be admissible — the guard stated as a design brief rather than a verdict.
+
+    Handed to the proposer up front (``corpus_factory.guard_brief``) so a reserved body is never drawn in the
+    first place. Everything here is derived from the predicates themselves, so the brief cannot drift away from
+    the guard it describes."""
+    return {
+        "version": HELD_OUT_VERSION,
+        "avoid_niches": {
+            "aquatic": "no undulating/swimming body plans (robot_kind 'aquatic')",
+            "aerial": "no rotorcraft/winged body plans (robot_kind 'aerial')",
+            "many_limb": (f"fewer than {MANY_LIMB_MIN} LIMBS, where a limb is a root chain with >= "
+                          f"{LIMB_ARTICULATION_MIN} actuated joints (a neck or a tail is not a limb)"),
+            "wheel_leg_hybrid": "do not put revolute wheels and >=2 non-wheel revolute joints on one body",
+        },
+        "avoid_prompts": held_out_prompts(),
+        "max_limbs": MANY_LIMB_MIN - 1,
+    }
+
+
 def held_out_prompts() -> list[str]:
     """The reserved specific-body prompts (for building the held-out eval split)."""
     return [p for p, _ in _RESERVED_BODIES]
@@ -203,6 +307,7 @@ def manifest() -> dict:
         "reserved_bodies": [{"prompt": p, "family": fam} for p, fam in _RESERVED_BODIES],
         "reserved_body_count": len(_RESERVED_BODIES),
         "reserved_niches": sorted(_RESERVED_NICHES),
+        "reserved_niche_rules": design_constraints()["avoid_niches"],
         "policy": ("bodies here are reserved BEFORE any embedding/metric fit or factory admission; the metric is "
                    "fit on TRAIN bodies only and whole niches are held out for structural extrapolation "
                    "(master_plan_v6 §10.4). Membership is structural (niche) or exact-prompt (specific body)."),

@@ -24,6 +24,7 @@ from pathlib import Path
 
 from virturoid.services.engineer_mode import run_engineer_search
 from virturoid.services.harness_banking import bank_search_result
+from virturoid.services.install_paths import anchored
 
 
 @dataclass
@@ -76,7 +77,7 @@ def _append_journal(path, rec):
 
 def laddered_evaluate_for(*, cpu_steps: int = 600, gpu_iters: int = 60, gpu_envs: int = 2048,
                           decimation: int = 10, action_lpf: float = 0.2, base_reward_weights: dict | None = None,
-                          promote=None, warm_start_pool: str | None = "build/models", recall_steps: int = 900,
+                          promote=None, warm_start_pool: str | None = str(anchored("build/models")), recall_steps: int = 900,
                           train_fn=None, verify_fn=None):
     """Production ``evaluate_for`` (plan v2 §5.1/N8): give each candidate a FIDELITY-LADDERED evaluate — a cheap
     CPU screen (pure-CPG rollout, seconds) that gates a GPU residual-training rung carrying the deploy-gap fixes

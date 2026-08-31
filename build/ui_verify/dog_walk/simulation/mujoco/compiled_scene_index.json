@@ -1,0 +1,15 @@
+{
+  "id": "compiled_anatomy_creature",
+  "robot_genome_id": "anatomy_creature",
+  "backend": "mujoco",
+  "scene_count": 1,
+  "scenes": [
+    {
+      "scene_set_id": "sceneset_anatomy_creature",
+      "scene_id": "locomotion_anatomy_creature",
+      "purpose": "locomotion",
+      "mujoco_xml": "simulation/mujoco/scenes/locomotion/anatomy_creature.xml",
+      "object_count": 0
+    }
+  ]
+}

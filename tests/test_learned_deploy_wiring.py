@@ -52,6 +52,358 @@ def test_deploy_rollout_records_qpos_by_default(monkeypatch):
     assert seen["record_qpos"] is False                      # explicit override still possible (training inner loops)
 
 
+# ------------------------------------------------------------- #257: the artifact DECLARES its controller
+# scripts/mjx_morph_attention.py::_save's meta layout, mirrored here so the routing contract is pinned against the
+# EXACT array the GPU trainer writes: [F, H, NT, fwd, adaptive@4, cpg@5, decimation@6, action_lpf@7, sphere_feet@8,
+# phase_obs@9, command@10, recipe@11]. That trainer's ONLY control law is the recipe one, but a run WITHOUT --cpg
+# banks no obs_mean and no cpg_arr -- and gpu_trainer.default_training_recipe sets cpg only for >=3 legs, so every
+# biped / humanoid / non-legged run lands here.
+def _gpu_artifact(path, feature_dim, *, cpg=0.0, decimation=1.0, sphere_feet=0.0, marked=True):
+    pol = MP.MorphPolicy(feature_dim, seed=0)                 # hidden=32 == meta[1] below
+    meta = [float(feature_dim), 32.0, 12.0, 0.4, 0.0, cpg, decimation, 0.0, sphere_feet, 0.0]
+    if marked:                                                # a post-fix artifact: command spacer + the marker
+        meta += [0.0, 1.0]
+    np.savez(str(path), **{k: pol._arrs[k] for k in ("We", "be", "Wq", "Wk", "Wv", "Wo", "Wh", "bh")},
+             meta=np.asarray(meta))
+    return str(path)
+
+
+def _route(monkeypatch, policy):
+    """Route ``policy`` with BOTH rollouts stubbed, so only the controller CHOICE is under test."""
+    seen = {}
+    monkeypatch.setattr(MP, "recipe_rollout_morph",
+                        lambda g, p, **kw: seen.update(via="recipe") or _credible_rollout())
+    monkeypatch.setattr(MP, "rollout_morph", lambda g, p, **kw: seen.update(via="residual") or _failed_rollout())
+    r = MP.rollout_deployed_morph_policy(object(), policy)
+    assert seen["via"] == ("recipe" if r["deployment_controller"] == "recipe_cpg" else "residual")
+    return r["deployment_controller"]
+
+
+def test_non_cpg_recipe_artifact_deploys_under_the_recipe_controller(monkeypatch, tmp_path):
+    """The measured bug: a recipe-trained artifact with NEITHER obs_mean NOR cpg was deployed under the legacy
+    torque-residual controller it was never trained with (which also never terminates on a fall). The explicit
+    meta[11] marker -- not the incidental presence of a normalizer -- decides."""
+    npz = _gpu_artifact(tmp_path / "gpu_biped.npz", 27)
+    pol = MP.MorphPolicy.from_npz(npz)
+    assert pol.obs_mean is None and pol.cpg is None           # exactly what the old inference looked at: nothing
+    assert pol.recipe_control is True                          # ...but the artifact SAYS what it was trained with
+    assert _route(monkeypatch, pol) == "recipe_cpg"
+
+
+def test_unmarked_artifact_routes_exactly_as_it_does_today(monkeypatch, tmp_path):
+    """BACKWARD COMPAT: checkpoints already on disk carry no meta[11] and can never be retro-marked, so an
+    UNMARKED artifact must keep the legacy obs_mean/cpg inference verbatim -- in both directions."""
+    old = MP.MorphPolicy.from_npz(_gpu_artifact(tmp_path / "old.npz", 27, marked=False))
+    assert old.recipe_control is None                          # unknown, NOT False: absence of evidence
+    assert _route(monkeypatch, old) == "residual"              # ...so it routes precisely as it did before
+    old_cpg = MP.MorphPolicy.from_npz(_gpu_artifact(tmp_path / "old_cpg.npz", 27, cpg=1.0, marked=False))
+    assert old_cpg.recipe_control is None and old_cpg.cpg is not None
+    assert _route(monkeypatch, old_cpg) == "recipe_cpg"        # the inference still carries the CPG artifacts
+    plain = MP.MorphPolicy(27, seed=0)                         # a fresh in-memory policy is unmarked too
+    assert plain.recipe_control is None and _route(monkeypatch, plain) == "residual"
+
+
+def test_recipe_marker_survives_banking_and_an_unmarked_bank_stays_unmarked(monkeypatch, tmp_path):
+    """to_npz is the flywheel's banking path: a marked artifact must stay marked through it, and a policy of
+    UNKNOWN provenance must bank a 0.0 that still means "unmarked" (never an explicit residual claim)."""
+    marked = MP.MorphPolicy.from_npz(_gpu_artifact(tmp_path / "gpu.npz", 27))
+    reloaded = MP.MorphPolicy.from_npz(marked.to_npz(str(tmp_path / "banked.npz"), 0.5))
+    assert reloaded.recipe_control is True and _route(monkeypatch, reloaded) == "recipe_cpg"
+    plain = MP.MorphPolicy(27, seed=0)
+    unmarked = MP.MorphPolicy.from_npz(plain.to_npz(str(tmp_path / "plain.npz"), 0.1))
+    assert float(np.load(tmp_path / "plain.npz")["meta"][11]) == 0.0
+    assert unmarked.recipe_control is None and _route(monkeypatch, unmarked) == "residual"
+    # a normalizer is proof of recipe training on its own -> banking one MARKS the file (same criterion as meta[2])
+    norm = (np.zeros(27), np.ones(27))
+    rec = MP.MorphPolicy.from_npz(plain.to_npz(str(tmp_path / "norm.npz"), 0.1, normalizer=norm))
+    assert rec.recipe_control is True and _route(monkeypatch, rec) == "recipe_cpg"
+
+
+def test_newly_routed_artifact_honours_its_own_decimation_and_sphere_feet(monkeypatch, quad, tmp_path):
+    """The deploy==train knobs the legacy residual path silently DROPPED. The recipe rollout adopts the
+    artifact's own meta[6]/meta[8], so the newly-routed policy runs the contact model and control rate it was
+    trained at -- assert on the real rollout, not on the routing tag alone."""
+    import mujoco
+
+    from virturoid.services import sphere_feet as SF
+    from virturoid.services.morph_graph import encode_robot
+    fd = encode_robot(mujoco.MjModel.from_xml_string(MP.robot_mjcf(quad))).feature_dim
+    pol = MP.MorphPolicy.from_npz(_gpu_artifact(tmp_path / "gpu.npz", fd, decimation=6.0, sphere_feet=1.0))
+    assert pol.decimation == 6 and pol.sphere_feet is True
+    seen = {"sphere": 0, "act": 0}
+    real_sf, real_act = SF.apply_sphere_feet, MP.MorphPolicy.act
+    monkeypatch.setattr(SF, "apply_sphere_feet", lambda m: seen.update(sphere=seen["sphere"] + 1) or real_sf(m))
+    monkeypatch.setattr(MP.MorphPolicy, "act",
+                        lambda self, *a, **k: (seen.update(act=seen["act"] + 1), real_act(self, *a, **k))[1])
+    r = MP.rollout_deployed_morph_policy(quad, pol, steps=12)
+    assert r["deployment_controller"] == "recipe_cpg"
+    assert seen["sphere"] == 1                                # meta[8]: the trained contact model is rebuilt
+    assert seen["act"] == 2                                   # meta[6]: 12 steps at D=6 -> 2 control updates, not 12
+
+
+# ------------------------------------------- #257 (cont.): the SAME question, asked in three more places
+# "Is this a recipe policy?" is also decided in learn_locomotion.locomotion_episode, learn_locomotion.rollout_view
+# and gene_build._build_legged_package. Each decides something DIFFERENT (which rollout scores the learned arm of
+# an episode / which control law the viewport replays / whether the banked policy is used at all), and each
+# predates the marker — so each mis-answers it for the artifacts the GPU trainer actually writes: no obs_mean
+# ever, and no cpg unless the body has >=3 legs.
+def _marked(tmp_path, feature_dim, name="gpu.npz", **kw):
+    return MP.MorphPolicy.from_npz(_gpu_artifact(tmp_path / name, feature_dim, **kw))
+
+
+def test_locomotion_episode_scores_a_marked_artifact_under_the_recipe_controller(monkeypatch, tmp_path, quad):
+    """SITE 1 (learn_locomotion.py:209) chooses the rollout that produces the LEARNED arm of the episode result —
+    the forward_m/upright the capability registry and the MCP locomotion tool report, and the number that decides
+    whether "learned" beats "scripted". A marked non-CPG artifact carries neither obs_mean nor cpg, so the legacy
+    inference sent it to rollout_morph: the legacy gravity-comp torque residual, which never terminates on a fall
+    and drops the artifact's own decimation/sphere_feet."""
+    from virturoid.services import learn_locomotion as LL
+    from virturoid.services import locomotion_controller as LC
+
+    pol = _marked(tmp_path, 27)
+    assert pol.obs_mean is None and pol.cpg is None            # what the old inference looked at: nothing
+    assert pol.recipe_control is True                          # ...while the artifact states its controller
+    seen = {}
+    monkeypatch.setattr(LC, "run_locomotion_episode",
+                        lambda model, **kw: {"distance_m": 0.0, "forward_m": 0.0, "upright": False, "status": "fell"})
+    monkeypatch.setattr(LL, "banked_policy_for", lambda gene, **kw: pol)
+    monkeypatch.setattr(MP, "recipe_rollout_morph",
+                        lambda g, p, **kw: seen.update(via="recipe") or _credible_rollout())
+    monkeypatch.setattr(MP, "rollout_morph", lambda g, p, **kw: seen.update(via="residual") or _failed_rollout())
+    ep = LL.locomotion_episode(quad, horizon=120)
+    assert seen["via"] == "recipe"                             # the controller it was TRAINED with
+    assert ep["source"] == "learned" and ep["upright"] is True  # ...and the episode reports that rollout's verdict
+    # BACKWARD COMPAT: an unmarked artifact keeps the legacy obs_mean/cpg inference verbatim, in both directions.
+    seen.clear()
+    monkeypatch.setattr(LL, "banked_policy_for", lambda gene, **kw: _marked(tmp_path, 27, "old.npz", marked=False))
+    LL.locomotion_episode(quad, horizon=120)
+    assert seen["via"] == "residual"
+    seen.clear()
+    monkeypatch.setattr(LL, "banked_policy_for",
+                        lambda gene, **kw: _marked(tmp_path, 27, "old_cpg.npz", cpg=1.0, marked=False))
+    LL.locomotion_episode(quad, horizon=120)
+    assert seen["via"] == "recipe"
+
+
+def test_rollout_view_replays_a_marked_artifact_under_the_recipe_control_law(monkeypatch, tmp_path, quad):
+    """SITE 2 (learn_locomotion.py:246) chooses the CONTROL LAW the desktop viewport replays with: the recipe
+    PD-to-default (+ the artifact's own CPG prior and gains) or the legacy gravity-comp torque residual, which is
+    the only path that calls MorphGraph.apply. Its legacy inference is NARROWER than the deploy router's — obs_mean
+    only, never cpg — so at HEAD EVERY GPU artifact, CPG or not, was replayed under a controller it never trained
+    with, and the user watched a motion that is not the gait that was banked."""
+    import mujoco
+
+    from virturoid.services import learn_locomotion as LL
+    from virturoid.services import morph_graph as MG
+    from virturoid.services.gene_compiler import compile_gene_to_mjcf, standing_spawn_z
+
+    xml = compile_gene_to_mjcf(quad, include_floor=True, spawn_z=standing_spawn_z(quad, meshed=False))
+    fd = MG.encode_robot(mujoco.MjModel.from_xml_string(xml)).feature_dim
+    pol = _marked(tmp_path, fd)
+    assert pol.obs_mean is None and pol.recipe_control is True
+    calls = {"apply": 0}
+    real_apply = MG.MorphGraph.apply
+    monkeypatch.setattr(MG.MorphGraph, "apply",
+                        lambda self, *a, **k: (calls.update(apply=calls["apply"] + 1), real_apply(self, *a, **k))[1])
+    view, _ = LL.rollout_view(quad, pol, steps=20, frame_every=10)   # must NOT raise: a recipe artifact has no
+    assert calls["apply"] == 0                                       #   normalizer to divide by (obs_mean is None)
+    assert len(view["frames"]) >= 2
+    # BACKWARD COMPAT: unmarked still replays exactly as before — normalizer -> recipe, bare policy -> residual.
+    plain = MP.MorphPolicy(fd, seed=0)
+    LL.rollout_view(quad, plain, steps=20, frame_every=10)
+    assert calls["apply"] == 20
+    plain.obs_mean, plain.obs_std = np.zeros(fd), np.ones(fd)
+    LL.rollout_view(quad, plain, steps=20, frame_every=10)
+    assert calls["apply"] == 20                                      # still 20: a normalizer still means "recipe"
+
+
+def test_the_build_headline_scores_the_banked_marked_policy_not_a_random_one(monkeypatch, tmp_path):
+    """SITE 3 (gene_build.py:802) is NOT a controller router — both branches already run recipe_rollout_morph. It
+    decides whether the banked policy is USED AT ALL, and ``policy=None`` there is not a zero-residual baseline:
+    recipe_rollout_morph CONSTRUCTS A RANDOM MorphPolicy (its own docstring). So a marked artifact was silently
+    discarded and the build's headline locomotion number — plus the qpos trace the viewer replays — described a
+    random policy instead of the species' banked one."""
+    from virturoid.fixtures.gene_library import quadruped_gene
+    from virturoid.services import gene_build as GB
+    from virturoid.services import learn_locomotion as LL
+
+    pol = _marked(tmp_path, 27)
+    calls = []
+
+    def fake_recipe(g, p, **kw):
+        calls.append((p, kw))
+        return _credible_rollout()
+
+    def headline():                                           # the exported-bare-gait check rolls out too, with its
+        return [p for p, kw in calls if kw.get("record_qpos")]  # own throwaway policy — the HEADLINE call is the one
+    monkeypatch.setattr(MP, "recipe_rollout_morph", fake_recipe)   # that records the qpos trace the viewer replays
+    monkeypatch.setattr(MP, "crawl_gait_rollout", lambda g, **kw: _failed_rollout())
+    monkeypatch.setattr(LL, "banked_policy_for", lambda gene, **kw: pol)
+    GB._build_legged_package(quadruped_gene(), "a quadruped that walks forward", tmp_path / "pkg", None)
+    assert headline() and headline()[0] is pol                # the banked artifact, not a random stand-in
+    # BACKWARD COMPAT: an UNMARKED policy with no normalizer is still discarded, exactly as today.
+    calls.clear()
+    monkeypatch.setattr(LL, "banked_policy_for", lambda gene, **kw: _marked(tmp_path, 27, "old.npz", marked=False))
+    GB._build_legged_package(quadruped_gene(), "a quadruped that walks forward", tmp_path / "pkg2", None)
+    assert headline() and headline()[0] is None
+
+
+def test_deploy_quality_scores_a_marked_artifact_under_the_recipe_controller(monkeypatch, tmp_path):
+    """SITE 4 (skill_library.py:55) scores BANKED SKILLS — the number ``acquire_skill`` compares against
+    ``target`` to decide REUSE-vs-retrain, the ``success_rate`` stamped into ``db.record_skill``, and therefore
+    what the cross-user flywheel RANKS and RECALLS for every later body. Its legacy inference is the narrow one
+    (obs_mean only, never cpg), so a marked GPU artifact — which banks no normalizer — was scored under the
+    legacy torque-residual controller it never trained with, and that wrong score was PERSISTED into the bank."""
+    from virturoid.services import skill_library as SL
+
+    pol = _marked(tmp_path, 27)
+    assert pol.obs_mean is None and pol.cpg is None             # what the old inference looked at: nothing
+    assert pol.recipe_control is True                            # ...while the artifact states its controller
+    seen = {}
+    monkeypatch.setattr(MP, "recipe_rollout_morph",
+                        lambda g, p, **kw: seen.update(via="recipe") or {"finite": True, "gait": 0.71})
+    monkeypatch.setattr(MP, "rollout_morph",
+                        lambda g, p, **kw: seen.update(via="residual") or {"finite": True, "gait": 0.12})
+    assert SL.deploy_quality(object(), pol) == pytest.approx(0.71)
+    assert seen["via"] == "recipe"                               # the controller it was TRAINED with
+    # BACKWARD COMPAT: an unmarked policy keeps the legacy obs_mean-only inference VERBATIM, in both directions.
+    seen.clear()
+    old = _marked(tmp_path, 27, "old.npz", marked=False)
+    assert old.recipe_control is None                            # unknown, NOT False: absence of evidence
+    assert SL.deploy_quality(object(), old) == pytest.approx(0.12) and seen["via"] == "residual"
+    seen.clear()
+    old.obs_mean, old.obs_std = np.zeros(27), np.ones(27)        # a normalizer still means "recipe", as today
+    assert SL.deploy_quality(object(), old) == pytest.approx(0.71) and seen["via"] == "recipe"
+    seen.clear()
+    old.obs_mean = None
+    old.cpg = MP.CPG_DEFAULT                                     # ...and cpg alone still does NOT, as today
+    assert SL.deploy_quality(object(), old) == pytest.approx(0.12) and seen["via"] == "residual"
+
+
+def test_deploy_quality_of_a_marked_artifact_needs_no_normalizer(quad, tmp_path):
+    """The COUPLING that the site-2 fix forced out, asserted here UNSTUBBED: a marked GPU artifact legitimately
+    has obs_mean None, so routing it to the recipe branch must feed RAW observations instead of dividing by a
+    normalizer that isn't there. ``recipe_rollout_morph`` already decouples control law from normalization
+    (``normalizer`` stays None -> no division), so this site needs no separate flag — prove it, don't assume it."""
+    import mujoco
+
+    from virturoid.services import skill_library as SL
+    from virturoid.services.morph_graph import encode_robot
+
+    fd = encode_robot(mujoco.MjModel.from_xml_string(MP.robot_mjcf(quad))).feature_dim
+    pol = _marked(tmp_path, fd)
+    assert pol.obs_mean is None and pol.recipe_control is True
+    q = SL.deploy_quality(quad, pol, steps=12)                  # must NOT raise TypeError on the absent normalizer
+    assert isinstance(q, float) and q > -1.0                    # a real recipe score, not the not-finite sentinel
+
+
+# ------------------------------------ #258: the GPU trainer's EXPLORATION SIGMA is bounded, and recorded
+# scripts/mjx_morph_attention.py has essentially no coverage, and `mjx` cannot be imported on a CPU box, so its
+# `main()` is untestable here. These pin the parts of the fix that are pure numerics (the sigma bound), pure
+# argparse (the flag) and pure I/O (the meta layout). The rollout/print plumbing that carries the mean-episode-
+# length readout is NOT covered: it lives inside jitted MJX rollouts and needs a real GPU run.
+def _trainer():
+    import scripts.mjx_morph_attention as T                # a repo-root namespace package; import per test so a
+    return T                                               # failure here can never silently skip this whole file
+
+
+def test_exploration_sigma_is_bounded_at_every_read():
+    """The measured bug (#258): ``ent = (logstd + const).sum()`` is LINEAR in logstd, so the PPO loss carries a
+    CONSTANT -ENT = -5e-3 gradient pushing sigma UP forever, unscheduled, with nothing opposing it. From the -0.5
+    init (sigma 0.6065) that truncated episodes to ~150 of 500 control steps, so the objective never observed the
+    fall — and the measured sweep showed sigma >~0.3 INVERTS the objective's ranking of two checkpoints."""
+    T = _trainer()
+    exp, bs = np.exp, T.bounded_sigma
+    assert exp(-0.5) == pytest.approx(0.6065, abs=1e-4)          # the trainer's logstd INIT, unbounded
+    assert bs(np.array([-0.5]))[0] == pytest.approx(exp(-0.7))   # ...capped from the very first iteration
+    for raw in (-0.5, 0.0, 2.0, 50.0):                           # the RUNAWAY: wherever the constant entropy
+        assert bs(np.array([raw]))[0] == pytest.approx(exp(T.LOGSTD_MAX))   # gradient drives it, sigma is bounded
+    assert bs(np.array([-9.0]))[0] == pytest.approx(exp(T.LOGSTD_MIN))      # and it can't collapse to 0 either
+    assert 0.100 == pytest.approx(exp(T.LOGSTD_MIN), abs=5e-4)   # the documented [0.10, 0.50] band
+    assert 0.497 == pytest.approx(exp(T.LOGSTD_MAX), abs=5e-4)
+    for raw in (-2.0, -1.5, -0.9):                               # INSIDE the band it is the EXACT identity, so a
+        assert bs(np.array([raw]))[0] == float(exp(raw))         # run that never hits the cap is unperturbed
+    # the sweep's GOOD region (sigma <= 0.15, where the objective ranked the good checkpoint first) is reachable
+    assert bs(np.array([0.0]), hi=-1.9)[0] == pytest.approx(0.1496, abs=1e-4)
+
+
+def test_the_sigma_bound_is_a_cli_flag_with_the_old_behaviour_reachable():
+    """A hard-coded guess is not falsifiable; a flag is. The parser also has to RENDER — an unescaped '%' in any
+    help string makes ``--help`` raise, which is how a CLI silently stops being usable."""
+    T = _trainer()
+    ap = T.build_parser()
+    d = ap.parse_args([])
+    assert (d.logstd_min, d.logstd_max) == (T.LOGSTD_MIN, T.LOGSTD_MAX)
+    assert d.ep_len == 200                                       # horizon stays a RUN-TIME choice; default untouched
+    wide = ap.parse_args(["--logstd-min", "-20", "--logstd-max", "20"])
+    for raw in (-0.5, 0.0, 2.0):                                 # a wide range == the exact PRE-BOUND behaviour
+        assert T.bounded_sigma(np.array([raw]), wide.logstd_min, wide.logstd_max)[0] == float(np.exp(raw))
+    tight = ap.parse_args(["--logstd-max", "-1.9"])
+    assert T.bounded_sigma(np.array([0.0]), tight.logstd_min, tight.logstd_max)[0] < 0.15
+    assert "--logstd-max" in ap.format_help()                    # renders at all (the unescaped-'%' trap)
+
+
+def _npz_with_meta(path, meta):
+    pol = MP.MorphPolicy(27, seed=0)
+    np.savez(str(path), **{k: pol._arrs[k] for k in ("We", "be", "Wq", "Wk", "Wv", "Wo", "Wh", "bh")},
+             meta=np.asarray(meta))
+    return MP.MorphPolicy.from_npz(str(path))
+
+
+def test_the_banked_artifact_records_the_sigma_it_was_trained_under(tmp_path):
+    """meta[12] follows the meta[11] convention EXACTLY: APPENDED (never reordered) so every existing reader is
+    untouched, and ABSENT rather than 0.0 when unknown — a 0.0 would be a positive claim of sigma 1.0. Without it
+    nothing on disk says which of two checkpoints was explored at a sigma that inverts the objective's ranking."""
+    T = _trainer()
+    m = T.trainer_meta(27, 32, 12, 0.4, decimation=6, sphere_feet=True, logstd=-0.7)
+    assert len(m) == 13 and m[11] == 1.0                         # the #257 recipe marker is untouched
+    assert float(np.exp(m[12])) == pytest.approx(0.4966, abs=1e-4)     # exp(meta[12]) = the training sigma
+    assert T.trainer_meta(27, 32, 12, 0.4, decimation=6, sphere_feet=True) == m[:12]   # unknown -> NO slot at all
+    # a 13-slot artifact must load EXACTLY as the 12-slot one: a tail entry is invisible to every existing reader
+    a, b = _npz_with_meta(tmp_path / "m13.npz", m), _npz_with_meta(tmp_path / "m12.npz", m[:12])
+    for attr in ("feature_dim", "hidden", "adaptive_gains", "decimation", "action_lpf", "sphere_feet",
+                 "phase_obs", "command_conditioned", "recipe_control"):
+        assert getattr(a, attr) == getattr(b, attr), attr
+    assert a.recipe_control is True and a.decimation == 6 and a.sphere_feet is True
+
+
+def test_the_entropy_bonus_pushes_sigma_up_forever_and_the_bound_stops_it():
+    """The MECHANISM, not just the clamp. ``loss = pg + VF*vf - ENT*ent`` with ``ent = (logstd + const).sum()`` is
+    LINEAR in logstd, so its gradient is the CONSTANT -ENT — an unscheduled upward push on sigma every minibatch,
+    for the whole run. Reading the CLIPPED logstd in the entropy term makes that gradient ZERO past the cap, so
+    the push stops AT the bound instead of accumulating forever in a parameter the rollout no longer obeys."""
+    jax = pytest.importorskip("jax")                             # the GPU-box dep; skip on a box without it
+    jp = jax.numpy
+    T = _trainer()
+    ENT = 5e-3                                                   # the trainer's entropy coefficient
+
+    def loss_unbounded(ls):
+        return -ENT * (ls + 0.5 * jp.log(2 * jp.pi * jp.e)).sum()
+
+    def loss_bounded(ls):
+        return -ENT * (T.bounded_logstd(ls, T.LOGSTD_MIN, T.LOGSTD_MAX, xp=jp)
+                       + 0.5 * jp.log(2 * jp.pi * jp.e)).sum()
+    for raw in (-0.5, 0.0, 2.0):                                 # unbounded: the SAME constant push, everywhere
+        assert float(jax.grad(loss_unbounded)(jp.array([raw]))[0]) == pytest.approx(-ENT)
+    assert float(jax.grad(loss_bounded)(jp.array([-1.5]))[0]) == pytest.approx(-ENT)   # inside: unchanged
+    for raw in (-0.5, 0.0, 2.0):                                 # at/past the cap: the push is switched OFF
+        assert float(jax.grad(loss_bounded)(jp.array([raw]))[0]) == pytest.approx(0.0, abs=1e-12)
+    assert float(jax.grad(loss_bounded)(jp.array([-9.0]))[0]) == pytest.approx(0.0, abs=1e-12)   # and below it
+    # and the SAME expression is what the rollout samples with, under jit (this is how the trainer reads it)
+    assert float(jax.jit(lambda p: T.bounded_sigma(p, T.LOGSTD_MIN, T.LOGSTD_MAX, xp=jp)[0])(jp.array([-0.5]))) \
+        == pytest.approx(float(np.exp(T.LOGSTD_MAX)), abs=1e-6)
+
+
+def test_this_files_gpu_artifact_mirror_still_matches_the_real_writer(tmp_path):
+    """``_gpu_artifact`` above hand-mirrors the trainer's meta array. A mirror that DRIFTS from the writer turns
+    every routing test in this file into a test of the mirror instead of the contract, so pin them together."""
+    T = _trainer()
+    mirrored = list(np.load(_gpu_artifact(tmp_path / "mirror.npz", 27, cpg=1.0, decimation=6.0,
+                                          sphere_feet=1.0))["meta"])
+    real = T.trainer_meta(27, 32, 12, 0.4, cpg=True, decimation=6, sphere_feet=True)
+    assert [float(x) for x in mirrored] == [float(x) for x in real]
+
+
 # ---------------------------------------------------------------------------- F1: recall seam + product verdict
 def test_recall_with_rollout_returns_the_screen_rollout(monkeypatch, quad):
     """The credibility screen already runs a full deployed rollout — the verdict path reuses that exact evidence."""
@@ -124,7 +476,12 @@ def test_honest_gait_skips_learned_when_scripted_credible(monkeypatch, quad):
         raise AssertionError("learned recall must not run when the scripted gait is credible")
     monkeypatch.setattr(AIT, "_learned_gait_attempt", must_not_run)
     out = AIT._honest_gait(quad, steps=60)
-    assert str(out["verdict"]).startswith("CREDIBLE") and out["gait_source"] == "default_crawl"
+    # The contract is SCRIPTED-not-learned, not one particular scripted label. verify now reports the more
+    # precise provenance when the body carries its own tuned op-point ("tuned_for_this_body") instead of
+    # flattening everything scripted to "default_crawl" -- both are the scripted path, and the thing this test
+    # guards (the learned recall never running) is asserted by the must_not_run monkeypatch above.
+    assert str(out["verdict"]).startswith("CREDIBLE")
+    assert out["gait_source"] in ("default_crawl", "tuned_for_this_body"), out["gait_source"]
 
 
 # ---------------------------------------------------------------------------- F3: parity as an enforced gate

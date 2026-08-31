@@ -12,6 +12,22 @@ _CAD = importlib.util.find_spec("build123d") is not None
 
 @unittest.skipUnless(_MUJOCO, "MuJoCo not installed.")
 class ViewerReplayFallbackTests(unittest.TestCase):
+    def test_geom_metadata_preserves_material_response(self):
+        import mujoco
+
+        from virturoid.services.viewer_sim import _geom_metadata
+
+        model = mujoco.MjModel.from_xml_string(
+            '<mujoco><asset><material name="alloy" rgba=".2 .3 .4 1" metallic=".65" roughness=".22"/>'
+            '<mesh name="part" vertex="0 0 0 1 0 0 0 1 0 0 0 1"/></asset>'
+            '<worldbody><geom name="part_vis" type="mesh" mesh="part" material="alloy"/></worldbody></mujoco>'
+        )
+        geom = _geom_metadata(model, {"part_vis": {"uri": "simulation/part.stl", "scale": 0.001}})[0]
+        self.assertEqual("mesh", geom["type"])
+        self.assertEqual("simulation/part.stl", geom["mesh_uri"])
+        self.assertAlmostEqual(0.65, geom["metalness"])
+        self.assertAlmostEqual(0.22, geom["roughness"])
+
     @unittest.skipUnless(_MUJOCO and _CAD, "MuJoCo and build123d are required for detailed visual replay.")
     def test_locomotion_replay_prefers_packaged_visual_meshes(self):
         """The episode's frame model and its browser-visible STL assets must be the same portable package model."""

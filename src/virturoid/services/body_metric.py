@@ -19,8 +19,14 @@ import math
 from pathlib import Path
 
 from virturoid.schemas.gene import RobotGene
+from virturoid.services.install_paths import anchored
 
-DEFAULT_METRIC_PATH = Path("build/models/body_metric.json")
+#: ANCHORED to the install (see ``services.install_paths``). The learned diagonal metric is a property of
+#: "which Virturoid am I running", not of the shell's pwd -- and ``_load`` returns None when the file is
+#: absent, so a CWD-relative default did not error, it silently dropped the WS-3 learned metric back to the
+#: unweighted default and went on ranking transfer candidates. MEASURED 2026-08-08: the sibling whitener
+#: resolved present from the repo root and absent from one directory up, same process, same install.
+DEFAULT_METRIC_PATH = anchored("build/models/body_metric.json")
 _cache: dict | None = None
 _cache_mtime: float | None = None
 _TRIED = False

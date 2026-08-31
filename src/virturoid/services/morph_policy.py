@@ -20,6 +20,10 @@ class MorphPolicy:
     # velocity command) fed through ONE extra global token. Fixed across morphologies so the perception
     # weights transfer like the rest of the policy (see [[perception-next-keystone]]).
     PERCEPT_DIM = 10                                          # 8 rangefinder distances + (vx_cmd, wz_cmd)
+    LEGACY_FEATURE_DIM = 24                                   # morph-token schema v1: 11 static + 13 runtime
+    DATASHEET_FEATURE_DIM = 27                                # schema v2: + limits low/high + torque capacity
+    LEGACY_VELOCITY_FEATURE_DIM = 26                          # v1 base token + [vx_cmd, wz_cmd]
+    DATASHEET_VELOCITY_FEATURE_DIM = 29                       # v2 base token + the same command suffix
 
     def __init__(self, feature_dim: int, hidden: int = 32, seed: int = 0, *,
                  film: bool = False, topo_bias: bool = False, topo_buckets: int = 8):
@@ -54,6 +58,12 @@ class MorphPolicy:
         #   [sin,cos] via the percept token (slots 8-9) so a clocked policy TIMES its steps; off = perception-blind
         self.command_conditioned = False                      # WS8/P6 (meta[10]): deploy feeds a [vx,wz] velocity
         #   command via the percept token (slots 8-9) so the policy TRACKS a commanded speed (L6); off = unconditioned
+        # RECIPE-CONTROLLER marker (meta[11]): an EXPLICIT "this policy was trained under the recipe controller"
+        # claim, so the deploy router stops INFERRING it from the incidental presence of obs_mean/cpg. Tri-state:
+        # True = marked recipe; None = UNMARKED (a fresh in-memory policy, or an artifact saved before the slot
+        # existed) -> rollout_deployed_morph_policy falls back to the legacy obs_mean/cpg inference. There is
+        # deliberately no False: a 0.0 in the file means "unmarked", never "explicitly residual" (see from_npz).
+        self.recipe_control = None
         rng = np.random.default_rng(seed)
         s = 0.3
         # NOTE: Wrange/brange are appended LAST so the rng draw order for We/Wq/Wk/Wv/Wo/Wh is unchanged
@@ -90,6 +100,7 @@ class MorphPolicy:
         policy is byte-identical to before."""
         import numpy as np
 
+        obs = self.adapt_observation(obs)
         if obs.shape[0] == 0:
             return np.zeros(0)
         a = self._arrs
@@ -119,6 +130,41 @@ class MorphPolicy:
         u = np.tanh(e + z)                                   # residual
         out = np.tanh(u @ a["Wh"] + a["bh"])                 # (N(+1), 1)
         return out[: obs.shape[0], 0]                        # drop the perception token's action
+
+    def accepts_feature_dim(self, observed_dim: int) -> bool:
+        """Whether an observation schema can be losslessly adapted for this policy.
+
+        V2 only appends physical datasheet meaning to the old token schema. A v1
+        policy can therefore ignore those three new columns and run exactly as it
+        did when banked; arbitrary dimension mismatches remain rejected.
+        """
+        observed_dim = int(observed_dim)
+        compatible_pairs = {
+            (self.LEGACY_FEATURE_DIM, self.DATASHEET_FEATURE_DIM),
+            (self.LEGACY_VELOCITY_FEATURE_DIM, self.DATASHEET_VELOCITY_FEATURE_DIM),
+        }
+        return (observed_dim == self.feature_dim
+                or tuple(sorted((observed_dim, self.feature_dim))) in compatible_pairs)
+
+    def adapt_observation(self, obs):
+        """Translate between morph-token schemas v1 and v2 without shifting runtime fields."""
+        import numpy as np
+
+        obs = np.asarray(obs, dtype=float)
+        if obs.ndim != 2:
+            raise ValueError(f"morph observation must be rank 2, got shape {obs.shape}")
+        observed = int(obs.shape[1])
+        if observed == self.feature_dim:
+            return obs
+        legacy_to_v2 = {
+            self.LEGACY_FEATURE_DIM: self.DATASHEET_FEATURE_DIM,
+            self.LEGACY_VELOCITY_FEATURE_DIM: self.DATASHEET_VELOCITY_FEATURE_DIM,
+        }
+        if legacy_to_v2.get(self.feature_dim) == observed:
+            return np.concatenate([obs[:, :11], obs[:, 14:]], axis=1)
+        if legacy_to_v2.get(observed) == self.feature_dim:
+            return np.concatenate([obs[:, :11], np.zeros((obs.shape[0], 3)), obs[:, 11:]], axis=1)
+        raise ValueError(f"policy feature_dim {self.feature_dim} is incompatible with observation {observed}")
 
     # flat parameter vector — for black-box optimization (ES) on CPU before MJX/PPO
     _ORDER = ("We", "be", "Wq", "Wk", "Wv", "Wo", "Wh", "bh", "Wrange", "brange")
@@ -184,6 +230,16 @@ class MorphPolicy:
         p.sphere_feet = bool(float(meta[8]) > 0.5) if len(meta) > 8 else False  # meta[8]: sphere feet (T1.4); deploy==train
         p.phase_obs = bool(float(meta[9]) > 0.5) if len(meta) > 9 else False  # meta[9]: P1 phase-clock obs; deploy==train
         p.command_conditioned = bool(float(meta[10]) > 0.5) if len(meta) > 10 else False  # meta[10]: WS8/P6 vel-command
+        # RECIPE-CONTROLLER marker rides in meta[11]. The GPU trainer's ONLY control law is the recipe (PD-to-default
+        # + terminate-on-fall), but a run WITHOUT --cpg banks neither obs_mean nor cpg, so the deploy router used to
+        # infer "not a recipe policy" and drove it under the LEGACY torque-residual rollout it was never trained with
+        # — which also never terminates on a fall and drops the artifact's own meta[6]/meta[8]. Every biped, humanoid
+        # and non-legged GPU run hit it, because gpu_trainer.default_training_recipe only sets cpg for >=3 legs.
+        # UNMARKED (<=11-element meta, or a 0.0) stays None, NOT False: checkpoints already on disk cannot be
+        # retro-marked, and to_npz stamps 0.0 for a policy of unknown provenance — so a 0.0 is an ABSENCE of evidence,
+        # never a positive "residual" claim. rollout_deployed_morph_policy turns None back into the exact obs_mean/cpg
+        # inference it used before, so every pre-marker artifact routes EXACTLY as it does today.
+        p.recipe_control = True if (len(meta) > 11 and float(meta[11]) > 0.5) else None
         return p
 
     def to_npz(self, path, score: float = 0.0, *, normalizer=None):
@@ -200,6 +256,12 @@ class MorphPolicy:
         if norm is not None:
             extra = {"obs_mean": np.asarray(norm[0], dtype=float), "obs_std": np.asarray(norm[1], dtype=float)}
             recipe_flag = 1.0
+        # meta[11]: the EXPLICIT recipe-controller marker. 1.0 when this policy is KNOWN to be a recipe policy —
+        # it was loaded from a marked artifact (``recipe_control``), or it banks an obs normalizer, which only a
+        # recipe-trained policy has. 0.0 means UNMARKED, never "residual": an in-memory policy of unknown
+        # provenance must keep falling back to the legacy inference in rollout_deployed_morph_policy, which is
+        # what preserves today's behaviour for everything that isn't positively marked.
+        recipe_marker = 1.0 if (recipe_flag or getattr(self, "recipe_control", None)) else 0.0
         np.savez(path, **{k: self._arrs[k] for k in self._order}, **extra,
                  meta=np.asarray([float(self.feature_dim), float(self.hidden), recipe_flag, float(score),
                                   1.0 if getattr(self, "adaptive_gains", False) else 0.0,
@@ -208,7 +270,8 @@ class MorphPolicy:
                                   float(getattr(self, "action_lpf", 0.0) or 0.0),     # meta[7]: action LPF
                                   1.0 if getattr(self, "sphere_feet", False) else 0.0,   # meta[8]: sphere feet (T1.4)
                                   1.0 if getattr(self, "phase_obs", False) else 0.0,    # meta[9]: P1 phase-clock obs
-                                  1.0 if getattr(self, "command_conditioned", False) else 0.0]))  # meta[10]: WS8/P6 cmd
+                                  1.0 if getattr(self, "command_conditioned", False) else 0.0,  # meta[10]: WS8/P6 cmd
+                                  recipe_marker]))               # meta[11]: recipe controller (0.0 = UNMARKED)
         return str(path)
 
 
@@ -304,7 +367,7 @@ def rollout_morph(gene, policy: MorphPolicy | None = None, *, steps: int = 600, 
     graph = encode_robot(model)
     if policy is None:
         policy = MorphPolicy(graph.feature_dim, seed=seed)
-    if policy.feature_dim != graph.feature_dim:
+    if not policy.accepts_feature_dim(graph.feature_dim):
         raise ValueError(f"policy feature_dim {policy.feature_dim} != graph {graph.feature_dim}")
 
     p0 = (np.array(data.qpos[graph.base_qadr:graph.base_qadr + 2], dtype=float)
@@ -402,6 +465,65 @@ _I_REF = 0.04359          # reference quadruped's MEDIAN actuated-DOF joint-spac
 _KP_MIN, _KP_MAX, _KD_MIN, _KD_MAX = 2.0, 192.0, 0.1, 24.0
 
 
+#: A posture hold tolerates this much joint error at the actuator's FULL declared torque. It sets the stiffness
+#: (``kp = tau_max / _HOLD_ERR_RAD``) and it is the whole design of the hold: 0.05 rad is ~3 deg, small enough
+#: that "it held its pose" means what a reader thinks it means, and loose enough that the joint is not commanding
+#: full torque against ordinary contact noise.
+_HOLD_ERR_RAD = 0.05
+#: Explicit-integrator stability ceilings, expressed as fractions of ``I_eff/dt`` and ``I_eff/dt^2``. Without
+#: them the law below detonates on exactly the bodies it exists for: measured 2026-08-04 on an imported Boston
+#: Dynamics Spot (50.3 kg, big torque limits), a stiffness read straight off ``tau_max`` gave joint damping of
+#: ``kd*dt/I ~ 1.3`` — above 1, so each step overshoots further than the last — and the hold diverged to a
+#: 0.594 rad tracking error and reported a robot that "will not hold its pose". Spot holds its pose fine.
+_HOLD_WN_DT, _HOLD_ZETA_DT = 0.5, 0.5
+
+
+def posture_hold_gains(model, data=None):
+    """Per-ACTUATOR ``(kp, kd, tau_max)`` for holding a body at a fixed pose, sized from the SAME
+    ``Kp ~ load / tolerated error`` reasoning a joint's actuator was itself sized by, and then clipped for
+    integrator stability. Indexed by ctrl slot; non-joint transmissions get ``kp = kd = 0``.
+
+    This is not the locomotion law (:func:`recipe_gains`) and must not be confused with it. That one fixes a
+    CLOSED-LOOP NATURAL FREQUENCY so a gait feels the same across morphologies, and caps ``kp`` at ``_KP_MAX``
+    (192) because a gait that routinely saturates its actuators is a gait that will not transfer. A posture hold
+    has the opposite requirement: it must REJECT A STATIC LOAD, and the load is ground reaction, which is exactly
+    the thing ``qfrc_bias`` does not contain. Measured on an imported Menagerie Go2: gravity compensation plus
+    ``kp = 60`` leaves 0.279 rad of steady-state error — the feet are pushing ~37 N up each leg at a ~0.2 m
+    lever, roughly 7.5 N.m the PD has to absorb — and the body reads as sagging when it is only softly held.
+    ``kp = tau_max / 0.05`` takes the same body to 0.026 rad.
+
+    ``data`` supplies the pose the inertia is read at (pass the body posed at the stance you intend to hold);
+    omitted, it is read at ``mj_resetData``'s zero pose.
+    """
+    import mujoco
+    import numpy as np
+
+    if data is None:
+        data = mujoco.MjData(model)
+        mujoco.mj_resetData(model, data)
+    mujoco.mj_forward(model, data)
+    M = np.zeros((model.nv, model.nv), dtype=float)
+    mujoco.mj_fullM(model, M, data.qM)
+    diag = np.diag(M)
+    dt = float(model.opt.timestep)
+    kp = np.zeros(model.nu, dtype=float)
+    kd = np.zeros(model.nu, dtype=float)
+    tau = np.zeros(model.nu, dtype=float)
+    for u in range(model.nu):
+        if int(model.actuator_trntype[u]) != int(mujoco.mjtTrn.mjTRN_JOINT):
+            continue
+        j = int(model.actuator_trnid[u, 0])
+        I = max(1e-4, float(diag[int(model.jnt_dofadr[j])]))
+        fr = model.actuator_forcerange[u]
+        t_max = float(fr[1]) if bool(model.actuator_forcelimited[u]) and fr[1] > fr[0] else 500.0
+        # stiffness the actuator can actually back, then the two integrator ceilings (wn*dt and kd*dt/I)
+        k = min(t_max / _HOLD_ERR_RAD, (_HOLD_WN_DT ** 2) * I / (dt * dt))
+        kp[u] = k
+        kd[u] = min(2.0 * float(np.sqrt(max(k, 0.0) * I)), _HOLD_ZETA_DT * I / dt)   # critically damped, clipped
+        tau[u] = t_max
+    return kp, kd, tau
+
+
 def _effective_inertia(model, graph):
     """Per-actuated-DOF effective (joint-space) inertia: the diagonal of the dense mass matrix at the default
     pose. ``mj_fullM`` densifies the sparse ``data.qM``; ``graph.vadr`` indexes the actuated DOFs. CPU MuJoCo."""
@@ -472,6 +594,13 @@ def recipe_gains(model, graph=None, *, ascale: float = _ASCALE):
 # oscillation on each leg's thigh+calf joints, diagonal limbs anti-phase, gives the body a STEPPING rhythm so
 # ES learns only a propulsion/stabilization RESIDUAL instead of discovering a gait from a stand-still (which
 # CPU-ES cannot do — it slides or collapses). residual_scale < 1 keeps the policy from cancelling the CPG.
+# ``leg_flip`` IS NOT A DIRECTION CONTROL, despite reading like one. Both branches below (lines ~546 and ~583)
+# select between [pi,0,0,pi] and [0,pi,pi,0] -- the same pattern with +pi on EVERY leg, i.e. swapping which
+# diagonal pair leads. On a fore-aft-symmetric leg layout that is a body SYMMETRY, not a reversal, so open-loop
+# travel is identical to 3 decimal places at every ``calf_phase`` on both the composed quad and the canonical
+# template (measured, task #254). It only appears to do something when a random residual rides on top. The knob
+# that actually sets direction is ``calf_phase`` -- the hip-to-knee relative phase, which decides whether the foot
+# pushes back or forward through stance. Kept in the dict because banked policies carry it at ``cpg_arr[5]``.
 CPG_DEFAULT = {"freq": 1.5, "thigh_amp": 0.6, "calf_amp": 0.8, "calf_phase": 1.5708,
                "residual_scale": 0.3, "leg_flip": True}
 
@@ -681,7 +810,15 @@ def recipe_rollout_morph(gene, policy: MorphPolicy | None = None, *, steps: int 
     obs normalization (``normalizer=(mean,std)``), terminate-on-fall, clipped-non-negative velocity-tracking
     reward. Returns ``gait`` (recipe reward meaned over the horizon — the training fitness), ``forward`` travel,
     ``height_ratio``, ``alive`` step count, ``survived``, and ``frames`` (for rendering). CPU MuJoCo; the SAME
-    policy object drives any morphology (this is what actually produces an UPRIGHT WALK)."""
+    policy object drives any morphology (this is what actually produces an UPRIGHT WALK).
+
+    ``policy=None`` is NOT an open-loop / zero-residual baseline -- it constructs a RANDOM ``MorphPolicy``
+    (``rng.normal(0, 0.3)`` weights, below), whose residual reaches ~0.06 rad, i.e. ~10% of ``thigh_amp``. On a
+    body the CPG drives well that is a small perturbation, but on a composed quad -- where the prior yields almost
+    no thrust -- the random residual DOMINATES the result: measured over 10 seeds, travel is -0.012 +/- 0.221 m
+    (6/10 negative) versus +0.455 +/- 0.100 m (0/10 negative) on the canonical fanned template. So a single
+    ``policy=None`` rollout of a composed body measures the SEED, not the body. For a true open-loop CPG, pass a
+    ``MorphPolicy`` with zeroed ``_arrs`` (verified byte-identical to ``cpg["residual_scale"] = 0.0``)."""
     import mujoco
     import numpy as np
 
@@ -708,7 +845,7 @@ def recipe_rollout_morph(gene, policy: MorphPolicy | None = None, *, steps: int 
     graph = encode_robot(model)
     if policy is None:
         policy = MorphPolicy(graph.feature_dim, seed=seed)
-    if policy.feature_dim != graph.feature_dim:
+    if not policy.accepts_feature_dim(graph.feature_dim):
         raise ValueError(f"policy feature_dim {policy.feature_dim} != graph {graph.feature_dim}")
     # Phase-5 topo-bias: a policy trained WITH the topology attention bias must DEPLOY with it too, or the
     # learned control mismatches. Compute the body's hop-distance matrix once (None for non-topo policies ->
@@ -830,7 +967,7 @@ def recipe_rollout_morph(gene, policy: MorphPolicy | None = None, *, steps: int 
     a = a_filt = None                                        #   HOLD it between (the CPG clock + PD loop still run
     for t in range(steps):                                   #   every step). dec=1 + action_lpf=0 -> byte-identical.
         if t % dec == 0:
-            obs = graph.observe(model, data)
+            obs = policy.adapt_observation(graph.observe(model, data))
             if mean is not None:
                 obs = (obs - mean) / std
             if phase_obs_deploy and cpg_on:                  # P1 phase-clock: feed the global gait clock [sin,cos] via
@@ -929,6 +1066,15 @@ def recipe_rollout_morph(gene, policy: MorphPolicy | None = None, *, steps: int 
         out["tau_cmd"] = np.asarray(tau_trace)                  #   traces for the executable-on-BOM certificate
         out["qvel"] = np.asarray(qv_trace)                      #   (token order == graph.act_u == BOM joint order)
         out["clamps"] = np.asarray(clamps)                     #   per-joint torque CAPACITY -> sizes the real servo
+        # ...and WHICH JOINT each column is, by name. "token order == BOM joint order" was true and was still
+        # only a comment, so the certificate had no way to look a column's part up in bom.json and instead
+        # re-derived one from the clamp -- which is how one package came to ship two motor selections. The
+        # compiler emits `<motor name="{segment}_motor">`, so the segment name is recoverable exactly.
+        _nm = []
+        for _u in act_u:
+            _a = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_ACTUATOR, int(_u)) or ""
+            _nm.append(_a[:-6] if _a.endswith("_motor") else _a)
+        out["joint_segments"] = _nm
     return out
 
 
@@ -943,8 +1089,21 @@ def rollout_deployed_morph_policy(gene, policy: MorphPolicy, *, steps: int = 900
     ``record_qpos`` defaults ON (v7-F2): without the qpos trace, ``gait_quality.classify()`` silently SKIPS its
     ROLL/PITCH gate — so a learned policy that rolled over could read CREDIBLE while the scripted gaits (which
     always record) get the full bar. Deploy/banking/recall screens must judge learned == scripted; the tiny
-    per-5-step qpos copy is the price of an un-gameable verdict."""
-    if getattr(policy, "obs_mean", None) is not None or getattr(policy, "cpg", None) is not None:
+    per-5-step qpos copy is the price of an un-gameable verdict.
+
+    Routing honours the artifact's EXPLICIT recipe marker (``recipe_control``, meta[11]) FIRST. Deriving "is this
+    a recipe policy?" from obs_mean/cpg alone misrouted every GPU run trained WITHOUT ``--cpg``: the trainer banks
+    no obs normalizer, and ``default_training_recipe`` only turns cpg on for >=3 legs, so bipeds, humanoids and
+    non-legged bodies were scored under the legacy residual controller they were never trained with (task #257).
+    The recipe path also restores the deploy==train knobs the residual rollout drops — ``recipe_rollout_morph``
+    adopts the artifact's own ``decimation`` (meta[6]) and ``sphere_feet`` (meta[8])."""
+    recipe = getattr(policy, "recipe_control", None)
+    if recipe is None:
+        # UNMARKED: an artifact saved before meta[11] existed, or an in-memory policy. A checkpoint already on disk
+        # can never be retro-marked, so instead of guessing a controller for it we keep the OLD heuristic verbatim
+        # — backward compatibility is the point, pre-marker artifacts must route EXACTLY as they did before.
+        recipe = getattr(policy, "obs_mean", None) is not None or getattr(policy, "cpg", None) is not None
+    if recipe:
         result = dict(recipe_rollout_morph(gene, policy, steps=steps, record_qpos=record_qpos))
         result["deployment_controller"] = "recipe_cpg"
         return result
@@ -962,6 +1121,10 @@ def rollout_deployed_morph_policy(gene, policy: MorphPolicy, *, steps: int = 900
 _GAIT_TUNE_GRID = [(1.5, 0.9, 1.0, 32.0, 1.5), (1.5, 0.9, 1.0, 120.0, 6.0), (1.5, 0.9, 1.0, 250.0, 10.0),
                    (1.0, 1.3, 0.9, 32.0, 1.5), (1.0, 1.7, 0.9, 60.0, 3.0), (1.5, 1.3, 0.9, 120.0, 6.0),
                    (1.0, 1.7, 0.6, 32.0, 1.5), (2.0, 0.9, 1.0, 180.0, 8.0), (1.5, 0.4, 0.6, 120.0, 6.0)]
+# NB the absolute (freq, kp, kd) above are RELATIVE to the canonical reference body: tune_crawl_gait rescales
+# each candidate by default_gait_for(gene) so the lattice explores the same SHAPE of gait around whatever
+# op-point this body's own size implies. Five extra rows hand-found by sweeping two named animals used to live
+# here; the scaling law replaced them, because a table only ever covers the bodies someone already swept.
 
 
 def tune_crawl_gait(gene, *, steps: int = 800, grid=None, cache: bool = True) -> dict:
@@ -984,9 +1147,14 @@ def tune_crawl_gait(gene, *, steps: int = 800, grid=None, cache: bool = True) ->
                 "upright_frac": round(float(r.get("upright_frac", 0.0)), 3),
                 "cadence": round(float(r.get("cadence", 0.0)), 2), "verdict": classify(r)}
 
+    # Re-centre the lattice on THIS body's size-derived op-point, so the search explores the same SHAPE of gait
+    # around the right centre instead of around one reference robot's absolute numbers (see default_gait_for).
+    _dg = default_gait_for(gene)
+    _fk, _sk = _dg["freq"] / 1.5, _dg["kp"] / 32.0
     best = None
     for cfg in grid:
         f, h, k, kp, kd = _norm(cfg)
+        f, kp, kd = f * _fk, kp * _sk, kd * _sk
         cand = _eval(f, h, k, kp, kd, steps)
         if not cand["verdict"].startswith("CREDIBLE"):
             continue
@@ -1021,11 +1189,157 @@ def _reset_to_rest(model, data) -> None:
         mujoco.mj_resetData(model, data)
 
 
+# The canonical fanned template is the body whose op-point (freq 1.5, kp 32, kd 1.5) was hand-tuned. MEASURED:
+# mean per-leg chain 0.4406 m, 3.474 kg ungrounded. These are a REFERENCE POINT for a scaling law, not a table.
+_GAIT_REF_LEG_M, _GAIT_REF_MASS_KG = 0.4406, 3.474
+
+
+def default_gait_for(gene) -> dict:
+    """The open-loop crawl op-point THIS body should start from, derived from its own size.
+
+    freq/kp/kd used to be constants -- one body's tuned numbers applied to every robot ever built. That is fine
+    while every body is the same size and silently wrong the moment they are not: giving limbs real proportions
+    (short hip + two long links) moved bodies off that operating point and 12 locomotion tests went red at once,
+    with a composed quadruped scoring 0.000 under a gait fitted to a different robot.
+
+    DYNAMIC SIMILARITY (Alexander's Froude number, Fr = v^2/gL) says geometrically similar legged bodies move
+    alike at equal Fr, so stride frequency scales as sqrt(g/L): a LONGER leg wants a SLOWER stride. Verified
+    against a 300-point offline sweep before adopting it -- the law predicts the horse's best swept cadence of
+    1.25 Hz to within 0.02, and pushes the short-legged hexapod up toward its measured 2.0. Stiffness tracks
+    mass (the GenLoco kp-proportional-to-mass result), since a heavier body needs more torque to hold a pose.
+
+    This replaces five op-points I had hard-coded from sweeping two named animals -- a lookup table that would
+    have gone stale on the next unusual body. A law generalizes; a table does not.
+    """
+    import re
+    from collections import defaultdict
+
+    chains: dict[str, float] = defaultdict(float)
+    for s in getattr(gene, "segments", []):
+        m = re.match(r"((?:(?:front|hind)_)?leg\d*(?:_[lr])?)_\d+$", (s.name or "").lower())
+        if m:
+            chains[m.group(1)] += float(getattr(s, "length_m", 0.0) or 0.0)
+    leg = (sum(chains.values()) / len(chains)) if chains else _GAIT_REF_LEG_M
+    mass = sum(float(getattr(s, "mass_kg", 0.0) or 0.0) for s in getattr(gene, "segments", [])) or _GAIT_REF_MASS_KG
+    # DEADBAND: a body within ~15% of the reference keeps the reference's PROVEN op-point untouched. The law is
+    # for bodies that genuinely differ in scale (a horse's 0.66 m leg, a hexapod's 0.32 m); nudging a
+    # near-reference body off a hand-verified operating point buys nothing and costs real verdicts -- measured,
+    # an un-deadbanded version flipped one design-bench animal from credible to not, taking verdict@1 0.45 ->
+    # 0.40. Same instinct as the tuner's short-circuit: never churn a default that already works.
+    _r = max(leg, 1e-3) / _GAIT_REF_LEG_M
+    freq = 1.5 if 0.85 <= _r <= 1.18 else 1.5 * (1.0 / _r) ** 0.5
+    # Stiffness scales UP with mass but never DOWN. Two reasons, one physical and one about our own data:
+    # a heavier body needs more torque to hold a pose, but a lighter one does not need LESS to stand -- it just
+    # draws less -- and the failure modes are asymmetric, since an over-stiff leg still holds its pose while an
+    # under-stiff one sags into a CROUCH. And an UNGROUNDED gene's mass is a placeholder, not a measurement, so
+    # scaling down from it means scaling by a fiction. Measured: the two-sided version put kp at 28.7 for a
+    # composed dog and took the design-bench animal family from partly-credible to verdict@1 = 0.0.
+    stiff = max(1.0, (mass / _GAIT_REF_MASS_KG) ** 0.7)
+    return {"freq": round(min(3.0, max(0.6, freq)), 3), "hip_amp": 0.9, "knee_amp": 1.0,
+            "kp": round(min(400.0, max(20.0, 32.0 * stiff)), 2),
+            "kd": round(min(18.0, max(1.0, 1.5 * stiff)), 3)}
+
+
+def _foot_geom_id(model, data, tip_body: int):
+    """The geom that IS the foot: the lowest-riding geom on the leg's tip body, resolved ONCE at rest so the
+    same physical point is tracked across a probe.
+
+    Chosen over the tip body's frame ORIGIN because the origin is not the foot and measurably is not: a
+    revolute joint's anchor frequently coincides with the frame origin of the body it drives, in which case
+    rotating that joint moves ``xpos[tip_body]`` by exactly zero. MEASURED on a real Menagerie Go2 -- probing
+    ``FL_calf_joint`` by +-0.3 rad moved the tip body's origin (+0.0000, +0.0000, +0.0000) m while the foot
+    geom on that same body swept 0.041 m vertically. Anything that ranks joints by their effect on the foot
+    and reads the origin is reading a column of zeros."""
+    gs = [gi for gi in range(int(model.ngeom)) if int(model.geom_bodyid[gi]) == int(tip_body)]
+    if not gs:
+        return None
+    return min(gs, key=lambda gi: float(data.geom_xpos[gi][2]))
+
+
+def lift_joint_for_leg(model, data, qadr, act_u, leg, hip_tok: int, *, delta: float = 0.3):
+    """WHICH JOINT ON THIS LEG ACTUALLY LIFTS THE FOOT -- by measured kinematic role, not by depth index.
+
+    THE DEFECT THIS REPLACES. The rule was ``knee_k = stride[-1]``: take the DEEPEST fore-aft joint. On a
+    two-link animal leg (abduction + hip + knee) that is the knee and it is right, because after the hip is
+    spoken for there is exactly ONE fore-aft joint left and no choice is being made at all. On a three-joint
+    humanoid leg (hip-pitch + knee + ankle-pitch) the deepest fore-aft joint is the ANKLE PITCH, so the gait
+    drove the ankle and left the KNEE frozen at its PD default. MEASURED on a real Menagerie Unitree G1: the
+    crawl actuated 4 of 29 DOF and held 25 rigid -- both knees, both hip-rolls (its only lateral-balance
+    authority) and both ankle-rolls -- which is visible in the render as legs that stay rigid poles through
+    the whole fall.
+
+    THE RULE. Among the leg's fore-aft (stride/lift) joints, the hip is already committed to striding, so the
+    lift joint is whichever of the REMAINING fore-aft joints has the most FOOT-RAISE AUTHORITY: perturb it
+    +-``delta`` rad off the rest pose and take the best vertical excursion of the foot contact point, per
+    radian. Ties break toward the deeper joint, so the result is deterministic. Abduction joints are not
+    candidates -- the crawl deliberately holds them for lateral balance ("hips stride fore-aft; knee lifts;
+    abduction held") and on a fanned quad the abduction has MORE vertical authority than the knee, so a rule
+    that scored every joint would hand the gait the stance width and roll the body over.
+
+    THE BLAST RADIUS IS STRUCTURAL, NOT INCIDENTAL. With one candidate the pick is forced, so this returns the
+    same token the depth rule did, byte for byte. Swept over the legged MuJoCo Menagerie: all EIGHT quadrupeds
+    (Go2, Go1, A1, ANYmal B, ANYmal C, Spot, Barkour v0, Barkour vB) have exactly one fore-aft candidate per
+    leg and are untouched; the NINE bipeds/humanoids (G1, H1, Talos, Cassie, Booster T1, Fourier N1, Berkeley
+    Humanoid, Adam Lite, OP3) have two or three, and the pick MOVES on five of the seven measured -- G1, H1 and
+    OP3 to the knee, Booster T1, Fourier N1 and Adam Lite to the shank/shin, Talos to leg_4 (its knee).
+
+    IT DOES NOT ALWAYS MOVE, AND THAT IS THE POINT OF MEASURING RATHER THAN RENAMING. On Cassie the distal
+    ``tarsus`` wins on its merits (0.389 m/rad of foot raise against the knee's 0.204) -- Cassie's foot hangs
+    off a four-bar and the tarsus is the segment that carries it, so the depth rule happened to be right there.
+    Berkeley Humanoid keeps its ankle too, but only 1.23x over its knee (0.069 vs 0.056), which is close enough
+    that it should be re-examined if that body ever matters.
+
+    THIS IS NOT A BIPED WALK FIX and must not be sold as one. A counterfactual sweep (729 operating points x 3
+    arms) measured the true-knee pick at best alive 1174 steps against the shipped ankle's 1018 -- +15%
+    survival and still no walk. Re-measured end to end here at each body's own fitted operating point, the G1
+    goes 450 -> 521 steps alive and the H1 642 -> 592, and BOTH still print CROUCH. It is here because a
+    controller that holds a customer's knees rigid is wrong on its own terms.
+
+    Returns ``(token, disclosure)``; ``disclosure`` is None when no choice was available."""
+    import mujoco
+
+    stride = list(leg.stride_tokens)
+    depth_pick = (stride[-1] if len(stride) >= 2
+                  else (leg.tokens[-1] if leg.tokens[-1] != stride[0] else stride[-1]))
+    cands = [t for t in stride if t != hip_tok]
+    if len(cands) < 2:
+        # Nothing to choose between. One fore-aft joint below the hip -> it IS the lift joint; none at all
+        # (a RADIAL spider/crab leg whose knee reads as world-x) -> the existing deepest-token fallback, which
+        # is what raises that leg's foot. Both are exactly what the depth rule returned.
+        return depth_pick, None
+    fg = _foot_geom_id(model, data, int(leg.tip_body))
+
+    def _foot_z() -> float:
+        return float(data.geom_xpos[fg][2]) if fg is not None else float(data.xpos[int(leg.tip_body)][2])
+
+    ranked = []
+    for depth, t in enumerate(cands):
+        qa = int(qadr[t]); q0 = float(data.qpos[qa]); z0 = _foot_z()
+        raise_per_rad = -1e18
+        for step in (delta, -delta):
+            data.qpos[qa] = q0 + step; mujoco.mj_forward(model, data)
+            raise_per_rad = max(raise_per_rad, (_foot_z() - z0) / abs(step))
+        data.qpos[qa] = q0; mujoco.mj_forward(model, data)
+        # The probe is UNCLAMPED by joint limits on purpose: it asks a geometric question -- is this joint's
+        # axis placed so that turning it picks the foot up -- and clamping turns it into a question about
+        # range of motion. Measured on the G1, clamping the knee to its 0.087 rad of negative travel while the
+        # ankle keeps a full 0.3 rad shrinks the knee's per-radian score ~3.4x purely because the raise is
+        # second-order in a small angle, and hands the pick straight back to the ankle.
+        ranked.append((round(float(raise_per_rad), 6), depth, int(t)))
+    ranked.sort(reverse=True)                                 # score first, then DEPTH -> a tie goes deeper
+    pick = ranked[0][2]
+    disclosure = {"picked": pick, "depth_rule_picked": int(depth_pick),
+                  "changed": bool(pick != depth_pick),
+                  "raise_per_rad": {int(t): s for (s, _d, t) in ranked}}
+    return pick, disclosure
+
+
 def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float | None = None, hip_amp: float | None = None,
                        knee_amp: float | None = None, duty: float = 0.25, kp: float | None = None,
                        kd: float | None = None, record_qpos: bool = False, frame_every: int = 5,
                        turn_bias: float = 0.0, steer_fn=None, return_control_plan: bool = False,
-                       record_ctrl: bool = False) -> dict:
+                       record_ctrl: bool = False, per_joint_gains: bool | str = False,
+                       live_duty: bool = False) -> dict:
     """STATICALLY-STABLE CRAWL gait for a WIDE-stance quadruped (open-loop, NO policy). Lifts ONE leg at a time
     (the 4 legs at quarter-cycle phases with a LOW-DUTY knee pulse) so 3 feet are ALWAYS planted -> the CoM stays
     inside the support triangle -> it CANNOT roll over. On a FANNED wide-stance body
@@ -1033,13 +1347,61 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float | None = None, hi
     ~1.0 m @ 0.34 m/s, upright roll ~8deg, tall height 0.83, support_frac 0.84) — where the diagonal TROT rolls
     over for want of active balance. Returns the SAME metrics dict as ``recipe_rollout_morph``. REQUIRES a wide
     stance: narrow feet make a thin support triangle that tips even under a crawl (see
-    [[walking-breakthrough-abduction]]). Hip strides fore-aft (world-y); knee lifts; abduction (world-x) held."""
+    [[walking-breakthrough-abduction]]). Hip strides fore-aft (world-y); knee lifts; abduction (world-x) held.
+
+    TWO OPT-IN CONTROLLER CHANGES, both DEFAULT-OFF and byte-identical to the shipped gait when off. This
+    function produces every credible walk the product has, and the bodies are co-tuned with its operating point
+    ([[body-and-gait-are-co-tuned]]), so neither may become the default without its own measured before/after.
+
+    ``per_joint_gains`` — give each actuated DOF its OWN stiffness instead of one scalar ``kp`` for all of them.
+      Today a joint carrying a head and a joint carrying a whole leg get identical gains; measured on the
+      grounded authored bodies, :func:`recipe_gains` (the zero-rollout ``Kp = J_eff * wn^2`` law, already used by
+      the recipe/CPG path) wants a spread of 5.8x (dog) / 8.6x (cheetah) / 9.4x (horse) between the stiffest and
+      softest joint: at kp=32 the hips that carry a whole leg run at 0.49x (dog) to 0.20x (horse) of the
+      stiffness the law asks for, while the knees run 1.8x (horse) to 2.8x (dog) TOO stiff.
+        * ``"recipe"`` (or ``True``) — the ABSOLUTE law: ``kp_j = I_eff_j * wn^2``. Ignores the scalar ``kp``.
+        * ``"scaled"`` — the recipe's SHAPE, anchored on the scalar ``kp`` (``kp_j = kp * r_j / median(r)``).
+          This is the mode that COMPOSES with ``gait_flywheel.fit_gait_for_body``: that fit gives a body its own
+          operating point but still hands every joint on it the same stiffness, so "scaled" keeps the fitted
+          op-point and only redistributes it. ``"recipe"`` would discard the fitted ``kp`` outright.
+      A control plan produced under per-joint gains is marked NON-exportable: the frozen target program carries a
+      scalar ``kp``/``kd`` and cannot reproduce the rollout it would claim to describe (the vectors are attached
+      as ``kp_per_joint``/``kd_per_joint`` for a future exporter that can).
+
+    THE RESULT NOW CARRIES ITS COURSE (``path_m``, ``net_m``, ``straightness``, ``heading_dev_p95_deg``,
+    ``heading_dev_max_deg``), integrated per physics step. ``forward`` is world-frame delta-x — the honest
+    projection on the heading the body set out on — but two endpoints cannot tell a straight walk from a loop
+    that happens to point part of itself down +x, and measured, one did not: a fitted operating point that walked
+    a 2.2 m circle back past its own start line reported ``forward 1.582 m`` and was called a CREDIBLE WALK.
+
+    ``live_duty`` — make the ``duty`` argument actually reach the controller (see the note at the parameter
+      defaults below: it is INERT today). ON, ``duty`` replaces the structurally-derived swing fraction. The
+      >=10-leg stability cap still applies afterwards as a ``min``, so a centipede's duty is still bounded.
+
+    TWO RESULT KEYS APPEAR ONLY WHEN THE BODY EARNS THEM, and both are disclosures of a decision this function
+    used to take silently:
+      * ``lift_joints`` — the leg's lift joint is NOT the deepest fore-aft joint (see
+        :func:`lift_joint_for_leg`). Present on multi-jointed legs, i.e. bipeds/humanoids; absent on every
+        quadruped, where the pick is forced.
+      * ``direction_probe`` — the wave-REVERSAL arm of the direction/frequency probe was degenerate on this
+        body, so it ran once and the freed rollouts went to a wider frequency ladder. Present on bipeds and on
+        hexapods; absent on quadrupeds and octopods.
+    A body that triggers neither gets exactly the dict it always got, key for key."""
+    import math as _math
+
     import mujoco
     import numpy as np
 
     # per-body tuned gait params (freq/hip_amp/knee_amp) cached by tune_crawl_gait -> a hexapod/octopod gets its
     # own credible op-point while the quad keeps the proven default. An EXPLICIT kwarg always wins over the cache.
     _gp = (getattr(gene, "metadata", None) or {}).get("gait_params", {})
+    # These constants stay the SHIPPED default deliberately. default_gait_for derives a body-specific op-point
+    # and predicts swept optima well, but making it the default measurably costs verdicts: design-bench
+    # verdict@1 went 0.45 -> 0.40 (animal family to 0/6) whether the derived stiffness moved up OR down. The
+    # honest reading is that our composed bodies and this operating point are CO-TUNED -- the bodies were shaped
+    # against 1.5/32 -- so any move off it, however well-motivated, breaks bodies that were leaning on it. The
+    # law is therefore used where it can only help (re-centring the TUNER's search, which still adopts nothing
+    # that is not a confirmed CREDIBLE walk) and not where it can silently regress a shipped robot.
     freq = float(_gp.get("freq", 1.5)) if freq is None else float(freq)
     hip_amp = float(_gp.get("hip_amp", 0.9)) if hip_amp is None else float(hip_amp)
     knee_amp = float(_gp.get("knee_amp", 1.0)) if knee_amp is None else float(knee_amp)
@@ -1047,6 +1409,22 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float | None = None, hi
     # (kp/kd) deploys with it — the deploy verdict then matches the tune's credible op-point. Explicit kwarg wins.
     kp = float(_gp.get("kp", 32.0)) if kp is None else float(kp)
     kd = float(_gp.get("kd", 1.5)) if kd is None else float(kd)
+    # `duty` IS NOT READ UNLESS `live_duty=True` (default OFF). It is deliberately absent from the five lines
+    # above, and that is not an oversight in the cache — it is INERT IN THIS FUNCTION. The swing fraction actually
+    # used is `lift_duty`, derived STRUCTURALLY below from the static-stability margin (`beta`: 0.75 for a quad ->
+    # lift_duty 0.25, which is why the signature default LOOKS like the live value and is not). On the grounded
+    # authored dog (MEASURED 2026-08-01):
+    # duty = 0.12 / 0.25 / 0.42 all give forward = +0.345000 exactly, identical to six decimal places.
+    #
+    # This mattered beyond documentation, because `gait_search.PARAM_NAMES` used to SEARCH `duty` over
+    # [0.12, 0.42] and `bank_gait` stored it: the CEM spent a sixth of its dimensionality on a knob with no
+    # effect, and the resulting variance-collapse was then mined and shown to operators as the bank's
+    # tightest-clustered parameter. `duty` has since been REMOVED from the search space, the fitted op-point and
+    # the mined hints (task #265) — see the note at `gait_search.PARAM_NAMES`. It survives HERE, as this
+    # function's parameter, only because `live_duty` (default OFF, wired below at the lift_duty derivation) can
+    # make it real. Turning that on is a REAL CONTROLLER CHANGE — it moves the gait of every body including the
+    # canonical template the whole op-point is co-tuned with — and measured, it is not free, so it stays off.
+    # docs/breaking_the_cotuning_wall.md §3.1.2 describes this as "read from 5 of 6"; it was stronger than that.
 
     from virturoid.services.appendage_map import build_appendage_map
     from virturoid.services.gait_engine import select_duty
@@ -1069,9 +1447,14 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float | None = None, hi
     legs_list = amap.legs
     beta = 0.75 if amap.n_legs == 4 else select_duty(amap, model)
     lift_duty = max(0.15, min(0.5, 1.0 - beta))
+    if live_duty:                                             # OPT-IN: `duty` finally reaches the controller.
+        lift_duty = max(0.05, min(0.9, float(duty)))          # Widened past the structural [0.15, 0.5] window on
+        #                                                       purpose — the whole point is that the CEM's own
+        #                                                       [0.12, 0.42] range becomes reachable end to end.
     xs = sorted({round(lg.tip_xy[0], 2) for lg in legs_list})
     rank_of = {x: i for i, x in enumerate(xs)}
     hip_k: dict = {}; knee_k: dict = {}; seg_of: dict = {}; is_right: dict = {}; hip_sign: dict = {}
+    lift_choice: dict = {}
     max_seg = max((rank_of[round(lg.tip_xy[0], 2)] for lg in legs_list), default=0)
     for i, lg in enumerate(legs_list):
         stride = lg.stride_tokens
@@ -1079,10 +1462,13 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float | None = None, hi
             continue
         seg_of[i] = rank_of[round(lg.tip_xy[0], 2)]; is_right[i] = 1.0 if lg.side < 0 else 0.0
         hip_k[i] = stride[0]
-        # LIFT joint: the deepest STRIDE joint normally (a proper knee); but a RADIAL leg (spider/crab) may have
-        # only ONE stride joint -> hip==knee -> no foot lift -> it crouches. Fall back to the leg's DEEPEST token
-        # (which raises the foot) so every leg gets a distinct lift joint and can step.
-        knee_k[i] = stride[-1] if len(stride) >= 2 else (lg.tokens[-1] if lg.tokens[-1] != stride[0] else stride[-1])
+        # LIFT joint: the joint that MEASURABLY raises this leg's foot, among the fore-aft joints below the hip
+        # (see `lift_joint_for_leg`). Was `stride[-1]` -- the DEEPEST fore-aft joint -- which is the knee on a
+        # two-link animal leg and the ANKLE PITCH on a three-joint humanoid leg, leaving the knee frozen.
+        # Identical to the old pick whenever the leg offers only one candidate, which is every quadruped.
+        knee_k[i], _disc = lift_joint_for_leg(model, data, qadr, act_u, lg, hip_k[i])
+        if _disc is not None and _disc["changed"]:
+            lift_choice[i] = _disc
         # PROPULSION SIGN (general, MEASURED): +stride swings the foot FORWARD (+x) on some bodies, BACK on
         # others (hexapod +0.035 vs dog -0.026). Perturb the hip, measure the foot's dx, set the sign so the
         # planted foot pushes BACKWARD during stance -> forward propulsion for every leg on any body.
@@ -1097,6 +1483,9 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float | None = None, hi
     # which contact friction breaks). The probe picks whichever actually carries the body +x.
     ph_fwd = {i: (seg_of[i] * (1.0 - beta) + 0.5 * is_right[i]) % 1.0 for i in hip_k}
     ph_rev = {i: ((max_seg - seg_of[i]) * (1.0 - beta) + 0.5 * is_right[i]) % 1.0 for i in hip_k}
+    # ... EXCEPT WHEN THE REVERSAL IS THE IDENTITY MAP, which it is on a body with one fore-aft leg station and
+    # on any hexapod. See the `_dir_collapsed` test at the direction/frequency probe below, which is where the
+    # duplicated budget was actually being spent.
     # MANY-LEG METACHRONAL CRAWL (>=10 legs, e.g. a centipede): the default phase formula CLUSTERS a long body's
     # legs into few distinct phases, so at beta=0.5 (lift_duty ~0.5) HALF the legs swing at once -> the body
     # loses support and collapses (measured: a 14-leg body stands statically but sinks in ~65 steps under the
@@ -1116,6 +1505,27 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float | None = None, hi
         knee_amp = min(knee_amp, 0.35)                        # low knee lift so few feet leave the ground
         kp = max(kp, 160.0); kd = max(kd, 7.0)                # STIFF stance legs hold the long body up (soft kp=32
         #                                                       let it sink; measured kp~160 keeps height_ratio >0.6)
+    # PER-JOINT PD GAINS (opt-in; see the docstring). The DEFAULT branch builds a flat list of the SAME python
+    # float the loop used to close over, so the arithmetic in `_run` is unchanged term for term and the shipped
+    # gait is byte-identical. Built HERE, after the many-leg block, so the >=10-leg stiffness floor applies to
+    # the vectors exactly as it applies to the scalars.
+    _gain_mode = ("recipe" if per_joint_gains is True else
+                  (str(per_joint_gains) if per_joint_gains else ""))
+    kp_of = [float(kp)] * graph.n_tokens
+    kd_of = [float(kd)] * graph.n_tokens
+    if _gain_mode:
+        if _gain_mode not in ("recipe", "scaled"):
+            raise ValueError(f"per_joint_gains must be False, True/'recipe' or 'scaled' (got {per_joint_gains!r})")
+        _kpv, _kdv, _ = recipe_gains(model, graph)
+        if _gain_mode == "scaled":
+            # Keep the body's OPERATING POINT (the scalar kp/kd, which on a shipped robot is the one
+            # `fit_gait_for_body` fitted to THIS body) and only redistribute it across joints by the recipe's
+            # shape. Normalising on the MEDIAN means the typical joint keeps the fitted stiffness exactly.
+            _kpv = _kpv * (float(kp) / max(1e-9, float(np.median(_kpv))))
+            _kdv = _kdv * (float(kd) / max(1e-9, float(np.median(_kdv))))
+        if len(hip_k) >= 10:                                  # same floor the scalar path just applied
+            _kpv = np.maximum(_kpv, 160.0); _kdv = np.maximum(_kdv, 7.0)
+        kp_of = [float(v) for v in _kpv]; kd_of = [float(v) for v in _kdv]
     dt = float(model.opt.timestep)
     _gz0 = np.asarray(data.geom_xpos[:, 2]); body_g = [gi for gi in range(model.ngeom) if int(model.geom_bodyid[gi]) != 0]
     feet = []
@@ -1138,6 +1548,14 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float | None = None, hi
             _qref = np.array([float(d.qpos[qadr[k]]) for k in range(graph.n_tokens)])
             _z0 = float(d.qpos[bq + 2]) or z0
         x0 = float(d.qpos[bq]); y0 = float(d.qpos[bq + 1]); yaw0 = _yaw_of(d); alive = nsteps; hr = 1.0
+        # COURSE ACCUMULATORS (task D5). `forward` below is world-frame delta-x, which a CIRCULAR path can book as
+        # travel — measured, a body that walked a 2.2 m loop back past its own start line reported forward 1.582 m
+        # and printed CREDIBLE WALK. Answering "did it go anywhere or did it go round" needs the PATH, not the two
+        # endpoints, so both are integrated here per PHYSICS STEP: exact, independent of `frame_every` (a verdict
+        # must not move because someone changed the trace sampling), and available even when nothing is recorded.
+        # Measurement only — no control state is touched, so the gait is byte-identical.
+        _px, _py, _yprev, _ydev, _path = x0, y0, yaw0, 0.0, 0.0
+        _devs: list[float] = []                                # |unwrapped heading deviation from yaw0|, per step
         frames = [] if record else None
         c_prev = (np.asarray(d.geom_xpos[feet_idx, 2]) < fz0 + 0.02) if len(feet_idx) else np.zeros(0, bool)
         lifts = up_steps = support_steps = 0
@@ -1166,7 +1584,7 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float | None = None, hi
                 tgt[hip_k[key]] = _qref[hip_k[key]] + amp_key * hip_sign[key] * s
             for k in range(graph.n_tokens):
                 qv = float(d.qvel[vadr[k]])
-                tau = kp * (tgt[k] - float(d.qpos[qadr[k]])) - kd * qv
+                tau = kp_of[k] * (tgt[k] - float(d.qpos[qadr[k]])) - kd_of[k] * qv
                 d.ctrl[act_u[k]] = float(np.clip(tau, -clamps[k], clamps[k]))
             if rec_ctrl:                                      # the exact torques that drive THIS step (parity leg:
                 ctrl_rows.append(np.array(d.ctrl, dtype=float))  # replay these bytes into both engines, v7-F3)
@@ -1175,6 +1593,13 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float | None = None, hi
                 alive = t; break
             if record and t % frame_every == 0:
                 frames.append(d.qpos.copy())
+            _x = float(d.qpos[bq]); _y = float(d.qpos[bq + 1])
+            _path += ((_x - _px) ** 2 + (_y - _py) ** 2) ** 0.5
+            _px, _py = _x, _y
+            _yn = _yaw_of(d)
+            _ydev += _math.atan2(_math.sin(_yn - _yprev), _math.cos(_yn - _yprev))   # wrap the STEP, integrate the
+            _yprev = _yn                                                            # total -> a full turn reads 360
+            _devs.append(abs(_ydev))
             z = float(d.qpos[bq + 2]); hr = min(1.0, max(0.0, z / _z0))
             q = d.qpos[bq + 3:bq + 7]; upr = 1.0 - 2.0 * (float(q[1]) ** 2 + float(q[2]) ** 2)
             if z < 0.5 * _z0:
@@ -1186,14 +1611,39 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float | None = None, hi
                 lifts += int(np.sum(c_prev & ~c_now)); ng = int(np.sum(c_now))
                 support_steps += int(0 < ng < len(feet_idx)); c_prev = c_now
         forward = float(d.qpos[bq] - x0)                      # + = the walk direction the dir_sign probe selected
-        yaw_change = float(np.arctan2(np.sin(_yaw_of(d) - yaw0), np.cos(_yaw_of(d) - yaw0)))
+        # UNWRAPPED. This used to be `atan2(sin(yaw-yaw0), cos(yaw-yaw0))`, which is the yaw MODULO a full turn:
+        # a body that turned 190 deg reported -170 (the wrong WAY round), and one that turned a full 360 reported
+        # 0 — the two headings a locomotion verdict most needs to tell apart from "went straight". The integrated
+        # value is the honest one and is what `gait_quality.course_summary` gates on. Small turns (every existing
+        # caller: tests/test_legged_steering asserts opposite-sign yaw at +-0.5 bias over 1200 steps, ~22 deg) are
+        # numerically unchanged, because below 180 deg the two definitions agree exactly.
+        yaw_change = float(_ydev)
+        _net = float(((float(d.qpos[bq]) - x0) ** 2 + (float(d.qpos[bq + 1]) - y0) ** 2) ** 0.5)
         _T = max(1, alive) * dt
         res = {"finite": True, "forward": round(forward, 3), "height_ratio": round(hr, 3), "alive": alive,
                "survived": bool(alive >= nsteps and hr > 0.6), "speed": round(forward / max(1, alive) / dt, 3),
                "cadence": round(lifts / _T, 2), "upright_frac": round(up_steps / max(1, alive), 3),
                "support_frac": round(support_steps / max(1, alive), 3), "n_feet": int(len(feet_idx)),
                "yaw_change": round(yaw_change, 3), "lateral": round(float(d.qpos[bq + 1] - y0), 3),
-               "gait": "crawl", "n_tokens": graph.n_tokens}
+               # THE COURSE IT ACTUALLY HELD, so a LOOP cannot present as a straight line. `forward` alone is two
+               # endpoints; these are the path between them. `gait_quality.course_summary` gates on them and
+               # `classify` puts them in the verdict string. p95 (not max) for the reason `orientation_summary`
+               # gives: heading oscillates within every stride, so a max would read stride wobble as a turn.
+               "path_m": round(_path, 3), "net_m": round(_net, 3),
+               "straightness": round(_net / _path, 3) if _path > 1e-6 else 0.0,
+               "heading_dev_p95_deg": round(float(np.degrees(np.percentile(_devs, 95))) if _devs else 0.0, 1),
+               "heading_dev_max_deg": round(float(np.degrees(max(_devs))) if _devs else 0.0, 1),
+               "gait": "crawl", "n_tokens": graph.n_tokens,
+               # THE HORIZON THIS RESULT WAS MEASURED AT, and the trace's sampling stride. Without these two a
+               # metrics dict cannot say how long anyone looked, so `gait_quality.settling` cannot tell a walk
+               # from a drift-before-falling and every verdict is implicitly a claim about a horizon nobody
+               # recorded (task #267). `alive` is NOT a substitute: it equals `steps` for every survivor.
+               "steps": int(nsteps), "frame_every": int(frame_every) if record else 0}
+        if _gain_mode:                                        # disclosure, only when the opt-in flag is on, so
+            res["gain_mode"] = _gain_mode                     # the default result dict is unchanged key for key
+            res["kp_span"] = [round(min(kp_of), 3), round(max(kp_of), 3)]
+        if live_duty:
+            res["lift_duty"] = round(float(lift_duty), 4)
         if record:
             res["qpos_frames"] = frames or []
         if rec_ctrl:
@@ -1207,13 +1657,59 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float | None = None, hi
     # near 0, never masked). This is the scripted PRIOR; the learned residual (GEN-8) refines it further.
     if not hip_k:
         return _run(ph_fwd, freq, steps, record_qpos, turn_bias, steer_fn, rec_ctrl=record_ctrl)
+    # THE DIRECTION ARM CAN BE DEGENERATE, and when it is, half this budget used to buy nothing. Reversing the
+    # metachronal wave shifts leg `i` by `(max_seg - 2*seg_i) * (1 - beta)` cycles -- which is a WHOLE number of
+    # cycles, i.e. nothing at all, on two shapes of body that we ship:
+    #   * ONE fore-aft station (any biped, and any four-legged body whose legs sit at one x): `seg` and
+    #     `max_seg` are both 0, so `ph_rev` IS `ph_fwd` term for term. VERIFIED: a composed biped and a real
+    #     Menagerie G1 both give {0: 0.0, 1: 0.5} in "both" directions.
+    #   * an ODD number of stations at the tripod duty beta = 0.5 -- which is EVERY HEXAPOD. Three stations
+    #     means `max_seg` = 2 and `(1 - beta)` = 0.5, so the reversal shifts every leg by exactly 1.0 cycle.
+    #     This one was found by MEASURING the fix, not by reading the code: a hexapod looks like it has a wave.
+    # So two of every four probe rollouts were byte-identical re-runs, on every evaluation of such a body, and
+    # silently. Detected structurally rather than by leg count, because neither shape above IS a leg count.
+    #
+    # The freed half is spent, not saved: the frequency ladder extends from two points to four, one step of the
+    # same 1.7x ratio in each direction, so the search is a STRICT SUPERSET of the shipped one at an unchanged
+    # four rollouts. Frequency is the axis worth spending it on -- it is the one probe coordinate this gait is
+    # measurably sensitive to (a hexapod nets +0.47 m at 2.5 Hz and -0.15 m at 1.5 Hz on the same body).
+    #
+    # MEASURED BLAST RADIUS of spending it (48 body x operating-point cells, full result dicts compared):
+    # 45 byte-identical; the 3 that move are all the authored hexapod at operating points AWAY from its own
+    # fitted one, and all 3 move FORWARD (-0.098 -> +0.191 m, -0.105 -> +0.057 m, +0.015 -> +0.046 m; two are
+    # sign flips from backward to forward). At its FITTED point the hexapod is byte-identical. The cost is
+    # support: it wins those metres at a higher stride frequency, so `support_frac` falls (0.907 -> 0.577 at
+    # the shipped default) -- fewer feet planted at once. Better travel, thinner static margin, stated here so
+    # nobody has to rediscover it.
+    _dir_collapsed = all(abs(ph_fwd[i] - ph_rev[i]) < 1e-9 for i in hip_k)
+    _dirs = (ph_fwd,) if _dir_collapsed else (ph_fwd, ph_rev)
+    _fqs = ((freq / 1.7, freq, freq * 1.7, freq * 1.7 * 1.7) if _dir_collapsed else (freq, freq * 1.7))
     best_phd, best_fq, best_fwd = ph_fwd, freq, -1e9
-    for phd in (ph_fwd, ph_rev):
-        for fq in (freq, freq * 1.7):
+    for phd in _dirs:
+        for fq in _fqs:
             f = _run(phd, fq, min(350, steps), False)["forward"]   # direction/freq probe is straight (turn_bias 0)
             if f > best_fwd:
                 best_fwd, best_phd, best_fq = f, phd, fq
     out = _run(best_phd, best_fq, steps, record_qpos, turn_bias, steer_fn, rec_ctrl=record_ctrl)
+    if _dir_collapsed:
+        # SAY SO. A result that silently ran half the search it claims to have run is the defect; a result that
+        # names the arm it dropped and why is the fix. Present only on bodies where the collapse is real, so
+        # every existing consumer of a quadruped/hexapod result sees the dict it always saw, key for key.
+        out["direction_probe"] = {
+            "arms": 1,
+            "reason": (f"reversing the metachronal wave shifts every leg by a whole number of cycles on this "
+                       f"body ({len(xs)} fore-aft leg station(s) at duty beta={beta:.2f}), so the reversed "
+                       f"wave is phase-identical to the forward one -- there is no wave to reverse"),
+            "stations": int(len(xs)),
+            "beta": round(float(beta), 4),
+            "budget_spent_on": "frequency",
+            "frequencies_hz": [round(float(v), 4) for v in _fqs],
+        }
+    if lift_choice:
+        # SAY SO, likewise, when the lift joint is not the one a reader of the old code would expect.
+        out["lift_joints"] = {int(i): {"picked": int(d["picked"]),
+                                       "deepest_fore_aft": int(d["depth_rule_picked"])}
+                              for i, d in sorted(lift_choice.items())}
     if return_control_plan:
         # Freeze the measured direction/frequency probe and the structural leg
         # map.  Deployment must never repeat a physics probe: this plan is the
@@ -1229,10 +1725,15 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float | None = None, hi
         # Do not export it as though it could.  The caller can fall back to the
         # explicitly-labelled trot starter rather than shipping a mismatched
         # controller.
-        exportable = len(hip_k) > 0 and len(hip_k) < 10
+        # Per-joint gains are NOT representable in this scalar-kp target program, so a plan produced under them
+        # would describe a controller that is not the one just measured. Refuse to call it exportable and carry
+        # the vectors alongside for an exporter that can consume them.
+        exportable = len(hip_k) > 0 and len(hip_k) < 10 and not _gain_mode
         out["control_plan"] = {
             "exportable": exportable,
-            "reason": None if exportable else "crawl requires a dynamic settled reference pose or has no leg map",
+            "reason": (None if exportable else
+                       ("per-joint PD gains are not representable in a scalar-kp target program" if _gain_mode
+                        else "crawl requires a dynamic settled reference pose or has no leg map")),
             "policy_type": "crawl_wave_gait",
             "joint_names": joint_names,
             "default_pose": [float(v) for v in q_def],
@@ -1247,6 +1748,10 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float | None = None, hi
                       "phase": float(best_phd[key]), "hip_sign": float(hip_sign[key])}
                      for key in sorted(hip_k)],
         }
+        if _gain_mode:
+            out["control_plan"].update({"gain_mode": _gain_mode,
+                                        "kp_per_joint": [round(v, 4) for v in kp_of],
+                                        "kd_per_joint": [round(v, 4) for v in kd_of]})
     return out
 
 

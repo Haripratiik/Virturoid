@@ -97,7 +97,10 @@ def generate_task_scenes(gene, spec: PickPlaceTaskSpec, count: int = 6, *, seed:
             x, y = chosen[k]; k += 1
             objs.append(SceneObject(name, "container", (x, y, 0.0, 0, 0, 0), material=mat(name, "bin")))
         scenes.append(SceneGraph(
-            id=f"{spec.task_type}_{gene.id}_{i}", version="0.1.0",
+            # NO gene id here: this id is the scene's FILENAME under scenes/variation/, and a composed gene id
+            # ("built_manipulator_7seg") pushed tracked paths past Windows' 260-char MAX_PATH. One gene per
+            # package, so task_type + index is already unique. See scene_generator._task_token.
+            id=f"{spec.task_type}_{i}", version="0.1.0",
             name=f"{spec.task_type} scene {i + 1}", backend_targets=["mujoco"],
             robot_spawn_xyz_rpy=(0, 0, 0, 0, 0, 0), objects=objs,
             variation_parameters={"task_type": spec.task_type}, requirement_trace=[spec.task_type]))

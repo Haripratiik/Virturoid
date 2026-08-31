@@ -13,6 +13,29 @@ plus the authored anatomy graph when one is available). Its three jobs, per the 
 Recording routes through the production ``compose_robot`` (LLM-first; the offline heuristic fires only behind
 ``VIRTUROID_ALLOW_HEURISTIC_FALLBACK`` exactly as elsewhere), so re-recording with dev tokens captures the real
 model and catches drift, while an offline record fills a deterministic CI fixture. Replay never generates.
+
+PROVENANCE (#208, 2026-08-07). The cassette used to record only *which builder* produced the geometry
+(``design_source``), and the bench's ``model`` label was typed by a CLI flag on the run rather than read off
+the data. Those two facts together let a number measured on the OFFLINE deterministic builders be reported
+under a live-model label. MEASURED on the committed fixture: **0 of 20 rows were authored by a model** — 14
+``heuristic`` and 6 ``anatomy_generic``, every one of the latter carrying ``_fallback_gene``'s note "No usable
+anatomy model was available", which is reachable only with ``llm is None``.
+
+So provenance is now DERIVED FROM THE ROW, never asserted by the caller:
+
+  * ``authored_by_model`` — is this geometry the model's work? True only for the design sources reachable
+    exclusively with a live backend (``llm``, ``llm_anatomy_graph``, ``anatomy``). This is decidable for
+    legacy rows too, which is why the committed fixture can be classified without re-recording it.
+  * ``llm_calls`` — completions actually billed while designing this row, read off the ``llm_client`` spend
+    ledger. Recorded going forward; absent (``None``) on legacy rows.
+
+``DesignCassette.mode()`` aggregates those into ``live`` / ``offline`` / ``mixed``, and Design-Bench refuses a
+run label that contradicts it. The rule is the one ``bank_gate`` uses for gait rows: the artifact carries the
+evidence for its own provenance, and a claim that outruns the evidence is rejected rather than printed.
+
+TOKEN BOUNDARY. Recording is a DESIGN-PATH activity — a developer re-recording the battery may spend design
+tokens (``scripts/design_bench.py --live``). Replay is token-free by construction and is what CI runs. Neither
+sits on the customer hot path: nothing in this module is reachable from ``create_robot``/``verify_robot``.
 """
 from __future__ import annotations
 
@@ -24,6 +47,57 @@ CASSETTE_VERSION = "v1"
 
 # The committed, token-free fixture CI replays. A dev re-record with live tokens can overwrite it explicitly.
 DEFAULT_CASSETTE_PATH = Path(__file__).resolve().parents[3] / "tests" / "fixtures" / "design_cassette_v1.json"
+
+#: Design sources that ONLY a live backend can produce — every assignment site sits inside an ``llm is not
+#: None`` branch of ``morphology_composer`` (``llm`` §propose_morphology_spec, ``llm_anatomy_graph``
+#: §_ground_anatomy_graph, ``anatomy`` §_compose_robot_impl). Seeing one of these IS the evidence a model
+#: authored the body; nothing else in the record is.
+MODEL_AUTHORED_SOURCES = frozenset({"llm", "llm_anatomy_graph", "anatomy", "anatomy_graph"})
+
+#: The deterministic builders. Note ``heuristic``/``anatomy_generic`` are also the landing spot when a live
+#: model WAS called and its proposal failed grounding — so these do not prove zero tokens, only that the
+#: shipped geometry is not the model's. That is the distinction the funnel actually needs.
+BUILDER_AUTHORED_SOURCES = frozenset({"heuristic", "anatomy_generic", "archetype", "anthropometric",
+                                      "intent", "offline_composer"})
+
+
+def authored_by_model(design_source: str | None) -> bool:
+    """Did a live model author this geometry? Decidable from the recorded ``design_source`` alone."""
+    return str(design_source or "") in MODEL_AUTHORED_SOURCES
+
+
+#: Substrings that identify a recorded failure as TRANSPORT, not design. MEASURED 2026-08-08 (#280): a full
+#: 20-prompt live battery produced 16 "refusals" -- and **14 of them were HTTP 429**, the organisation's 50
+#: requests-per-day cap on the fast model, hit partway through the run. The bench scored all 16 identically, as
+#: schema failures in the absolute denominator, and printed ``verdict@1 = 0.0``. That number was a measurement
+#: of an exhausted API quota wearing the label of the product's design quality -- the exact defect #208 closed
+#: facing the other way, and strictly worse, because a live baseline fixture recorded during an outage would
+#: have frozen "the product can build nothing" in as the regression floor.
+#:
+#: So a failure now carries WHY. Design refusals are the product's honest strict-mode behaviour and are real
+#: data; infrastructure failures are not a measurement of anything and are excluded from the denominator with
+#: their prompt ids named (never silently dropped -- see ``design_bench.bench_from_cassette``).
+INFRASTRUCTURE_ERROR_MARKERS: tuple[str, ...] = (
+    "error code: 429", "rate limit", "rate_limit", "too many requests",
+    "error code: 500", "error code: 502", "error code: 503", "error code: 504",
+    "internal server error", "service unavailable", "bad gateway", "overloaded",
+    "connection error", "connection aborted", "connection reset", "connectionerror",
+    "timeout", "timed out", "apitimeouterror", "apiconnectionerror",
+    "insufficient_quota", "quota", "authenticationerror", "permissiondenied",
+    "invalid_api_key", "ssl", "temporarily unavailable",
+)
+
+
+def is_infrastructure_failure(error: str | None) -> bool:
+    """Was this recorded failure the NETWORK/QUOTA, rather than the model declining to produce a sound design?
+
+    Decided from the recorded error text, so legacy rows are classifiable without re-recording -- the same
+    property that made ``authored_by_model`` able to classify the 2026-07 fixture. Conservative by
+    construction: anything not matching a known transport signature counts as a DESIGN refusal, so an
+    unrecognised failure is scored against us rather than excused.
+    """
+    text = str(error or "").lower()
+    return any(m in text for m in INFRASTRUCTURE_ERROR_MARKERS)
 
 
 class DesignCassette:
@@ -66,9 +140,14 @@ class DesignCassette:
 
     # -------------------------------------------------------------- write
     def record(self, prompt_id: str, *, prompt: str, gene, graph: dict | None = None,
-               source: str = "unknown", error: str | None = None) -> None:
+               source: str = "unknown", error: str | None = None,
+               llm_calls: int | None = None, backend: str | None = None, model: str | None = None,
+               strict_llm: bool | None = None) -> None:
         """Store (or overwrite) one prompt→design entry. ``gene`` may be None to record a design FAILURE (so the
-        funnel's schema/compile denominator is honest — an attempt that produced nothing is still an attempt)."""
+        funnel's schema/compile denominator is honest — an attempt that produced nothing is still an attempt).
+
+        ``llm_calls``/``backend``/``model``/``strict_llm`` are the measured provenance of THIS attempt (see the
+        module docstring). They are written as given — the caller measures, it does not assert."""
         entry = {"prompt": prompt, "source": source, "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%S")}
         if gene is not None:
             entry["gene"] = gene.to_dict() if hasattr(gene, "to_dict") else gene
@@ -77,7 +156,92 @@ class DesignCassette:
             entry["graph"] = graph
         if error is not None:
             entry["error"] = str(error)[:300]
+        prov = {k: v for k, v in (("llm_calls", llm_calls), ("backend", backend), ("model", model),
+                                  ("strict_llm", strict_llm)) if v is not None}
+        if prov:
+            entry["provenance"] = prov
         self._data.setdefault("entries", {})[prompt_id] = entry
+
+    def drop(self, prompt_id: str) -> bool:
+        """Forget one entry so the next record run re-generates it. The reason this exists is #280: a row whose
+        stored outcome is a TRANSPORT failure is not an answer, and because ``design_from_prompt`` replays
+        anything already present, leaving it in place would make a single rate-limit window poison that prompt
+        permanently. Returns whether an entry was removed."""
+        return self._data.setdefault("entries", {}).pop(prompt_id, None) is not None
+
+    # -------------------------------------------------------------- provenance (the honest-gate substrate)
+    def entry_provenance(self, prompt_id: str) -> dict:
+        """Per-row provenance, DERIVED not asserted. ``authored_by_model`` is decidable for every row (legacy
+        included) from ``design_source``; ``llm_calls`` is None on rows recorded before it was measured.
+        ``failed`` marks a recorded design FAILURE — an attempt that produced no body at all."""
+        e = self.entry(prompt_id) or {}
+        prov = e.get("provenance") or {}
+        failed = "gene" not in e
+        infra = failed and is_infrastructure_failure(e.get("error"))
+        return {"prompt_id": prompt_id,
+                "design_source": e.get("design_source"),
+                "failed": failed,
+                # WHY it failed. "infrastructure" is not a measurement of the product (#280); "design_refusal"
+                # is -- it is strict mode declining to substitute a template, which is the behaviour we want.
+                "failure_kind": (None if not failed else "infrastructure" if infra else "design_refusal"),
+                "infrastructure_failure": infra,
+                "error": e.get("error"),
+                "authored_by_model": authored_by_model(e.get("design_source")),
+                "llm_calls": prov.get("llm_calls"),
+                "backend": prov.get("backend"), "model": prov.get("model"),
+                "strict_llm": prov.get("strict_llm")}
+
+    def mode(self) -> str:
+        """The cassette's measured mode: WHICH GENERATOR was measured, not how well it did.
+
+        ``live`` (every design that exists was authored by a model), ``offline`` (none was), ``mixed`` (both
+        generators appear), ``empty``. **Design FAILURES are excluded from the vote**, deliberately: under
+        ``strict_llm`` the product refuses rather than substituting a template, so a live run that refuses is
+        still a measurement OF THE LIVE PATH. Counting a refusal as evidence of the offline generator would
+        relabel the honest strict-mode behaviour as an offline run. The refusals are not hidden — they are
+        ``n_failed`` here and schema failures in the funnel's absolute denominator.
+        """
+        rows = [r for r in (self.entry_provenance(p) for p in self.prompt_ids()) if not r["failed"]]
+        if not rows:
+            return "empty"
+        n_live = sum(1 for r in rows if r["authored_by_model"])
+        return "live" if n_live == len(rows) else "offline" if n_live == 0 else "mixed"
+
+    def provenance(self) -> dict:
+        """The whole-cassette provenance block that Design-Bench stamps onto its funnel."""
+        rows = [self.entry_provenance(p) for p in self.prompt_ids()]
+        built = [r for r in rows if not r["failed"]]
+        infra = [r for r in rows if r["infrastructure_failure"]]
+        refused = [r for r in rows if r["failure_kind"] == "design_refusal"]
+        n_live = sum(1 for r in built if r["authored_by_model"])
+        calls = [r["llm_calls"] for r in rows if r["llm_calls"] is not None]
+        srcs: dict[str, int] = {}
+        for r in rows:
+            key = ("(infrastructure failure)" if r["infrastructure_failure"] else "(design refused)"
+                   if r["failed"] else str(r["design_source"] or "unknown"))
+            srcs[key] = srcs.get(key, 0) + 1
+        return {"mode": self.mode(), "n_rows": len(rows),
+                "n_built": len(built), "n_failed": len(rows) - len(built),
+                # #280: a failure is only a measurement when it was the MODEL that declined.
+                "n_design_refused": len(refused), "n_infrastructure_failed": len(infra),
+                "infrastructure_prompt_ids": sorted(r["prompt_id"] for r in infra),
+                "design_refused_prompt_ids": sorted(r["prompt_id"] for r in refused),
+                "n_usable": len(rows) - len(infra),
+                "n_authored_by_model": n_live, "n_authored_by_builder": len(built) - n_live,
+                "design_sources": srcs,
+                "llm_calls_total": sum(calls) if calls else None,
+                "n_rows_with_measured_calls": len(calls),
+                "llm_calls_caveat": ("A FLOOR, not a cost. llm_client._LedgerClient records a call only after "
+                                     "complete_json RETURNS, so every completion that raised -- which is every "
+                                     "one of the 429s -- billed latency (and possibly tokens) while counting 0."),
+                "backends": sorted({r["backend"] for r in rows if r["backend"]}),
+                "models": sorted({r["model"] for r in rows if r["model"]}),
+                "evidence": ("authored_by_model is read off design_source; the listed sources are assigned only "
+                             "inside llm-is-not-None branches of morphology_composer. Design failures are "
+                             "counted but do not vote on the mode (see DesignCassette.mode). Rows without "
+                             "llm_calls predate provenance recording (#208). failure_kind is read off the "
+                             "recorded error text against INFRASTRUCTURE_ERROR_MARKERS (#280)."),
+                "path": str(self.path)}
 
     def save(self, *, battery_version: str | None = None) -> Path:
         if battery_version is not None:
@@ -93,6 +257,8 @@ class DesignCassette:
             sources[e.get("source", "unknown")] = sources.get(e.get("source", "unknown"), 0) + 1
         return {"version": self._data.get("version"), "battery_version": self._data.get("battery_version"),
                 "n_entries": len(entries), "n_failures": sum(1 for e in entries.values() if "gene" not in e),
+                "n_infrastructure_failures": sum(1 for e in entries.values()
+                                                 if "gene" not in e and is_infrastructure_failure(e.get("error"))),
                 "sources": sources, "path": str(self.path)}
 
 
@@ -110,14 +276,34 @@ def design_from_prompt(prompt: str, *, prompt_id: str, cassette: DesignCassette 
         return cassette.get_gene(prompt_id), "cassette"
     if not allow_generate:
         return None, "absent"
+    import os
+
+    from virturoid.services.llm_client import spend_snapshot
     from virturoid.services.morphology_composer import compose_robot
+
+    def _calls() -> int:
+        return int(spend_snapshot()["totals"]["internal_calls"])
+
+    # MEASURE the spend across this one design instead of trusting a flag. The ledger is process-global and
+    # counts every internal completion (llm_client._LedgerClient), so the delta is exactly what this attempt
+    # billed -- including the calls the intent planner and anatomy designer make underneath compose_robot.
+    before = _calls()
+
+    def _prov() -> dict:
+        # Read AFTER the attempt: get_llm()'s _load_local_env() is what populates these from the project .env,
+        # so reading first would report "no backend" on a machine that has one configured.
+        return {"backend": os.environ.get("VIRTUROID_LLM_BACKEND"),
+                "model": os.environ.get("VIRTUROID_OPENAI_MODEL") or os.environ.get("VIRTUROID_CLAUDE_MODEL"),
+                "strict_llm": bool(strict_llm)}
     try:
         gene = compose_robot(prompt, llm="auto", strict_llm=strict_llm)
         source = getattr(gene, "design_source", "generated") or "generated"
     except Exception as exc:  # noqa: BLE001 - a failed design is DATA (the schema/compile floor), not a crash
         if cassette is not None and record:
-            cassette.record(prompt_id, prompt=prompt, gene=None, source="error", error=f"{type(exc).__name__}: {exc}")
+            cassette.record(prompt_id, prompt=prompt, gene=None, source="error",
+                            error=f"{type(exc).__name__}: {exc}", llm_calls=_calls() - before, **_prov())
         return None, f"error:{type(exc).__name__}"
     if cassette is not None and record:
-        cassette.record(prompt_id, prompt=prompt, gene=gene, source=source)
+        cassette.record(prompt_id, prompt=prompt, gene=gene, source=source,
+                        llm_calls=_calls() - before, **_prov())
     return gene, source

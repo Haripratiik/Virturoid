@@ -40,7 +40,8 @@ def build_product_readiness_ledger(package_dir, *, robot_class: str = "", gene=N
         # top of schema validity + compiled sim + a REAL BOM (G2, fidelity gap-closure: the e2e test caught
         # packages with ZERO parts list marked safe_to_export=True — a robot with no parts cannot be built).
         # CV + controller are required only when present/requested.
-        require = ["schema_valid", "sim_compiled", "real_cad_exported", "physics_evaluated", "bom_present"]
+        require = ["schema_valid", "sim_compiled", "real_cad_exported", "physics_evaluated", "bom_present",
+                   "actuators_feasible"]
     stages = [
         _probe_schema_valid(pkg),
         _probe_sim_compiled(pkg),
@@ -49,9 +50,17 @@ def build_product_readiness_ledger(package_dir, *, robot_class: str = "", gene=N
         _probe_physics(pkg, gene),
         _probe_controller(pkg),
         _probe_bom(pkg),
+        _probe_actuators_feasible(pkg),
     ]
+    require = list(require)
+    # A control stack that FAILED its datasheet-torque audit must block safe_to_export, not merely be noted:
+    # this is the artifact a customer runs on hardware. Scoped to the failure so a passing/absent audit never
+    # adds a gate a build could not previously have had to clear.
+    ctrl = next((s for s in stages if s.stage == "controller_exported"), None)
+    if ctrl is not None and ctrl.status == BELOW_GATE and "controller_exported" not in require:
+        require.append("controller_exported")
     return ProductReadinessLedger(package_dir=str(pkg), robot_class=robot_class, stages=stages,
-                                  required=list(require), enforce=enforce)
+                                  required=require, enforce=enforce)
 
 
 def write_product_readiness_ledger(package_dir, *, robot_class: str = "", gene=None,
@@ -184,6 +193,69 @@ def _probe_rendered_cv(pkg: Path) -> StageRecord:
     return StageRecord("rendered_cv_data", NOT_REQUIRED, "no perception/CV stage in this build")
 
 
+def _probe_actuators_feasible(pkg: Path) -> StageRecord:
+    """B3d (2026-07-24 audit): surface the BOM's power/torque feasibility as a GATE, not a buried note.
+
+    ``bom_certificate.json`` (bom_certificate.certify_policy_on_bom) grades every joint's measured torque/speed
+    demand against the REAL selected servo across 6 gates (peak torque, thermal-continuous, speed, torque-speed
+    envelope, mechanical power, selection headroom). Before this it sat on disk and nothing gated on it, so a
+    robot whose actuators can't physically supply the demanded power still exported green. Now: cert present +
+    ``pass:true`` -> ATTAINED; present + ``pass:false`` -> BELOW_GATE (blocks export, with the failing gate
+    named); absent -> NOT_REQUIRED (no cert was run -> stay silent, never block a body we didn't assess)."""
+    cert = next((p for p in pkg.rglob("bom_certificate.json")), None)
+    if cert is None:
+        return StageRecord("actuators_feasible", NOT_REQUIRED, "no BOM feasibility certificate in this build")
+    try:
+        data = json.loads(cert.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return StageRecord("actuators_feasible", NOT_REQUIRED, "bom_certificate.json does not parse")
+    if data.get("pass") is True:
+        return StageRecord("actuators_feasible", ATTAINED,
+                           f"real BOM actuators cleared all feasibility gates ({data.get('n_gates_pass')}/6)",
+                           {"n_gates_pass": data.get("n_gates_pass")})
+    failed = [g.get("name") for g in (data.get("gates") or []) if not g.get("passed")]
+    return StageRecord("actuators_feasible", BELOW_GATE,
+                       "BOM actuators are power/torque INFEASIBLE for the demanded motion: "
+                       + (", ".join(str(f) for f in failed) or "below feasibility threshold"),
+                       {"n_gates_pass": data.get("n_gates_pass"), "failed_gates": failed})
+
+
+def _requested_task_failure(pkg: Path) -> StageRecord | None:
+    """B3d: return a BELOW_GATE verdict if the REQUESTED-task evaluation ran for real and fell below its bar,
+    else None. This is what makes gate strictness CONSISTENT across archetypes -- the task the user asked for
+    (in gene_evaluation_report / physics_evaluation_report) vetoes export whether it's locomotion (didn't walk)
+    or a scored task (<25% success), so a generic grasp-lift or nav certification can never mask a failing
+    requested task. Returns None when the requested task PASSED or ran only as a dry-run (let the normal flow
+    decide), so this only ever BLOCKS, never upgrades."""
+    gene_eval = next((p for p in pkg.rglob("gene_evaluation_report.json")), None)
+    phys = next((p for p in pkg.rglob("physics_evaluation_report.json")), None)
+    for rep in (phys, gene_eval):
+        if rep is None:
+            continue
+        try:
+            data = json.loads(rep.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            continue
+        if str(data.get("adapter_name", "")).lower().startswith("dry_run"):
+            continue                                        # a dry-run isn't a real verdict -> don't veto on it
+        if str(data.get("task_type", "")) == "locomotion":
+            fwd = float(data.get("forward_m", 0.0)); up = bool(data.get("upright", False))
+            status = str(data.get("status", ""))
+            walked = (status == "walked") if status else (fwd >= _WALK_MIN_FORWARD_M and up)
+            if not walked:
+                return StageRecord("physics_evaluated", BELOW_GATE,
+                                   f"requested locomotion did not walk (forward {fwd:.2f} m, status "
+                                   f"'{status or up}') in {rep.name}",
+                                   {"forward_m": fwd, "upright": up, "status": status})
+            return None
+        sr = data.get("success_rate")
+        if sr is not None and float(sr) < 0.25:
+            return StageRecord("physics_evaluated", BELOW_GATE,
+                               f"requested task success only {float(sr):.0%} in {rep.name}", {"success_rate": sr})
+        return None
+    return None
+
+
 def _probe_physics(pkg: Path, gene) -> StageRecord:
     """A REAL (non-dry-run) physics evaluation + a passed spawn-penetration check. Uses the gene when given."""
     # spawn penetration via the gene-design gate (fatal/high stability/kinematic flags == not physics-ready).
@@ -218,6 +290,17 @@ def _probe_physics(pkg: Path, gene) -> StageRecord:
             return StageRecord("physics_evaluated", BELOW_GATE,
                                "real physics ran but task success is below the export gate: "
                                + "; ".join(data.get("export_blockers") or ["below threshold"]), evidence)
+
+    # B3d (2026-07-24 audit): the REQUESTED task is authoritative for the gate. Before crediting a GENERIC
+    # capability certification (a contact grasp+lift of an arbitrary block, or a nav route), veto on the task the
+    # user actually asked for: an arm asked to sort/transport that scored ~0% must be EXPORT-BLOCKED exactly like
+    # a dog that won't walk — a passing generic grasp cert cannot mask a failing requested task. (Was: the grasp
+    # cert was checked first and short-circuited to ATTAINED, so the arm exported green while the dog didn't —
+    # inconsistent strictness.) The §15.3 gated run above already decides when present, so this only applies when
+    # there is no explicit gated verdict.
+    veto = _requested_task_failure(pkg)
+    if veto is not None:
+        return veto
 
     # A REAL (non-pinned) contact grasp+lift, certified by grasp_eval.evaluate_grasp_lift (closes the fingers and
     # lifts the object by FRICTION — no _pin_block). This is the honest manipulation capability: if it passed, the
@@ -308,10 +391,60 @@ def _probe_physics(pkg: Path, gene) -> StageRecord:
     return StageRecord("physics_evaluated", NOT_RUN, "no real physics evaluation report")
 
 
+def _control_stack_torque_failure(pkg: Path) -> StageRecord | None:
+    """Return a BELOW_GATE verdict if the shipped control stack FAILED its datasheet-torque audit, else None.
+
+    The control stage used to attain on FILE PRESENCE alone, while the compiler's docstring and the deployment
+    guide both told the customer a command past a joint's datasheet torque had been checked for. Nothing ran that
+    check, so the ladder was crediting a green it had not earned. Now the ledger reads the audit's own verdict in
+    ``reports/script_validation.json -> torque_audit`` and refuses to call the stage real when it failed. A
+    'no_reference'/absent audit does NOT downgrade the stage (nothing was measured, so nothing is claimed) --
+    it is disclosed in the detail instead."""
+    val = next((p for p in pkg.rglob("script_validation.json")), None)
+    if val is None:
+        return None
+    try:
+        audit = (json.loads(val.read_text(encoding="utf-8")) or {}).get("torque_audit") or {}
+    except Exception:  # noqa: BLE001
+        return None
+    if audit.get("status") != "fail":
+        return None
+    viol = [str(v) for v in (audit.get("violations") or [])]
+    return StageRecord("controller_exported", BELOW_GATE,
+                       "the shipped control stack FAILED its datasheet-torque audit: "
+                       + ("; ".join(viol[:3]) or "a command could exceed a joint's actuator peak torque"),
+                       {"torque_audit_violations": len(viol), "detail": viol[:5]})
+
+
 def _probe_controller(pkg: Path) -> StageRecord:
-    """A trained/exported controller bundle. not_required when training wasn't requested (no bundle present)."""
+    """A trained/exported controller bundle whose companion control stack passed the datasheet-torque audit.
+    not_required when training wasn't requested (no bundle present)."""
+    veto = _control_stack_torque_failure(pkg)
+    if veto is not None:
+        return veto                      # a stack that can overdrive a motor is not an exported controller
     bundle = next((p for p in pkg.rglob("controller_bundle.json")), None)
     ctrl = next((p for p in pkg.rglob("controller.py")), None)
+    val = next((p for p in pkg.rglob("script_validation.json")), None)
+    astat, n_joints = None, 0
+    if val is not None:
+        try:
+            _a = ((json.loads(val.read_text(encoding="utf-8")) or {}).get("torque_audit") or {})
+            astat, n_joints = _a.get("status"), int(_a.get("n_joints") or 0)
+        except Exception:  # noqa: BLE001
+            astat = None
+    # A pass over ZERO joints is not a passed safety check -- every check is trivially true over an empty set.
+    # It must read as NOT APPLICABLE here too, or the ledger re-launders the vacuous green the audit refused.
+    audited = astat == "pass" and n_joints > 0
+    if audited:
+        note = " + control stack passed the datasheet-torque audit"
+    elif astat == "not_applicable" or (astat == "pass" and n_joints == 0):
+        note = " (no actuated joints: the datasheet-torque audit does not apply -- nothing was checked)"
+    elif val is not None:
+        note = " (control stack present but its datasheet-torque audit did NOT run)"
+    else:
+        note = ""
     if bundle is not None or ctrl is not None:
-        return StageRecord("controller_exported", ATTAINED, "controller bundle present")
-    return StageRecord("controller_exported", NOT_REQUIRED, "no trained controller requested")
+        return StageRecord("controller_exported", ATTAINED, "controller bundle present" + note,
+                           {"torque_audit_passed": audited})
+    return StageRecord("controller_exported", NOT_REQUIRED, "no trained controller requested" + note,
+                       {"torque_audit_passed": audited})

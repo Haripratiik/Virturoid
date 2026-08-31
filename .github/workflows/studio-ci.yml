@@ -1,0 +1,99 @@
+name: Studio UI
+
+# The Studio bundle is COMMITTED (frontend/dist is tracked, and ui_server serves it straight from disk at
+# /studio). That makes a specific, silent failure possible: change frontend/src, forget to rebuild, and the
+# app every user runs no longer contains the change -- with no error anywhere, because the stale bundle is
+# perfectly valid JavaScript.
+#
+# It has already happened once. Commit 07d0a7f (2026-07-24, "Studio viewport: change-guarded per-frame resize
+# so the GL buffer can't freeze") touched exactly one file, frontend/src/viewport/engine/engine.ts, and
+# rebuilt nothing. The viewport fix was in the repository and not in the product until a later commit
+# happened to rebuild.
+#
+# Two gates, in order of how much they prove:
+#   1. typecheck -- the source compiles at all;
+#   2. rebuild + `git diff --exit-code frontend/dist` -- the committed bundle IS this source.
+#
+# Gate 2 relies on the vite build being deterministic for a fixed toolchain, which it is: the asset hashes are
+# content-derived, and two consecutive local builds of the same tree produced byte-identical output
+# (index-6zkzKw_G.js, verified 2026-08-07). Node is pinned here and the dependency tree by package-lock.json.
+# If a toolchain bump changes the hashes, this job fails ONCE and the fix is to commit the rebuilt bundle --
+# which is the correct outcome, not flake: the shipped bundle really did change.
+
+on:
+  pull_request:
+    paths:
+      - "frontend/**"
+      - ".github/workflows/studio-ci.yml"
+  push:
+    branches: [main]
+    paths:
+      - "frontend/**"
+      - ".github/workflows/studio-ci.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: studio-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bundle:
+    name: Studio typechecks and its committed bundle is current
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install (locked)
+        working-directory: frontend
+        run: npm ci
+      - name: Typecheck
+        working-directory: frontend
+        run: npm run typecheck
+      - name: Build
+        working-directory: frontend
+        run: npm run build
+      # tsconfig.tsbuildinfo is an incremental-compile cache; it legitimately differs per machine and says
+      # nothing about what ships. Only dist/ is the artifact users run.
+      # CHECK ONE: the bundle a fresh clone gets must actually be in the repository.
+      #
+      # frontend/dist/ is in .gitignore, and 18 files under it were force-added anyway. That combination is a
+      # trap with teeth: vite names the bundle by content hash, so every rebuild writes a NEW filename, and
+      # that new filename is ignored. `git add -A` skips it, index.html is tracked and updates happily, and
+      # the commit ships an index.html pointing at a file git does not contain -- a blank Studio on a fresh
+      # clone, with a green build. Found live 2026-08-07 while adding the Memory tab; the fix each time is
+      # `git add -f frontend/dist`, which is what the previous bundle commits (73b7ff9, 651a281) did.
+      - name: Every asset index.html references must be tracked by git
+        run: |
+          missing=0
+          for ref in $(grep -oE '(assets|/studio/assets)/[A-Za-z0-9._-]+\.(js|css)' frontend/dist/index.html | sed 's#^/studio/##' | sort -u); do
+            if ! git ls-files --error-unmatch "frontend/dist/$ref" >/dev/null 2>&1; then
+              echo "::error::frontend/dist/index.html references $ref, which git does not track."
+              missing=1
+            fi
+          done
+          if [ "$missing" = "1" ]; then
+            echo "frontend/dist/ is gitignored, so a rebuilt bundle needs: git add -f frontend/dist"
+            echo "Without it a fresh clone serves an index.html whose script does not exist."
+            exit 1
+          fi
+          echo "Every referenced asset is tracked."
+      # CHECK TWO: and it must be built from THIS source.
+      - name: The committed bundle must match this source
+        run: |
+          if ! git diff --exit-code -- frontend/dist; then
+            echo "::error::frontend/dist does not match frontend/src."
+            echo "Either the bundle was not rebuilt after a source change (run 'cd frontend && npm run build'"
+            echo "then 'git add -f frontend/dist'), or the build toolchain moved and the bundle genuinely"
+            echo "changed -- in which case commit the rebuilt bundle too. A stale dist means users run code"
+            echo "this repository does not have."
+            exit 1
+          fi
+          echo "frontend/dist is current."

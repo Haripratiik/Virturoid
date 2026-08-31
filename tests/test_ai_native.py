@@ -158,5 +158,102 @@ class AssistantConversationTests(unittest.TestCase):
         self.assertAlmostEqual(call_tool("get_robot", {"robot_id": rid})["result"]["standing_height_m"], h0, delta=1e-4)
 
 
+@unittest.skipUnless(_MUJOCO, "needs MuJoCo")
+class RenderViewPathTests(unittest.TestCase):
+    """``render_view`` is the tool an engineer calls to SEE the robot. It must hand back a path that OPENS.
+
+    Measured before the fix, through ``call_tool`` on an imported Go2: the PNG was written, and the result
+    carried no ``path`` key at all (only ``artifacts``), holding a CWD-relative string
+    ``build\\agent_renders\\<id>_view.png``. An MCP host launched from a different working directory cannot
+    resolve that, so the picture existed and the caller had nothing that opened it.
+    """
+
+    def setUp(self):
+        from virturoid.services import session_state as S
+        S.reset()
+
+    def _rid(self):
+        from virturoid.services.agent_tools import call_tool
+        return call_tool("create_robot", {"prompt": "a quadruped robot dog"})["result"]["robot_id"]
+
+    def test_render_view_returns_an_absolute_path_to_a_file_that_exists(self):
+        import os
+
+        from virturoid.services.agent_tools import call_tool
+        env = call_tool("render_view", {"robot_id": self._rid()})
+        self.assertTrue(env["ok"], env)
+        r = env["result"]
+        self.assertIn("path", r, "the tool for SEEING the robot must report the picture under 'path'")
+        self.assertTrue(os.path.isabs(r["path"]), f"a relative path does not resolve for an MCP host: {r['path']}")
+        self.assertTrue(os.path.isfile(r["path"]), f"reported a path with no file behind it: {r['path']}")
+        self.assertGreater(r["bytes"], 0)
+        self.assertEqual(r["artifacts"], [r["path"]], "artifacts must carry the same absolute path")
+
+    def test_the_reported_path_resolves_from_any_working_directory(self):
+        """The actual failure mode: the string is handed to a process whose CWD is not the server's."""
+        import os
+        import tempfile
+
+        from virturoid.services.agent_tools import call_tool
+        path = call_tool("render_view", {"robot_id": self._rid()})["result"]["path"]
+        cwd = os.getcwd()
+        with tempfile.TemporaryDirectory() as elsewhere:
+            try:                                     # restore BEFORE the dir is removed, or Windows can't rmdir
+                os.chdir(elsewhere)
+                self.assertTrue(os.path.isfile(path), f"{path} does not open from {elsewhere}")
+            finally:
+                os.chdir(cwd)
+
+    def test_a_render_that_cannot_be_produced_fails_loudly_with_a_reason(self):
+        """No silent ``None``: a render that did not happen says why, and never reports a path."""
+        from virturoid.services import ai_native_tools as A
+        from virturoid.services.agent_tools import call_tool
+        rid = self._rid()
+        real = A._render_gene_detail
+        A._render_gene_detail = lambda *a, **k: (None, "MUJOCO_GL=osmesa: libOSMesa.so not found")
+        try:
+            env = call_tool("render_view", {"robot_id": rid})
+        finally:
+            A._render_gene_detail = real
+        self.assertFalse(env["ok"], f"a render that produced nothing must not report ok=True: {env}")
+        self.assertIn("libOSMesa", env["error"], "the reason must reach the caller, not be replaced by a phrase")
+        self.assertIsNone(env["result"]["path"])
+        self.assertEqual(env["result"]["artifacts"], [])
+
+    def test_an_unknown_view_is_an_honest_failure_through_the_dispatcher(self):
+        from virturoid.services.agent_tools import call_tool
+        env = call_tool("render_view", {"robot_id": self._rid(), "view": "xray"})
+        self.assertFalse(env["ok"], env)
+        self.assertIn("collision", env["error"], "the refusal names the accepted values")
+
+    def test_the_collision_view_of_an_imported_robot_actually_draws_the_colliders(self):
+        """``view='collision'`` promises "the EXACT bodies the physics verdict is computed on".
+
+        On an imported Menagerie robot it drew an EMPTY FLOOR: the source parks its collision geoms in geom
+        group 3 (visuals in 0/2), MjvOption defaults to geomgroup [1,1,1,0,0,0], so all 13 of the Go2's
+        colliders were in a group the renderer had switched off -- while the cosmetics that WERE visible had
+        just been set to alpha 0. A path to a picture of nothing is the same defect as no path at all.
+        """
+        import os
+        from pathlib import Path
+
+        men = Path(os.path.expanduser("~/.cache/robot_descriptions/mujoco_menagerie/unitree_go2"))
+        if not men.is_dir():
+            self.skipTest("unitree_go2 is not cached locally (robot_descriptions fetches on demand)")
+        import numpy as np
+        from PIL import Image
+
+        from virturoid.services.agent_tools import call_tool
+        rid = call_tool("ingest_project", {"path": str(men)})["result"]["robot_id"]
+        env = call_tool("render_view", {"robot_id": rid, "view": "collision"})
+        self.assertTrue(env["ok"], env)
+        a = np.asarray(Image.open(env["result"]["path"]).convert("RGB")).astype(int)
+        # the colliders are drawn in an unmistakable orange (0.95, 0.45, 0.15); the floor and sky are grey-blue,
+        # so "red channel well above blue" separates body from scene without depending on exact shading.
+        warm = float(((a[..., 0] - a[..., 2]) > 40).mean())
+        self.assertGreater(warm, 0.02, f"the collision view drew no colliders (only {warm:.4%} of the frame is "
+                                       f"collider-coloured) — this is a picture of an empty floor")
+
+
 if __name__ == "__main__":
     unittest.main()

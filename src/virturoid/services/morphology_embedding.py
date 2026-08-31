@@ -38,6 +38,56 @@ FEATURE_NAMES = (
     + [f"base_{b}" for b in _BASE]
 )
 
+#: MASS IS LOG-COMPRESSED, and it is the only feature that has to be. ``_SCALES`` above states the contract —
+#: every feature lands at ~O(1) so no single one owns the distance — and mass is the one that breaks it: a
+#: linear divisor cannot hold 0.2 kg and 100 kg at O(1) at the same time, so the heaviest robot in any
+#: comparison sets the direction of the whole vector.
+#:
+#: MEASURED 2026-08-08 on the live composer: "a small quadruped robot dog" (2.09 kg, anatomy route) against
+#: "a large quadruped robot" (14.92 kg, template route) — two quadrupeds — cosine 0.813, of which
+#: ``total_mass`` alone supplied 0.293 of the 0.375 squared distance, i.e. **78%**. Every other feature agreed
+#: they were the same kind of machine. And the ordering was inverted, not merely blurred: the same large
+#: quadruped scored 0.886 against a two-legged HUMANOID, so the nearest verified precedent to a quadruped was
+#: a biped. That is the moat's own key, and ``_robotics_grounding`` gates warm-start at 0.85 — so the flywheel
+#: answered "no close verified precedent" for a quadruped standing next to a banked quadruped.
+#:
+#: The root cause is mass being a pre-grounding PLACEHOLDER the two builders disagree about ~3x on at equal
+#: size (1.31 vs 4.35 kg per metre of link) — re-ground both to the same physical band and the same pair reads
+#: 0.994. A key that only works on already-grounded bodies is not a key: an ingested 15 kg Go2 must land next
+#: to our composed dog, and no amount of fixing OUR builders can arrange that. So the key stops reading raw
+#: kilograms. log1p over the same scale keeps the feature's meaning and its sign of variation (heavier is
+#: still further) while bounding its span: the pair above moves 7.1x -> 2.5x apart and lands at 0.964, and
+#: quadruped-vs-quadruped (0.964) now correctly outranks quadruped-vs-biped (0.907).
+#:
+#: ``embed_gene_rich`` below already did exactly this and named the same defect ("total_mass alone is 55% of
+#: its variance"); it just never shipped, because it is gated behind a learned metric that has to prove itself
+#: first. This is the same fix on the vector that actually ships.
+#:
+#: ONE FEATURE, and that is a measured choice, not caution. Swept against the 26-body physics-verified transfer
+#: corpus (``embedding_eval``), compressing ``total_mass`` alone beat every wider variant on every axis --
+#: kendall 0.4794 / pearson 0.5593 (vs 0.4756 / 0.5583 adding ``mean_mass``, 0.4782 / 0.5570 adding the length
+#: magnitudes) -- and it opens the widest correct gap between quadruped-quadruped (0.9640) and quadruped-biped
+#: (0.9073); the wider variants close that gap to +0.037 and +0.017.
+#:
+#: HONEST COST, on the same corpus: ``triplet_ranking_acc`` falls 0.9036 -> 0.8635 while the two
+#: proximity-vs-measured-transfer CORRELATIONS both rise (kendall 0.4506 -> 0.4794, pearson 0.5050 -> 0.5593).
+#: The corpus's own bodies come from our two builders, which disagree ~3x about placeholder mass at equal size,
+#: so raw mass is partly a BUILDER label there and the triplet metric was partly scoring that. The correlations
+#: are the less thresholded read and they improve; the class ordering above was flatly wrong before and is
+#: right now. Both numbers are recorded here so the trade is visible rather than claimed as a clean win.
+_LOG_SCALED = ("total_mass",)
+
+#: Bumped whenever the map above changes, so a PERSISTED body index built by an older version is detected and
+#: rebuilt instead of being silently compared against fresh vectors (see ``RoboticsVectorMemory``).
+BODY_EMBED_VERSION = 2
+
+
+def _scaled(name: str, raw: float) -> float:
+    s = _SCALES[name]
+    if name in _LOG_SCALED:
+        return math.log1p(max(0.0, raw)) / math.log1p(s)
+    return raw / s
+
 
 def _depth_and_branching(gene: RobotGene):
     children: dict[str, list[str]] = {}
@@ -103,7 +153,7 @@ def embed_gene(gene: RobotGene) -> list[float]:
         "std_length": std_length, "mean_radius": sum(radii) / len(radii), "total_mass": sum(masses),
         "mean_mass": sum(masses) / len(masses), "n_fingers": n_fingers, "symmetry": symmetry,
     }
-    vec = [raw[k] / _SCALES[k] for k in _SCALES]
+    vec = [_scaled(k, raw[k]) for k in _SCALES]
     vec += ax
     vec += [1.0 if gene.end_effector_type == e else 0.0 for e in _EE]
     vec += [1.0 if gene.base_mount == b else 0.0 for b in _BASE]

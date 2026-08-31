@@ -8,6 +8,13 @@ pose relative to its parent (``body_pos``/``body_quat`` = exactly a URDF joint o
 straight from the model. Result: the URDF matches what we simulate, for a quad/hexapod/humanoid/arm alike.
 
 Visuals + collisions are the model's primitive geoms (box/cylinder/sphere) — self-contained, no external meshes.
+
+CONSTRAINTS. A RobotGene carries two kinds URDF treats very differently, and this file emits one and discloses
+the other. ``coupled_joints`` (mimic/slaved DOF: a Panda's two fingers, a Stretch's 10x gripper, ToddlerBot's
+negative gear ratios) map exactly onto URDF's native ``<mimic>`` — a degree-1 relation, which is what all 97
+corpus couplings turned out to be — so they are EMITTED. ``loop_closures`` cannot be expressed at all: URDF is a
+strict tree, one parent per link, and a closed loop needs a second path. Those are stated in an XML comment in
+the file itself rather than dropped in silence.
 """
 from __future__ import annotations
 
@@ -64,6 +71,79 @@ def _geom_visual_xml(model, g) -> tuple[str, str]:
     return geom, origin
 
 
+def _comment(text: str) -> str:
+    """One well-formed XML comment carrying ``text``.
+
+    Disclosure is only worth anything if the file still parses. An XML comment may not contain ``--`` or end in
+    ``-``, and the text below interpolates SEGMENT NAMES that come from a customer's own model, so neither rule
+    can be satisfied by writing the literal carefully. Double hyphens are separated and a trailing hyphen padded;
+    nothing is dropped.
+    """
+    body = " ".join(str(text).split()).replace("--", "- -")
+    while body.endswith("-"):
+        body += " "
+    return f"  <!-- {body} -->"
+
+
+def _num(v) -> str:
+    """A coupling ratio printed at full carried precision. ToddlerBot's neck runs through -0.90909091 and its
+    hip through -0.85714286; ``%.4f`` would ship -0.9091 and -0.8571, i.e. a different gearbox."""
+    return f"{float(v):.10g}"
+
+
+def _flatten_couplings(gene):
+    """Resolve every carried coupling onto an INDEPENDENT driver joint. ``{driven: (driver, multiplier, offset)}``.
+
+    A gene coupling is ``q_a = offset + ratio * q_b`` and URDF's ``<mimic>`` is ``q_a = multiplier * q_b + offset``
+    -- the same degree-1 relation, so the carried numbers transfer 1:1 with no rescaling.
+
+    They are COMPOSED first, because two corpus bodies declare CHAINS: a Stretch's four telescoping arm stages
+    are ``l0<-l1<-l2<-l3`` and a Talos gripper's six-bar is ``motor_single<-motor_double<-inner_double``. MuJoCo
+    solves such a chain jointly, but a URDF consumer does not: ``robot_state_publisher`` evaluates each mimic
+    from the joint_states message, and a mimic whose reference is ITSELF a mimic never appears there -- so the
+    dependent stage reads 0 and the arm telescopes wrong. Composition is exact for degree 1
+    (``a = r1*b + o1``, ``b = r2*c + o2`` => ``a = r1*r2*c + (r1*o2 + o1)``), so flattening loses nothing and
+    every emitted ``<mimic>`` points at a joint the controller actually commands.
+
+    Returns ``(resolved, notes)``; ``notes`` names anything NOT emitted, so the URDF can say so in the file.
+    """
+    direct: dict[str, tuple[str, float, float]] = {}
+    notes: list[str] = []
+    for cj in (getattr(gene, "coupled_joints", None) or []):
+        a, b = (cj or {}).get("a"), (cj or {}).get("b")
+        try:
+            ratio = float((cj or {}).get("ratio", 1.0))
+            offset = float((cj or {}).get("offset", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            notes.append(f"a coupling on {a!r} has a non-numeric ratio/offset")
+            continue
+        if not a or not b or a == b or ratio == 0.0 or ratio != ratio or abs(ratio) == float("inf"):
+            notes.append(f"a coupling naming {a!r}/{b!r} is malformed (self-join or zero/non-finite ratio)")
+            continue
+        if a in direct:
+            # URDF allows exactly ONE <mimic> per joint. Two couplings driving one joint is a constraint pair
+            # MuJoCo can solve and URDF cannot state; emitting the second would silently overwrite the first.
+            notes.append(f"{a} is driven by more than one coupling; URDF permits one <mimic> per joint, so only "
+                         f"the relation to {direct[a][0]} is emitted")
+            continue
+        direct[a] = (str(b), ratio, offset)
+
+    resolved: dict[str, tuple[str, float, float]] = {}
+    for a, (b0, r0, o0) in direct.items():
+        drv, mul, off = b0, r0, o0
+        seen = {a}
+        while drv in direct and drv not in seen:
+            seen.add(drv)
+            d2, r2, o2 = direct[drv]
+            drv, mul, off = d2, mul * r2, mul * o2 + off
+        if drv in direct:                               # closed cycle of couplings: no independent driver exists
+            notes.append(f"the coupling on {a} closes a cycle ({' -> '.join(sorted(seen))}); URDF <mimic> needs "
+                         "an independently-commanded reference joint and a cycle has none")
+            continue
+        resolved[a] = (drv, mul, off)
+    return resolved, notes
+
+
 def gene_to_urdf(gene, *, name: str | None = None, mesh_dir: str | None = None) -> str:
     """Compile ``gene`` to MuJoCo and transcribe it into a geometrically-correct URDF string.
 
@@ -89,20 +169,33 @@ def gene_to_urdf(gene, *, name: str | None = None, mesh_dir: str | None = None) 
     seg_mesh: dict[str, str] = {}
     if mesh_dir:
         try:
-            import shutil
-
             from virturoid.services.cad_geometry import build_visual_meshes
             # Bake into the process-shared cache (bakes each unique segment shape ONCE), then copy the referenced
             # STLs next to robot.urdf so the exported package remains self-contained (no external dependency).
+            from virturoid.services.gene_compiler import stage_mesh
             baked = build_visual_meshes(gene, _mesh_cache_dir())
             os.makedirs(str(mesh_dir), exist_ok=True)
+            # ``stage_mesh``, not a copy keyed on the basename: the old rule skipped the copy whenever a file of
+            # that name already sat in ``mesh_dir``, so two links whose baked STLs share a basename shipped ONE
+            # geometry under both names -- and a leftover from an earlier export of a DIFFERENT robot was
+            # adopted as this one's. Shared claim map => one destination file per link, verified byte-identical.
+            claimed: dict[str, str] = {}
             for seg, src in baked.items():
-                dst = os.path.join(str(mesh_dir), os.path.basename(src))
-                if not os.path.exists(dst):
-                    shutil.copyfile(src, dst)
-                seg_mesh[seg] = dst
+                seg_mesh[seg] = str(stage_mesh(src, mesh_dir, seg, claimed))
+            # Claim what we just staged in the directory's ledger. Nothing is deleted here (see below), but
+            # recording it now means a build that dies before ``robot.urdf`` is written still leaves files the
+            # NEXT build can prove are ours and clear, rather than orphans nobody may touch.
+            from virturoid.services.gene_compiler import note_staged
+            note_staged(mesh_dir, {os.path.basename(p) for p in seg_mesh.values()})
         except Exception:  # noqa: BLE001 - no build123d / awkward solid -> primitive visuals below
             seg_mesh = {}
+        # NOTHING IS REMOVED FROM ``mesh_dir`` HERE, deliberately. An earlier export into a reused
+        # ``robot/meshes/`` does leave STLs this URDF references none of, and the ROS 2 export then installs all
+        # of them (measured: 25 meshes shipped, 7 referenced, 18 belonging to a discarded quadruped) -- but this
+        # function only RETURNS the URDF, it does not write it. Pruning from here removes the previous robot's
+        # meshes while the previous robot's ``robot.urdf`` is still the one on disk, so any failure between the
+        # two leaves a description beside none of its geometry. The removal therefore lives with the write, in
+        # ``gene_build._write_genome_and_urdf``, keyed on the ``filename=`` refs of the URDF it just wrote.
 
     def bname(b):
         return escape(mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, b) or f"link{b}")
@@ -114,7 +207,62 @@ def gene_to_urdf(gene, *, name: str | None = None, mesh_dir: str | None = None) 
         if jt in (_MJ_HINGE, _MJ_SLIDE):
             joint_of[int(model.jnt_bodyid[j])] = j
 
+    def jname_of(j):
+        return escape(mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, j)
+                      or f"{bname(int(model.jnt_bodyid[j]))}_joint")
+
+    def joint_id_for_segment(seg) -> int | None:
+        """The compiled model's joint for a gene segment. Read through the MODEL rather than by string-formatting
+        ``<segment>_joint``, so the reference in a <mimic> is by construction the same name the joint below is
+        WRITTEN under -- including whatever escaping or fallback that name went through."""
+        bid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, str(seg))
+        return joint_of.get(int(bid)) if bid >= 0 else None
+
+    # COUPLED (mimic/slaved) DOF -> URDF's own <mimic>. This is a NATIVE URDF element for exactly this relation,
+    # so a carried coupling is EMITTED here rather than merely disclosed: a Panda whose two fingers open
+    # separately is not a Panda, and an engineer taking that URDF to RViz/MoveIt/Gazebo gets a machine that does
+    # not exist. Ratios are carried as the source states them -- ToddlerBot's -0.90909091 and -0.85714286 are
+    # NEGATIVE and a Stretch's gripper runs at 10x its slider; normalising any of those to +/-1 is a different
+    # transmission.
+    _couplings, _cnotes = _flatten_couplings(gene)
+    _mimic_of: dict[int, str] = {}
+    _emitted: list[tuple[str, str, float, float]] = []
+    for _a, (_b, _mul, _off) in _couplings.items():
+        _ja, _jb = joint_id_for_segment(_a), joint_id_for_segment(_b)
+        if _ja is None or _jb is None or _ja == _jb:
+            _cnotes.append(f"the coupling {_a}<-{_b} names a segment with no joint in the compiled model")
+            continue
+        _mimic_of[_ja] = (f'    <mimic joint="{jname_of(_jb)}" multiplier="{_num(_mul)}" '
+                          f'offset="{_num(_off)}" />')
+        _emitted.append((jname_of(_ja), jname_of(_jb), _mul, _off))
+
     lines = [f'<robot name="{robot_name}">']
+    if _emitted:
+        lines.append(_comment(
+            f"{len(_emitted)} coupled (mimic/slaved) joint pair(s) from this design are emitted below as URDF "
+            "<mimic>: "
+            + "; ".join(f"{a} = {_num(m)}*{b}" + (f" + {_num(o)}" if o else "") for a, b, m, o in _emitted)
+            + ". These DOF are NOT independently commandable: a controller that drives a mimic joint on its "
+            "own is fighting the transmission. Chained couplings are composed onto an independently-driven "
+            "reference joint (exact for a degree-1 relation), because a <mimic> whose reference is itself a "
+            "<mimic> is not resolved by robot_state_publisher."))
+    if _cnotes:
+        lines.append(_comment(
+            "WARNING: coupling(s) NOT represented below: "
+            + "; ".join(str(n) for n in dict.fromkeys(_cnotes))
+            + ". The MJCF export carries them as <equality><joint>; in this file those DOF move independently."))
+    # URDF IS A TREE, so a declared closed loop CANNOT be represented here — a gantry's bridge can only hang off
+    # one column, a delta's arms cannot share a platform. Dropping that silently is the worst option available:
+    # the file would look complete and ship the exact cantilever the loop was added to fix, under a green export.
+    # So say it, in the file itself, where anyone opening the URDF will see it.
+    _loops = getattr(gene, "loop_closures", None) or []
+    if _loops:
+        lines.append(_comment(
+            f"WARNING: {len(_loops)} closed kinematic loop(s) in this design are NOT represented below. "
+            "URDF is a strict tree (one parent per link) and cannot express them. Affected: "
+            + "; ".join(f"{str((lc or {}).get('a'))}<->{str((lc or {}).get('b'))}" for lc in _loops)
+            + ". The MJCF export carries them as <equality><connect>; this file describes the same robot with "
+            "those joins OPEN, so any load path through them is missing."))
     for b in range(1, model.nbody):
         nm = bname(b)
         mass = max(1e-4, float(model.body_mass[b]))
@@ -137,10 +285,28 @@ def gene_to_urdf(gene, *, name: str | None = None, mesh_dir: str | None = None) 
             mat = (f'<material name="{nm}_m{g}"><color rgba="{rgba[0]:.3f} {rgba[1]:.3f} {rgba[2]:.3f} 1" /></material>'
                    if len(rgba) >= 3 else "")
             vis.append(f'    <visual>{origin}<geometry>{geom}</geometry>{mat}</visual>')
-            col.append(f'    <collision>{origin}<geometry>{geom}</geometry></collision>')
+            # COLLISION == WHAT ACTUALLY COLLIDES. Every geom used to be transcribed into both blocks, so the
+            # shipped URDF declared the decoration -- motor housings, panel/vent detail, the visual-only shells
+            # that carry mass=0 contype=0 conaffinity=0 -- as real collision geometry. Measured: a hexapod
+            # exported 62 <collision> elements where the model we simulate, verify and train on collides with
+            # 26; a Go2 exported 46 against 13. That is a customer loading our URDF into Gazebo or RViz and
+            # getting a robot that self-collides on parts our own simulator passes straight through.
+            #
+            # It also has to be read from ``contype``/``conaffinity`` rather than from the geom's provenance,
+            # because otherwise the collision set MOVES whenever the visual layer changes: attaching an
+            # imported link's own mesh suppresses that link's housing + detail geoms, which silently dropped 33
+            # of the Go2's 46 declared collisions. Reading what collides makes the URDF's collision set equal
+            # to the compiled model's -- for a generated body and an imported one alike -- and invariant to
+            # every visual decision above.
+            if int(model.geom_contype[g]) or int(model.geom_conaffinity[g]):
+                col.append(f'    <collision>{origin}<geometry>{geom}</geometry></collision>')
         if not vis:                                     # a geom-less body still needs a renderable stub
             vis.append('    <visual><geometry><box size="0.02 0.02 0.02" /></geometry></visual>')
-            col.append('    <collision><geometry><box size="0.02 0.02 0.02" /></geometry></collision>')
+        if not col:
+            # A body whose every geom is visual-only has no collider to declare. Every link carried a collision
+            # element before this, and some importers assume one, so it keeps a 1 mm placeholder at the link
+            # origin rather than none: structurally the same file, and honest about there being nothing there.
+            col.append('    <collision><geometry><box size="0.001 0.001 0.001" /></geometry></collision>')
         # VISUAL-MESH BRIDGE: if this link's segment baked a shape-program STL, the link's VISUAL becomes that
         # single mesh (identity origin — the STL is already in the link's [0,length] +z frame), while COLLISION
         # keeps the primitive geoms above (physics untouched). This is what makes an octopus render as an octopus.
@@ -177,11 +343,14 @@ def gene_to_urdf(gene, *, name: str | None = None, mesh_dir: str | None = None) 
         lo, hi = float(model.jnt_range[j][0]), float(model.jnt_range[j][1])
         if not bool(model.jnt_limited[j]):
             lo, hi = -3.14159, 3.14159
-        jname = escape(mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, j) or f"{bname(b)}_joint")
+        jname = jname_of(j)
         lines += [f'  <joint name="{jname}" type="{jtype}">',
                   f'    <parent link="{bname(parent)}" /><child link="{bname(b)}" />', origin,
                   f'    <axis xyz="{axis[0]:.4f} {axis[1]:.4f} {axis[2]:.4f}" />',
-                  f'    <limit lower="{lo:.4f}" upper="{hi:.4f}" effort="30" velocity="10" />', "  </joint>"]
+                  f'    <limit lower="{lo:.4f}" upper="{hi:.4f}" effort="30" velocity="10" />']
+        if j in _mimic_of:
+            lines.append(_mimic_of[j])
+        lines.append("  </joint>")
 
     lines.append("</robot>")
     return "\n".join(lines) + "\n"

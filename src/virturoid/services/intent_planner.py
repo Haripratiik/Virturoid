@@ -129,7 +129,15 @@ _CLASS_WORDS = {
                     # G4: floor-cleaning nouns — 'a robot vacuum' previously matched NOTHING and became a
                     # tabletop sorting ARM (the worst e2e intent failure)
                     "vacuum", "mop", "sweep", "sweeper", "floor-clean", "floor clean"),
-    "humanoid": ("humanoid", "bimanual", "two arms", "two-arm", "android", "torso", "human-like"),
+    # "torso" is NOT here: it is a body PART every legged animal, humanoid and mobile manipulator has, not a
+    # class noun -- and ``humanoid`` is tried FIRST below, so one part word outranked every quadruped cue in
+    # the prompt. Measured 2026-08-08: "a four-legged walking robot with a slender torso", "a quadruped robot
+    # with a long torso", "a robot dog with a slender torso" and "a hexapod robot with a broad torso" ALL
+    # planned humanoid and built the 2-legged humanoid recipe; so did "a torso-mounted arm". This turned
+    # load-bearing when #285 taught ``body_proportions`` to honour "a slender torso"/"a long torso" as real
+    # proportion asks -- the exact phrases the composer had just learned to build were the ones that lost
+    # their body class on the way in. The genuine humanoid phrasings below still match on their own.
+    "humanoid": ("humanoid", "bimanual", "two arms", "two-arm", "android", "human-like"),
     "manipulator": ("arm", "grasp", "grip", "pick", "place", "sort", "manipulat", "assemble", "weld",
                     "spray", "paint", "lift", "stack", "insert"),
 }

@@ -165,10 +165,23 @@ def plan_sensor_geoms(gene, sensors, frames=None) -> dict:
 
 def sensor_geoms_for_gene(gene, *, task: str = "") -> dict:
     """Derive the class+task sensor suite (the same one the BOM uses) and plan its geometry from the robot's
-    rest-pose world frames. Used by the render path so the viewport shows sensors in the right place."""
+    rest-pose world frames. Used by the render path so the viewport shows sensors in the right place.
+
+    NOT ON THE CUSTOMER'S OWN MACHINE. The suite is an inference from ``robot_class``; bolting it onto an
+    IMPORTED body draws hardware their robot does not have, and -- because the camera branch above also emits a
+    functional ``<camera name="robot_cam">`` -- it manufactured the very sensor that ``camera_perception`` then
+    rendered through, which is how a Menagerie Go2 (``ncam 0, nsensor 0``) came to report ``sees: true``. A part
+    the customer PINNED is still theirs to assert, so pins are honoured; everything else is withheld.
+    """
     try:
         from virturoid.services.bom_builder import _sensor_suite
+        from virturoid.services.sensor_provenance import SENSOR_CATEGORIES, carries_our_proposed_sensors
         scale_kg = sum(s.mass_kg for s in gene.segments)
-        return plan_sensor_geoms(gene, _sensor_suite(gene.robot_class, None, task, scale_kg))
+        suite = _sensor_suite(gene.robot_class, None, task, scale_kg)
+        if carries_our_proposed_sensors(gene):
+            pinned = {str(v) for k, v in ((getattr(gene, "metadata", None) or {}).get("pinned_parts") or {}).items()
+                      if k in SENSOR_CATEGORIES}
+            suite = [row for row in suite if row[0] in pinned]
+        return plan_sensor_geoms(gene, suite)
     except Exception:  # noqa: BLE001 - sensors are a visual nicety; never block a compile
         return {}

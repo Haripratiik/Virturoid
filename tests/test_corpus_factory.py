@@ -88,6 +88,68 @@ def test_held_out_aware_proposer_saves_the_budget(tmp_path):
     assert len(res.admitted) == 2 and res.rejected.get("held_out", 0) == 0   # no slot wasted on a held-out body
 
 
+def test_novelty_is_decided_before_the_expensive_verify(tmp_path):
+    """#281: novelty is pure structure and the verifier is a 39 s gait fit, so a duplicate must never reach it.
+    The measured night rejected 9 proposals for novelty AFTER paying to fit each one a controller."""
+    calls = []
+
+    def counting_verify(gene):
+        calls.append(gene.id)
+        return {"schema_valid": True, "compiles": True, "source": "physics", "credible": True,
+                "fitness": 0.6, "verdict": "CREDIBLE", "kind": "legged"}
+    it = iter([_legged(4, "A"), _legged(4, "DUP")])          # DUP is structurally identical to A
+    res = CF.run_factory_night(lambda ctx: next(it, None), manifest_path=tmp_path / "c.json",
+                               verify_fn=counting_verify)
+    assert len(res.admitted) == 1 and res.rejected.get("novelty") == 1
+    assert calls == ["A"], f"the duplicate was verified before it was deduped: {calls}"
+
+
+def test_a_failed_draft_does_not_end_the_night(tmp_path):
+    """A proposer hiccup (a composition that raised) used to return None through the wrapper, and
+    ``run_factory_night`` reads None as 'the bank is exhausted' — so one transient failure forfeited the rest
+    of the budget silently. A None mid-resample is a failed DRAFT, not an exhausted bank."""
+    queue = [_aquatic(), None, _legged(4, "A"), _aquatic(), _legged(5, "B")]
+    it = iter(queue)
+    wrapped = CF.held_out_aware(lambda ctx: next(it, None), max_resample=4)
+    res = CF.run_factory_night(wrapped, config=CF.FactoryConfig(max_bodies=2),
+                               manifest_path=tmp_path / "c.json", verify_fn=_fake_verify({"A", "B"}))
+    assert len(res.admitted) == 2 and res.rejected.get("held_out", 0) == 0
+    assert res.proposer["failed_drafts"] == 1 and res.proposer["reserved_drafts"] == 2
+
+
+def test_the_guard_steers_the_proposer_instead_of_only_filtering_it(tmp_path):
+    """The whole point of #281: a reserved draft must come back to the proposer WITH ITS REASON, and the guard's
+    constraints must reach the proposer before it draws at all."""
+    seen_context, told = {}, []
+
+    def proposer(ctx):
+        seen_context.update(ctx)
+        return next(it, None)
+    it = iter([_aquatic(), _legged(4, "A")])
+    wrapped = CF.held_out_aware(proposer, max_resample=3,
+                                on_reserved=lambda g, p, why: told.append(why))
+    CF.run_factory_night(wrapped, config=CF.FactoryConfig(max_bodies=1),
+                         manifest_path=tmp_path / "c.json", verify_fn=_fake_verify({"A"}))
+    assert told and told[0]["niche"] == "aquatic" and told[0]["reason"]
+    assert seen_context["guard"]["max_limbs"] == 5           # the brief, handed over before any body exists
+    assert "avoid_niches" in seen_context["guard"] and "corpus_keys" in seen_context
+
+
+def test_guard_brief_is_the_guards_own_constraints():
+    from virturoid.services.heldout_set import design_constraints
+    assert CF.guard_brief() == design_constraints()
+
+
+def test_proposer_stats_report_drafts_per_slot(tmp_path):
+    """drafts/slot is the number that says whether steering works: 1.0 means every draft became a proposal."""
+    it = iter([_legged(4, "A"), _legged(5, "B")])
+    wrapped = CF.held_out_aware(lambda ctx: next(it, None))
+    res = CF.run_factory_night(wrapped, config=CF.FactoryConfig(max_bodies=2),
+                               manifest_path=tmp_path / "c.json", verify_fn=_fake_verify({"A", "B"}))
+    assert res.proposer["drafts"] == 2 and res.proposer["drafts_per_slot"] == 1.0
+    assert res.to_dict()["proposer"]["slots"] == 2
+
+
 def test_checkpoint_persists_and_resumes(tmp_path):
     mp = tmp_path / "corpus.json"
     it1 = iter([_legged(4, "A")])
@@ -124,6 +186,139 @@ def test_proposer_failure_is_isolated_not_fatal(tmp_path):
     res = CF.run_factory_night(flaky, manifest_path=tmp_path / "c.json", verify_fn=_fake_verify({"OK"}))
     assert len(res.admitted) == 1                          # the night survived the proposer error
     assert any(d.get("stage") == "propose" for d in res.diagnostics)
+
+
+def _night_module():
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+    import corpus_factory_night
+    return corpus_factory_night
+
+
+def test_the_legged_target_grid_spans_the_axes_that_actually_move_the_body():
+    """The grid's cells are the MEASURED-effective axes (body-plan route, size word, biped stature); an inert
+    axis in here is a slot spent to re-bank a body the corpus already has."""
+    night = _night_module()
+    targets = night._legged_targets()
+    assert len(targets) == len({p for p, _ in targets})                # no duplicate prompt in the grid
+    assert {t["route"] for _, t in targets} == {"template", "anatomy", "biped"}
+    assert min(night._BIPED_STATURES_M) > 1.03                         # below this the biped builder clamps flat
+    # interleaved: the first three targets are three DIFFERENT body plans, not three sizes of one
+    assert len({t["route"] for _, t in targets[:3]}) == 3
+    # every target must name a body the guard can admit — a reserved cell is a cell that can never be banked
+    from virturoid.services.heldout_set import MANY_LIMB_MIN
+    assert MANY_LIMB_MIN >= 6 and not any("six-legged" in p or "eight-legged" in p for p, _ in targets)
+
+
+def test_night_proposer_spends_a_draft_not_a_slot_on_a_reserved_body(monkeypatch):
+    """The load-bearing behaviour: a body the guard reserves is composed CHEAP, recognised, and its target
+    retired — it never reaches the expensive walkability stage and never occupies a proposal slot."""
+    night = _night_module()
+    from virturoid.services import anatomy_compiler, morphology_composer
+    drafted, finalized = [], []
+
+    def fake_compose(prompt, *, llm="auto", ensure_walkable=False, strict_llm=False, **kw):
+        drafted.append(prompt)
+        assert ensure_walkable is False, "the draft stage must not pay for walkability"
+        return _aquatic() if len(drafted) <= 2 else _legged(4, f"OK{len(drafted)}")
+
+    def fake_walk(gene, prompt="", **kw):
+        finalized.append(prompt)
+        return gene
+    monkeypatch.setattr(morphology_composer, "compose_robot", fake_compose)
+    monkeypatch.setattr(anatomy_compiler, "ensure_walkable_quad", fake_walk)
+
+    propose = night._offline_proposer(False, ("legged",), llm=None)
+    got = propose({"thinnest_classes": ["legged"], "corpus_keys": set()})
+    from virturoid.services.heldout_set import is_held_out
+    gene, prompt = got
+    assert not is_held_out(gene, prompt=prompt)
+    assert len(drafted) == 3 and finalized == [drafted[2]]     # 2 reserved drafts, 1 finalize — not 3 finalizes
+    assert propose.stats == {"drafts_composed": 3, "reserved_drafts": 2, "duplicate_drafts": 0,
+                             "failed_drafts": 0, "finalized": 1}
+    # the two reserved targets are RETIRED, not re-rolled: the next call draws fresh prompts
+    propose({"thinnest_classes": ["legged"], "corpus_keys": set()})
+    assert drafted[3] not in drafted[:3]
+
+
+def test_night_proposer_dedups_structurally_before_paying_to_verify(monkeypatch):
+    """A body the corpus already holds is refused at draft time, where it costs ~0 s, instead of downstream at
+    the novelty gate where it would already have cost a gait fit."""
+    night = _night_module()
+    from virturoid.services import anatomy_compiler, morphology_composer
+    from virturoid.services.heldout_set import body_key
+    n = {"i": 0}
+
+    def fake_compose(prompt, **kw):
+        n["i"] += 1
+        return _legged(4, "SAME") if n["i"] <= 2 else _legged(5, "NEW")
+    monkeypatch.setattr(morphology_composer, "compose_robot", fake_compose)
+    monkeypatch.setattr(anatomy_compiler, "ensure_walkable_quad", lambda g, p="", **kw: g)
+    propose = night._offline_proposer(False, ("legged",), llm=None)
+    got = propose({"corpus_keys": {body_key(_legged(4, "SAME"))}})
+    assert body_key(got[0]) == body_key(_legged(5, "NEW"))
+    assert propose.stats["duplicate_drafts"] == 2 and propose.stats["finalized"] == 1
+
+
+def test_the_night_narrates_every_slot_and_the_journal_survives_a_kill(tmp_path):
+    """A gait-corpus night spends 24-200 s per body inside VERIFY and, until this landed, printed nothing until
+    it was over. MEASURED 2026-08-08 on a real night: the only way to tell an honest search from a hang was to
+    sample the process's CPU counter from outside the program.
+
+    The journal is the durable half. ``run_factory_night`` checkpoints ADMITS to the manifest after each one but
+    counts REJECTIONS in memory and writes them only after the loop — so a night that is killed (a long night
+    usually is) loses exactly the evidence for why its corpus came out small. One flushed line per candidate
+    fixes that, and it records the VERIFY verdict, which is not the admission: a body can verify credible and
+    still be rejected downstream for novelty.
+    """
+    night = _night_module()
+    journal = tmp_path / "j.jsonl"
+    seen = []
+
+    def inner(gene):
+        seen.append(gene)
+        if len(seen) == 2:
+            raise RuntimeError("this body exploded")
+        return {"credible": True, "fitness": 1.5, "gait_source": "fitted", "robustness_rel": 0.1,
+                "verdict": "CREDIBLE WALK", "schema_valid": True, "compiles": True}
+
+    verify = night.narrated(inner, journal)
+    verify(_legged(4, "A"))
+    with pytest.raises(RuntimeError):
+        verify(_legged(4, "B"))
+    verify(_legged(5, "C"))
+
+    lines = [json.loads(x) for x in journal.read_text(encoding="utf-8").splitlines()]
+    assert [r["slot"] for r in lines] == [1, 2, 3]              # the RAISING candidate is journalled too
+    assert lines[0]["credible"] is True and lines[0]["robustness_rel"] == 0.1
+    assert "this body exploded" in lines[1]["error"] and "credible" not in lines[1]
+    assert lines[2]["segments"] == len(_legged(5, "C").segments)
+    assert all(r["wall_s"] >= 0 for r in lines)
+
+
+def test_the_night_reports_gated_rows_separately_from_all_rows(tmp_path):
+    """The night's headline used to be one number, and one number overstates it.
+
+    ``gait_fit_verify_fn`` calls ``_compiles_and_credible`` FIRST, and that is the ordinary product verify path
+    (``verify_robot`` -> ``_auto_bank_gait`` -> ``bank_gait(ungated_reason=...)``), so a body whose shipped
+    default already walks leaves an UNGATED row in the night's own bank before the gate stack has ruled on it.
+    MEASURED on the 2026-08-08 night: 1 of the first 11 rows. Ungated rows are what made the old 103-row bank
+    unusable as evidence (99 of 103 of them) and ``mine_gait_hints`` filters them out the moment a gated row
+    exists — so they are ballast, and the night has to say how much of its output is the real thing.
+    """
+    from virturoid.services.gait_flywheel import BANK_GATE, LOCOMOTION
+    from virturoid.services.memory_db import MemoryDB
+    night = _night_module()
+    with MemoryDB(tmp_path / "virturoid_memory.db") as db:
+        db.record_skill("gait::quadruped::a", "quadruped", LOCOMOTION, success_rate=0.9,
+                        base_config={"gait_params": {"freq": 1.5}, "bank_gate": BANK_GATE})
+        db.record_skill("gait::quadruped::b", "quadruped", LOCOMOTION, success_rate=0.9,
+                        base_config={"gait_params": {"freq": 1.5}, "bank_gate": "ungated_declared"})
+        db.record_skill("gait::quadruped::c", "quadruped", LOCOMOTION, success_rate=0.9,
+                        base_config={"gait_params": {"freq": 1.5}})            # no stamp at all
+    assert night.gait_rows(tmp_path) == (3, 1)
+    assert night.gait_rows(tmp_path / "nope") == (-1, -1)      # a missing bank is reported, never guessed at
 
 
 @pytest.mark.slow

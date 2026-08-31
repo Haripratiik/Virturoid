@@ -16,7 +16,10 @@ import json
 import os
 
 _ISAAC_LAB_TARGET = ">=2.0 (isaaclab namespace)"
-_LEGGED = {"quadruped", "hexapod", "humanoid", "biped", "legged"}
+# Which class strings mean "legged" is body_kind's to say -- a private copy here drifted out of step with the
+# rest of the system (it was missing "octopod" and "bipedal") and decided whether a locomotion training env
+# was exported at all.
+from virturoid.services.body_kind import LEGGED_CLASSES as _LEGGED  # noqa: E402
 
 
 def _pyid(s: str) -> str:
@@ -33,6 +36,55 @@ def _leaf_links(gene) -> list[str]:
     return [_safe(s.name) for s in gene.segments if s.name not in parents and s.parent is not None]
 
 
+def _constraints_block(man: dict) -> str:
+    """The two constraint kinds, as Python the engineer can act on, with an honest note on each.
+
+    Isaac Lab has no coupling representation of its own: an ``ArticulationCfg`` groups joints into actuator
+    groups by name regex and gives each a drive, and nothing in ``ImplicitActuatorCfg``/``ActuatorBaseCfg``
+    relates one joint's coordinate to another's. The constraint lives one layer down, in PhysX (mimic/gear
+    joints on the USD prim) -- which is exactly the layer this box cannot run or verify. So the relations are
+    handed over as data plus the two ways to honour them, rather than as generated code we never executed.
+    """
+    cj = man.get("coupled_joints") or []
+    loops = man.get("loop_closures") or []
+    lines = [
+        "",
+        "# --- CONSTRAINTS ------------------------------------------------------------------------------------",
+    ]
+    if cj:
+        lines += [
+            "# These joint pairs are COUPLED on the real machine: ONE transmission, not two independent DOF (a",
+            "# gripper's two fingers, a telescoping stage, a geared neck). The USD does NOT enforce them --",
+            "# core UsdPhysics has no joint-coupling schema, and Virturoid cannot author or verify PhysX's",
+            "# extension schema off-GPU. Two ways to honour them, in order of preference:",
+            "#   1. apply PhysX mimic joints to the driven joint prim in Isaac (PhysX's `gearing` is the",
+            "#      NEGATIVE of `multiplier` below, and its `offset` is negated too -- check against a spawn);",
+            "#   2. or drive only the `driver` joints and set the `driven` ones from them in your action term.",
+            "# Do NOT command a driven joint independently; that fights the transmission.",
+            "COUPLED_JOINTS = [",
+        ]
+        lines += [f'    {{"driven": "{c["driven_joint"]}", "driver": "{c["driver_joint"]}", '
+                  f'"multiplier": {float(c["multiplier"]):.10g}, "offset": {float(c["offset"]):.10g}}},'
+                  for c in cj]
+        lines.append("]")
+    else:
+        lines.append("COUPLED_JOINTS = []   # this design declares no coupled (mimic/slaved) DOF")
+    if loops:
+        lines += [
+            "",
+            "# CLOSED KINEMATIC LOOPS, exported INTO the USD as UsdPhysics.FixedJoint (USD is a graph, not a",
+            "# tree, so unlike URDF these survive). They are RIGID here where MuJoCo solves them as a compliant",
+            "# <equality><connect>, so an Isaac scene will be stiffer than the model Virturoid simulated.",
+            "LOOP_CLOSURES = [",
+        ]
+        lines += [f'    {{"a": "{lc.get("a")}", "b": "{lc.get("b")}", "usd_prim": "/Robot/{lc.get("name")}"}},'
+                  for lc in loops]
+        lines.append("]")
+    else:
+        lines.append("LOOP_CLOSURES = []    # this design declares no closed kinematic loops")
+    return "\n".join(lines) + "\n"
+
+
 def _dict_literal(d: dict, *, indent: int = 12) -> str:
     """Render {name: number} as a readable multi-line Python dict literal."""
     pad = " " * indent
@@ -46,7 +98,7 @@ def export_isaac_lab(gene, out_dir: str, *, robot_name: str | None = None, kp: f
                      kd: float = 1.5) -> dict:
     """Write the full Isaac Lab hand-off package for ``gene`` into ``out_dir``. Returns the manifest + the list of
     files written. Requires ``usd-core`` + ``mujoco`` (for the USD). The Python scaffolds are pure text."""
-    from virturoid.services.usd_exporter import _actuator_limits, export_usd
+    from virturoid.services.usd_exporter import _actuator_limits, _safe, export_usd
 
     os.makedirs(out_dir, exist_ok=True)
     name = _pyid(robot_name or f"{gene.robot_class}_{(gene.id or 'robot')[:6]}")
@@ -60,16 +112,40 @@ def export_isaac_lab(gene, out_dir: str, *, robot_name: str | None = None, kp: f
 
     joints = man["joints"]
     limits = _actuator_limits(gene)                     # {segment_name: (effort_nm, vel_radps)}
-    # joint drive names come from the USD (== mjcf joint names); actuator limits are keyed by segment name.
-    # map by order of actuated segments == order of USD joints (both follow the kinematic tree).
+    # Joint drive names come from the USD (== mjcf joint names); actuator limits are keyed by SEGMENT name.
+    #
+    # This used to `zip(joints, [s.name for s in gene.segments if actuated])`, i.e. pair the two lists BY
+    # POSITION on the assumption that USD/MuJoCo kinematic-DFS order equals `gene.segments` list order. That
+    # holds only for a depth-first-AUTHORED body. An AMENDED one -- `add_limb` appends its new chain at the end
+    # of the list while the compiler emits it under its mid-tree parent -- shifts everything after the mount
+    # point. HOW MANY joints that corrupts is MOUNT-POINT DEPENDENT, not a constant. Measured on ONE composed
+    # quadruped (19 DOF after two added limbs), sweeping the mid-tree parent, the old positional pairing gave a
+    # joint the WRONG SEGMENT's motor 18/19 (mount `neck`), 14/19 (`leg1_l_*`), 11/19 (`leg1_r_*`); the subset
+    # where the resulting effort/velocity numbers actually DIFFER is 12/19, 9/19, 7/19 respectively (e.g.
+    # `mast_0_joint` handed `leg1_r_0`'s limits). Mount nearer the end of the list and fewer joints shift --
+    # the defect is identical, only its blast radius moves, so no single ratio describes it.
+    #
+    # The correct key is already in the record and was unread: `usd_exporter` puts the driven body on every
+    # joint dict as `child` (the USD-safe form of the segment name). Resolve by that, and NAME any joint whose
+    # segment cannot be found instead of silently handing it the 20 Nm default.
+    seg_of_safe = {_safe(s.name): s.name for s in gene.segments}
     eff = {}
     vel = {}
-    seg_names = [s.name for s in gene.segments if s.joint_type in ("revolute", "prismatic")]
-    for jd, sname in zip(joints, seg_names):
-        e, v = limits.get(sname, (20.0, 20.0))
+    unresolved: list[str] = []
+    joint_segment: dict = {}
+    for jd in joints:
+        sname = seg_of_safe.get(str(jd.get("child") or ""))
+        if sname is None or sname not in limits:
+            unresolved.append(jd["name"])
+            e, v = 20.0, 20.0
+        else:
+            e, v = limits[sname]
+            joint_segment[jd["name"]] = sname
         eff[jd["name"]] = e
         vel[jd["name"]] = v
     rest = {jd["name"]: jd.get("rest", 0.0) for jd in joints}
+    man["joint_segment"] = joint_segment
+    man["actuator_limits_unresolved"] = unresolved
 
     files = {"usd": usd_path}
 
@@ -80,7 +156,8 @@ def export_isaac_lab(gene, out_dir: str, *, robot_name: str | None = None, kp: f
             name=name, NAME=NAME, robot_class=robot_class, base=man["base"], dof=man["dof"],
             usd_basename=os.path.basename(usd_path), spawn_z=round(man["spawn_z"], 4),
             joint_pos=_dict_literal(rest, indent=12), effort=_dict_literal(eff, indent=16),
-            velocity=_dict_literal(vel, indent=16), kp=kp, kd=kd, target=_ISAAC_LAB_TARGET))
+            velocity=_dict_literal(vel, indent=16), kp=kp, kd=kd, target=_ISAAC_LAB_TARGET,
+            constraints=_constraints_block(man)))
     files["cfg"] = cfg_path
 
     # 3) the standalone spawn / smoke script
@@ -104,6 +181,11 @@ def export_isaac_lab(gene, out_dir: str, *, robot_name: str | None = None, kp: f
     manifest = {"robot_name": name, "robot_class": robot_class, "is_legged": is_legged,
                 "isaac_lab_target": _ISAAC_LAB_TARGET, **man,
                 "actuator_effort_nm": eff, "actuator_velocity_radps": vel, "files": files,
+                # WHICH SEGMENT each joint's limits came from, so the pairing is auditable from the shipped
+                # manifest rather than trusted. A joint absent from here carries the fallback default and is
+                # named in `actuator_limits_unresolved`.
+                "joint_segment": joint_segment,
+                "actuator_limits_unresolved": unresolved,
                 "validated_offline": {"usd_reread": man["validated"], "python_compiles": None},
                 "not_run_in_isaac": True}
     man_path = os.path.join(out_dir, "manifest.json")
@@ -178,7 +260,7 @@ _USD_PATH = os.path.join(os.path.dirname(__file__), "{usd_basename}")
         ),
     }},
 )
-'''
+{constraints}'''
 
 _SPAWN_TEMPLATE = '''"""Standalone Isaac Lab smoke test for `{name}`: spawn it, step physics, print DOF + base height.
 
@@ -306,8 +388,13 @@ def _readme(name, robot_class, is_legged, man, files) -> str:
         f"| `{os.path.basename(files['usd'])}` | the physics USD (UsdPhysics articulation: rigid bodies, "
         f"colliders, {dof} joints w/ limits + drives). Transcribed from the exact MuJoCo model Virturoid "
         f"simulates, then re-read + validated with OpenUSD. |",
-        f"| `{name}_cfg.py` | the `ArticulationCfg` — spawn + init stance + per-joint PD gains and **real "
-        f"selected-motor** effort/velocity limits from the BOM. |",
+        f"| `{name}_cfg.py` | the `ArticulationCfg` — spawn + init stance + per-joint PD gains and "
+        + ("**real selected-motor** effort/velocity limits from the BOM, each resolved through the joint's own "
+           "driven link (`manifest.json` -> `joint_segment` records which segment every limit came from). |"
+           if not (man.get("actuator_limits_unresolved") or []) else
+           f"selected-motor effort/velocity limits from the BOM. **{len(man['actuator_limits_unresolved'])} of "
+           f"{dof} joints could NOT be resolved to a segment** and carry a placeholder limit — they are named "
+           f"in `manifest.json` -> `actuator_limits_unresolved`. |"),
         f"| `spawn_{name}.py` | a standalone smoke test — spawns the robot, steps physics, prints DOF + base "
         f"height. Run this FIRST. |",
     ]
@@ -358,6 +445,9 @@ def _readme(name, robot_class, is_legged, man, files) -> str:
         "- **Final training**: this is a correct-by-structure starting point, not a trained policy. Virturoid "
         "pre-screens the design; Isaac Lab does the high-fidelity training + sim2real.",
         "",
+    ]
+    lines += _readme_constraints(man, name)
+    lines += [
         "_Generated by Virturoid. The USD is a faithful transcription of the simulated model; the Isaac Lab "
         "config targets the API documented at isaac-sim.github.io/IsaacLab._",
     ]
@@ -366,3 +456,45 @@ def _readme(name, robot_class, is_legged, man, files) -> str:
 
 def NAME_UPPER(name: str) -> str:
     return _pyid(name).upper()
+
+
+def _readme_constraints(man: dict, name: str) -> list[str]:
+    """The constraints section: what this lane carries, what it does not, and which format does."""
+    cj = man.get("coupled_joints") or []
+    loops = man.get("loop_closures") or []
+    if not cj and not loops:
+        return []
+    out = ["## Constraints — what this package carries and what it does not", ""]
+    if loops:
+        out += [
+            f"**{len(loops)} closed kinematic loop(s): EXPORTED.** USD is a graph, not a tree, so each is a "
+            "`UsdPhysics.FixedJoint` in the `.usda` (`/Robot/loop_*`). Caveat, stated because it is a real "
+            "difference: MuJoCo solves these as a COMPLIANT `<equality><connect>` and a USD fixed joint is "
+            "rigid, so this scene is stiffer than the one Virturoid simulated. "
+            + "; ".join(f"`{lc.get('a')}`<->`{lc.get('b')}`" for lc in loops[:6])
+            + ("..." if len(loops) > 6 else ""),
+            "",
+        ]
+    if cj:
+        out += [
+            f"**{len(cj)} coupled (mimic/slaved) joint pair(s): NOT ENFORCED by the USD.** These DOF are one "
+            "transmission on the real machine, not two independent joints. Core UsdPhysics has no schema that "
+            "relates one joint's coordinate to another's, and the PhysX gear/mimic constraints that do live in "
+            "an Omniverse extension Virturoid cannot author or re-read off-GPU — so rather than ship an "
+            "unverified guess at PhysX's attribute names (its `gearing` is the NEGATIVE of the multiplier "
+            "below), the relations are handed over as data:",
+            "",
+            "| driven joint | = | driver joint | multiplier | offset |",
+            "|---|---|---|---|---|",
+        ]
+        out += [f"| `{c['driven_joint']}` | = | `{c['driver_joint']}` | {float(c['multiplier']):.10g} | "
+                f"{float(c['offset']):.10g} |" for c in cj]
+        out += [
+            "",
+            f"They are also written into the `.usda` as `customData` on each driven joint prim, and into "
+            f"`{name}_cfg.py` as `COUPLED_JOINTS`. Apply them as PhysX mimic joints, or drive only the driver "
+            "joints and derive the driven ones in your action term. **Virturoid's URDF export states these "
+            "natively as `<mimic>`** — use that file if your consumer reads URDF.",
+            "",
+        ]
+    return out

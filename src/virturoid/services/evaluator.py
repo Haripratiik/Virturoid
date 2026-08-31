@@ -52,7 +52,7 @@ def run_mock_evaluation(
                     summary="Synthetic (mock) evaluator flagged a bin collision in this scene — NOT a physics result.",
                     likely_causes=["bin spacing too tight", "missing pre-place waypoint"],
                     suggested_fixes=["generate wider-bin-spacing regression scene", "add pre-place waypoint"],
-                    regression_scene_id=f"regression_{scene.id}",
+                    regression_scene_id=f"regr_{scene.id}",
                 )
             )
 
@@ -122,7 +122,7 @@ def run_physics_evaluation_in_memory(robot: RobotGenome, task: TaskGraph, scene_
                 summary=f"Real MuJoCo pick-place: {ftype} in scene {scene.id}.",
                 likely_causes=_CAUSES.get(ftype, ["see episode metrics"]),
                 suggested_fixes=[_FIX.get(ftype, "regenerate a failure-conditioned regression scene")],
-                regression_scene_id=f"regression_{scene.id}"))
+                regression_scene_id=f"regr_{scene.id}"))
     return EvaluationRun(id=run_id, robot_genome_id=robot.id, task_graph_id=task.id, scene_set_id=scene_set.id,
                          policy_id=policy.id, backend="mujoco", episodes=episodes, failures=failures)
 

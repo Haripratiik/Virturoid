@@ -12,6 +12,7 @@ import { Timeline } from "@/panels/timeline/Timeline";
 import { ViewportCanvas } from "@/viewport/ViewportCanvas";
 import { VerifyWorkspace } from "@/panels/verify/VerifyWorkspace";
 import { LibraryWorkspace } from "@/panels/library/LibraryWorkspace";
+import { MemoryWorkspace } from "@/panels/memory/MemoryWorkspace";
 import { TrainWorkspace } from "@/panels/train/TrainWorkspace";
 import { useAppStore } from "@/state/app";
 import type { WorkspaceId } from "@/state/app";
@@ -37,6 +38,7 @@ function EditorContent() {
   if (workspace === "simulate") return <ViewportCanvas showSceneStrip />;
   if (workspace === "train") return <TrainWorkspace />;
   if (workspace === "verify") return <VerifyWorkspace />;
+  if (workspace === "memory") return <MemoryWorkspace />;
   return <LibraryWorkspace />;
 }
 
@@ -54,6 +56,7 @@ function useGlobalHotkeys() {
           "3": "workspace.train",
           "4": "workspace.verify",
           "5": "workspace.library",
+          "6": "workspace.memory",
           b: "view.toggleAgent",
           i: "view.toggleInspector",
           j: "view.toggleDock",
@@ -103,7 +106,7 @@ export function App() {
       useAppStore.getState().setTourOpen(true);
     }
     const ws = params.get("ws");
-    if (ws && ["design", "simulate", "train", "verify", "library"].includes(ws)) {
+    if (ws && ["design", "simulate", "train", "verify", "library", "memory"].includes(ws)) {
       useAppStore.getState().setWorkspace(ws as WorkspaceId);
     }
     const robot = params.get("robot");
@@ -127,7 +130,8 @@ export function App() {
   }, [packages.data, activePackage]);
 
   const showTimeline = workspace === "design";
-  const showDockRegion = workspace !== "library";
+  // Library and Memory are full-page reading surfaces; the dock would crop them for no gain.
+  const showDockRegion = workspace !== "library" && workspace !== "memory";
 
   return (
     <div className="flex h-full flex-col">

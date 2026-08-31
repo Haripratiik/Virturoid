@@ -29,6 +29,10 @@ def test_feature_extractor_reports_real_and_neutral_features_honestly():
                       "foot_clearance", "energy", "action_smooth", "dist_to_goal"}
     assert f["foot_clearance"] == 0.0 and f["energy"] == 0.0 and f["action_smooth"] == 0.0  # unavailable -> neutral
     assert -1.0 <= f["upright"] <= 1.0 and 0.0 <= f["contact_frac"] <= 1.0                    # real, in-range
+    # M6 (2026-07-24 audit): `alive` is the documented 0/1 survival flag, NOT the raw step count (was ~500x).
+    assert f["alive"] in (0.0, 1.0), f"alive must be the 0/1 flag, got {f['alive']}"
+    assert reward_features_from_rollout({"survived": True, "alive": 500})["alive"] == 1.0     # step count -> flag
+    assert reward_features_from_rollout({"survived": False, "alive": 137})["alive"] == 0.0
 
 
 def test_a_reward_steers_evaluate_gait_and_success_is_separate():
@@ -78,3 +82,93 @@ def test_full_loop_is_honest_and_never_banks_a_non_credible_gait():
     assert out["ok"] is True
     assert out["credible"] == out["verdict"].startswith("CREDIBLE")       # the flag never disagrees with the verdict
     assert isinstance(out["reward_expr"], (str, type(None))) and out["n_candidates"] >= 1
+
+
+# ------------------------------------------------------------------ the reward must reach the TRAINER, not just
+# the CPU gait search. The regression these guard: `gpu_trainer.train_gene_on_gpu` accepted `reward_expr=` and
+# `mjx_morph_attention.py` handled `--reward-expr`, but `reward_expr=` had ZERO callers repo-wide -- the trainer
+# half shipped and the call site never did, so "an LLM-authored reward steers PPO" was a claim about dead code.
+def test_the_selected_reward_expression_reaches_the_gpu_trainer(monkeypatch):
+    from virturoid.services import gpu_trainer as GT
+    from virturoid.services.reward_loop import train_selected_reward_on_gpu
+
+    seen = {}
+
+    def _fake_train(gene, **kw):
+        seen.update(kw)
+        return str(kw["out_path"])
+
+    monkeypatch.setattr(GT, "gpu_available", lambda **kw: True)
+    monkeypatch.setattr(GT, "train_gene_on_gpu", _fake_train)
+    rep = train_selected_reward_on_gpu(_dog(), "max(0.0, forward_vel)*alive - 0.1*slip", iters=7, envs=64)
+
+    assert rep["trained"] is True and rep["policy"]
+    assert seen["reward_expr"] == "max(0.0, forward_vel)*alive - 0.1*slip"   # the expression, not a weight dict
+    assert seen["iters"] == 7 and seen["envs"] == 64
+
+
+def test_train_backend_gpu_hands_the_loops_winner_to_ppo_and_cpu_says_it_did_not(monkeypatch):
+    from virturoid.services import reward_loop as RL
+
+    calls = []
+    monkeypatch.setattr(RL, "train_selected_reward_on_gpu",
+                        lambda gene, expr, **kw: calls.append(expr) or
+                        {"attempted": True, "trained": True, "policy": "p.npz", "reward_expr": expr})
+    kw = dict(task="walk forward", llm=None, n_rewards=2, screen_generations=1, screen_pop=4,
+              final_generations=2, final_pop=6, steps=300, seed=5, bank=False)
+    gpu = RL.run_intelligent_reward_loop(_dog(), train_backend="gpu", **kw)
+    # the WINNER of the honest screen is what PPO gets (or "" when every candidate was gamed and the loop fell
+    # back to the default fitness — the point is that the two can never disagree)
+    assert calls and calls[0] == (gpu["reward_expr"] or "")
+    assert gpu["optimizer"]["steered_ppo"] is True and gpu["policy_npz"] == "p.npz"
+
+    calls.clear()
+    cpu = RL.run_intelligent_reward_loop(_dog(), train_backend="cpu", **kw)
+    assert not calls                                          # cpu is the default and must stay local
+    assert cpu["optimizer"]["steered_ppo"] is False           # ...and must SAY it never steered PPO
+    assert "CEM" in cpu["optimizer"]["cpu"]
+
+
+def test_gpu_backend_degrades_honestly_when_the_box_is_unreachable(monkeypatch):
+    from virturoid.services import gpu_trainer as GT
+    from virturoid.services.reward_loop import train_selected_reward_on_gpu
+    monkeypatch.setattr(GT, "gpu_available", lambda **kw: False)
+    monkeypatch.setattr(GT, "train_gene_on_gpu", lambda *a, **k: pytest.fail("must not train on a dead box"))
+    rep = train_selected_reward_on_gpu(_dog(), "max(0.0, forward_vel)")
+    assert rep["trained"] is False and "did NOT steer PPO" in rep["note"]
+
+
+def test_batched_reward_matches_scalar_and_vectorizes():
+    """R1 MJX-port primitive: compile_reward_batched evaluates the SAME reward over arrays (numpy or jax.numpy),
+    matching the scalar compiler element-wise, so the CPU search and the GPU trainer share one reward."""
+    import numpy as np
+    from virturoid.services.reward_dsl import (REWARD_FEATURES, _TEMPLATES, compile_reward,
+                                               compile_reward_batched)
+    expr = "exp(-(forward_vel - 0.4)**2 / 0.25) * alive + 0.2*upright - 0.1*energy"
+    scalar, batched = compile_reward(expr), compile_reward_batched(expr)
+    rng = np.random.default_rng(0)
+    for _ in range(30):
+        f = {k: float(rng.uniform(-1, 1)) for k in REWARD_FEATURES}
+        fb = {k: np.array([f[k]]) for k in REWARD_FEATURES}
+        assert abs(float(batched(fb)[0]) - scalar(f)) < 1e-9
+    # vectorizes over a batch of "envs" and stays finite
+    fb = {k: rng.uniform(-1, 1, 256) for k in REWARD_FEATURES}
+    out = batched(fb)
+    assert out.shape == (256,) and bool(np.all(np.isfinite(out)))
+    # every template compiles under the batched backend too
+    assert all(compile_reward_batched(e) is not None for e in _TEMPLATES.values())
+
+
+def test_reward_dsl_rejects_exponent_dos():
+    """B0b: 9**9**9 passes the allowlist but hangs eval building a 370M-digit int. A constant exponent >8 or a
+    huge constant base is rejected fast (features are in [-1,1]); legit powers like **2 still compile."""
+    import pytest as _pt
+    from virturoid.services.reward_dsl import RewardSyntaxError, compile_reward
+    for dos in ("9**9**9", "(10**9)**(10**9)", "forward_vel**100", "1000000000000**upright"):
+        with _pt.raises(RewardSyntaxError):
+            compile_reward(dos)
+    assert compile_reward("(forward_vel - 0.4)**2") is not None      # squared-error pattern still legal
+    # the RCE surface stays closed
+    for rce in ("__import__('os')", "().__class__", "open('x')"):
+        with _pt.raises(RewardSyntaxError):
+            compile_reward(rce)

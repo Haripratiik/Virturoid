@@ -22,6 +22,7 @@ def test_train_held_banks_a_credible_gait(tmp_path, monkeypatch):
     out = run_train_gene_job({"robot_id": rid, "max_evals": 3})
 
     assert out.get("mode") == "gait_search"
+    assert out["n_evals"] == 3 or out["stopped_reason"] == "credible_walk"
     assert "banked_gait" in out                              # the contract now carries the banked skill id (or None)
     if out.get("solved"):
         # a solved search cleared the un-gameable forward+cadence+upright gates -> its winner MUST be banked
@@ -31,3 +32,5 @@ def test_train_held_banks_a_credible_gait(tmp_path, monkeypatch):
             row = db.conn.execute("SELECT base_config FROM skills WHERE skill_id=?",
                                   (out["banked_gait"],)).fetchone()
             assert row is not None                           # the skill is really persisted, recallable next build
+    if not out.get("beats_default"):
+        assert out["banked_gait"] is None                    # a credible-but-weaker controller never poisons memory

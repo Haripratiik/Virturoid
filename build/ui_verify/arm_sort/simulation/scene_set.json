@@ -5,7 +5,7 @@
   "purpose": "variation",
   "scenes": [
     {
-      "id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_000",
+      "id": "scene_938c34b8_variation_000",
       "version": "0.1.0",
       "name": "Sort colored blocks variation scene 1",
       "backend_targets": [
@@ -122,7 +122,7 @@
       ]
     },
     {
-      "id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_001",
+      "id": "scene_938c34b8_variation_001",
       "version": "0.1.0",
       "name": "Sort colored blocks variation scene 2",
       "backend_targets": [
@@ -239,7 +239,7 @@
       ]
     },
     {
-      "id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_002",
+      "id": "scene_938c34b8_variation_002",
       "version": "0.1.0",
       "name": "Sort colored blocks variation scene 3",
       "backend_targets": [
@@ -356,7 +356,7 @@
       ]
     },
     {
-      "id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_003",
+      "id": "scene_938c34b8_variation_003",
       "version": "0.1.0",
       "name": "Sort colored blocks variation scene 4",
       "backend_targets": [
@@ -473,7 +473,7 @@
       ]
     },
     {
-      "id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_004",
+      "id": "scene_938c34b8_variation_004",
       "version": "0.1.0",
       "name": "Sort colored blocks variation scene 5",
       "backend_targets": [
@@ -590,7 +590,7 @@
       ]
     },
     {
-      "id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_005",
+      "id": "scene_938c34b8_variation_005",
       "version": "0.1.0",
       "name": "Sort colored blocks variation scene 6",
       "backend_targets": [
@@ -707,7 +707,7 @@
       ]
     },
     {
-      "id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_006",
+      "id": "scene_938c34b8_variation_006",
       "version": "0.1.0",
       "name": "Sort colored blocks variation scene 7",
       "backend_targets": [
@@ -824,7 +824,7 @@
       ]
     },
     {
-      "id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_007",
+      "id": "scene_938c34b8_variation_007",
       "version": "0.1.0",
       "name": "Sort colored blocks variation scene 8",
       "backend_targets": [
@@ -941,7 +941,7 @@
       ]
     },
     {
-      "id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_008",
+      "id": "scene_938c34b8_variation_008",
       "version": "0.1.0",
       "name": "Sort colored blocks variation scene 9",
       "backend_targets": [
@@ -1058,7 +1058,7 @@
       ]
     },
     {
-      "id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_009",
+      "id": "scene_938c34b8_variation_009",
       "version": "0.1.0",
       "name": "Sort colored blocks variation scene 10",
       "backend_targets": [

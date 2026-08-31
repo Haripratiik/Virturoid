@@ -31,7 +31,14 @@ class MorphologyEmbeddingTests(unittest.TestCase):
         d_far = distance(embed_gene(arm), embed_gene(humanoid))
         self.assertLess(d_close, d_far)                        # arm+gripper nearer to arm than a humanoid is
         self.assertLess(d_close, 2.0)
-        self.assertGreater(d_far, 2.5)
+        # SEPARATION IS A RATIO, not a distance in absolute units. This line read ``d_far > 2.5`` — a bar on an
+        # un-normalized Euclidean distance, which any robot can clear by simply being heavier. Measured
+        # 2026-08-08 with the old linear mass map, ``total_mass`` supplied 2.78 of that 3.60: the arm weighs
+        # 0.925 kg and the humanoid 9.25 kg, so ~74% of the squared "different morphology" distance was the 10x
+        # mass, not the morphology. Mass is log-compressed now (see ``_LOG_SCALED``) and the same pair reads
+        # d_close 1.186 / d_far 2.465, a 2.08x separation earned from structure. A ratio is what "closer than"
+        # means and it cannot be gamed by scale.
+        self.assertGreater(d_far, 1.8 * d_close)
 
 
 class SpeciesDiscoveryTests(unittest.TestCase):

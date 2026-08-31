@@ -61,6 +61,17 @@ def _validate_ast(node: ast.AST) -> None:
             raise RewardSyntaxError(f"unknown name: {sub.id!r} (not a whitelisted feature or function)")
         if isinstance(sub, ast.Call) and not (isinstance(sub.func, ast.Name) and sub.func.id in _SAFE_FUNCS):
             raise RewardSyntaxError("only whitelisted functions may be called")
+        # B0b: the RCE surface is closed, but `9**9**9` / `(10**9)**(10**9)` pass the allowlist and hang eval
+        # building a ~370M-digit int (the float() OverflowError guard never reaches). All 10 features are in
+        # [-1,1], so a constant exponent above ~8 or a huge constant base is never legitimate — reject it. This
+        # bounds compute so an agent-authored (BYOK) reward can't DoS the loop.
+        if isinstance(sub, ast.BinOp) and isinstance(sub.op, ast.Pow):
+            exp = sub.right
+            if isinstance(exp, ast.Constant) and isinstance(exp.value, (int, float)) and abs(exp.value) > 8:
+                raise RewardSyntaxError(f"exponent {exp.value} too large (max 8) — features are in [-1,1]")
+            base = sub.left
+            if isinstance(base, ast.Constant) and isinstance(base.value, (int, float)) and abs(base.value) > 1e6:
+                raise RewardSyntaxError(f"constant base {base.value} too large (max 1e6)")
 
 
 def compile_reward(expr: str):
@@ -79,6 +90,41 @@ def compile_reward(expr: str):
             return float(v) if math.isfinite(v) else 0.0
         except (ValueError, ZeroDivisionError, OverflowError):
             return 0.0
+
+    return fn
+
+
+def _reduce_binop(op, args):
+    out = args[0]
+    for a in args[1:]:
+        out = op(out, a)
+    return out
+
+
+def compile_reward_batched(expr: str, *, xp=None):
+    """R1 (MJX port): the SAME AST-validated reward, evaluated over ARRAYS with an array math backend (``numpy``
+    by default, or ``jax.numpy`` for the on-GPU trainer). Returns ``fn(features: dict[str, array]) -> array`` so
+    the MJX-PPO trainer can compute the 10 features per-env in JAX and score an LLM-authored reward NATIVELY —
+    the CPU gait search and the GPU trainer share one reward definition, no per-step Python ``eval`` in the hot
+    loop. Pure arithmetic + the whitelisted funcs (min/max/abs/exp/tanh/sqrt/clip), all with array equivalents,
+    so the returned fn is ``jit``/``vmap``-friendly. Non-finite results are sanitized to 0 (never poison PPO)."""
+    if xp is None:
+        import numpy as xp
+    tree = ast.parse(expr.strip(), mode="eval")
+    _validate_ast(tree)
+    code = compile(tree, "<reward_batched>", "eval")
+    funcs = {
+        "min": lambda *a: _reduce_binop(xp.minimum, a), "max": lambda *a: _reduce_binop(xp.maximum, a),
+        "abs": xp.abs, "exp": xp.exp, "tanh": xp.tanh,
+        "sqrt": lambda x: xp.sqrt(xp.maximum(0.0, x)),
+        "clip": lambda x, lo, hi: xp.clip(x, lo, hi),
+    }
+
+    def fn(features: dict):
+        env = {k: features.get(k, 0.0) for k in REWARD_FEATURES}   # arrays (or scalars) — no float() coercion
+        env.update(funcs)
+        v = eval(code, {"__builtins__": {}}, env)  # noqa: S307 - AST-allowlisted, no builtins, closed env
+        return xp.nan_to_num(v, nan=0.0, posinf=0.0, neginf=0.0)
 
     return fn
 
@@ -105,14 +151,16 @@ _TEMPLATES: dict[str, str] = {
 }
 
 
-def propose_rewards(task: str = "walk forward", *, n: int = 4, llm=None) -> list[RewardCandidate]:
+def propose_rewards(task: str = "walk forward", *, n: int = 4, llm=None, reflection: str = "") -> list[RewardCandidate]:
     """Propose ``n`` candidate rewards. With ``llm`` (an object with ``.complete(prompt) -> str``) the model
     proposes expressions over the whitelisted API; each is validated + only compilable ones are kept, and the
-    heuristic templates backfill to guarantee ``n`` legal candidates. LLM-off returns the templates directly."""
+    heuristic templates backfill to guarantee ``n`` legal candidates. LLM-off returns the templates directly.
+    ``reflection`` (an R2 reflection block from the previous round) is injected into the LLM prompt so the next
+    proposal CORRECTS the last run's failure instead of guessing afresh."""
     cands: list[RewardCandidate] = []
     if llm is not None:
         try:
-            text = llm.complete(_reward_prompt(task, n))
+            text = llm.complete(_reward_prompt(task, n, reflection))
             for i, line in enumerate([l.strip() for l in text.splitlines() if l.strip()][:n]):
                 expr = line.split("#", 1)[0].strip().rstrip(",")
                 try:
@@ -129,12 +177,14 @@ def propose_rewards(task: str = "walk forward", *, n: int = 4, llm=None) -> list
     return good[:n]
 
 
-def _reward_prompt(task: str, n: int) -> str:
+def _reward_prompt(task: str, n: int, reflection: str = "") -> str:
     feats = ", ".join(REWARD_FEATURES); funcs = ", ".join(_SAFE_FUNCS)
+    fb = (f"\n\nFEEDBACK from the previous round (fix these specifically):\n{reflection}\n" if reflection else "")
     return (f"Write {n} candidate reward functions for the task: {task}.\n"
             f"Each MUST be a single Python arithmetic expression using ONLY these per-step features: {feats}.\n"
             f"You may call ONLY these functions: {funcs}. No other names, no attributes, no imports.\n"
-            f"One expression per line, no prose. Reward forward progress while upright; penalize slip + energy.")
+            f"One expression per line, no prose. Reward forward progress while upright; penalize slip + energy."
+            f"{fb}")
 
 
 def select_reward(candidates: list[RewardCandidate], rollout_fn, *, gaming_reward_z: float = 2.0) -> dict:

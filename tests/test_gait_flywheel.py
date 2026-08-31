@@ -48,6 +48,31 @@ class GaitFlywheelTests(unittest.TestCase):
         self.assertIsNotNone(recalled)
         self.assertAlmostEqual(recalled["kp"], 200.0, places=3)
 
+    def test_structural_keys_do_not_collapse_animal_bodies(self):
+        from virturoid.services.gait_flywheel import structural_gait_key
+        from virturoid.services.morphology_composer import compose_robot
+        prompts = ["a robot dog", "a robot horse", "a robot fox", "a robot wolf",
+                   "a robot cat", "a robot goat", "a robot deer", "a robot gecko"]
+        genes = [compose_robot(prompt, llm=None, ensure_walkable=True) for prompt in prompts]
+        keys = {structural_gait_key(gene) for gene in genes}
+        self.assertGreaterEqual(len(keys), 6, f"eight animal prompts collapsed to {len(keys)} structures")
+        self.assertEqual(structural_gait_key(genes[0]), structural_gait_key(genes[0]))
+
+    def test_keep_best_is_scoped_to_one_structure(self):
+        from virturoid.services.gait_flywheel import bank_gait
+        from virturoid.services.morphology_composer import compose_robot
+        db = self._db()
+
+        class _Walk:
+            best_survived, best_height_ratio, best_credible = True, 0.85, True
+            best_forward = 0.7
+            best_params = {"freq": 1.5, "hip_amp": 0.9, "knee_amp": 1.0,
+                           "duty": 0.25, "kp": 32.0, "kd": 1.5}
+
+        dog = compose_robot("a robot dog", llm=None, ensure_walkable=True)
+        horse = compose_robot("a robot horse", llm=None, ensure_walkable=True)
+        self.assertNotEqual(bank_gait(db, dog, _Walk()), bank_gait(db, horse, _Walk()))
+
     def test_bank_rejects_a_non_credible_slide(self):
         # UN-GAMEABLE: a body that SLIDES forward (survives + travels past the 0.15 m floor but never steps) is not a
         # walk and must never enter the bank — else a slide masquerades as a gait and gets recalled/reused. This is
@@ -94,10 +119,20 @@ class GaitFlywheelTests(unittest.TestCase):
         bank_gait(db, gA, _Walk())
 
         gB = ensure_walkable_quad(compose_robot("a four legged walking robot"), "a four legged walking robot")
-        if getattr(gB, "species", None) != getattr(gA, "species", None):    # only meaningful if strings differ
-            recalled = recall_gait(db, gB)
-            self.assertIsNotNone(recalled, "morphology embedding should retrieve a structurally-similar prior")
-            self.assertAlmostEqual(recalled["kp"], 233.0, places=3)         # reused A's actual controller params
+        # THIS TEST ASSERTED NOTHING. It was guarded by `if gB.species != gA.species`, and MEASURED 2026-08-09
+        # both prompts compose to species "quadruped.anatomy" — so the guard was False, `recall_gait` was never
+        # called, and the moat's headline (recall keyed on MORPHOLOGY, not on a name) passed vacuously in CI.
+        #
+        # The guard was also the wrong question. Recall must NOT depend on the two bodies carrying different
+        # species STRINGS: that they carry the same one is the point — the retrieval key is the structural
+        # vector, and a name-keyed cache would be exactly the thing this test exists to rule out. So the recall
+        # is asserted unconditionally, and the species strings are asserted to be irrelevant to the answer by
+        # renaming gB before the lookup.
+        gB.species = "totally_different_name.v9"
+        recalled = recall_gait(db, gB)
+        self.assertIsNotNone(recalled, "morphology embedding should retrieve a structurally-similar prior")
+        self.assertAlmostEqual(recalled["kp"], 233.0, places=3)             # reused A's actual controller params
+        self.assertAlmostEqual(recalled["freq"], 1.42, places=3)            # ...the whole operating point, not a default
 
     def test_warm_start_provenance_names_the_actual_parent_at_deploy_horizon(self):
         """The flywheel edge must identify the recalled skill and compare controllers at one horizon."""

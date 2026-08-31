@@ -26,12 +26,218 @@ The AI agents use this two ways:
 from __future__ import annotations
 
 import json
+import logging
+import os
 import re
 import sqlite3
+import sys
 import time
 from pathlib import Path
 
-DEFAULT_DB_PATH = Path("build") / "memory" / "virturoid_memory.db"
+_LOG = logging.getLogger("virturoid.memory")
+
+
+def default_memory_dir() -> Path:
+    """Where the flywheel's memory lives, overridable via ``VIRTUROID_MEMORY_DIR``.
+
+    The override exists because this path used to be a constant, and a constant made the
+    TEST SUITE A WRITER TO THE DEVELOPER'S OWN BANK. The suite banks gaits through the
+    ordinary product path -- ``verify_robot`` -> ``_auto_bank_gait`` -> ``bank_gait`` --
+    so it was never doing anything the product does not do; it was doing it to the wrong
+    database. MEASURED 2026-08-07: one session grew ``build/memory`` from 97 to 101
+    locomotion rows, and four rows in the live bank carry the body class
+    ``totally_made_up_xyz``, traceable to ``tests/test_structural_dispatch.py``.
+
+    That is worse than untidy. The bank is the substrate we MEASURE against -- the
+    evidence gates, the fragility re-measurement, the mining runs all read it -- so a
+    suite that writes to it is a suite that edits its own evidence. Fixture rows were
+    being counted as observations in an analysis of whether the flywheel has signal.
+
+    Resolved per call rather than bound at import so that a test session, a corpus
+    factory night and the product can each point somewhere different in one process.
+    """
+    return Path(os.environ.get("VIRTUROID_MEMORY_DIR") or Path("build") / "memory")
+
+
+#: Module-level convenience for the many call sites that want the product default.
+#: Kept as a name so existing ``from ... import DEFAULT_DB_PATH`` sites keep working;
+#: conftest sets ``VIRTUROID_MEMORY_DIR`` before any virturoid module is imported, which
+#: is why binding here at import time is safe.
+DEFAULT_DB_PATH = default_memory_dir() / "virturoid_memory.db"
+
+# ---------------------------------------------------------------------------- the destination policy
+#
+# ``VIRTUROID_MEMORY_DIR`` fixed PYTEST. It did not fix the bank, for two measured reasons.
+#
+# ONE: THERE ARE TWO DEFAULT RULES, AND ONLY ONE OF THEM READS THE ENV VAR. ``agent_tools.safe_build_path(None,
+# "memory")`` computes ``<cwd>/build/memory`` from scratch and is the destination used by
+# ``gait_flywheel._open_db_and_learn`` (the fallback under every ``fit_gait_for_body(db=None)``, so under
+# ``ensure_walkable_quad``, so under ``create_robot``), by ``agent_design_tools._bank_to_flywheel`` (``submit_design``
+# -> ``record_run``) and by ``adapt_gait``. MEASURED 2026-08-07 with ``VIRTUROID_MEMORY_DIR`` pointed at an empty
+# directory: ``fit_gait_for_body(db=None)`` created a 122 KB database in ``<cwd>/build/memory`` and left the redirect
+# target EMPTY. The live bank's newest ``runs`` row is from today and one row from 10:11 carries the fixture class
+# ``totally_made_up_xyz`` -- i.e. the suite was still writing the real bank AFTER the conftest fix landed.
+#
+# TWO: NOTHING LOADS CONFTEST EXCEPT PYTEST. ``python -c``, ``python -m unittest``, the REPL and a scratch script all
+# import the product with no redirect at all and inherit ``build/memory`` as a silent default.
+#
+# So the rule below is enforced HERE, at ``MemoryDB.__init__`` -- the one chokepoint every writer funnels through --
+# and not at any individual call site, because the call sites are exactly what keeps drifting.
+#
+#   * an EXPLICIT destination (any path that is not the conventional bank dir) is never touched. The product's
+#     ``workspace/memory/...``, every ``tmp_path`` in the suite, a night's ``--memory`` dir: unchanged.
+#   * the CONVENTIONAL bank dir + a redirect in force -> REWRITTEN to the redirect. Whoever computed this path meant
+#     "the default memory"; they just used the older rule. This is what makes the redirect TOTAL.
+#   * the CONVENTIONAL bank dir + no redirect + an AD-HOC process -> opened READ-ONLY.
+#
+# WHICH FAILURE DIRECTION THIS OPTIMISES FOR, AND WHY. Both directions matter and they are not symmetric.
+# Polluting the corpus is IRREVERSIBLE -- the bank is gitignored, has no backup, and rows may never be deleted, so a
+# stray probe's row is evidence we are then stuck measuring against forever (that is #274 and #278). Sandboxing a
+# real run is RECOVERABLE -- the data exists, in a directory that gets named. So the guard is biased toward refusing
+# the write, BUT it is built so the sandboxing direction cannot happen silently at all:
+#
+#   - nothing is ever redirected to a scratch/temp directory of our invention. A read-only probe still READS the real
+#     bank, byte for byte, so ``python -c "...stats()"`` keeps answering with the real numbers instead of the far
+#     worse failure of confidently reporting an empty corpus.
+#   - the only destination we ever substitute is one the caller's own process ASKED for via VIRTUROID_MEMORY_DIR.
+#   - both branches announce themselves (stderr for the read-only lane, which is never pytest; a log line + the
+#     ``MEMORY_DESTINATION_EVENTS`` audit list for the rewrite lane).
+#
+# THE ESCAPE HATCH IS THE SAME ONE MECHANISM: ``VIRTUROID_MEMORY_DIR=build/memory`` names the real bank explicitly
+# and makes it writable from anywhere, including ``python -c``. There is deliberately no second "allow writes" flag:
+# a destination you have to name is the whole point.
+
+#: The bank's location under the OLDER rule -- ``<cwd>/build/memory`` -- captured at import, not read live.
+#: Pinned to the process's initial cwd on purpose: "the repo's real bank" is a fixed place, so a test that chdirs
+#: into a temp tree gets a genuinely private ``build/memory`` there rather than having it captured by this policy.
+_INITIAL_CWD = Path.cwd()
+
+#: Every DISTINCT destination decision this process made, newest last: ``{"kind", "asked", "used", "why"}``. An
+#: audit trail, so "where did my rows go" is answerable without re-running anything. Deduped on (asked, used)
+#: because the leaking rule fires once per build, not once per process.
+MEMORY_DESTINATION_EVENTS: list[dict] = []
+
+_ANNOUNCED: set[str] = set()
+_SEEN_DECISIONS: set[tuple[str, str]] = set()
+
+
+def _record(kind: str, asked: Path, used: Path, why: str) -> None:
+    key = (str(asked), str(used))
+    if key in _SEEN_DECISIONS:
+        return
+    _SEEN_DECISIONS.add(key)
+    MEMORY_DESTINATION_EVENTS.append({"kind": kind, "asked": str(asked), "used": str(used), "why": why})
+
+
+def conventional_memory_dir() -> Path:
+    """``<initial cwd>/build/memory`` — the older, env-blind default rule (``agent_tools.safe_build_path``)."""
+    return _INITIAL_CWD / "build" / "memory"
+
+
+def _norm(p) -> str:
+    return os.path.normcase(os.path.abspath(str(p)))
+
+
+def adhoc_entry_point() -> str | None:
+    """Name the entry point when this process has no identifiable script — else ``None``.
+
+    ``python -c``/``python -``/the REPL/``python -i`` have no entry point on disk to attach a destination to, and
+    ``python -m unittest`` runs this repo's tests without ever loading ``tests/conftest.py``. All four were named in
+    the bug report as writers of the real bank. A NAMED script (``python scripts/x.py``, pytest, the MCP server,
+    Studio) is deliberately NOT ad-hoc: it is a place where a destination can be stated, and stating it is that
+    script's job — see ``scripts/corpus_factory_night.py``.
+    """
+    argv0 = (sys.argv[0] if sys.argv else "") or ""
+    if sys.flags.interactive:
+        return "python -i"
+    low = argv0.lower()
+    if argv0 in ("", "-", "-c"):
+        return {"": "the interactive interpreter", "-": "python - (stdin)", "-c": "python -c"}[argv0]
+    for runner in ("unittest", "doctest"):
+        if low.endswith(f"-m {runner}") or low.endswith((f"{runner}\\__main__.py", f"{runner}/__main__.py")):
+            return f"python -m {runner}"
+    return None
+
+
+class MemoryBankIsReadOnly(sqlite3.OperationalError):
+    """A write was attempted against a bank this process may only read. Subclasses ``sqlite3.OperationalError`` so
+    the many best-effort ``except Exception`` banking sites behave exactly as they did before — the difference is
+    that a developer who does NOT swallow it gets told which env var to set."""
+
+
+class _GuardedConnection(sqlite3.Connection):
+    """Turns sqlite's ``attempt to write a readonly database`` into a sentence that says what to do about it."""
+
+    _virturoid_hint = ""
+
+    def _reraise(self, exc):
+        if "readonly" in str(exc).lower():
+            return MemoryBankIsReadOnly(f"{exc}. {self._virturoid_hint}")
+        return exc
+
+    def execute(self, *a, **k):
+        try:
+            return super().execute(*a, **k)
+        except sqlite3.OperationalError as exc:
+            raise self._reraise(exc) from exc
+
+    def executemany(self, *a, **k):
+        try:
+            return super().executemany(*a, **k)
+        except sqlite3.OperationalError as exc:
+            raise self._reraise(exc) from exc
+
+    def executescript(self, *a, **k):
+        try:
+            return super().executescript(*a, **k)
+        except sqlite3.OperationalError as exc:
+            raise self._reraise(exc) from exc
+
+
+def _announce_once(key: str, message: str, *, stderr: bool) -> None:
+    if key in _ANNOUNCED:
+        return
+    _ANNOUNCED.add(key)
+    # Exactly ONE channel, or the bare-interpreter case prints the same sentence twice (logging's lastResort
+    # handler writes to stderr too). Plain ASCII: this lands on a cp1252 console.
+    if stderr:
+        print(f"virturoid: {message}", file=sys.stderr)
+    else:
+        _LOG.warning("%s", message)
+
+
+def resolve_memory_destination(db_path: Path) -> tuple[Path, bool, str]:
+    """Apply the destination policy to one requested bank path.
+
+    Returns ``(path, read_only, why)``. Pure apart from the announce/audit side effects, so a test can ask what the
+    policy WOULD do without opening anything.
+    """
+    db_path = Path(db_path)
+    conventional = _norm(db_path.parent) == _norm(conventional_memory_dir())
+    if not conventional:
+        return db_path, False, ""                       # an explicitly chosen destination: never touched
+    redirect = os.environ.get("VIRTUROID_MEMORY_DIR")
+    if redirect:
+        if _norm(redirect) == _norm(db_path.parent):
+            return db_path, False, ""                   # the redirect NAMES this bank -> an explicit choice
+        used = Path(redirect) / db_path.name
+        why = (f"{db_path} was computed by the env-blind rule (agent_tools.safe_build_path); "
+               f"VIRTUROID_MEMORY_DIR is in force, so this process's memory is {used}")
+        _record("redirected", db_path, used, why)
+        _announce_once("redirect", why, stderr=False)
+        return used, False, why
+    who = adhoc_entry_point()
+    if who and db_path.exists():
+        why = (f"{db_path} opened READ-ONLY: {who} has no entry point to attach a destination to, and this is the "
+               f"real corpus (gitignored, no backup, rows are never deleted). Reads are unaffected. To write it, "
+               f"say so: VIRTUROID_MEMORY_DIR={db_path.parent} -- or point that at a scratch dir to sandbox")
+        _record("read_only", db_path, db_path, why)
+        _announce_once("read_only", why, stderr=True)   # never pytest: pytest always has the redirect in force
+        return db_path, True, why
+    # No redirect, not ad-hoc (a named script / the product), or the bank does not exist yet (a fresh checkout has
+    # no corpus to protect and must still be able to create one). Write it.
+    return db_path, False, ""
+
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
@@ -199,12 +405,25 @@ class MemoryDB:
     """Embedded SQLite-backed Virturoid Memory. Use as a context manager or call close()."""
 
     def __init__(self, db_path: Path = DEFAULT_DB_PATH) -> None:
-        self.path = Path(db_path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(str(self.path))
+        #: ``requested`` is kept alongside ``path`` so a caller can see that the destination policy moved it.
+        self.requested = Path(db_path)
+        self.path, self.read_only, self.destination_note = resolve_memory_destination(self.requested)
+        if self.read_only:
+            conn = sqlite3.connect(f"file:{self.path.as_posix()}?mode=ro", uri=True,
+                                   factory=_GuardedConnection)
+            conn._virturoid_hint = self.destination_note
+        else:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            conn = sqlite3.connect(str(self.path), factory=_GuardedConnection)
+        self.conn = conn
         self.conn.row_factory = sqlite3.Row
-        self.conn.executescript(_SCHEMA)
-        self.conn.commit()
+        try:
+            self.conn.executescript(_SCHEMA)
+            self.conn.commit()
+        except MemoryBankIsReadOnly:
+            # An older bank missing a table this schema would add. Reads of what IS there still work, which is the
+            # whole value of the read-only lane; refusing to open would just push the developer back to writing.
+            _LOG.warning("read-only bank %s predates part of the current schema; reads only", self.path)
 
     def __enter__(self) -> "MemoryDB":
         return self

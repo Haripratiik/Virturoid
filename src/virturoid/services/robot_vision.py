@@ -222,10 +222,12 @@ def evaluate_robot_vision(gene, *, n_train: int = 280, seed: int = 0) -> dict:
     'CV is part of building a camera robot'. (Closed-loop nav is a separate utility; a steer-to-bearing glide is a
     weak discriminator because the search behaviour can reach a goal without good vision.)"""
     from virturoid.services.camera_perception import robot_camera_part, render_px_for_camera
+    from virturoid.services.sensor_provenance import camera_is_ours_to_add
     part = robot_camera_part(gene)
     if part is None:
+        allowed, why = camera_is_ours_to_add(gene)
         return {"has_camera": False, "trained_in_house": False,
-                "note": "this robot carries no camera — nothing to train vision on"}
+                "note": (why if not allowed else "this robot carries no camera — nothing to train vision on")}
     tr = train_robot_vision(gene, n=n_train, seed=seed)
     return {"has_camera": True, "camera_part": part.name, "render_px": render_px_for_camera(part),
             "bearing_mae_deg": tr["test_mae_deg"], "baseline_norm": tr["baseline_mae"],

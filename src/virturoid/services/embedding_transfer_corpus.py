@@ -18,6 +18,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from virturoid.services.install_paths import anchored
+
 # a deliberately diverse zoo: a strong LEGGED core (where gait-hint retrieval actually happens and today's embedding
 # is blind, cosine 0.91-1.0) + serial/wheeled/arm outliers so the eval also catches "homeless body" retrieval.
 DEFAULT_ZOO: list[tuple[str, str]] = [
@@ -52,7 +54,9 @@ DEFAULT_ZOO: list[tuple[str, str]] = [
     ("rover",  "a four-wheeled rover robot"),
 ]
 
-DEFAULT_CACHE = Path("build/data/transfer_corpus.json")
+#: ANCHORED (see ``services.install_paths``) -- a measured-transfer corpus this install BUILT, not something
+#: that should appear or vanish with the shell's pwd. ``load_corpus`` treats absent as empty.
+DEFAULT_CACHE = anchored("build/data/transfer_corpus.json")
 
 
 def _compose(prompt: str):

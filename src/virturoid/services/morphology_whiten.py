@@ -19,9 +19,13 @@ import json
 from pathlib import Path
 
 from virturoid.schemas.gene import RobotGene
+from virturoid.services.install_paths import anchored
 from virturoid.services.morphology_embedding import RICH_FEATURE_NAMES, embed_gene_rich
 
-DEFAULT_WHITENER_PATH = Path("build/models/body_whitener.json")
+#: ANCHORED (see ``services.install_paths``): ``load_whitener`` returns None when absent and ``apply_whiten``
+#: then returns the RAW vector, so a CWD-relative default silently un-whitened the embedding index -- the
+#: exact mass-tyranny pathology Wave 1 exists to remove -- with nothing logged and no error raised.
+DEFAULT_WHITENER_PATH = anchored("build/models/body_whitener.json")
 _EPS = 1e-6
 _cache: dict | None = None
 _cache_mtime: float | None = None

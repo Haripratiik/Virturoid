@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Check, X, Circle, ChevronDown, ChevronRight, OctagonX, Loader2 } from "lucide-react";
-import { useJobsStore, PHASES, phaseStates, phaseForStage } from "@/state/jobs";
+import { useJobsStore, PHASES, phaseStates, phaseForStage, jobStatusLabel, jobStatusKind } from "@/state/jobs";
 import { cancelJob } from "@/api/jobs";
 import { Pill } from "@/components/ui";
 import type { PhaseId } from "@/state/jobs";
@@ -45,12 +45,7 @@ export function RunCard({ jobId, goal }: { jobId: string; goal: string }) {
     <div className="rounded-card border border-agent/30 bg-agent-dim/40 p-2.5">
       <div className="mb-1.5 flex items-start justify-between gap-2">
         <div className="text-xs font-medium text-primary">{goal}</div>
-        <Pill
-          kind={
-            job.status === "succeeded" ? "ok" : job.status === "failed" ? "bad" : job.status === "cancelled" ? "warn" : "skip"
-          }
-          label={job.status}
-        />
+        <Pill kind={jobStatusKind(job.status)} label={jobStatusLabel(job.status)} />
       </div>
 
       <div className="flex flex-col gap-0.5">
@@ -108,6 +103,8 @@ export function RunCard({ jobId, goal }: { jobId: string; goal: string }) {
             Cancel
           </button>
         ) : job.status === "succeeded" ? (
+          // Task-success belongs to a robot that EXISTS. A refused build has no robot, so it gets
+          // no "success 0%" pill to sit under — it gets the reason it refused, below.
           <div className="flex flex-wrap items-center justify-end gap-1">
             {typeof result.robot_class === "string" && <Pill kind="skip" label={result.robot_class} />}
             {typeof result.final_success_rate === "number" && (
@@ -119,6 +116,11 @@ export function RunCard({ jobId, goal }: { jobId: string; goal: string }) {
           </div>
         ) : null}
       </div>
+      {job.status === "no_output" && (
+        <div className="mt-1.5 text-2xs leading-relaxed text-warn">
+          {typeof result.blocked_reason === "string" ? result.blocked_reason : "No robot package was generated."}
+        </div>
+      )}
       {job.error && <div className="mt-1.5 font-mono text-2xs text-fail">{job.error}</div>}
     </div>
   );

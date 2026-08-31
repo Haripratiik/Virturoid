@@ -42,10 +42,10 @@ class VirtBenchArmsTests(unittest.TestCase):
 
 
 class ArmBGpuRungTests(unittest.TestCase):
-    def test_gpu_rung_composes_and_verifies(self):
-        # WS1/#66: with use_gpu, run_arm_b promotes the search winner to a GPU-trained residual, then INDEPENDENTLY
-        # verifies it at the frozen horizon. Inject a stub trainer that "returns" the banked forward-quad so the
-        # rung is exercised on CPU (no real GPU): the GPU candidate then verifies forward and wins.
+    def test_gpu_rung_rejects_stale_artifact_after_independent_verify(self):
+        # WS1/#66: with use_gpu, run_arm_b sends the trainer's artifact through the frozen independent verifier.
+        # This historical checkpoint predates the current physics and now leans/falls. The trainer's optimistic
+        # self-report must not promote it, but the attempted artifact and rejection remain in the provenance.
         import os
         if not os.path.isfile("build/models/quaddec_fwd.npz"):
             self.skipTest("no banked forward-quad to stand in for the GPU-trained policy")
@@ -57,9 +57,11 @@ class ArmBGpuRungTests(unittest.TestCase):
 
         b = run_arm_b("L1_quad_walk", steps=120, max_evals=2, use_memory=False, use_gpu=True,
                       gpu_iters=40, gpu_hifi=stub_hifi)
-        self.assertTrue(b["verified_pass"])                    # the GPU-trained (stub) policy verified forward
-        self.assertIn("GPU residual", b["method"])             # the GPU candidate won the best-verified selection
-        self.assertEqual(b["gpu_npz"], "build/models/quaddec_fwd.npz")
+        self.assertFalse(b["gpu_candidate_verdict"]["verified_pass"])
+        self.assertEqual(b["gpu_candidate_verdict"]["failure_mode"], "leaning")
+        self.assertEqual(b["gpu_candidate_npz"], "build/models/quaddec_fwd.npz")
+        self.assertIsNone(b["gpu_npz"])                        # rejected artifact was not promoted as the winner
+        self.assertIsNone(b["gpu_error"])
         self.assertEqual(b["budget"]["gpu_iters"], 40)         # N16 ledger records the GPU spend
         self.assertIn("spec", seen)                            # the search winner was handed to the trainer
 

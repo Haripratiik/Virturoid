@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
-export type WorkspaceId = "design" | "simulate" | "train" | "verify" | "library";
+export type WorkspaceId = "design" | "simulate" | "train" | "verify" | "library" | "memory";
 
 // Workbench editor tabs — one per stage of the robot lifecycle, plus Library.
 // Rendered as IDE-style tabs above the editor area (never preached elsewhere).
@@ -11,6 +11,7 @@ export const WORKSPACES: Array<{ id: WorkspaceId; label: string; shortcut: strin
   { id: "train", label: "Train", shortcut: "3", hint: "Teach the robot its task through trial and error (RL)" },
   { id: "verify", label: "Verify", shortcut: "4", hint: "Honesty gates — what is proven vs. only claimed" },
   { id: "library", label: "Library", shortcut: "5", hint: "Every robot you have built, searchable" },
+  { id: "memory", label: "Memory", shortcut: "6", hint: "The verified-morphology bank — what is banked, under which gate, and whether recalling it actually helped" },
 ];
 
 export type DockTab = "console" | "jobs" | "artifacts" | "data";

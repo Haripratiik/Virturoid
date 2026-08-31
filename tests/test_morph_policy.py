@@ -113,6 +113,26 @@ class PerceptionTokenTests(unittest.TestCase):
         # Loaded the shared proprio weights -> perception-blind act() is identical to the source policy.
         self.assertTrue(np.array_equal(q.act(obs), p.act(obs)))
 
+    def test_v1_policy_reads_v2_observation_without_runtime_field_shift(self):
+        import numpy as np
+        from virturoid.services.morph_policy import MorphPolicy
+
+        p = MorphPolicy(24, seed=9)
+        v2 = np.random.default_rng(4).normal(size=(6, 27))
+        legacy = np.concatenate([v2[:, :11], v2[:, 14:]], axis=1)
+        self.assertTrue(p.accepts_feature_dim(27))
+        self.assertTrue(np.array_equal(p.act(v2), p.act(legacy)))
+
+    def test_velocity_conditioned_v1_policy_reads_v2_observation(self):
+        import numpy as np
+        from virturoid.services.morph_policy import MorphPolicy
+
+        p = MorphPolicy(26, seed=10)
+        v2 = np.random.default_rng(5).normal(size=(4, 29))
+        legacy = np.concatenate([v2[:, :11], v2[:, 14:]], axis=1)
+        self.assertTrue(p.accepts_feature_dim(29))
+        self.assertTrue(np.array_equal(p.act(v2), p.act(legacy)))
+
 
 @unittest.skipUnless(_MUJOCO, "MuJoCo not installed.")
 class MorphGraphTests(unittest.TestCase):
@@ -127,6 +147,14 @@ class MorphGraphTests(unittest.TestCase):
                   _radial_legged(6), _radial_legged(8)]
         dims = {self._encode(g).feature_dim for g in bodies}
         self.assertEqual(len(dims), 1, f"feature_dim must be identical across bodies, got {dims}")
+        self.assertEqual({27}, dims)
+
+    def test_joint_tokens_include_physical_datasheet_limits(self):
+        graph = self._encode(_gene("quadruped"))
+        self.assertEqual(14, graph.static.shape[1])
+        # Low/high limits and actuator capacity are finite and not empty constants.
+        self.assertTrue(all(graph.static[:, 11] <= graph.static[:, 12]))
+        self.assertTrue(any(graph.static[:, 13] > 0.0))
 
     def test_cached_models_keep_solver_settings_in_the_cache_key(self):
         from virturoid.services.morph_policy import compiled_model, robot_mjcf

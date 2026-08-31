@@ -8775,7 +8775,7 @@
     "mobile_manip__appearance": {
       "prompt": "a wheeled robot that carries a small arm to pick things up as it drives",
       "source": "heuristic",
-      "recorded_at": "2026-07-11T12:49:46",
+      "recorded_at": "2026-07-30T13:02:34",
       "gene": {
         "id": "built_mobile_manipulator_11seg",
         "species": "mobile_manipulator.composed",
@@ -8789,6 +8789,10 @@
           "Request needs clarification or capability work: 'pick_place_sort' is implemented for manipulator, not mobile_manipulator (cross-morphology task wiring missing)"
         ],
         "metadata": {
+          "rest_pose": {
+            "j1_joint": -2.09,
+            "j2_joint": -2.62
+          },
           "build_plan": {
             "prompt": "a wheeled robot that carries a small arm to pick things up as it drives",
             "robot_class": "mobile_manipulator",
@@ -9262,7 +9266,7 @@
     "mobile_manip__construction": {
       "prompt": "a mobile base on four wheels with a three-joint manipulator arm mounted on the deck",
       "source": "heuristic",
-      "recorded_at": "2026-07-11T12:49:46",
+      "recorded_at": "2026-07-30T13:02:34",
       "gene": {
         "id": "built_mobile_manipulator_11seg",
         "species": "mobile_manipulator.composed",
@@ -9276,6 +9280,10 @@
           "Request needs clarification or capability work: 'pick_place_sort' is implemented for manipulator, not mobile_manipulator (cross-morphology task wiring missing)"
         ],
         "metadata": {
+          "rest_pose": {
+            "j1_joint": -2.09,
+            "j2_joint": -2.62
+          },
           "build_plan": {
             "prompt": "a mobile base on four wheels with a three-joint manipulator arm mounted on the deck",
             "robot_class": "mobile_manipulator",

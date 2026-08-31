@@ -34,8 +34,38 @@ class LocomotionTests(unittest.TestCase):
         mj = mujoco.MjModel.from_xml_string(compile_gene_to_mjcf(g))
         r = run_locomotion_episode(mj)
         self.assertTrue(r["upright"])                             # legs point down -> it stands
-        self.assertEqual(r["status"], "walked")                  # the scripted baseline produces locomotion
-        self.assertGreater(r["distance_m"], 0.1)                 # (direction is the learned policy's job)
+        # `distance_m` IS NOT A WALK. It is norm(p1 - p0) — the UNSIGNED planar travel that
+        # `locomotion_status`'s own docstring, and `test_backward_or_sideways_progress_never_certifies_a_
+        # forward_walk` twenty lines above, both say cannot certify a forward walk. This line used to read
+        # `assertGreater(r["distance_m"], 0.1)` inside a test named `..._walks_forward`, and MEASURED
+        # 2026-08-09 the body it was passing on travels forward_m -0.793 with distance_m 0.793 and
+        # status 'stalled': the bare trot drives the AUTHORED quadruped BACKWARD, and the assertion could
+        # not tell. So this line now claims only what it can see — the trot machinery drives the body —
+        # and the FORWARD claim is made below, on signed travel, where it is true.
+        self.assertGreater(r["distance_m"], 0.1, "the bare trot must actually drive the body somewhere")
+        # The PRODUCT verdict for a quadruped is the GAIT-AWARE evaluate_robot (trot, else the statically-stable
+        # crawl), which is what verify_robot ships. B1 scales the fanned walkable template to the body's size for
+        # per-prompt differentiation; that wide-stance body DRIFTS under the bare trot (direction is the learned
+        # policy's job, as the distance check already concedes) but WALKS under the crawl -- exactly why the crawl
+        # gait exists ([[walking-breakthrough-abduction]]). Assert the walk the product actually earns, gait-aware.
+        #
+        # ASK FOR THE WALKABLE BODY (#285). ``compose_robot`` used to run the walkability gate inside itself, so
+        # a bare compose silently returned the fanned template and this line measured THAT. It no longer does:
+        # composing returns the AUTHORED body, and the gate -- unchanged -- runs for a caller who asks for it
+        # (``ensure_walkable=True``) or for ``create_robot``, which grounds and fits an operating point first and
+        # then decides. Measured on the authored body at the shipped freq 1.5 / kp 32 it travels -0.17 m and rolls
+        # over, and with an operating point of its own it is a CREDIBLE WALK -- which is precisely why the
+        # decision moved to a caller that has one. This assertion is about the WALKABLE body, so it asks for one.
+        from virturoid.services.task_matched_eval import evaluate_robot
+        w = compose_robot("a quadruped walking robot", ensure_walkable=True)
+        ev = evaluate_robot(w)
+        # THE FORWARD CLAIM, and the one this test is named for. `evaluate_robot`'s locomotion branch scores
+        # `max(0.0, forward_m) if upright else 0.0` — SIGNED forward, clamped, upright-gated — so the metric
+        # name is asserted too: if it ever reverts to unsigned planar travel this line must fail, not pass.
+        self.assertEqual(ev["metric"], "forward_m",
+                         "the product's locomotion score must be SIGNED forward, never unsigned distance")
+        self.assertGreaterEqual(float(ev.get("value", 0.0)), 0.5,
+                                "the composed quadruped must walk under the product's gait-aware verdict")
 
     def test_leg_count_is_parametric(self):
         # "build whatever I want from scratch": a hexapod gets 6 legs (leg count is a PARAMETER), not the

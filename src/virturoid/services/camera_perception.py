@@ -13,26 +13,54 @@ from __future__ import annotations
 import math
 
 
-def robot_camera_part(gene, *, task: str = ""):
-    """The camera part this robot carries (from its class+task sensor suite) — its real specs drive the sim camera."""
+def robot_camera_context(gene, *, task: str = ""):
+    """``(camera_part_or_None, provenance)`` — the camera this robot carries AND on whose authority.
+
+    ``provenance`` is one of:
+
+    * ``"pinned"``     — the customer named this exact part for this robot.
+    * ``"our_design"`` — we composed this robot, so its class+task sensor suite is the design we are proposing.
+    * ``None``         — no camera we are entitled to claim; ``robot_camera_part`` returns None.
+
+    THE CASE THAT MADE THIS A TUPLE. ``_sensor_suite`` maps ``robot_class`` to parts, and for a quadruped that
+    is an Intel RealSense D435i. Applied to a body we composed that is a proposal. Applied to a MENAGERIE GO2 --
+    ``ncam 0, nsensor 0`` -- it fitted a camera to a machine the customer already owns, and everything
+    downstream then measured it: ``sensor_geometry`` emitted a functional ``<camera name="robot_cam">`` from the
+    suite, ``robot_sees_target`` rendered through it, and ``verify_robot.vision`` published
+    ``camera_part: Intel RealSense D435i, sees: true`` about a camera that does not exist. So the question
+    "which camera" is now inseparable from "says who". See ``sensor_provenance``.
+    """
+    from virturoid.services.sensor_provenance import camera_is_ours_to_add
     try:
-        from virturoid.services.bom_builder import _sensor_suite
-        from virturoid.services.component_catalog import component
-        # honor a pinned camera first
+        # A PIN IS THE CUSTOMER'S OWN INSTRUCTION and outranks both branches below: on their imported machine it
+        # says "this camera is / will be on it", which is theirs to assert; on ours it overrides our pick.
         pinned = (getattr(gene, "metadata", None) or {}).get("pinned_parts", {}).get("camera")
         if pinned:
             from virturoid.services.component_catalog import resolve_part
             p = resolve_part(pinned)
             if p is not None:
-                return p
+                return p, "pinned"
+        if not camera_is_ours_to_add(gene)[0]:
+            return None, None
+        from virturoid.services.bom_builder import _sensor_suite
+        from virturoid.services.component_catalog import component
         scale = sum(s.mass_kg for s in gene.segments)
         for name, _qty, _mount in _sensor_suite(gene.robot_class, None, task, scale):
             c = component(name)
             if c and c.category == "camera":
-                return c
+                return c, "our_design"
     except Exception:  # noqa: BLE001
         pass
-    return None
+    return None, None
+
+
+def robot_camera_part(gene, *, task: str = ""):
+    """The camera part this robot carries (from its class+task sensor suite) — its real specs drive the sim camera.
+
+    ``None`` for an imported machine whose own model declares no camera: we do not fit hardware to a robot the
+    customer already owns. ``robot_camera_context`` returns the reason alongside.
+    """
+    return robot_camera_context(gene, task=task)[0]
 
 
 def render_px_for_camera(part) -> int:
@@ -66,14 +94,29 @@ def robot_sees_target(gene, *, goal_ahead_m: float = 1.6, goal_rgb=(0.1, 0.85, 0
     import numpy as np
 
     from virturoid.services.gene_compiler import gene_to_meshed_mjcf, standing_spawn_z
+    from virturoid.services.sensor_provenance import camera_is_ours_to_add, declared, is_imported
     from virturoid.services.vision_nav import detect_goal_bearing
 
-    part = robot_camera_part(gene, task=(getattr(gene, "metadata", None) or {}).get("task", ""))
+    part, cam_src = robot_camera_context(gene, task=(getattr(gene, "metadata", None) or {}).get("task", ""))
     out = {"has_camera": part is not None, "camera_part": getattr(part, "name", None)}
     if part is None:
         out["sees"] = False
-        out["note"] = "this robot carries no camera in its BOM — perception is via its other sensors (e.g. LiDAR ring)."
+        # WHY there is no camera matters, because the two reasons are different claims. On a body we composed,
+        # "no camera" is a design fact. On the CUSTOMER'S machine it is a REFUSAL to invent one, and it has to
+        # be legible as such -- the same shape as `controller_provenance.what_we_took_from_your_model`, which
+        # states what was read verbatim instead of asserting past the evidence.
+        if is_imported(gene):
+            inv = declared(gene) or {}
+            out["your_model_declares"] = {"cameras": inv.get("ncam"), "sensors": inv.get("nsensor")}
+            out["we_did_not_add_one"] = camera_is_ours_to_add(gene)[1]
+            out["note"] = ("no vision claim about your machine: we report what your model declares, and we do "
+                           "not fit a camera to your robot and then measure it")
+        else:
+            out["note"] = ("this robot carries no camera in its BOM — perception is via its other sensors "
+                           "(e.g. LiDAR ring).")
         return out
+    out["camera_is"] = ("a part YOU pinned for this robot" if cam_src == "pinned" else
+                        "part of the design we are proposing for this robot")
     px = render_px_for_camera(part)
     try:
         xml = gene_to_meshed_mjcf(gene, include_floor=True, spawn_z=standing_spawn_z(gene))

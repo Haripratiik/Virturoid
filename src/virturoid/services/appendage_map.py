@@ -6,8 +6,9 @@ hexapod's 6, a snake's spine, a rover's wheels — where the old name-regex CPG 
 
 Measured rules (probed on the live build path, docs/generality_plan.md §1):
   * a token = one actuated joint; chains = maximal root->leaf paths in the token tree (``MorphGraph.parent``).
-  * GROUNDED = the chain's lowest geom (incl. welded foot bodies) sits within ``ground_tol`` of the body's
-    lowest geom overall. Legs/wheels/spine are grounded; arms + neck/tail are not (they ride high, z~0.44).
+  * GROUNDED = the chain's TIP — the body it reaches farthest, incl. welded foot bodies; see ``chain_tip`` —
+    sits within ``ground_tol`` of the body's lowest geom overall. Legs/wheels/spine are grounded; arms +
+    neck/tail are not (they ride high, z~0.44).
   * WHEEL = grounded chain with a CONTINUOUS (unlimited) hinge (a free-spinning driven wheel).
   * SPINE = the body IS one long grounded serial chain (len >= ``spine_min``) with no other grounded chains
     (a snake/eel) — undulates, doesn't step.
@@ -129,38 +130,95 @@ def build_appendage_map(model, *, ground_tol: float = 0.10, spine_min: int = 6) 
         kids.setdefault(p, []).append(t)
     roots = [t for t in range(n) if graph.parent[t] == -1]
 
-    # TIP = the KINEMATICALLY deepest body under a chain's first body (incl. branches + welded feet/grippers).
-    # A leg's tip is the foot (rides low, near the floor); an arm's tip is the gripper (rides high, in free
-    # space) — so grounded-ness must test the TIP's height, NOT the chain's lowest point (an arm mounts its
-    # BASE low, which fooled a min-z test into calling it grounded). This is the leg/arm discriminator.
+    # TIP = the body under a chain's first body that the chain physically REACHES FARTHEST (incl. branches +
+    # welded feet/grippers). A leg's tip is the foot (rides low, near the floor); an arm's tip is the gripper
+    # (rides high, in free space) — so grounded-ness must test the TIP's height, NOT the chain's lowest point
+    # (an arm mounts its BASE low, which fooled a min-z test into calling it grounded). Leg/arm discriminator.
     def chain_tip(main_tokens):
+        """Reach = the KINEMATIC PATH LENGTH from the chain's root (the parent->child offsets summed along
+        the body tree), with hop count breaking exact ties.
+
+        HOP COUNT ALONE WAS THE RULE, and hop count is only a proxy for distality: it holds on a serial limb
+        and breaks on a CLOSED-LOOP one. Measured on Cassie, whose foot is driven through a four-bar:
+        ``left-plantar-rod`` hangs one hop DEEPER than ``left-foot`` (tarsus -> foot-crank -> plantar-rod)
+        but it is the rod that closes the loop back onto the foot (cassie.xml ``<connect body1=
+        "left-plantar-rod" body2="left-foot">``) and it rides 0.12 m ABOVE it. The rod was taken for the tip,
+        so the tip sat 0.12 m off the floor, so BOTH legs read as ungrounded — and a biped came out with
+        ZERO legs and kind "manipulator", i.e. judged by the arm rubric. (It only ever passed because a
+        SYNTHETIC decoration geom on that rod used to be the lowest thing on the robot; once the import
+        carried the customer's real meshes, the foot became the lowest point, as it physically is.)
+
+        Path length is non-decreasing down a branch, so the tip is still a leaf and a gripper still beats the
+        wrist it hangs off; what changes is that SIBLING branches are compared by how far they actually
+        extend, not by how many joints happen to be stacked in them."""
         root_b = bod[main_tokens[0]]
-        best_b, best_depth = bod[main_tokens[-1]], -1
+        best_b, best_key = bod[main_tokens[-1]], (-1.0, -1)
         for bb in range(int(model.nbody)):
-            pb, depth, found = bb, 0, False
+            pb, depth, reach, found = bb, 0, 0.0, False
             while pb > 0:
                 if pb == root_b:
                     found = True; break
-                pb = int(model.body_parentid[pb]); depth += 1
-            if found and depth > best_depth:
-                best_depth, best_b = depth, bb
+                par = int(model.body_parentid[pb])
+                reach += float(np.linalg.norm(data.xpos[pb] - data.xpos[par]))
+                pb = par; depth += 1
+            key = (round(reach, 9), depth)
+            if found and key > best_key:
+                best_key, best_b = key, bb
         return body_low(best_b), (float(data.xpos[best_b][0]), float(data.xpos[best_b][1])), best_b
 
     # build each root's main path (root -> deepest leaf via single-child descent; branch = end-effector/gripper)
-    chains = []
-    for r in roots:
+    def main_paths(r, depth=0):
+        """The chains under token ``r``. Normally one: descend while there is a single child and stop at a
+        branch (a gripper's fingers are not part of the arm).
+
+        A ONE-TOKEN stub that branches is not an appendage at all, though — it is a TRUNK (a waist/pelvis yaw
+        joint sitting between the free base and the hips), and stopping there collapsed everything below it
+        into a single stub. Measured on Booster T1: both legs hang off one ``Waist`` token, so the body came
+        out with ZERO legs and one 1-token "other", which then disabled the biped honesty verdict and left a
+        humanoid to be judged by the multi-leg crawl gait. Every imported robot with an actuated waist above
+        the hips lost its legs the same way. So descend PAST a bare trunk and let each branch be its own
+        chain. A trunk >= 2 tokens long is a real appendage (an arm ending in fingers) and is left alone."""
         path = [r]; cur = r
         while cur in kids:
             ch = kids[cur]
             if len(ch) != 1:                            # branch point (e.g. gripper fingers) -> stop the main path
                 break
             cur = ch[0]; path.append(cur)
-        tip_z, tip_xy, tip_b = chain_tip(path)
-        grounded = (tip_z - zmin) < ground_tol
-        chains.append({"root": r, "path": path, "grounded": grounded, "tip_xy": tip_xy, "tip_body": tip_b,
-                       "unlimited": any(not limited[t] for t in path)})
+        if len(path) == 1 and len(kids.get(path[0], ())) >= 2 and depth < 8:
+            return [p for c in kids[path[0]] for p in main_paths(c, depth + 1)]
+        return [path]
+
+    chains = []
+    for r in roots:
+        for path in main_paths(r):
+            tip_z, tip_xy, tip_b = chain_tip(path)
+            grounded = (tip_z - zmin) < ground_tol
+            chains.append({"root": path[0], "path": path, "grounded": grounded, "tip_xy": tip_xy,
+                           "tip_body": tip_b, "unlimited": any(not limited[t] for t in path)})
 
     grounded_chains = [c for c in chains if c["grounded"]]
+
+    # A BOLTED-DOWN BODY DOES NOT STAND ON WHAT IT IS BOLTED TO. Grounded-ness is measured against the body's
+    # own lowest geom, which on a bench-mounted assembly is the bench mount itself — so every chain that hangs
+    # anywhere near it reads as ground-contacting. Measured: a Robotiq 2F-85's two fingers came out as two LEGS
+    # (n_legs=2 -> family "humanoid"), a UR5e's single 6-joint chain came out as a SNAKE'S SPINE, and a LEAP
+    # hand's four fingers came out as a QUADRUPED — so an imported dexterous hand was verified with a walk
+    # rubric and offered a quadruped crawl gait.
+    #
+    # A fixed base is only promoted on evidence of a real STANCE (body_kind.MIN_STANCE_CHAINS /
+    # STANCE_LEVEL_FRAC): enough chains reaching down TOGETHER, to a common level. That is what still keeps
+    # #214's quadruped legged — MuJoCo fused its static torso into the world, and its four level limbs qualify.
+    # FLOATING bodies are untouched: they really do stand on whatever reaches the floor.
+    floating = any(int(model.jnt_type[j]) == int(mujoco.mjtJoint.mjJNT_FREE) for j in range(int(model.njnt)))
+    if not floating:
+        from virturoid.services.body_kind import MIN_STANCE_CHAINS, STANCE_LEVEL_FRAC
+        zmax = max((max(float(gz[gi]) for gi in gs) for b, gs in body_geoms.items() if b != 0), default=zmin)
+        tips = [body_low(c["tip_body"]) for c in grounded_chains]
+        level = bool(tips) and (max(tips) - min(tips)) <= STANCE_LEVEL_FRAC * max(zmax - zmin, 1e-6)
+        if len(grounded_chains) < MIN_STANCE_CHAINS or not level:
+            for c in chains:
+                c["grounded"] = False
+            grounded_chains = []
 
     # SPINE: a single grounded serial chain that IS the body (long, no sibling grounded chains)
     if len(grounded_chains) == 1 and len(grounded_chains[0]["path"]) >= spine_min:

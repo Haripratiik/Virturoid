@@ -1,6 +1,7 @@
 import { ShieldCheck, ShieldAlert, Download } from "lucide-react";
 import { useAppStore, useSelectionStore } from "@/state/app";
-import { useLedger, useScorecard, useSpecCompliance, useBomFidelity, useSim2Sim } from "@/api/queries";
+import { useLedger, usePackages, useScorecard, useSpecCompliance, useBomFidelity, useSim2Sim } from "@/api/queries";
+import { robotStatus } from "@/state/status";
 import { EmptyState, Pill, QueryState, SectionLabel, verdictKind, fmt } from "@/components/ui";
 import { packageUrl } from "@/api/client";
 
@@ -10,6 +11,7 @@ import { packageUrl } from "@/api/client";
 function GatePipeline() {
   const activePackage = useAppStore((s) => s.activePackage);
   const ledger = useLedger(activePackage);
+  const packages = usePackages();
   const select = useSelectionStore((s) => s.select);
   const selection = useSelectionStore((s) => s.selection);
 
@@ -20,28 +22,35 @@ function GatePipeline() {
     return <EmptyState title="No readiness ledger" sub="This package predates the ledger, or hasn't finished building." />;
   }
   const { stages, required, safe_to_export, issues, highest_attained } = ledger.data;
+  // Headline = the SHARED verdict (same object the header chip and status bar render). The Export
+  // action stays gated by `safe_to_export` itself, because that is literally the export gate.
+  const status = robotStatus(packages.data?.packages.find((p) => p.id === activePackage), ledger.data)!;
+  const ok = status.kind === "ok";
 
   return (
     <div>
       <div
         className={`mx-4 mt-4 flex items-center justify-between gap-3 rounded-card border p-3 ${
-          safe_to_export ? "border-ok/40 bg-ok-dim/40" : "border-fail/40 bg-fail-dim/40"
+          ok ? "border-ok/40 bg-ok-dim/40" : "border-fail/40 bg-fail-dim/40"
         }`}
       >
         <div className="flex items-center gap-3">
-          {safe_to_export ? (
+          {ok ? (
             <ShieldCheck size={22} className="text-ok" aria-hidden />
           ) : (
             <ShieldAlert size={22} className="text-fail" aria-hidden />
           )}
           <div>
-            <div className={`text-base font-semibold ${safe_to_export ? "text-ok" : "text-fail"}`}>
-              {safe_to_export ? "EXPORT-READY" : "EXPORT BLOCKED"}
-            </div>
+            <div className={`text-base font-semibold ${ok ? "text-ok" : "text-fail"}`}>{status.label}</div>
             <div className="text-2xs text-muted">
               Highest attained: <span className="font-mono">{highest_attained ?? "—"}</span> · Export-readiness = package
               completeness + honest verification, not trained capability.
             </div>
+            {status.buildable === false && (
+              <div className="mt-1 text-2xs text-warn">
+                Not buildable from real parts — a separate check from export-readiness. {status.notes[0] ?? ""}
+              </div>
+            )}
           </div>
         </div>
         <a

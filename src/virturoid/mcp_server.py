@@ -22,9 +22,10 @@ SERVER_INFO = {"name": "virturoid", "version": "0.1.0"}
 
 def _tools_list() -> dict:
     from virturoid.services.agent_tools import tool_specs
-    # G-G: advertise the CONSOLIDATED <=15-tool workflow view (Cursor caps ~40 tools across servers and silently
-    # drops the rest; a lean menu keeps every client — incl. Codex/Cursor — working). Every other registry tool
-    # stays callable by name via tools/call. MCP uses `inputSchema`; our registry stores it under `parameters`.
+    # G-G: advertise the CONSOLIDATED workflow view (Cursor caps ~40 tools across servers and silently drops the
+    # rest; a lean menu keeps every client — incl. Codex/Cursor — working). The count budget, what it protects
+    # and the measurement behind its size live on `agent_tools.MCP_TOOL_VIEW`; this is just the transport. Every
+    # other registry tool stays callable by name via tools/call. MCP uses `inputSchema`; ours is `parameters`.
     return {"tools": [{"name": t["name"], "description": t["description"], "inputSchema": t["parameters"]}
                       for t in tool_specs(view="mcp")]}
 
@@ -116,7 +117,8 @@ def _resources_list() -> dict:
                           "description": f"{r.get('robot_class') or '?'} — {r.get('label')}", "mimeType": "application/json"})
     except Exception:  # noqa: BLE001 - resources are progressive enhancement
         pass
-    render_dir = Path("build/agent_renders")
+    from virturoid.services.ai_native_tools import _render_dir
+    render_dir = _render_dir()                  # ask the owner; a second literal here would drift from it
     if render_dir.exists():
         for p in sorted(render_dir.glob("*"))[:100]:
             if p.suffix.lower() in (".png", ".gif"):
@@ -128,7 +130,32 @@ def _resources_list() -> dict:
 # H1 (plan_v5): the ONLY filesystem roots resources/read may serve. Canonicalize + confine, so a
 # `file://../../etc/passwd` or a symlink can't escape — the Equixly 22%-of-servers arbitrary-read class
 # (Filesystem-MCP CVE-2025-53109/53110 remedy: resolve then allowlist). Artifacts we produce live here.
-_ALLOWED_READ_ROOTS = ("build/agent_renders", "build/agent_exports", "build/sessions")
+#
+# ASK THE OWNER; DO NOT RE-DERIVE. This used to be the tuple of literals
+# ``("build/agent_renders", "build/agent_exports", "build/sessions")``, resolved against the process CWD --
+# a fourth instance of the shape that produced three shipped incidents (see ``services.install_paths``), and
+# the worst-placed one, because a confinement boundary that disagrees with the writer fails in BOTH
+# directions. Concretely: ``session_state`` honours ``VIRTUROID_SESSIONS_DIR``, and this list did not, so
+# with that variable set the allowlist covered a directory nothing writes to while the real session files
+# sat outside it -- a legitimate ``resources/read`` of our own artifact was refused. The mirror case is the
+# one that matters for security: a root computed here from a DIFFERENT rule than the writer's is not the
+# boundary anyone reviewed.
+#
+# So each root is now fetched from the module that OWNS that destination, and there is exactly one rule per
+# destination in the process. Resolved per call, not frozen at import, because the owners resolve per call.
+def _allowed_read_roots() -> tuple[Path, ...]:
+    from virturoid.services.agent_tools import safe_build_path
+    from virturoid.services.ai_native_tools import _render_dir
+    from virturoid.services.session_state import _dir as _sessions_dir
+    roots = []
+    for get in (_render_dir,                                  # owner of build/agent_renders
+                lambda: safe_build_path(None, "agent_exports"),  # owner of build/agent_exports
+                _sessions_dir):                               # owner of build/sessions
+        try:
+            roots.append(Path(get()).resolve())
+        except (OSError, RuntimeError, ValueError):           # a root we cannot resolve is a root we do not allow
+            continue
+    return tuple(roots)
 
 
 def _read_allowed(path: Path) -> bool:
@@ -136,8 +163,7 @@ def _read_allowed(path: Path) -> bool:
         target = path.resolve()
     except (OSError, RuntimeError):
         return False
-    for root in _ALLOWED_READ_ROOTS:
-        r = Path(root).resolve()
+    for r in _allowed_read_roots():
         if r == target or r in target.parents:
             return True
     return False
@@ -153,7 +179,8 @@ def _resources_read(params: dict) -> dict:
         return {"contents": [{"uri": uri, "mimeType": "application/json", "text": json.dumps(payload, default=str)}]}
     path = Path(uri.replace("file://", ""))
     if not _read_allowed(path):                                 # H1: confine to our artifact roots
-        raise PermissionError(f"resource outside the allowed roots {_ALLOWED_READ_ROOTS}: {uri}")
+        allowed = ", ".join(str(r) for r in _allowed_read_roots())
+        raise PermissionError(f"resource outside the allowed roots {allowed}: {uri}")
     if not path.exists() or path.is_dir():
         raise FileNotFoundError(f"no resource {uri}")
     data = base64.b64encode(path.read_bytes()).decode("ascii")
@@ -182,6 +209,52 @@ def _handle(method: str, params: dict):
                     "the real skills, and scores it (list_skills for the vocabulary; submit_task to author the "
                     "sequence yourself). Long runs: train_held returns a job_id -> poll get_job. export_held "
                     "writes real MJCF/CAD.\n"
+                    "IS IT TRUE OF THE PHYSICAL ROBOT? calibrate_to_hardware {robot_id} is the sim-to-real "
+                    "journey and its own menu entry: call it with no step to be told where this robot already "
+                    "stands, then step:'plan_bench_experiment' (a short, safe experiment bounded by this "
+                    "robot's own joint limits and its motors' datasheets), 'simulate_bench_log' if you have no "
+                    "hardware yet (a SIMULATION, labelled as one, that can raise no fidelity rung), "
+                    "'measure_sim_to_real_gap' (per joint, in rad/ms/N.m, never a scalar score), "
+                    "'fit_actuators' (damping/reflected-inertia/dry-friction with an interval each, applied "
+                    "only where the identifiability and tracking gates allow) and 'calibration_status' (what is "
+                    "attached, and the one-call undo). step:'sim_to_real_transfer' is the related PURE-SIM "
+                    "probe — how much of a trained policy survives dynamics it never saw — and is never a "
+                    "statement about a physical machine. Every step is equally callable by its own name.\n"
+                    "MEASURE, DON'T GUESS (folded — call by name): probe_robot {robot_id, fields} answers "
+                    "questions off the COMPILED model, so an answer cannot disagree with the physics the verdict "
+                    "uses — per-joint static torque vs the actuator's rating, reach, ground clearance, mass/CoM/"
+                    "support margin, and SWEPT self-collision (parts that are clear at rest and touch partway "
+                    "through a joint's declared range). assert_design {robot_id, assertions} records what the "
+                    "design MEANT as claims the harness checks (kind:'list' for the vocabulary; persist:true so a "
+                    "later edit re-checks the original intent). scope_amend {robot_id, ops} DRY-RUNS an edit — "
+                    "blast radius + what it invalidates — before edit_robot commits it.\n"
+                    "TRAINING LANDS ON THE ROBOT (folded — call by name). learn_gait {robot_id} and adapt_gait "
+                    "{robot_id} are the two tools that FIT a controller to THIS body — learn_gait spends the "
+                    "full flywheel budget, adapt_gait warm-starts a short search from the corpus's mined hints. "
+                    "Both COMMIT the fitted gait to the held robot, so the very next verify_robot measures what "
+                    "you trained and reports gait_source 'tuned_for_this_body::<tool>' instead of the generic "
+                    "prior it named before (a mined cross-body hint, or the shipped crawl default). The commit "
+                    "is credible-gated (a run that did not walk "
+                    "does not overwrite a controller that might — the report says so), undoable (edit_robot "
+                    "op:'undo') and skippable (apply:'never' returns the parameters and touches nothing). "
+                    "apply_gait {robot_id, params:{freq,hip_amp,knee_amp,kp,kd}} lands parameters you already "
+                    "hold; flywheel_hints {robot_id} shows what the corpus has actually learned, with the "
+                    "evidence gates each hint had to survive.\n"
+                    "ADVANCED AUTHORING: train_reward {robot_id, task} runs the closed reward loop and lands "
+                    "its result the same way. Pass `reward` to author the objective YOURSELF as code — one "
+                    "arithmetic expression over the AST-sandboxed feature vocabulary (forward_vel, upright, "
+                    "height_ratio, foot_clearance, contact_frac, action_smooth, energy, dist_to_goal, alive, "
+                    "slip; functions abs/clip/exp/max/min/sqrt/tanh), e.g. "
+                    "\"max(0.0, forward_vel)*alive + 0.3*upright - 0.2*slip\". Omit `reward` and the loop "
+                    "authors candidates itself, screens each on real physics and drops any that games the "
+                    "metric; either way a credible result is banked as a reusable reward pattern. "
+                    "generate_fusion {robot_id} compiles an EKF/AHRS/odometry sensor-fusion config "
+                    "from the robot's real BOM sensors and RETURNS the source inline (every byte is derived "
+                    "from this robot's BOM); generate_control_scripts {robot_id} emits the obs-assembler + "
+                    "state machine + safety filter + watchdog control stack, returning the config inline and "
+                    "the written files under `scripts_dir` — pass include_source:true to get the .py bodies "
+                    "back too (they are the same template for every robot, so the default does not re-send "
+                    "them).\n"
                     "INPUT & TRAINING (folded — call by name, not in the menu): ingest_project {project_path, "
                     "description} (THE entry point for a user's EXISTING robot — classifies their folder/zip, "
                     "imports the model, parses an NLP description like 'aluminum body, carbon-fiber legs, 5 kg "

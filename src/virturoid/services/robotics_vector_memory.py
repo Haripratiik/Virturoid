@@ -33,7 +33,8 @@ import sqlite3
 import time
 
 from virturoid.schemas.gene import RobotGene
-from virturoid.services.morphology_embedding import FEATURE_NAMES, embed_gene
+from virturoid.services.install_paths import anchored
+from virturoid.services.morphology_embedding import BODY_EMBED_VERSION, FEATURE_NAMES, embed_gene
 
 _TEXT_DIM = 64
 BODY_DIM = len(FEATURE_NAMES)
@@ -181,7 +182,9 @@ def cosine(a: list[float], b: list[float]) -> float:
 # The learned graph latent (GeneGNN.embed) is used for the body sub-space ONLY when a trained model exists
 # AND its latent agrees with the deterministic morphology space on obvious cases — so a learned z_body can
 # never be worse than the shipped hand-crafted vector (the same "never worse" discipline as similar_runs).
-_GNN_MODEL_PATH = "build/models/gene_gnn.pt"
+#: ANCHORED (see ``services.install_paths``): guarded by ``if not Path(_GNN_MODEL_PATH).exists()`` and then
+#: skipped, so CWD-relative meant the GNN encoder was silently unavailable from any other directory.
+_GNN_MODEL_PATH = str(anchored("build/models/gene_gnn.pt"))
 _TRUSTED_GNN = None   # None = untried; False = absent/untrusted; else a loaded GeneGNN
 
 
@@ -362,6 +365,19 @@ class RoboticsVectorMemory:
         return {"edges": edges, "seeded_builds": seeded, "measured_deltas": len(deltas),
                 "mean_delta": mean_delta, "positive_fraction": positive}
 
+    def hint_reuse_summary(self) -> dict:
+        """Measured flywheel-hint deployments, with failures in the denominator as well as wins."""
+        rows = self.conn.execute(
+            "SELECT delta FROM provenance WHERE kind='gait_hint_deploy' AND delta IS NOT NULL"
+        ).fetchall()
+        deltas = [float(r["delta"]) for r in rows]
+        wins = sum(1 for d in deltas if d > 1e-9)
+        losses = sum(1 for d in deltas if d < -1e-9)
+        ties = len(deltas) - wins - losses
+        return {"trials": len(deltas), "wins": wins, "losses": losses, "ties": ties,
+                "hit_rate": round(wins / len(deltas), 4) if deltas else None,
+                "mean_delta_m": round(sum(deltas) / len(deltas), 6) if deltas else None}
+
     # ----------------------------------------------------------------- integrators (backfill)
     def index_runs(self) -> int:
         """Embed every run's (prompt + task_type) into the ``run`` sub-space; skip already-indexed.
@@ -403,9 +419,31 @@ class RoboticsVectorMemory:
             except (json.JSONDecodeError, TypeError, KeyError, ValueError):
                 continue
             self.upsert(BODY, r["species_pattern"], embed_body(gene, latent=_body_latent(gene)),
-                        {"robot_class": r["robot_class"], "buildable": bool(r["buildable"])})
+                        {"robot_class": r["robot_class"], "buildable": bool(r["buildable"]),
+                         "embed_version": BODY_EMBED_VERSION})
             written += 1
         return written
+
+    def body_index_needs_rebuild(self) -> bool:
+        """True when the persisted ``body`` sub-space is empty OR was written by an older body embedding.
+
+        A morphology key is only a key while every vector in it was produced by the SAME map. When the map
+        changes (``BODY_EMBED_VERSION``), the rows already on disk do not become wrong-looking — they become
+        SILENTLY comparable to fresh ones, which is worse: kNN keeps answering, just about the wrong bodies.
+        The species-derived rows are all regenerable from ``species_tree.genes``, so the honest response to a
+        version change is to rebuild them rather than to mix generations.
+        """
+        rows = self.conn.execute("SELECT meta FROM vectors WHERE obj_type=?", (BODY,)).fetchall()
+        if not rows:
+            return True
+        for r in rows:
+            try:
+                meta = json.loads(r["meta"] or "{}")
+            except json.JSONDecodeError:
+                return True
+            if int(meta.get("embed_version") or 0) < BODY_EMBED_VERSION:
+                return True
+        return False
 
     def _species_genes(self) -> dict:
         """species_pattern -> RobotGene for nodes carrying a full gene (for skill body embeddings)."""

@@ -67,6 +67,29 @@ class GroundedPhysicsTests(unittest.TestCase):
             mujoco.mj_step(m, d)
         self.assertTrue(np.all(np.isfinite(d.qpos)))
 
+    def test_reference_morphologies_land_in_grounded_mass_bands(self):
+        from virturoid.services.grounded_physics import ground_gene
+        from virturoid.services.morphology_composer import compose_robot
+        cases = [("a robot dog", (12.0, 15.0)),
+                 ("a 6-axis collaborative robot arm", (17.0, 21.0)),
+                 ("a four-wheeled warehouse rover", (70.0, 150.0))]
+        for prompt, band in cases:
+            gene = compose_robot(prompt, llm=None, ensure_walkable=False)
+            report = ground_gene(gene, fill=0.25)
+            self.assertGreaterEqual(report["total_mass_kg"], band[0], prompt)
+            self.assertLessEqual(report["total_mass_kg"], band[1], prompt)
+            self.assertIsNotNone(report["physical_prior"])
+
+    def test_physics_derived_torque_decreases_down_a_leg(self):
+        from virturoid.services.grounded_physics import ground_gene
+        from virturoid.services.morphology_composer import compose_robot
+        gene = compose_robot("a robot dog", llm=None, ensure_walkable=True)
+        ground_gene(gene)
+        chain = [s for s in gene.segments if s.name.startswith("leg1_l_") and s.joint_type == "revolute"]
+        needs = [s.torque_req_nm for s in sorted(chain, key=lambda s: s.name)]
+        self.assertGreaterEqual(needs[0], needs[-1])
+        self.assertGreater(len(set(needs)), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

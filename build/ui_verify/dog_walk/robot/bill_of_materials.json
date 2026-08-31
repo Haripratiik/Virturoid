@@ -1,0 +1,116 @@
+{
+  "robot_class": "quadruped",
+  "dof": 10,
+  "actuator_map": {
+    "neck": "Dynamixel XM540-W270-T",
+    "tail": "Dynamixel XC430-W150-T",
+    "leg1_l_0": "Dynamixel XM540-W270-T",
+    "leg1_l_1": "Dynamixel XM540-W270-T",
+    "leg1_r_0": "Dynamixel XM540-W270-T",
+    "leg1_r_1": "Dynamixel XM540-W270-T",
+    "leg2_l_0": "Dynamixel XM540-W270-T",
+    "leg2_l_1": "Dynamixel XM540-W270-T",
+    "leg2_r_0": "Dynamixel XM540-W270-T",
+    "leg2_r_1": "Dynamixel XM540-W270-T"
+  },
+  "lines": [
+    {
+      "part": "Dynamixel XM540-W270-T",
+      "category": "actuator",
+      "qty": 9,
+      "unit_mass_kg": 0.165,
+      "unit_price_usd": 430.0,
+      "detail": "servo, peak 10.6 Nm @ 12 V, gear 272.5:1",
+      "mass_kg": 1.485,
+      "price_usd": 3870.0
+    },
+    {
+      "part": "Dynamixel XC430-W150-T",
+      "category": "actuator",
+      "qty": 1,
+      "unit_mass_kg": 0.065,
+      "unit_price_usd": 60.0,
+      "detail": "servo, peak 1.5 Nm @ 12 V, gear 150:1",
+      "mass_kg": 0.065,
+      "price_usd": 60.0
+    },
+    {
+      "part": "Polycarbonate shell",
+      "category": "material",
+      "qty": 2,
+      "unit_mass_kg": 1.0473,
+      "unit_price_usd": 14.66,
+      "detail": "2 links (shell), 1200 kg/m^3 - tough coloured outer body panels",
+      "mass_kg": 2.0946,
+      "price_usd": 29.32
+    },
+    {
+      "part": "Aluminum 6061-T6",
+      "category": "material",
+      "qty": 10,
+      "unit_mass_kg": 0.163,
+      "unit_price_usd": 1.96,
+      "detail": "10 links (structural), 2700 kg/m^3 - CNC structural links (default)",
+      "mass_kg": 1.63,
+      "price_usd": 19.6
+    },
+    {
+      "part": "Hardened steel (gripper)",
+      "category": "material",
+      "qty": 4,
+      "unit_mass_kg": 0.2039,
+      "unit_price_usd": 1.83,
+      "detail": "4 links (contact-metal), 7850 kg/m^3 - wear-resistant metal hands/jaws",
+      "mass_kg": 0.8156,
+      "price_usd": 7.32
+    },
+    {
+      "part": "Intel RealSense D435i",
+      "category": "camera",
+      "qty": 1,
+      "unit_mass_kg": 0.072,
+      "unit_price_usd": 334.0,
+      "detail": "RGB-D stereo + IMU, 0.2-10m - head: forward depth camera",
+      "mass_kg": 0.072,
+      "price_usd": 334.0
+    },
+    {
+      "part": "Bosch BNO055",
+      "category": "imu",
+      "qty": 1,
+      "unit_mass_kg": 0.003,
+      "unit_price_usd": 35.0,
+      "detail": "9-DOF IMU + sensor fusion - trunk: body IMU",
+      "mass_kg": 0.003,
+      "price_usd": 35.0
+    },
+    {
+      "part": "NVIDIA Jetson Orin Nano 8GB",
+      "category": "compute",
+      "qty": 1,
+      "unit_mass_kg": 0.176,
+      "unit_price_usd": 249.0,
+      "detail": "40 TOPS edge AI - compute load 10 (10 DOF)",
+      "mass_kg": 0.176,
+      "price_usd": 249.0
+    },
+    {
+      "part": "Mean Well RSP-320-48",
+      "category": "power",
+      "qty": 1,
+      "unit_mass_kg": 1.3,
+      "unit_price_usd": 78.0,
+      "detail": "320W 48V enclosed PSU (socketed/wall) - socketed PSU: 320 W >= 220 W draw (default; say 'battery' for untethered)",
+      "mass_kg": 1.3,
+      "price_usd": 78.0
+    }
+  ],
+  "totals": {
+    "line_items": 9,
+    "actuators": 10,
+    "mass_kg": 7.641,
+    "price_usd": 4682.24,
+    "est_power_w": 148.8
+  },
+  "note": "Representative real-world components (manufacturer datasheets, ~2024); verify exact specs against the live datasheet before procurement."
+}

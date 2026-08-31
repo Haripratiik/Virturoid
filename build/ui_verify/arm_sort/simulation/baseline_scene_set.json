@@ -5,7 +5,7 @@
   "purpose": "baseline",
   "scenes": [
     {
-      "id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_baseline_000",
+      "id": "scene_938c34b8_baseline_000",
       "version": "0.1.0",
       "name": "Sort colored blocks baseline scene 1",
       "backend_targets": [
@@ -106,7 +106,7 @@
       ]
     },
     {
-      "id": "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_baseline_001",
+      "id": "scene_938c34b8_baseline_001",
       "version": "0.1.0",
       "name": "Sort colored blocks baseline scene 2",
       "backend_targets": [

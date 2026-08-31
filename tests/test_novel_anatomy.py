@@ -57,7 +57,10 @@ class NovelCompileTests(unittest.TestCase):
         for gene in (build_spider(), build_snake(), build_frog()):
             xml = compile_gene_to_mjcf(gene, spawn_z=standing_spawn_z(gene))
             m = mujoco.MjModel.from_xml_string(xml)
-            self.assertEqual(1, m.nkey, f"{gene.species}: expected a rest-pose keyframe")
+            self.assertGreaterEqual(m.nkey, 1, f"{gene.species}: expected a home/rest keyframe")
+            names = {mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_KEY, i) for i in range(m.nkey)}
+            self.assertIn("home", names)
+            self.assertIn("rest", names)
             # the keyframe qpos length MUST equal the model's nq (else MuJoCo would have refused to load)
             self.assertEqual(m.nq, m.key_qpos.shape[1])
             d = mujoco.MjData(m)

@@ -1,0 +1,108 @@
+{
+  "note": "Design-Bench v1 LIVE baseline -- the LLM-first product, not the offline builders. The 20-prompt battery run through the PRODUCTION lane, compose_robot(llm='auto', strict_llm=True) -- the same call robot_factory.create_robot makes by default -- against gpt-5.5, then scored with the same MuJoCo verdicts the offline baseline uses. Sibling file tests/fixtures/design_bench_baseline_v1.json grades the DETERMINISTIC OFFLINE BUILDERS. The two measure different generators; design_bench.check_label raises in both directions and the two fixtures declare different 'mode', so grading one against the other's floor is a test failure, not a silent re-baseline.",
+  "battery_version": "v1",
+  "model": "live_llm_v1",
+  "mode": "live",
+  "recorded_at": "2026-08-07 / 2026-08-08",
+  "generator": {
+    "backend": "openai",
+    "design_model": "gpt-5.5",
+    "lane": "compose_robot(llm='auto', strict_llm=True) -- production default",
+    "n_prompts_attempted": 20
+  },
+  "cassette": "tests/fixtures/design_cassette_live_v1.json",
+  "recording_sessions": {
+    "2026-08-07": [
+      "mobile_manip__appearance",
+      "rover__appearance",
+      "starfish__appearance",
+      "welder__appearance"
+    ],
+    "2026-08-08": [
+      "cart__appearance",
+      "cart__construction",
+      "elephant__appearance",
+      "elephant__construction",
+      "gecko__appearance",
+      "gecko__construction",
+      "inchworm__appearance",
+      "inchworm__construction",
+      "lynx__appearance",
+      "lynx__construction",
+      "mobile_manip__construction",
+      "palletizer__appearance",
+      "palletizer__construction",
+      "rover__construction",
+      "starfish__construction",
+      "welder__construction"
+    ]
+  },
+  "coverage_note": "PARTIAL, AND THE REASON MATTERS. 10 of the 20 prompts have never returned a real answer: every attempt died on HTTP 429, the organisation's 50-requests-per-day cap on the fast model. Those rows measure an exhausted quota, not a design, and are EXCLUDED FROM THE DENOMINATOR by design_cassette.is_infrastructure_failure rather than scored as failures -- before that exclusion existed the same run printed verdict@1 = 0.0 over n=20, a number about an API outage wearing the product's label. Coverage is 10/20 because the cassette merges two sessions of the identical lane: where 08-08 hit a 429 and the 08-07 arm had a real answer, the 08-07 row is used. Every rate below is over the 10 prompts that carry a real design-path outcome.",
+  "n_attempts_scored": 10,
+  "n_battery": 20,
+  "n_infrastructure_excluded": 10,
+  "infrastructure_excluded": {
+    "cart__appearance": "LLMDesignUnavailable: LLM anatomy graph did not clear grounding: the anatomy graph did not compile: Error code",
+    "cart__construction": "LLMDesignUnavailable: LLM anatomy graph did not clear grounding: the anatomy graph did not compile: Error code",
+    "elephant__construction": "LLMDesignUnavailable: LLM anatomy graph did not clear grounding: the anatomy graph did not compile: Error code",
+    "gecko__appearance": "LLMDesignUnavailable: LLM anatomy graph did not clear grounding: the anatomy graph did not compile: Error code",
+    "gecko__construction": "LLMDesignUnavailable: LLM anatomy graph did not clear grounding: the anatomy graph did not compile: Error code",
+    "inchworm__appearance": "LLMDesignUnavailable: LLM anatomy graph did not clear grounding: the anatomy graph did not compile: Error code",
+    "mobile_manip__construction": "LLMDesignUnavailable: LLM anatomy graph did not clear grounding: the anatomy graph did not compile: Error code",
+    "palletizer__appearance": "LLMDesignUnavailable: LLM anatomy graph did not clear grounding: the anatomy graph did not compile: Error code",
+    "rover__construction": "LLMDesignUnavailable: LLM anatomy graph did not clear grounding: the anatomy graph did not compile: Error code",
+    "welder__construction": "LLMDesignUnavailable: LLM anatomy graph did not clear grounding: the anatomy graph did not compile: Error code"
+  },
+  "schema_valid@1": 0.6,
+  "compile@1": 0.6,
+  "verdict@1": 0.1,
+  "correct@1": 0.5,
+  "refused@1": 0.4,
+  "headline_note": "TWO NUMBERS, ON PURPOSE. verdict@1 = 0.1 is the CAPABILITY rate: 1 of 10 answered prompts produced a robot that works (welder__appearance, ARTICULATES at 1.35 m reach). correct@1 = 0.5 is the HONESTY rate: it also counts the 4 prompts the product declined rather than shipping a body whose rest pose topples or whose joints sit over their static hold torque. Quoting correct@1 as capability would be exactly the dishonesty this harness exists to prevent -- and so would scoring a refusal as a failure, which is what the boolean floor did.",
+  "diversity_unique_ratio": 1.0,
+  "spec_faithfulness": 0.6667,
+  "by_family": {
+    "animal": 0.0,
+    "arm": 0.5,
+    "hybrid": 0.0,
+    "novel": 0.0,
+    "vehicle": 0.0
+  },
+  "by_phrasing": {
+    "appearance": 0.1667,
+    "construction": 0.0
+  },
+  "refusals_note": "DESIGN REFUSALS: compose_robot raised LLMDesignUnavailable rather than substituting a template. This is the correct strict-mode behaviour and it is the most product-relevant thing the bench records. They stay IN the denominator -- an unserved prompt is unserved, so verdict@1 must not reward them -- but their per_case_outcome is 'refused', NOT 'failed'. The distinction is the whole point: a refusal that turns into a built-but-broken body is a regression the boolean floor could not express, because both sides of it read False.",
+  "n_refused": 4,
+  "refusals": {
+    "elephant__appearance": "LLMDesignUnavailable: LLM anatomy graph did not clear grounding: center of mass falls outside the foot support polygon \u2014 the rest pose is statically unstable (would topple)",
+    "mobile_manip__appearance": "LLMDesignUnavailable: LLM anatomy graph did not clear grounding: 2 joint(s) near/over their static hold torque (worst manipulator_forearm at 128% of capacity)",
+    "palletizer__construction": "LLMDesignUnavailable: LLM anatomy graph did not clear grounding: 5 joint(s) near/over their static hold torque (worst wrist_pitch_link at 108% of capacity)",
+    "starfish__appearance": "LLMDesignUnavailable: LLM anatomy graph did not clear grounding: center of mass falls outside the foot support polygon \u2014 the rest pose is statically unstable (would topple)"
+  },
+  "per_case_note": "PER-CASE floor over the MODEL-AUTHORED outcomes, replayed token-free. It floors the COMPILER+PHYSICS under the model's own designs AND the failure-kind classification of its refusals; re-recording is what measures the GENERATOR, and that is a periodic action, not a per-commit one. Gate semantics live in design_bench.outcome_regressions: 'credible' must stay credible, 'refused' must stay refused (a fall to 'failed' means the honesty gate stopped firing), 'failed' is tracked debt and protects nothing. A prompt disappearing from the map fails too -- widening INFRASTRUCTURE_ERROR_MARKERS by one word ('capacity' appears verbatim in the palletizer refusal) would otherwise reclassify a refusal as transport and drop it from the denominator unnoticed.",
+  "per_case_outcome": {
+    "lynx__appearance": "failed",
+    "lynx__construction": "failed",
+    "elephant__appearance": "refused",
+    "rover__appearance": "failed",
+    "welder__appearance": "credible",
+    "palletizer__construction": "refused",
+    "mobile_manip__appearance": "refused",
+    "starfish__appearance": "refused",
+    "starfish__construction": "failed",
+    "inchworm__construction": "failed"
+  },
+  "per_case": {
+    "elephant__appearance": false,
+    "inchworm__construction": false,
+    "lynx__appearance": false,
+    "lynx__construction": false,
+    "mobile_manip__appearance": false,
+    "palletizer__construction": false,
+    "rover__appearance": false,
+    "starfish__appearance": false,
+    "starfish__construction": false,
+    "welder__appearance": true
+  }
+}

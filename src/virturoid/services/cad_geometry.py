@@ -13,6 +13,7 @@ for mass. MuJoCo meshes use the STL with a 0.001 scale.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from virturoid.services.grounded_physics import MATERIALS
@@ -60,10 +61,26 @@ def realize_shape(spec: dict):
                 return base
         except Exception:  # noqa: BLE001 - malformed compound -> capsule fallback below
             pass
+    # `anatomy_role` is the general anatomy compiler asking for the SAME detailed solids the hard-coded recipes
+    # get via family="role". It stamps the mapped role additively (its own `family` stays whatever the physics
+    # proxy needs), so honour it here -- the visual layer is the only consumer of this function, so preferring
+    # the rich solid cannot move a collider, a mass or a verdict. Falls through to the authored family below if
+    # the solid fails to build, so a bad role can never lose the part.
+    _arole = str(spec.get("anatomy_role") or "")
+    if _arole and fam != "role":
+        try:
+            _part = build_anatomy(_arole, float(spec.get("length", spec.get("height", 0.1)) or 0.1),
+                                  float(spec.get("radius", 0.03) or 0.03),
+                                  collider=str(spec.get("collider_shape") or ""))
+            if _part is not None and _part.is_valid and _part.volume > 0:
+                return _part
+        except Exception:  # noqa: BLE001 - fall back to the authored shape program below
+            pass
     if fam == "role":                                # role-keyed multi-feature anatomy (build_anatomy)
         try:
             part = build_anatomy(spec.get("role", "actuator_segment"),
-                                 float(spec.get("length", 0.1)), float(spec.get("radius", 0.03)))
+                                 float(spec.get("length", 0.1)), float(spec.get("radius", 0.03)),
+                                 collider=str(spec.get("collider_shape") or ""))
             if part is not None and part.is_valid and part.volume > 0:
                 return part
         except Exception:  # noqa: BLE001 - unknown role / awkward topology -> capsule fallback below
@@ -145,18 +162,28 @@ def realize_shape(spec: dict):
                         bd.Cylinder(cr, cd, mode=bd.Mode.SUBTRACT)
                 except Exception:  # noqa: BLE001 - a bad cutout just doesn't bore; keep the solid
                     pass
-            fil = float(spec.get("fillet", 0) or 0) * 1000.0
-            if fil > 0:
-                try:
-                    bd.fillet(p.edges(), min(fil, R * 0.4))
-                except Exception:  # noqa: BLE001 - fillet can fail on some topology; skip it
-                    pass
+            # Edge finishing is deliberately LAST. Chamfer establishes the robust machined silhouette first;
+            # fillet is terminal because vent/cutout edges make an all-edge fillet fail in OpenCascade. If the
+            # terminal fillet cannot be built, the already-chamfered part remains instead of silently reverting
+            # the entire link to a sharp primitive.
             cham = float(spec.get("chamfer", 0) or 0) * 1000.0
             if cham > 0:
                 try:
                     bd.chamfer(p.edges(), min(cham, R * 0.35))
-                except Exception:  # noqa: BLE001 - chamfer can fail on some topology; skip it
-                    pass
+                except Exception:  # noqa: BLE001 - retry only long exterior edges, away from small vent loops
+                    try:
+                        bd.chamfer(p.edges().filter_by(bd.Axis.Z), min(cham, R * 0.25))
+                    except Exception:  # noqa: BLE001 - keep the valid unchamfered solid
+                        pass
+            fil = float(spec.get("fillet", 0) or 0) * 1000.0
+            if fil > 0:
+                try:
+                    bd.fillet(p.edges(), min(fil, R * 0.4))
+                except Exception:  # noqa: BLE001 - preserve the chamfer and retry exterior axial edges only
+                    try:
+                        bd.fillet(p.edges().filter_by(bd.Axis.Z), min(fil, R * 0.25))
+                    except Exception:  # noqa: BLE001 - chamfered fallback intentionally survives
+                        pass
         part = p.part
         if part is not None and fam in ("loft", "sole"):     # floor to z=0 in the link's [0,length] frame
             try:
@@ -172,10 +199,97 @@ def realize_shape(spec: dict):
     return fb.part
 
 
-def build_link_solid(shape: str, length_m: float, radius_m: float, actuated: bool):
+def _visual_matches_link(geom: dict, seg) -> dict:
+    """Return ``geom`` with its DIMENSIONS reconciled to the link's real ``radius_m`` / ``length_m``.
+
+    A geometry spec is authored when the body is composed, but the link keeps changing afterwards: grounding
+    re-sizes it, the structural pass thickens under-margined links, the housing-fit pass grows a limb so it can
+    carry its motor, and an edit can rescale it. Nothing propagated any of that into the VISUAL spec, so the
+    render drew a stale silhouette -- measured on a quadruped, a leg whose real link radius is 27.3 mm was drawn
+    at 12.7 mm, i.e. **2.15x thinner than the robot being simulated**, while the datasheet motor can was drawn at
+    full size. That combination is precisely the "fat drums on pencil sticks" toy cue, and it is also a
+    truthfulness bug: the picture disagrees with the physics it claims to show.
+
+    Only ever GROWS the visual to meet the link (never shrinks an authored flourish below what the model asked
+    for), and only touches dimensional fields -- family, profile topology, detail and role are untouched."""
+    try:
+        r = float(getattr(seg, "radius_m", 0.0) or 0.0)
+        L = float(getattr(seg, "length_m", 0.0) or 0.0)
+        if r <= 0.0 or not isinstance(geom, dict):
+            return geom
+        out = dict(geom)
+        if out.get("anatomy_role") or str(out.get("family") or "").lower() == "role":
+            out["radius"] = max(float(out.get("radius") or 0.0), r)      # parametric solids: just re-size
+            if L > 0:
+                out["length"] = L
+            # Tell the solid WHICH COLLIDER it is standing in. A role solid is a picture of a link whose physics
+            # is a primitive, and for ground-contact parts the two must not describe different shapes: a
+            # quadruped foot is a CAPSULE (round section, the contact is a rolling ball) while a humanoid foot
+            # is a BOX (a flat plate, the contact is a sole). Drawing one shape over the other misrepresents the
+            # contact patch in the render, which is the single place a picture can most easily lie about the
+            # physics. `build_anatomy` uses this to pick the right foot; every other role ignores it.
+            out["collider_shape"] = str(getattr(seg, "shape", "") or "")
+            return out
+        if str(out.get("family") or "").lower() == "compound":
+            # A multi-feature part (a stepped chassis, a flanged arm link) is a UNION of positioned sub-shapes,
+            # and this function used to fall straight through it -- a compound has no top-level `profile`, so a
+            # trunk or an arm link whose link radius grew during grounding kept its stale silhouette. Scale the
+            # WHOLE assembly by ONE factor taken from the defining (first) sub-part, so the sub-shapes keep their
+            # relative proportions and their mounting positions instead of each snapping to the link radius.
+            parts = [p for p in (out.get("parts") or []) if isinstance(p, dict)]
+            if parts:
+                try:
+                    cur = max(max(abs(float(p[0])), abs(float(p[1])))
+                              for p in (parts[0].get("profile") or []) if len(p) >= 2)
+                except (TypeError, ValueError, IndexError):
+                    cur = 0.0
+                if cur > 0 and r > cur:
+                    k = r / cur
+                    scaled = []
+                    for sp in out["parts"]:
+                        if not isinstance(sp, dict):
+                            scaled.append(sp)
+                            continue
+                        sp = dict(sp)
+                        if isinstance(sp.get("profile"), (list, tuple)):
+                            sp["profile"] = [[float(p[0]) * k, float(p[1]) * k]
+                                             for p in sp["profile"] if len(p) >= 2]
+                        for _f in ("fillet", "chamfer"):
+                            if sp.get(_f):
+                                sp[_f] = float(sp[_f]) * k
+                        at = sp.get("at")
+                        if isinstance(at, (list, tuple)) and len(at) == 3:   # lateral mounts follow the section;
+                            sp["at"] = (float(at[0]) * k, float(at[1]) * k, float(at[2]))   # z stays in the frame
+                        scaled.append(sp)
+                    out["parts"] = scaled
+            return out
+        prof = out.get("profile")
+        if isinstance(prof, (list, tuple)) and prof:                     # extrude: scale the section to the link
+            try:
+                cur = max(max(abs(float(p[0])), abs(float(p[1]))) for p in prof if len(p) >= 2)
+            except (TypeError, ValueError, IndexError):
+                return out
+            if cur > 0 and r > cur:
+                k = r / cur
+                out["profile"] = [[float(p[0]) * k, float(p[1]) * k] for p in prof if len(p) >= 2]
+                for _f in ("fillet", "chamfer"):                         # keep edge treatments proportionate
+                    if out.get(_f):
+                        out[_f] = float(out[_f]) * k
+        return out
+    except Exception:  # noqa: BLE001 - reconciliation is a fidelity aid; never lose the part over it
+        return geom
+
+
+def build_link_solid(shape: str, length_m: float, radius_m: float, actuated: bool,
+                     actuator_spec: dict | None = None, *, motor_boss: bool = True):
     """A DETAILED, manufacturable link solid (mm): a slim structural body, mounting collars at both ends,
     and — for an actuated link — a real servo housing with an output horn at the proximal (joint) end.
-    This is what closes the mechanical-detail gap vs a bare capsule (real robots show housings/brackets)."""
+    This is what closes the mechanical-detail gap vs a bare capsule (real robots show housings/brackets).
+
+    ``motor_boss=False`` builds the STRUCTURE only (body + collars, no motor). Use it when the consumer draws
+    the actuator itself — the MJCF render path emits a datasheet-sized ``_act`` geom per revolute joint, and
+    fusing a second copy here put two coincident surfaces in the same place, which z-fights into a visible
+    sawtooth seam around every joint."""
     import build123d as bd
 
     L = max(20.0, length_m * 1000.0)
@@ -188,10 +302,50 @@ def build_link_solid(shape: str, length_m: float, radius_m: float, actuated: boo
         for z in (L / 2, -L / 2):                    # small mounting collars where it bolts to its neighbours
             with bd.Locations((0, 0, z)):
                 bd.Cylinder(R * 0.8, R * 0.35)
-        if actuated:                                 # a compact CYLINDRICAL motor can across the joint
-            with bd.Locations(bd.Location((0, 0, -L / 2), (0, 90, 0))):
-                bd.Cylinder(R * 0.95, R * 2.0)       # slim can spanning the joint width
+        if actuated and motor_boss:
+            # The motor boss is a property of the selected BUYABLE actuator, not of the link radius. It is
+            # centered on the proximal joint and oriented across the link, matching the viewport/BOM source.
+            env = tuple(float(v) * 1000.0 for v in (actuator_spec or {}).get("envelope_m", ()))
+            if len(env) == 3 and (actuator_spec or {}).get("shape") == "cylinder":
+                axis_dim = int((actuator_spec or {}).get("axis_dim", 2))
+                can_len = env[axis_dim]
+                can_radius = max(env[i] for i in range(3) if i != axis_dim) / 2.0
+                with bd.Locations(bd.Location((0, 0, -L / 2), (0, 90, 0))):
+                    bd.Cylinder(can_radius, can_len)
+            elif len(env) == 3:
+                axis_dim = int((actuator_spec or {}).get("axis_dim", 0))
+                other = [env[i] for i in range(3) if i != axis_dim]
+                with bd.Locations((0, 0, -L / 2)):
+                    bd.Box(env[axis_dim], other[0], other[1])
+            else:                                    # explicit offline fallback; not used after grounding
+                with bd.Locations(bd.Location((0, 0, -L / 2), (0, 90, 0))):
+                    bd.Cylinder(R * 0.95, R * 2.0)
     return p.part
+
+
+def _add_selected_actuator_housing(solid, seg, *, proximal_z_mm: float):
+    """Fuse the selected actuator envelope onto an arbitrary/role CAD solid."""
+    if getattr(seg, "joint_type", None) != "revolute":
+        return solid
+    from virturoid.services.component_geometry import actuator_for_joint
+    spec = actuator_for_joint(seg)
+    if not spec:
+        return solid
+    import build123d as bd
+    env = tuple(float(v) * 1000.0 for v in spec["envelope_m"])
+    axis_dim = int(spec.get("axis_dim", 2))
+    with bd.BuildPart() as combined:
+        bd.add(solid)
+        if spec.get("shape") == "cylinder":
+            can_len = env[axis_dim]
+            can_radius = max(env[i] for i in range(3) if i != axis_dim) / 2.0
+            with bd.Locations(bd.Location((0, 0, proximal_z_mm), (0, 90, 0))):
+                bd.Cylinder(can_radius, can_len)
+        else:
+            other = [env[i] for i in range(3) if i != axis_dim]
+            with bd.Locations((0, 0, proximal_z_mm)):
+                bd.Box(env[axis_dim], other[0], other[1])
+    return combined.part
 
 
 # Role-keyed ANATOMY library: a small set of MULTI-FEATURE link solids so a generated body reads as real
@@ -229,7 +383,7 @@ def _loft_solid(bd, sections, *, floor: bool = True):
     return part
 
 
-def build_anatomy(role: str, length_m: float, radius_m: float):
+def build_anatomy(role: str, length_m: float, radius_m: float, *, collider: str = ""):
     """A detailed, role-specific ORIGINAL link solid (build123d Part, mm), built in the link's [0, length]
     +z frame. Every role is now an ELLIPTICAL LOFT (or a simple analytic part) generated by us — NOT a copied
     real-robot mesh. Unknown roles fall back to a generic limb spindle. VISUAL ONLY (the compiler reads only
@@ -275,29 +429,87 @@ def build_anatomy(role: str, length_m: float, radius_m: float):
             (0.30 * L,  R * 0.92, R * 1.40),
             (0.65 * L,  R * 0.88, R * 1.36),
             (L,         R * 0.58, R * 1.05)])
-    if role == "sensor_head":                        # a tapered ovoid skull (jaw -> cheeks -> crown)
-        head = _loft_solid(bd, [
-            (0.00,     R * 0.66, R * 0.60),
-            (0.22 * L, R * 0.92, R * 0.82),
-            (0.50 * L, R * 1.00, R * 0.94),
-            (0.80 * L, R * 0.80, R * 0.74),
-            (L,        R * 0.34, R * 0.30)])
-        return _fil(head, 0.2 * R)
+    if role == "sensor_head":
+        # A MACHINED SENSOR MODULE, not an organic skull. This solid used to be a jaw->cheeks->crown ovoid
+        # tapering to a point, which rendered as a smooth egg — and on the general anatomy path it was
+        # OVERRIDING a spec that says, in as many words, "a rounded box with a flat front face for cameras —
+        # NOT an organic skull. This is a ROBOT". A robot's head is a camera/lidar housing: a filleted box with
+        # a flat forward face and a recessed sensor band wrapping the brow. The link frame is [0, L] along +z
+        # and the head is AIMED, so +z is the look direction: z=0 is the neck mount, z=L the face.
+        hy, hx = R * 0.98, R * 0.86               # half-width / half-depth of the housing
+        try:
+            with bd.BuildPart() as hp:
+                with bd.Locations((0, 0, L / 2.0)):
+                    bd.Box(2 * hx, 2 * hy, L)
+                # recessed sensor band around the brow: remove the outer skin over a slice near the face, then
+                # put the core back so the band is a groove in the housing rather than a cut through it.
+                with bd.Locations((0, 0, 0.74 * L)):
+                    bd.Box(2.6 * hx, 2.6 * hy, 0.26 * L, mode=bd.Mode.SUBTRACT)
+                with bd.Locations((0, 0, 0.74 * L)):
+                    bd.Box(1.70 * hx, 1.70 * hy, 0.26 * L)
+                try:                              # soften the housing corners; a sharp box reads unfinished
+                    bd.fillet(hp.edges().filter_by(bd.Axis.Z), min(0.34 * hx, 0.34 * hy))
+                except Exception:  # noqa: BLE001 - awkward edge set after the boolean; keep the crisp box
+                    pass
+            head = hp.part
+            if head is not None and head.is_valid and head.volume > 0:
+                return head
+        except Exception:  # noqa: BLE001 - fall back to the lofted housing below
+            pass
+        return _fil(_loft_solid(bd, [
+            (0.00,     R * 0.72, R * 0.64),
+            (0.30 * L, R * 0.96, R * 0.86),
+            (0.78 * L, R * 0.98, R * 0.90),
+            (L,        R * 0.78, R * 0.72)]), 0.2 * R)
     if role == "hand_plate":                         # a flat mitten: wide in y, thin in x, tapering to fingers
         return _loft_solid(bd, [
             (0.00,     R * 0.7, R * 0.5),
             (0.35 * L, R * 1.0, R * 0.55),
             (0.75 * L, R * 0.9, R * 0.45),
             (L,        R * 0.5, R * 0.30)])
-    if role == "foot_pad":                           # a forward-pointing sole (heel -> toe), +x = forward
-        with bd.BuildPart() as p:
-            with bd.BuildSketch(bd.Plane.XY) as _sk:
-                with bd.BuildLine():
-                    bd.Polyline((-0.5 * R, -0.95 * R), (2.4 * R, -0.72 * R),
-                                (2.4 * R, 0.72 * R), (-0.5 * R, 0.95 * R), close=True)
-                bd.make_face()
-            bd.extrude(amount=max(8.0, 0.9 * L))
-        return _fil(p.part, 0.28 * R)
+    if role == "foot_pad":
+        # A CONTACT BOOT ON AN ANKLE SHANK — deliberately shaped to the COLLIDER the physics actually uses.
+        #
+        # The link frame is [0, L] along +z and the ankle re-aims +z forward, so forward=z, thickness=x,
+        # width=y. This solid used to be a flat SOLE (half-thickness 0.62 R, half-width 0.98 R), which measured
+        # 37 x 61 x 101 mm on the demo dog: a big flat pale paddle, and after the chassis the most toy-like
+        # thing in the render.
+        #
+        # The important part is WHY a rounded boot is the honest shape rather than a prettier one. The foot's
+        # collider is a CAPSULE of radius R spanning [0, L] — so the body the verdict is computed on already
+        # has a circular cross-section of radius R and hemispherical ends. The flat sole was therefore not the
+        # truthful drawing: it was 18.6 mm thick inside a 30 mm collider, i.e. the simulated foot was FATTER
+        # than the pictured one, and the ground contact the gait verdict uses happens on a surface that was
+        # never drawn. Lofting circular sections (half_Y == half_X) reproduces that capsule, so this change
+        # makes picture and physics agree MORE, not less — the opposite trade from bolting a decorative
+        # hemisphere onto a shape the collider does not have.
+        #
+        # Every section stays at or inside R so the boot can never reach below the capsule. That matters
+        # beyond aesthetics: `standing_spawn_z` measures the MESHED model's lowest point, so a visual that
+        # dipped past the collider would silently raise the spawn height — real physics — without moving a
+        # single collider. Verified unchanged at 0.3007 m on the demo dog.
+        #
+        # WHICH BOOT depends on the collider this foot actually stands in, because the two legged archetypes
+        # genuinely differ. A quadruped foot is a CAPSULE — a round shank whose contact rolls, like the rubber
+        # ball on a Go2 — so circular sections (half_Y == half_X) reproduce it exactly. A humanoid foot is a
+        # BOX: a flat plate whose contact is a sole, and drawing a round sausage there would misrepresent the
+        # contact patch just as badly as the flat sole misrepresented the quadruped's capsule. Same principle,
+        # opposite shape; `collider` comes from the segment via `_visual_matches_link`. Unknown/absent collider
+        # keeps the historical sole, so no caller is changed by accident.
+        # NB _loft_solid takes (z, half_Y, half_X) — y is the lateral WIDTH, x the vertical THICKNESS.
+        if collider.lower() in ("capsule", "sphere", "cylinder"):
+            return _loft_solid(bd, [
+                (0.00,      R * 0.56, R * 0.56),      # ankle shank — the narrow neck the bracket clamps
+                (0.10 * L,  R * 0.74, R * 0.74),
+                (0.30 * L,  R * 0.95, R * 0.95),      # boot swells to the capsule section
+                (0.72 * L,  R * 0.99, R * 0.99),      # the sole: the surface that actually touches the floor
+                (0.93 * L,  R * 0.88, R * 0.88),
+                (L,         R * 0.44, R * 0.44)])     # rounded toe cap
+        return _loft_solid(bd, [
+            (0.00,     R * 0.84, R * 0.55),           # heel — narrower across, thicker
+            (0.18 * L, R * 0.98, R * 0.62),           # widest, just ahead of the heel
+            (0.62 * L, R * 0.92, R * 0.46),           # midfoot
+            (L,        R * 0.60, R * 0.32)])          # toe — thin and tapered
     if role == "mount_base":                         # pedestal: wide base flange + a motor drum
         with bd.BuildPart() as p:
             with bd.Locations((0, 0, 0.12 * L)):
@@ -305,15 +517,102 @@ def build_anatomy(role: str, length_m: float, radius_m: float):
             with bd.Locations((0, 0, 0.6 * L)):
                 bd.Cylinder(1.0 * R, 0.8 * L)
         return _fil(p.part, 0.1 * R)
-    return _spindle(R)                               # actuator_segment / thigh / shin / arm / quad limb roles
+    # A LEG'S THREE LINKS ARE THREE DIFFERENT PARTS. `_anatomy_role_for` goes to the trouble of distinguishing
+    # hip / thigh / calf BY POSITION, exactly as a real leg is built -- and then every one of them fell through
+    # to the same `_spindle`, so a quadruped leg rendered as three identical beads on a string and the role
+    # vocabulary was differentiated in NAME ONLY. The gait fixes the link LENGTHS (they are the lever arms the
+    # scripted crawl is tuned against, and re-proportioning them is what got reverted on 2026-07-29), so the
+    # shape has to carry the read: a fat abduction drum, a broad flat-sided thigh plate, a slim tapering calf.
+    # `_loft_solid` takes (z, half_Y, half_X); a quadruped leg swings in x-z, so x is fore-aft (broad) and y is
+    # lateral (thin). Every section stays within R so the visual never exceeds the capsule it stands in.
+    if role in ("quad_hip",):                        # abduction housing: short, fat, machined drum
+        return _fil(_loft_solid(bd, [
+            (0.00,     R * 0.86, R * 0.80),
+            (0.26 * L, R * 1.00, R * 0.96),
+            (0.74 * L, R * 0.94, R * 0.90),
+            (L,        R * 0.58, R * 0.54)]), 0.26 * R)
+    if role in ("quad_thigh", "thigh"):              # upper link: broad fore-aft, THIN laterally (a plate link)
+        return _fil(_loft_solid(bd, [
+            (0.00,     R * 0.60, R * 0.94),
+            (0.18 * L, R * 0.64, R * 1.00),
+            (0.70 * L, R * 0.52, R * 0.84),
+            (L,        R * 0.42, R * 0.60)]), 0.16 * R)
+    if role in ("quad_calf", "shin"):                # lower link: slim, tapering to an ANKLE BOSS at the foot
+        # The taper used to run all the way out to 0.25 R x 0.32 R, which on the demo dog's 12.7 mm calf is a
+        # 6 x 8 mm NEEDLE. Against the foot's 30 mm contact boot that is a 4:1 step, and it rendered exactly as
+        # it sounds: a pin stuck into a blob, which re-created the bead-on-a-string read at the ankle that the
+        # hip/thigh/calf split had just removed further up the leg. A real shank does not taper to a point --
+        # it thickens into a machined boss where the foot BOLTS ON (Go2: a ~20 mm shank into a ~44 mm foot,
+        # about 2:1). Keeping the mid-span slim preserves the slender-shank read; only the distal end changes,
+        # so this is a silhouette fix, not a proportion one -- the link's length_m and radius_m are untouched
+        # and the collider is unmoved.
+        return _fil(_loft_solid(bd, [
+            (0.00,     R * 0.56, R * 0.82),
+            (0.30 * L, R * 0.44, R * 0.64),
+            (0.72 * L, R * 0.40, R * 0.52),
+            (0.90 * L, R * 0.54, R * 0.66),          # ankle boss begins
+            (L,        R * 0.60, R * 0.72)]), 0.14 * R)
+    return _spindle(R)                               # actuator_segment / arm roles
 
 
-def _seg_mesh_fp(out, s, *, kitbash: bool, synth: bool):
+_GENERATOR_REV: str | None = None
+
+
+def _generator_rev() -> str:
+    """Content hash of THIS module's source, mixed into every visual-mesh cache key.
+
+    The key used to describe only the SEGMENT (shape, length, radius, geometry spec, flags). That silently
+    assumed the code which turns a spec into a solid never changes — but ``build_anatomy`` and
+    ``realize_shape`` ARE that code, and they are precisely what a geometry fix edits. A role solid's spec
+    (``anatomy_role: foot_pad``) is byte-identical before and after such a fix, so the key did not move and
+    every cached STL stayed put.
+
+    Measured, and it is not a hypothetical: changing ``foot_pad`` from a flat sole to a contact boot left the
+    render drawing the OLD 37 x 61 x 101 mm ski while a fresh build produced the new 60 x 60 x 101 mm boot.
+    A geometry change therefore LOOKED like it had done nothing — and the same trap would hand a customer a
+    stale body from a warm cache. Hashing the generator's own source makes any edit to it invalidate the cache
+    automatically, with no version constant for anyone to forget to bump. Computed once per process."""
+    global _GENERATOR_REV
+    if _GENERATOR_REV is None:
+        import hashlib
+        try:
+            _GENERATOR_REV = hashlib.md5(Path(__file__).read_bytes()).hexdigest()[:8]
+        except Exception:  # noqa: BLE001 - an unreadable source must never break meshing; falling back to a
+            _GENERATOR_REV = "nosrc"                # constant simply restores the previous (unversioned) key
+    return _GENERATOR_REV
+
+
+def _src_mesh_fp(out, s, src):
+    """Destination for an IMPORTED link's own mesh inside ``out``.
+
+    Keyed by the source file's identity (path + size + mtime) and NOT by the kit-bash/synth/actuator flags that
+    ``_seg_mesh_fp`` hashes: the customer's geometry is the same file whichever way we would have drawn a link of
+    ours, so one copy serves every render mode instead of one per flag combination (a 30-link G1 carries ~60 MB).
+    Re-baking the import writes a new mtime and therefore a new name, so a re-imported robot never reads a stale
+    copy. The segment name is sanitized because link names come from the customer's file, not from us."""
+    import hashlib
+    import re
+
+    st = src.stat()
+    sig = f"{src.resolve()}|{st.st_size}|{int(st.st_mtime)}"
+    stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(s.name or "link")).strip("_") or "link"
+    return out / f"{stem}_src_{hashlib.md5(sig.encode()).hexdigest()[:10]}.stl"
+
+
+def _seg_mesh_fp(out, s, *, kitbash: bool, synth: bool, actuator_in_mesh: bool = True):
     """The per-segment visual-mesh cache path + resolved kit-bash role. Shared by ``build_visual_meshes`` and
     ``prebake_synth_meshes`` so a parallel pre-bake writes the exact files the compiler later reads. The
-    content hash includes geometry + kit-bash/synth flags, so any change re-bakes."""
+    content hash includes geometry + kit-bash/synth/actuator flags AND the generator's own source revision
+    (see ``_generator_rev``), so any change — to the spec OR to the code that realizes it — re-bakes.
+
+    The segment name is sanitized into the stem for the same reason ``_src_mesh_fp`` sanitizes it: once a robot
+    can be IMPORTED, ``s.name`` is the customer's link name, not ours. A link called ``arm/1`` turned this into
+    a path with a directory component that nobody creates, so the bake raised mid-body and the link fell back to
+    a bare primitive on a robot whose whole point was that it keeps the customer's geometry. The hash is what
+    makes the name unique; the stem only has to be readable and legal."""
     import hashlib
     import json
+    import re
     actuated = s.joint_type in ("revolute", "prismatic")
     geom = getattr(s, "geometry", None)
     kit_role = (geom.get("role") if isinstance(geom, dict) and geom.get("family") == "role" else None) \
@@ -323,11 +622,14 @@ def _seg_mesh_fp(out, s, *, kitbash: bool, synth: bool):
         if not has_part(kit_role):
             kit_role = None
     sig = json.dumps([s.shape, round(s.length_m, 5), round(s.radius_m, 5), actuated, geom,
-                      bool(kit_role), bool(synth)], sort_keys=True, default=str)
-    return out / f"{s.name}_{hashlib.md5(sig.encode()).hexdigest()[:10]}.stl", kit_role
+                      bool(kit_role), bool(synth), _generator_rev()]
+                     + ([] if actuator_in_mesh else ["noact"]), sort_keys=True, default=str)
+    stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(s.name or "link")).strip("_") or "link"
+    return out / f"{stem}_{hashlib.md5(sig.encode()).hexdigest()[:10]}.stl", kit_role
 
 
-def prebake_synth_meshes(gene, out_dir: str, *, kitbash: bool = True, llm=None, max_workers: int = 6) -> int:
+def prebake_synth_meshes(gene, out_dir: str, *, kitbash: bool = True, llm=None, max_workers: int = 6,
+                         actuator_in_mesh: bool = True) -> int:
     """Pre-synthesize, IN PARALLEL, the AI mesh for every ``geometry.family=='synth'`` segment into the
     cache, so a later ``gene_to_meshed_mjcf(gene, synth=True)`` is instant. LLM calls are I/O-bound and the
     mesh build is pure numpy, so threading is safe and a whole body takes ~one part's wall-clock instead of
@@ -344,7 +646,7 @@ def prebake_synth_meshes(gene, out_dir: str, *, kitbash: bool = True, llm=None, 
         geom = getattr(s, "geometry", None)
         if not (isinstance(geom, dict) and geom.get("family") == "synth"):
             continue
-        fp, _ = _seg_mesh_fp(out, s, kitbash=kitbash, synth=True)
+        fp, _ = _seg_mesh_fp(out, s, kitbash=kitbash, synth=True, actuator_in_mesh=actuator_in_mesh)
         if fp.exists():
             continue
         jobs.append((geom.get("desc") or f"a robot {s.name} part", s.length_m, s.radius_m, str(fp)))
@@ -361,7 +663,8 @@ def prebake_synth_meshes(gene, out_dir: str, *, kitbash: bool = True, llm=None, 
 
 
 def build_visual_meshes(gene, out_dir: str, *, cache: bool = True, kitbash: bool = False,
-                        synth: bool = False) -> dict:
+                        synth: bool = False, actuator_in_mesh: bool = True,
+                        wrote: set | None = None) -> dict:
     """Generate a per-segment VISUAL STL normalized to the link's ``[0, length]`` body frame so it drops
     straight onto the compiler's primitive (which spans 0..length along local +z). This is the mesh layer
     that makes a compiled body render like real hardware instead of a bare capsule.
@@ -372,27 +675,64 @@ def build_visual_meshes(gene, out_dir: str, *, cache: bool = True, kitbash: bool
     keep their primitive. (Previously geometry segments were ALSO skipped, which silently discarded the
     detailed shapes and was the second root cause of the toy look.)
 
+    ``actuator_in_mesh`` decides who owns the JOINT MOTOR. Default True fuses the selected actuator's envelope
+    into the STL, which is right for URDF/CAD consumers that have no other way to show it. The MJCF render path
+    passes False, because ``compile_gene_to_mjcf(show_actuators=True)`` already emits a datasheet-sized ``_act``
+    geom per revolute joint: with both on, the same can was drawn TWICE from two sources, and the coincident
+    surfaces z-fought into a sawtooth seam ringing every joint on every legged body.
+
     Cached by a content hash of the segment's shape params INCLUDING its geometry spec, so re-rendering the
     same body is instant but a changed shape re-bakes. Returns ``{segment_name: absolute_stl_path}``.
-    Requires build123d (raises if absent; callers that want a graceful fallback should catch and compile
-    without meshes)."""
+    Requires build123d to GENERATE a link (raises if absent, as before; callers that want a graceful fallback
+    should catch and compile without meshes) -- but a link the customer SHIPPED is only copied, so a wholly
+    imported robot still renders as itself on a machine with no CAD kernel. Serving someone their own robot
+    must not depend on our ability to draw ours."""
     import hashlib
     import json
+    import shutil
 
-    import build123d as bd
+    bd = None                                        # imported lazily: only GENERATING a link needs the kernel
 
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     meshes: dict[str, str] = {}
     for s in gene.segments:
-        if s.joint_type == "prismatic":              # gripper/hand fingers keep their primitive
+        geom = getattr(s, "geometry", None)
+        # THE CUSTOMER'S OWN MESH WINS. An imported segment carries family="source_mesh" pointing at that link's
+        # real geometry, baked into this segment's frame at import. Never re-synthesize over it: the whole point
+        # of ingesting someone's robot is that the robot stays theirs.
+        from_source = isinstance(geom, dict) and geom.get("family") == "source_mesh"
+        # Gripper/hand fingers keep their primitive -- EXCEPT when the customer shipped that finger's real
+        # geometry. A Franka Panda's two jaws are prismatic, so this skip silently dropped 2 of its 11 imported
+        # link meshes and the hand rendered as a pair of bare pins beside the real wrist.
+        if s.joint_type == "prismatic" and not from_source:
             continue
         actuated = s.joint_type in ("revolute", "prismatic")
-        geom = getattr(s, "geometry", None)
         # Kit-bash a real, license-clean link mesh for this part when enabled and one is catalogued for the
         # role; otherwise synth / procedural anatomy / generic detail. Flags are in the cache key (toggle rebakes).
-        fp, kit_role = _seg_mesh_fp(out, s, kitbash=kitbash, synth=synth)
+        if from_source:
+            src = Path(str(geom.get("path") or ""))
+            if src.is_file():
+                # COPY IT INTO ``out_dir`` instead of pointing at the import cache. Callers treat the returned
+                # path set as the asset directory they asked us to fill: ``write_packaged_visual_mjcf`` relpaths
+                # each entry against the package and publishes ``viewer_assets/<name>`` in its mesh index, and
+                # ``gene_urdf`` copies each basename next to robot.urdf. Handing back a path in build/_importmesh
+                # made both of those describe files that were never shipped -- the package's own index pointed at
+                # ``simulation/viewer_assets/base.stl`` while its XML pointed back out of the package at a
+                # machine-local cache. One copy per content hash, so re-rendering the same body stays instant.
+                fp = _src_mesh_fp(out, s, src)
+                if not (cache and fp.exists() and fp.stat().st_size == src.stat().st_size):
+                    shutil.copyfile(src, fp)
+                    if wrote is not None:
+                        wrote.add(fp.name)
+                meshes[s.name] = str(fp.resolve()).replace("\\", "/")
+                continue
+        fp, kit_role = _seg_mesh_fp(out, s, kitbash=kitbash, synth=synth, actuator_in_mesh=actuator_in_mesh)
         if not (cache and fp.exists()):
+            if wrote is not None:
+                wrote.add(fp.name)
+            if bd is None:
+                import build123d as bd                # noqa: PLW2901 - raises here exactly as it used to
             baked = None
             if kit_role is not None:                 # real Menagerie link mesh, fitted to this link's frame
                 from virturoid.services.part_catalog import fitted_part_stl
@@ -402,19 +742,34 @@ def build_visual_meshes(gene, out_dir: str, *, cache: bool = True, kitbash: bool
                 baked = synthesize_part(geom.get("desc") or f"a robot {s.name} part",
                                         s.length_m, s.radius_m, str(fp))
             if baked is None and geom:               # arbitrary/role shape -> realize, then drop floor to z=0
-                solid = realize_shape(geom)
+                solid = realize_shape(_visual_matches_link(geom, s))
                 try:
                     minz = float(solid.bounding_box().min.Z)
                 except Exception:  # noqa: BLE001 - degenerate bbox -> assume already floored
                     minz = 0.0
                 solid = solid.moved(bd.Location((0, 0, -minz)))
+                if actuator_in_mesh:
+                    solid = _add_selected_actuator_housing(solid, s, proximal_z_mm=0.0)
                 bd.export_stl(solid, str(fp))
             elif baked is None:                      # generic detailed link: centered [-L/2,L/2] -> +L/2 to [0,L]
-                solid = build_link_solid(s.shape, s.length_m, s.radius_m, actuated)
+                from virturoid.services.component_geometry import actuator_for_joint
+                solid = build_link_solid(s.shape, s.length_m, s.radius_m, actuated,
+                                         actuator_spec=actuator_for_joint(s), motor_boss=actuator_in_mesh)
                 solid = solid.moved(bd.Location((0, 0, s.length_m * 1000.0 / 2.0)))
                 bd.export_stl(solid, str(fp))
         meshes[s.name] = str(fp.resolve()).replace("\\", "/")
     return meshes
+
+
+#: WHY ``wrote`` IS AN OUT-PARAMETER AND NOT THE RETURN VALUE. Callers stage these files and then hand the
+#: names to ``gene_compiler.note_staged``, whose contract is "files this export JUST WROTE" -- the staging
+#: ledger's digest is the only thing separating "ours, untouched" from "ours once, theirs now". Passing the
+#: full returned map violated that: both branches above SKIP the write when the cache serves the file, so a
+#: same-robot rebuild re-digested a mesh the customer had hand-edited and the ledger then swore their bytes
+#: were ours. MEASURED end to end: the package shipped their geometry attributed to us, and the next rebuild
+#: of a different body deleted it and recorded it under ``removed_stale`` as our own stale file -- strictly
+#: worse than the stale geometry this prune was built to remove. Every existing call site is unchanged
+#: because the parameter is optional; a caller that wants to CLAIM files must now ask what was written.
 
 
 def is_real_cad(step_path) -> bool:
@@ -443,6 +798,24 @@ def is_real_cad(step_path) -> bool:
     return len(re.findall(r"#\d+\s*=", text)) >= 20
 
 
+def _R_to_deg_xyz(R) -> tuple:
+    """Rotation matrix -> intrinsic XYZ euler in DEGREES, which is what build123d's Location wants.
+
+    Same convention MuJoCo uses by default (eulerseq "xyz", R = Rx @ Ry @ Rz), so a part lands in the CAD
+    assembly exactly where the compiled MJCF puts it -- otherwise the two artefacts describe different robots."""
+    import numpy as np
+    sy = float(-R[2, 0])
+    sy = max(-1.0, min(1.0, sy))
+    b = np.arcsin(sy)
+    if abs(sy) < 0.999999:
+        a = np.arctan2(float(R[2, 1]), float(R[2, 2]))
+        c = np.arctan2(float(R[1, 0]), float(R[0, 0]))
+    else:                                                    # gimbal lock: fold the rotation into a alone
+        a = np.arctan2(float(-R[1, 2]), float(R[1, 1]))
+        c = 0.0
+    return (float(np.degrees(a)), float(np.degrees(b)), float(np.degrees(c)))
+
+
 def export_gene_cad(gene, out_dir: str, *, material: str = "aluminum") -> dict:
     """Export real CAD for every link of ``gene``: per-link STEP + STL + assembly STEP, with mass and
     moment of inertia computed from the solids. Returns a manifest dict (the manufacturable artifact)."""
@@ -452,32 +825,179 @@ def export_gene_cad(gene, out_dir: str, *, material: str = "aluminum") -> dict:
     out = Path(out_dir)
     (out / "step").mkdir(parents=True, exist_ok=True)
     (out / "stl").mkdir(parents=True, exist_ok=True)
+    # What the PREVIOUS export into this directory claimed, read before the manifest is replaced. It is the
+    # second proof (beside each directory's own staging ledger) of which files here are OURS, so a customer who
+    # deletes the ledger still gets a clean rebuild -- and a directory staged before the ledger existed still
+    # gets cleaned up exactly once.
+    prior_step, prior_stl, prior_asm = set(), set(), set()
+    try:
+        _prev = json.loads((out / "cad_manifest.json").read_text(encoding="utf-8"))
+        prior_step = {Path(p["step"]).name for p in _prev.get("parts", []) if p.get("step")}
+        prior_stl = {Path(p["stl"]).name for p in _prev.get("parts", []) if p.get("stl")}
+        # only if the last manifest says WE wrote one; a robot_assembly.step nobody claims is not ours to delete
+        prior_asm = {"robot_assembly.step"} if _prev.get("assembly_step") else set()
+    except (OSError, ValueError, KeyError, TypeError):
+        prior_step, prior_stl, prior_asm = set(), set(), set()
     parts: list[dict] = []
     solids = []
     total_mass = 0.0
+    used_grounded = False
+    import hashlib
+    import re
+    import shutil
+    named: dict[str, str] = {}                           # file stem -> the ONE link that owns it
+    wrote_step: set[str] = set()                         # the files THIS export owns, for the prune below
+    wrote_stl: set[str] = set()
     for s in gene.segments:
-        if getattr(s, "geometry", None):                 # blueprint specified an ARBITRARY shape for this block
-            solid = realize_shape(s.geometry)
+        # An IMPORTED link's ``geometry`` is not a shape program -- it is a pointer at the customer's own baked
+        # mesh -- and ``realize_shape`` does not know that family, so it fell through to its malformed-spec
+        # fallback: a capsule at the DEFAULT 100 mm x 30 mm, for every link. Measured on a Menagerie Go2, that
+        # shipped the 0.376 m chassis as 395.84 cm3 against a real ~11,300, and every hip and thigh at an
+        # identical 474.53 cm3 despite differing 2.2x in length -- a CAD package with the right part names, the
+        # right masses, and nobody's geometry. Their real geometry goes to the STL lane, where a triangle mesh
+        # belongs; the STEP lane gets the link solid built from THIS link's own measured length/radius, which is
+        # a B-rep we can honestly compute volume and inertia from. ``geometry_source`` says which is which, so
+        # nothing downstream can read the STEP as the customer's CAD.
+        geom = getattr(s, "geometry", None)
+        imported = isinstance(geom, dict) and geom.get("family") == "source_mesh"
+        src_mesh = None
+        if imported:
+            p = Path(str(geom.get("path") or ""))
+            src_mesh = p if p.is_file() else None
+        if geom and not imported:
+            solid = realize_shape(geom)                  # blueprint specified an ARBITRARY shape for this block
+            solid = _add_selected_actuator_housing(solid, s, proximal_z_mm=0.0)
         else:                                            # default detailed link (tube + collars + motor can)
+            from virturoid.services.component_geometry import actuator_for_joint
             solid = build_link_solid(s.shape, s.length_m, s.radius_m,
-                                     s.joint_type in ("revolute", "prismatic"))
-        bd.export_step(solid, str(out / "step" / f"{s.name}.step"))
-        bd.export_stl(solid, str(out / "stl" / f"{s.name}.stl"))
+                                     s.joint_type in ("revolute", "prismatic"),
+                                     actuator_spec=actuator_for_joint(s))
+        # Link names come from the customer's file once a robot can be imported, so they are sanitized into a
+        # legal stem and disambiguated: two links must never write one CAD file.
+        stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(s.name or "link")).strip("_") or "link"
+        if named.setdefault(stem, s.name) != s.name:
+            stem = f"{stem}_{hashlib.md5(str(s.name).encode('utf-8', 'replace')).hexdigest()[:8]}"
+            named.setdefault(stem, s.name)
+        bd.export_step(solid, str(out / "step" / f"{stem}.step"))
+        wrote_step.add(f"{stem}.step")
+        if src_mesh is not None:
+            shutil.copyfile(src_mesh, out / "stl" / f"{stem}.stl")   # the customer's OWN surface, unmodified
+        else:
+            bd.export_stl(solid, str(out / "stl" / f"{stem}.stl"))
+        wrote_stl.add(f"{stem}.stl")
         vol_m3 = float(solid.volume) * 1e-9          # mm^3 -> m^3
-        mass = vol_m3 * density
+        solid_mass = vol_m3 * density                # mass IF this link were a SOLID `material` billet
+        # B3b (2026-07-24 audit): prefer the GROUNDED buildable mass the URDF/BOM/sim all report -- a real link
+        # is a hollow CF tube plus a motor, NOT a solid aluminum billet, and treating it as solid invented a
+        # ~35 kg dog. When the gene is grounded, ``s.mass_kg`` = structure(@fill) + actuator; use it as the one
+        # source of truth and scale the solid's inertia tensor to that mass so ixx stays consistent with what
+        # the manifest reports. Ungrounded genes fall back to the solid-volume estimate (flagged in the note).
+        grounded = float(getattr(s, "mass_kg", 0.0) or 0.0)
+        mass = grounded if grounded > 0 else solid_mass
+        used_grounded = used_grounded or grounded > 0
+        scale = (mass / solid_mass) if solid_mass > 0 else 1.0
         total_mass += mass
-        ixx = float(solid.matrix_of_inertia[0][0]) * density * 1e-15   # mm^5*kg/m^3 -> kg*m^2 (approx)
+        ixx = float(solid.matrix_of_inertia[0][0]) * density * 1e-15 * scale   # mm^5*kg/m^3 -> kg*m^2 (approx)
         parts.append({"name": s.name, "volume_cm3": round(float(solid.volume) * 1e-3, 2),
                       "mass_kg": round(mass, 3), "ixx_kg_m2": round(ixx, 6),
-                      "step": f"step/{s.name}.step", "stl": f"stl/{s.name}.stl"})
+                      "mass_basis": "grounded" if grounded > 0 else "solid_volume",
+                      # Which lane is whose: "customer_mesh" means the STL is the geometry they gave us and the
+                      # STEP is our parametric stand-in at their measured length/radius (a triangle mesh has no
+                      # B-rep to write); "generated" means both lanes are ours.
+                      "geometry_source": "customer_mesh" if src_mesh is not None else "generated",
+                      "step": f"step/{stem}.step", "stl": f"stl/{stem}.stl"})
         solids.append(solid)
-    try:                                             # one manufacturable assembly STEP
-        asm = solids[0]
-        for sld in solids[1:]:
-            asm = asm + sld
+    # A POSITIONED ASSEMBLY, not a pile of parts at the origin. Every link solid is AUTHORED at (0,0,0) along its
+    # own +z, so boolean-unioning them fused the whole robot into one blob at one point: the file was named
+    # robot_assembly.step and was not an assembly. That is why "make it taller" could not be shown as a geometric
+    # delta -- there was no geometry to diff, and anyone opening the STEP saw a knot.
+    # Each solid is now placed at its FORWARD-KINEMATIC pose, walking the gene chain exactly as the MJCF does:
+    # a child sits at its parent's tip plus mount_offset, rotated by mount_euler (MuJoCo's default eulerseq
+    # "xyz", so R = Rx @ Ry @ Rz -- the same convention gene_compiler emits and robot_import reads).
+    asm_ok = False
+    try:
+        import numpy as _np
+
+        placed, world = [], {}
+        for s, sld in zip(gene.segments, solids):
+            me = tuple(getattr(s, "mount_euler", None) or (0.0, 0.0, 0.0))
+            mo = tuple(getattr(s, "mount_offset", None) or (0.0, 0.0, 0.0))
+            ca, cb, cc = (_np.cos(v) for v in me)
+            sa, sb, sc = (_np.sin(v) for v in me)
+            Rx = _np.array([[1, 0, 0], [0, ca, -sa], [0, sa, ca]])
+            Ry = _np.array([[cb, 0, sb], [0, 1, 0], [-sb, 0, cb]])
+            Rz = _np.array([[cc, -sc, 0], [sc, cc, 0], [0, 0, 1]])
+            R_local = Rx @ Ry @ Rz
+            if s.parent and s.parent in world:
+                pR, pT, pLen = world[s.parent]
+                R = pR @ R_local
+                T = pT + pR @ (_np.asarray(mo, dtype=float) + _np.array([0.0, 0.0, float(pLen)]))
+            else:
+                R, T = R_local, _np.asarray(mo, dtype=float)
+            world[s.name] = (R, T, float(s.length_m))
+            # build123d works in MILLIMETRES; the gene is metres.
+            loc = bd.Location((float(T[0]) * 1000.0, float(T[1]) * 1000.0, float(T[2]) * 1000.0),
+                              _R_to_deg_xyz(R))
+            placed.append(loc * sld)
+        asm = bd.Compound(children=placed)           # a real assembly: parts KEEP their identity and their pose
         bd.export_step(asm, str(out / "robot_assembly.step"))
         asm_ok = True
-    except Exception:  # noqa: BLE001 - boolean union can be finicky; per-part STEP is the fallback
+    except Exception:  # noqa: BLE001 - placement/compound can be finicky; per-part STEP is the fallback
         asm_ok = False
-    return {"material": material, "parts": parts, "part_count": len(parts),
-            "total_mass_kg": round(total_mass, 3), "assembly_step": asm_ok, "dir": str(out)}
+    # Claim what was written before the manifest goes down: an export that dies here still leaves files the
+    # next one can prove are its own to clear, instead of orphans nobody is allowed to touch.
+    from virturoid.services.gene_compiler import note_staged
+    note_staged(out / "step", wrote_step)
+    note_staged(out / "stl", wrote_stl)
+    if asm_ok:
+        note_staged(out, {"robot_assembly.step"})
+    manifest = {"material": material, "parts": parts, "part_count": len(parts),
+                "total_mass_kg": round(total_mass, 3), "assembly_step": asm_ok, "dir": str(out)}
+    if not parts:
+        # AN EXPORT THAT PRODUCED NOTHING HAS NO AUTHORITY TO REMOVE ANYTHING. This used to prune with empty
+        # keep-sets, which emptied step/ and stl/ -- while ``_export_real_cad`` returns None on a zero-part
+        # export WITHOUT rewriting the manifest, so ``cad_manifest.json`` was left claiming 9 parts named
+        # ``step/base.step`` over a directory holding zero files (measured). The document this fix designates as
+        # the authority on what belongs here became the wrong one. Leaving both the files and the manifest alone
+        # keeps them describing the same robot, which is the invariant that actually matters.
+        manifest["removed_stale"] = []
+        manifest["pruned"] = False
+        manifest["note"] = ("this export produced no parts, so nothing was written and nothing was removed; any "
+                            "CAD in this directory and the cad_manifest.json beside it are from an earlier "
+                            "export and still describe each other")
+        return manifest
+    from virturoid.services.gene_compiler import prune_staged_dir
+
+    # THIS DIRECTORY DESCRIBES ONE ROBOT. A build into a reused ``out`` only ever added parts, so after a
+    # redesign (``autonomous_build`` rebuilds into the directory it already used) or a re-export of the same
+    # ``robot_id``, ``step/`` held the PREVIOUS body's links beside this one's -- measured: 27 STEP files for a
+    # 9-part arm, 18 of them a discarded quadruped's ``leg*``/``torso``/``head``. ``cad_manifest.json`` listed
+    # only the 9, so a manifest reader was safe and ``glob("cad/step/*.step")`` -- which is not an unreasonable
+    # way to open a folder of STEP files -- assembled a chimera.
+    #
+    # ORDER MATTERS TWICE HERE. The removals are computed first (``dry_run``) so ``removed_stale`` can go INTO
+    # the manifest; the manifest is written next, by the same function that made the files, so writer and
+    # authority can never drift apart; the deletions happen last, so a failure anywhere above leaves the
+    # directory and the manifest still agreeing with each other. And only files a previous run of OURS wrote
+    # are candidates: ``out`` is customer-chosen (``compose.py --build``), and shape-based deletion took out
+    # ``cad/reference_fixture.step``, ``cad/step/my_custom_bracket.step`` and ``cad/stl/customer_scan.STL`` on a
+    # re-export of the very same robot.
+    plans = [("step/", out / "step", wrote_step, (".step",), prior_step),
+             ("stl/", out / "stl", wrote_stl, (".stl",), prior_stl),
+             # a failed assembly must not leave the PREVIOUS robot's assembly standing as this one's
+             ("", out, {"robot_assembly.step"} if asm_ok else set(), (".step",), prior_asm)]
+    dry = [(pfx, d, keep, sfx, prior, prune_staged_dir(d, keep, sfx, prior=prior, dry_run=True))
+           for pfx, d, keep, sfx, prior in plans]
+    manifest["removed_stale"] = sorted(pfx + n for pfx, _d, _k, _s, _p, r in dry for n in r["removed"])
+    manifest["left_not_ours"] = sorted(pfx + n for pfx, _d, _k, _s, _p, r in dry for n in r["kept_foreign"])
+    manifest["pruned"] = True
+    # The manifest is written HERE, not by ``_export_real_cad`` afterwards, so the one document this design
+    # calls the authority is produced by the one function that knows what is on disk.
+    try:
+        (out / "cad_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    except OSError:  # noqa: BLE001 - an unwritable manifest means we must NOT delete anything either
+        manifest["removed_stale"], manifest["pruned"] = [], False
+        return manifest
+    for _pfx, d, keep, sfx, prior, _r in dry:
+        prune_staged_dir(d, keep, sfx, prior=prior)
+    return manifest

@@ -17,6 +17,7 @@ Handlers take ``args: dict`` and return JSON-able dicts (errors as ``{"error": .
 from __future__ import annotations
 
 import os
+import re
 
 
 def _interpret_prompt(args: dict) -> dict:
@@ -154,18 +155,57 @@ def _sandbox_policy(args: dict) -> dict:
         timeout=float(args.get("timeout", 10.0)))
 
 
+def _actuator_count(robot_id: str):
+    """``(n_actuators, "")`` for a held robot, or ``(None, why_not)``. Compiles the gene — MuJoCo's own count."""
+    from virturoid.services import session_state as _S
+    gene = _S.get_robot(str(robot_id or ""))
+    if gene is None:
+        return None, f"no held robot '{robot_id}'; create_robot / submit_design / ingest_project first"
+    try:
+        import mujoco
+        from virturoid.services.gene_compiler import compile_gene_to_mjcf
+        return int(mujoco.MjModel.from_xml_string(compile_gene_to_mjcf(gene)).nu), ""
+    except Exception as exc:  # noqa: BLE001 - no MuJoCo / a body that will not compile: say so, never guess
+        return None, f"could not count actuators on '{robot_id}': {type(exc).__name__}: {exc}"
+
+
 def _import_onnx_policy(args: dict) -> dict:
-    from virturoid.services.policy_native_adapter import inspect_onnx, run_onnx_policy
+    """INSPECT + VALIDATE an inbound ONNX policy. Deliberately NOT a deployment — see ``policy_native_adapter``.
+
+    ``robot_id`` is what makes "validated" mean something about the customer's robot rather than about an
+    abstract vector: the action width is checked against the actuator count MuJoCo reports for THAT body, so a
+    policy trained for a 12-DOF quadruped and pointed at an 18-DOF hexapod is caught here instead of later.
+    """
+    from virturoid.services.policy_native_adapter import DEPLOYMENT, inspect_onnx, run_onnx_policy
     args = args or {}
     path = args.get("path", "")
     if not path:
         return {"error": "path is required (a .onnx policy file)"}
     if not os.path.exists(path):
         return {"error": f"path not found: {path}"}
+    action_dim, checked_against = args.get("action_dim"), None
+    if args.get("robot_id"):
+        n, why = _actuator_count(args["robot_id"])
+        if n is None:
+            return {"error": why}
+        if action_dim is not None and int(action_dim) != n:
+            return {"error": f"action_dim={int(action_dim)} contradicts robot '{args['robot_id']}', which has {n} "
+                             f"actuators — drop action_dim and the robot's own count is used"}
+        action_dim, checked_against = n, {"robot_id": args["robot_id"], "n_actuators": n}
     if args.get("observation") is None:                        # no obs -> just inspect the IO contract
-        return inspect_onnx(path)
-    return run_onnx_policy(path, args["observation"], action_dim=args.get("action_dim"),
-                           safety_limits=args.get("safety_limits"))
+        out = inspect_onnx(path)
+    else:
+        out = run_onnx_policy(path, args["observation"], action_dim=action_dim,
+                              safety_limits=args.get("safety_limits"))
+    if checked_against:
+        out["action_dim_checked_against"] = checked_against
+    # SAY IT AT THE TOP LEVEL TOO. An agent that reads only the headline of a tool called "import_onnx_policy"
+    # must not come away believing the robot now runs this policy; the nested block is the detail, this is the
+    # sentence. Nothing in the repo can deploy an imported ONNX policy, and pretending otherwise by omission is
+    # the same defect as train_reward's GPU arm claiming a bank nothing wrote to.
+    out["deployed"] = False
+    out["deployment_note"] = DEPLOYMENT["what_this_tool_does"] + " " + DEPLOYMENT["verify_robot_still_measures"]
+    return out
 
 
 def _import_controller_interface(args: dict) -> dict:
@@ -203,12 +243,312 @@ def _import_cad(args: dict) -> dict:
     return import_cad(path, material=args.get("material", "abs")).to_dict()
 
 
+def _model_compile_probe():
+    """A real-MuJoCo-compile probe for the model picker (input_classifier.rank_model_candidates).
+
+    Reuses ``model_import.import_model`` -- the SAME machinery ingest uses on the file it eventually picks -- so
+    the counts the picker scores on are the counts the customer will actually get. Results are memoised because
+    the picker probes a handful of near-tied candidates and ingest then imports the winner again. Returns None
+    when MuJoCo is unavailable, which simply drops the compiled evidence and leaves the static ranking."""
+    cache: dict[str, dict | None] = {}
+
+    def probe(abs_path: str) -> dict | None:
+        if abs_path not in cache:
+            try:
+                from virturoid.services.model_import import import_model
+                r = import_model(abs_path)
+                cache[abs_path] = ({"ok": True, "bodies": int(r.get("parts") or 0),
+                                    "actuators": int(r.get("actuated") or 0)} if r.get("ok")
+                                   else {"ok": False, "bodies": 0, "actuators": 0})
+            except Exception:  # noqa: BLE001 - no MuJoCo / unreadable file -> no compiled evidence, not a crash
+                cache[abs_path] = None
+        return cache[abs_path]
+
+    return probe
+
+
+# Classes that ALREADY carry legged meaning, and the families that can adopt the QUADRUPED fan/crawl walkable
+# template. Both now come from ``body_kind`` -- the one place body classification lives -- rather than being
+# re-listed here, which is how the copies drifted apart in the first place.
+from virturoid.services.body_kind import (  # noqa: E402
+    LEGGED_CLASSES as _LEGGED_CLASSES,
+    QUAD_TEMPLATE_CLASSES as _QUAD_TEMPLATE_CLASSES,
+    family_from_legs,
+    measured_legs,
+)
+
+
+def _needs_legged_reconciliation(gene) -> bool:
+    """True only for the #214 case: a body whose STRUCTURE is legged while its class string says otherwise.
+
+    That happens when MuJoCo fuses a URDF quadruped's static torso into the world, leaving a fixed base that
+    the string classifier reads as an arm. It does NOT happen to an imported humanoid, whose class the
+    structural classifier already got right -- and treating it as if it did is what renamed every biped a
+    quadruped on the way in."""
+    try:
+        from virturoid.services.task_matched_eval import robot_kind
+        if robot_kind(gene) != "legged":
+            return False
+    except Exception:  # noqa: BLE001 - a classification guess must never break an ingest
+        return False
+    return (getattr(gene, "robot_class", "") or "").strip().lower() not in _LEGGED_CLASSES
+
+
+def _legged_family(gene) -> str:
+    """Which legged family a body belongs to, from the limbs that actually CARRY it -- the same ground-contact
+    signal ``robot_import._infer_class`` uses -- never a hard-coded guess.
+
+    An inconclusive count returns the honest generic ``"legged"`` rather than inventing a family, because the
+    family drives the BOM, the spec sheet, the verify rubric and the walkable-template offer.
+
+    The count and the ladder are both ``body_kind``'s -- this function used to carry its own copy of each, and
+    the ladder disagreed with ``robot_import._infer_class``'s copy at 3 legs."""
+    return family_from_legs(measured_legs(gene)) or "legged"
+
+
+#: a per-link mass has to move by more than this before we call the customer's number "replaced" (kg).
+_MASS_TOL_KG = 1e-3
+
+#: a scheme'd URL or a bare host/path (`arxiv.org/abs/...`) -- text that is never a robot specification.
+_URL_RE = re.compile(
+    r"(?:\w+://\S+)|(?:\b(?:www\.)?[\w.-]+\.(?:org|com|net|io|edu|gov|ai|dev|co|uk|de|cn)\b(?:/\S*)?)",
+    re.IGNORECASE)
+
+
+def _strip_urls(text: str) -> str:
+    """Remove links before a dropped README is read as a materials spec.
+
+    The fold-in below exists so a customer needn't retype specs already written in notes.md. But a README is
+    not a spec sheet -- it is prose, badges and CITATIONS -- and the property extractor matches substrings.
+    Measured on the real Menagerie G1: its README cites ``url={https://arxiv.org/abs/2502.08844}``, the
+    ``/abs/`` in that arXiv link parsed as ABS PLASTIC, and ingest silently applied
+    ``set_material(group='all', material='abs_plastic')`` to an imported humanoid -- which re-derives every
+    link mass, so Unitree's 33.341 kg became 30.780 kg of our plastic estimate because of a citation URL.
+
+    A URL can never be a material, a payload or a dimension, so it is dropped before parsing. Prose that
+    really does say "aluminium body, 5 kg payload" is untouched."""
+    try:
+        return _URL_RE.sub(" ", text or "").strip()
+    except Exception:  # noqa: BLE001 - never let sanitising break an ingest
+        return text or ""
+
+
+def _link_shape(gene) -> dict:
+    """``{link_name: (mass_kg, radius_m, length_m)}`` — the snapshot that lets ingest state, as a measurement
+    rather than a hope, whether the body it hands back is still the body the customer handed us."""
+    try:
+        return {s.name: (float(s.mass_kg or 0.0), float(s.radius_m or 0.0), float(s.length_m or 0.0))
+                for s in gene.segments}
+    except Exception:  # noqa: BLE001 - provenance accounting must never break an ingest
+        return {}
+
+
+def _reconcile_mass_provenance(gene, before: dict, result: dict) -> dict:
+    """Make ``metadata['mass_source']`` tell the truth about the masses the gene is actually carrying.
+
+    An imported robot arrives stamped ``mass_source='source_model'``: those per-link masses are the
+    manufacturer's own, read straight off the customer's model. That flag is LOAD-BEARING, not decorative --
+    ``gene_build.grounding_config`` turns it into ``preserve_mass=True`` on every later re-ground, so once it
+    is set, every downstream door (build, export, spec sheet, BOM, certificate) treats whatever masses it
+    finds as authoritative and refuses to touch them.
+
+    So a wrong ``mass_source`` is SELF-SEALING: if ingest replaced the customer's masses with our own estimate
+    and left the flag reading "source_model", the estimate is not merely mislabelled, it is LOCKED IN as the
+    customer's own measurement, permanently and silently, and every artifact downstream cites the
+    manufacturer for a number the manufacturer never published. Measured before this: an ingested Go2 held
+    29.031 kg of our aluminium-and-catalog-motor guesswork under a label that said 15.206 kg of Unitree's.
+
+    Therefore: when the numbers move, the label moves with them. Returns the ledger either way, so the honest
+    case is visible too -- "we preserved it" is a claim that should also be measured, not assumed.
+    """
+    meta = getattr(gene, "metadata", None)
+    after = _link_shape(gene)
+    if not isinstance(meta, dict) or not before or not after:
+        return {}
+    src_total = sum(v[0] for v in before.values())
+    now_total = sum(v[0] for v in after.values())
+    changed = [n for n in (set(before) | set(after))
+               if abs(after.get(n, (0.0,))[0] - before.get(n, (0.0,))[0]) > _MASS_TOL_KG]
+    preserved = not changed and abs(now_total - src_total) <= _MASS_TOL_KG
+    claimed = str(meta.get("mass_source") or "") or None
+    prov = {"claimed_on_import": claimed, "mass_kg_as_imported": round(src_total, 3),
+            "mass_kg_held": round(now_total, 3), "delta_kg": round(now_total - src_total, 3),
+            "n_links_mass_changed": len(changed), "preserved": bool(preserved)}
+    if claimed == "source_model" and not preserved:
+        meta["mass_source"] = "virturoid_estimate"
+        meta["mass_source_replaced"] = {
+            "was": "source_model", "source_model_mass_kg": round(src_total, 3),
+            "held_mass_kg": round(now_total, 3), "n_links": len(changed),
+            "why": "ingest re-derived per-link mass (material grounding and/or an applied edit op), so these "
+                   "masses are Virturoid's estimate and must not be re-preserved as the manufacturer's",
+        }
+        prov["corrected_to"] = "virturoid_estimate"
+        _finding(result, _WARN,
+            f"MASSES REPLACED - the manufacturer's per-link masses "
+            f"({round(src_total, 3)} kg over {len(before)} links) were "
+            f"REPLACED during ingest by Virturoid's derived masses ({round(now_total, 3)} kg, "
+            f"{len(changed)} link(s) changed) -- metadata['mass_source'] is now 'virturoid_estimate', not "
+            f"'source_model', so nothing downstream cites your manufacturer for our number")
+    elif preserved and claimed == "source_model":
+        prov["note"] = ("your model's own per-link masses are held unchanged; grounding sized actuators "
+                        "around them instead of re-deriving them")
+    # AND NAME THE MATERIAL HONESTLY. `metadata['grounding']` records the density the held masses were derived
+    # at, which is right and load-bearing -- but it is OUR pick unless the customer asked for it, and their
+    # request can perfectly well have been SKIPPED ("this robot has no 'torso' part") while a re-ground stamped
+    # a global material anyway. Report the record and whether they chose it; never let the stamp imply consent.
+    #
+    # Only an IMPORT gets the warning. On a body we composed from the customer's words there is no
+    # manufacturer to misquote -- picking a default density is the design decision they asked us to make --
+    # and warning about it on every description-only ingest would be noise that buries the real one.
+    rec = meta.get("grounding") if isinstance(meta.get("grounding"), dict) else None
+    if rec:
+        asked = {str(m.get("material") or "") for m in (result.get("materials_applied") or [])}
+        mat = str(rec.get("material") or "")
+        prov["material_masses_derived_at"] = mat
+        prov["material_requested_by_customer"] = bool(mat and mat in asked)
+        if mat and mat not in asked and meta.get("imported_from"):
+            _finding(result, _WARN,
+                f"MATERIAL NOT YOURS - the held masses were derived at '{mat}' — Virturoid's default for this "
+                f"step, NOT a material you specified"
+                + (f" (your material request was skipped: {result['skipped_ops'][0].get('reason')})"
+                   if result.get("skipped_ops") else "")
+                + "; set it explicitly with the set_material edit op if that is wrong")
+    return prov
+
+
+# ---------------------------------------------------------------------------------------------------------
+# INGEST FINDINGS -> the one line an agent actually relays.
+#
+# This is the SECOND time the same defect shape has been found in this function. 60d452d closed it for the
+# substitution gate ("substitution can no longer report success"); the simulability gate added in 9fbdcdc
+# reintroduced it verbatim, because the honesty lived IN THE GATE instead of in the summary. The measured
+# symptom, on the one genuinely-unsimulable Menagerie package:
+#
+#     ok=True   "Ingested -> adv_flybody_ingest: lane=faithful, 0 material(s) applied, payload=None kg,
+#                1 warning(s). Ready to edit/verify."
+#
+# ...for a twin that does not compile in MuJoCo. A COUNT hides its contents: "1 warning(s)" reads the same
+# whether the warning is "your CAD file had an odd unit" or "this robot cannot be stepped at all".
+#
+# So the summary is no longer written by the gates. It is DERIVED, and the derivation makes the honest
+# outcome the DEFAULT rather than something each new gate has to remember:
+#
+#   * ``result['warnings']`` IS the findings ledger. A future gate that only appends a string -- which is
+#     what every gate here already does, so it is what the next one will do -- still cannot produce a clean
+#     summary: an unclassified warning is treated as ``warn`` and its TEXT reaches the line.
+#   * ``_finding(result, _ERROR, ...)`` additionally flips ``ok`` to False and makes that finding LEAD the
+#     summary. Refusing is a SEVERITY on a finding, not a bespoke branch a gate author has to write.
+#   * "Ready to edit/verify" is emitted by exactly ONE branch: the one with no findings at all.
+#
+# _ERROR means the caller cannot proceed as asked with the robot we are handing back -- it is not their
+# robot, or it cannot be stepped, or there is none. _WARN means the ingest stands but something the caller
+# must know was dropped, replaced or guessed. A bad VERDICT (a body that does not walk) is neither: that is
+# ``imported_verdict``, and it correctly leaves ``ok`` True.
+# ---------------------------------------------------------------------------------------------------------
+_ERROR, _WARN = "error", "warn"
+
+
+def _finding(result: dict, severity: str, message: str, *, lead: bool = False) -> None:
+    """Record one ingest finding at a severity the summary is structurally required to honour.
+
+    Writes BOTH ``findings`` (typed) and ``warnings`` (the flat list every existing consumer already reads,
+    including ``_ingestion_report``'s ``dropped`` ledger), so severity is additive and nothing downstream
+    has to change to keep working. ``lead=True`` puts it first -- for the case where two errors are true at
+    once and one of them is the more specific account of the other.
+    """
+    entry = {"severity": severity, "message": message}
+    findings = result.setdefault("findings", [])
+    warnings = result.setdefault("warnings", [])
+    if lead:
+        findings.insert(0, entry)
+        warnings.insert(0, message)
+    else:
+        findings.append(entry)
+        warnings.append(message)
+
+
+def _finalize_ingest(result: dict) -> dict:
+    """Derive ``ok``, ``error`` and ``summary`` from the findings ledger.
+
+    The ONLY place any of the three is written, and every ``return`` of a built result goes through it, so a
+    gate cannot report a success it did not earn -- nor a refusal with no message, which is what the two
+    early ``return`` paths used to produce (``ok=False``, no ``summary`` at all, and an envelope reading
+    "ingest_project reported failure without a reason").
+    """
+    typed = {}
+    for f in result.get("findings") or []:
+        typed.setdefault(f["message"], f)
+    # Rebuild in warning order, promoting any bare `warnings.append` a gate made without a severity.
+    ordered = [typed.get(w) or {"severity": _WARN, "message": w} for w in (result.get("warnings") or [])]
+    for f in result.get("findings") or []:                     # a finding with no warning line (shouldn't happen)
+        if f not in ordered:
+            ordered.append(f)
+    result["findings"] = ordered
+
+    errors = [f for f in ordered if f.get("severity") == _ERROR]
+    rid = result.get("robot_id")
+    lane = result.get("lane_used") or "none"
+    # The twin importer's own notes are NOT ingest findings -- they describe how the editable approximation
+    # was derived (unsupported joint types, multi-joint bodies) and every real model carries a few. But they
+    # are not nothing either, and they were invisible: "0 warning(s)" was the line for a Go2 whose import
+    # raised 3. Counted separately so neither number can stand in for the other.
+    approximations = len(((result.get("import") or {}).get("warnings")) or [])
+    tail = (f" [robot={rid}; lane={lane}; {len(ordered)} finding(s)"
+            + (f"; {approximations} twin-approximation note(s) in result['import']['warnings']"
+               if approximations else "")
+            + "; full list in result['findings']]")
+
+    if errors:
+        result["ok"] = False
+        result["error"] = errors[0]["message"]
+        result["summary"] = errors[0]["message"] + tail
+    elif ordered:
+        result["ok"] = True                                    # the ingest stands -- but it is not clean
+        result["summary"] = (f"Ingested -> {rid}: lane={lane}, "
+                             f"{len(result.get('materials_applied') or [])} material(s) applied, "
+                             f"payload={result.get('payload_kg')} kg. NOT CLEAN - {ordered[0]['message']}"
+                             + tail)
+    else:
+        result["ok"] = True
+        result["summary"] = (f"Ingested -> {rid}: lane={lane}, "
+                             f"{len(result.get('materials_applied') or [])} material(s) applied, "
+                             f"payload={result.get('payload_kg')} kg, no findings"
+                             + (f" ({approximations} twin-approximation note(s) in "
+                                f"result['import']['warnings'])" if approximations else "")
+                             + ". Ready to edit/verify.")
+    return result
+
+
 def _ingest_project(args: dict) -> dict:
     """INGESTION AGENT (Part B): a robotics team drops a project FOLDER/ZIP of their existing robot (URDF/MJCF +
     optional BOM/CAD) plus an NLP description ("aluminum body, carbon-fiber legs, 5 kg payload, 6-DOF arm"), and
     gets back ONE unified, immediately-editable RobotGene held in the session -- the user's stated materials +
     load already applied, with a project graph + BOM/CAD summary + honest per-step warnings. It ORCHESTRATES the
-    importers already built (classifier, robot_import, bom_importer, cad_importer) + nlp_properties + edit_operators."""
+    importers already built (classifier, robot_import, bom_importer, cad_importer) + nlp_properties + edit_operators.
+
+    THE CUSTOMER'S FOLDER IS READ-ONLY FOR THE WHOLE OF THIS CALL. Two writes into it were measured on a real
+    Menagerie Go2 (a prep copy in ``model_import``, the report in ``_persist_ingestion_report``); both are
+    fixed at their own site, and this wrapper is what stops the third. It has to sit at the DOOR rather than
+    at each writer, because an ingest fans out through the classifier, three importers, the grounding pass
+    and the edit operators -- "every write reachable from an ingest" is not a list anyone can keep current by
+    reading. A refusal is recorded and surfaced in ``source_folder_protection`` rather than swallowed.
+    """
+    from virturoid.services import source_guard
+    target = (args or {}).get("project_path") or (args or {}).get("path")
+    with source_guard.read_only(target) as guard:
+        result = _ingest_project_inner(args)
+        report = guard.report()
+    if report and isinstance(result, dict):
+        result["source_folder_protection"] = report
+        _finding(result, _WARN, f"WE TRIED TO WRITE INTO YOUR PROJECT FOLDER - {report['n_blocked_writes']} "
+                                f"write(s) into {report['source_folder']} were refused; your files are "
+                                f"unchanged. This is a Virturoid defect — see source_folder_protection.")
+        _finalize_ingest(result)
+    return result
+
+
+def _ingest_project_inner(args: dict) -> dict:
+    """The ingest itself. Always called through :func:`_ingest_project`, which owns the read-only guarantee."""
     import shutil
 
     args = args or {}
@@ -217,8 +557,8 @@ def _ingest_project(args: dict) -> dict:
     if not path and not description:
         return {"error": "provide project_path (a folder or .zip of the robot's files) and/or description (NLP)"}
 
-    result: dict = {"robot_id": None, "materials_applied": [], "payload_kg": None,
-                    "applied_ops": [], "skipped_ops": [], "warnings": [], "notes": []}
+    result: dict = {"robot_id": None, "materials_applied": [], "payload_kg": None, "applied_ops": [],
+                    "skipped_ops": [], "warnings": [], "findings": [], "notes": []}
     workdir: str | None = None
     scan_root: str | None = None
     bundle = None
@@ -239,9 +579,29 @@ def _ingest_project(args: dict) -> dict:
             else:
                 scan_root = os.path.abspath(path)
             bundle = scan_folder(scan_root)
-            result["project_graph"] = project_graph_summary(bundle)
+            # PICK THE MODEL BY EVIDENCE. ingest already compiles models, so it contributes the compiled
+            # body/actuator counts the metadata-only inspect_project_bundle cannot.
+            result["project_graph"] = project_graph_summary(bundle, compile_probe=_model_compile_probe())
+            # Auto-read a NOTES / README the customer dropped in the folder into the NLP payload, so specs
+            # written in notes.md ("aluminum body, carbon-fiber legs, 5 kg payload") are parsed the same as a
+            # typed description -- a drop-a-folder customer shouldn't have to re-type what's already in the box
+            # (2026-07-24 audit). Capped so a long README can't swamp the props extractor.
+            for _nm in ("notes.md", "notes.txt", "README.md", "readme.md", "README.txt"):
+                _np = os.path.join(scan_root, _nm)
+                try:
+                    if os.path.isfile(_np):
+                        with open(_np, encoding="utf-8", errors="replace") as _f:
+                            _txt = _f.read(4000).strip()
+                        _txt = _strip_urls(_txt)
+                        if _txt:
+                            description = (description + "\n" + _txt).strip() if description else _txt
+                            result["notes"].append(f"folded {_nm} from the project into the NLP description")
+                            break
+                except OSError:
+                    pass
         except Exception as exc:  # noqa: BLE001
-            result["warnings"].append(f"project scan failed: {exc}")
+            _finding(result, _ERROR, f"PROJECT NOT READ - scanning {path} failed ({exc}), so NONE of the files "
+                                     f"you handed us were opened; anything held below came from the description")
 
     # 2) import the robot model -> the inferred, EDITABLE RobotGene (the twin we amend)
     gene = None
@@ -254,9 +614,29 @@ def _ingest_project(args: dict) -> dict:
             gene = imp.get("gene")
             result["import"] = {"source": model_rel, "robot_class": imp.get("robot_class"),
                                 "species": imp.get("species"), "valid": imp.get("valid"),
+                                # A twin that cannot be STEPPED is a different failure from one whose schema is
+                                # off, and the ingesting agent has to be able to tell: everything it does next
+                                # (verify, certify, cost, calibrate) is computed by stepping this model.
+                                "simulable": imp.get("simulable", True),
+                                "simulation_check": imp.get("simulation_check") or {},
                                 "warnings": list(imp.get("warnings", []))[:8]}
+            if not imp.get("simulable", True):
+                # AN ERROR, NOT A WARNING. The twin recorded here IS the held robot -- `S.put_robot(gene)`
+                # below holds this object, and verify/certify/BOM/cost/calibrate all produce their numbers by
+                # STEPPING it. A model that does not step cannot produce any of them, so "Ready to edit/verify"
+                # is false about the only robot this call hands back. (The faithful MJCF, when it loaded, is
+                # returned in the payload for native simulation -- but it is not what is held.)
+                _why = " ".join(str((imp.get("simulation_check") or {}).get("reason") or "").split())[:220]
+                _finding(result, _ERROR,
+                         f"NOT SIMULABLE - the editable twin inferred from {model_rel} cannot be stepped in "
+                         f"MuJoCo ({_why}). It is the HELD robot, and every number downstream (verdict, "
+                         f"certificate, BOM, spec sheet, calibration gap) comes from stepping it, so it is NOT "
+                         f"ready to edit or verify; result['faithful']['mjcf'] holds your model as-is for "
+                         f"native simulation.")
         except Exception as exc:  # noqa: BLE001
-            result["warnings"].append(f"model import failed ({model_rel}): {exc}")
+            # No twin at all from the customer's model. Whatever is held below came from somewhere else.
+            _finding(result, _ERROR, f"MODEL NOT IMPORTED - {model_rel} could not be turned into an editable "
+                                     f"robot ({exc})")
 
     # 2-faithful) FAITHFUL LANE (P0, plan §P0.2): before we touch the lossy gene twin, load the customer's model
     # AS-IS through the repair pass and keep it. This is the body with THEIR link names + dimensions (FL_hip,
@@ -289,8 +669,16 @@ def _ingest_project(args: dict) -> dict:
                                            "— added a free base so it can locomote; original geometry unchanged")
             else:
                 result["faithful"] = {"ok": False, "note": fm.get("note"), "repairs": fm.get("repairs", [])}
+                # A CLEAN refusal by the faithful lane raised nothing at all before this: it reached only
+                # `_ingestion_report`'s `dropped` list, which the summary counts nothing from, so a customer
+                # whose model we could not load as-is still read "0 warning(s). Ready to edit/verify."
+                _finding(result, _WARN,
+                         f"YOUR MODEL DID NOT LOAD AS-IS - the faithful lane refused {model_rel} "
+                         f"({fm.get('note')}), so the only body here is our re-derived approximation of it, "
+                         f"not your geometry or your link names")
         except Exception as exc:  # noqa: BLE001 - faithful lane is additive; the gene twin still stands
-            result["warnings"].append(f"faithful lane unavailable: {exc}")
+            _finding(result, _WARN, f"YOUR MODEL DID NOT LOAD AS-IS - the faithful lane failed on {model_rel} "
+                                    f"({exc}); the held body is our re-derived approximation, not your geometry")
 
     # 2b) a legged import that can't stand on its own stance gets the SAME walkable-stance treatment a composed
     # body gets (a wide fanned stance) so it can actually be SIMULATED and its controller improved. A well-formed
@@ -299,16 +687,99 @@ def _ingest_project(args: dict) -> dict:
         result["lane_used"] = "gene_fallback"                 # only the lossy twin is runnable -> say so
     if gene is not None:
         result["lanes_attempted"].append("gene")
-    if gene is not None and getattr(gene, "robot_class", "") == "quadruped":
+    # B2 (2026-07-24 audit): NEVER silently swap the customer's imported body for a canonical template before we
+    # verify it. That made the ingest verdict describe OUR template's walk, not the customer's robot -- the exact
+    # honesty failure the strategy is built to avoid. We KEEP the imported geometry (with the customer's link
+    # names) as the held robot, report ITS OWN honest verdict, and OFFER a walkable reference template as a
+    # clearly-labelled, opt-in alternative the customer can adopt -- never a hidden substitution.
+    if gene is not None:
         try:
-            from virturoid.services.anatomy_compiler import ensure_walkable_quad
-            gene = ensure_walkable_quad(gene, "imported quadruped", force=True)  # imports are geometrically lossy;
-            #                                       don't trust the "already walks?" shortcut, but only adopt the
-            #                                       fanned stance if it materially out-walks what was imported
-            if dict(getattr(gene, "metadata", None) or {}).get("walkability_fallback", {}).get("applied"):
-                result["notes"].append("the imported quadruped could not stand on its own stance -> adopted a "
-                                       "walkable fanned stance for its class so it simulates and its gait can be improved")
+            from virturoid.services.task_matched_eval import evaluate_robot, robot_kind
+            _kind = robot_kind(gene)
+            # #214: reconcile a fixed-base legged import that the string classifier mislabelled an arm, so the
+            # BOM/fusion/verify pipeline all treat it consistently as the legged body it structurally is.
+            #
+            # 2026-08-01: this fired for ANY class outside ("quadruped", "legged", "hexapod") and always wrote
+            # the literal "quadruped", so every imported HUMANOID -- a family robot_import._infer_class had
+            # already read correctly off the limbs holding it up (#244) -- was renamed a quadruped here. Measured
+            # on unitree_g1: bom.json and spec_sheet.json said `robot_class: quadruped`, the honesty ledger said
+            # "the imported QUADRUPED does not walk credibly", and the walkable-template offer quoted 0.681 m --
+            # the generic quad template, the same number offered for a Go2 -- i.e. it offered to turn a biped
+            # into a different animal. A class that already means legged is now left alone, and when the remap
+            # does fire the family comes from the body's own leg count instead of a constant.
+            if _needs_legged_reconciliation(gene):
+                _fam = _legged_family(gene)
+                result["notes"].append(f"reclassified the import from '{gene.robot_class}' to '{_fam}' (it "
+                                       f"stands on limbs off a common base, not on wheels or a bench mount)")
+                gene.robot_class = _fam
         except Exception:  # noqa: BLE001
+            _kind = getattr(gene, "robot_class", "")
+    if gene is not None and _kind == "legged":
+        try:
+            # WHOSE CONTROLLER PRODUCED THIS NUMBER IS PART OF THE NUMBER. Until 2026-08-12 this read
+            # ``walks_as_imported: own >= 0.5`` over "the customer's own imported geometry", which a customer
+            # reads as "my robot walks". It is OUR scripted gait driving THEIR body -- the very attribution
+            # ``verify_robot`` refuses to make (it returns ``locomotion_verdict: None`` and the "NO LOCOMOTION
+            # VERDICT -- we do not have your robot's controller" lead for the same robot, in the same session).
+            # Two surfaces answering the same question with different framings is how #215/#218 happened.
+            #
+            # The bare ``>= 0.5`` is also the wrong gate on its own: ``forward`` is world-frame delta-x, so a
+            # body going round in a circle books its far side as travel. ``classify`` is the code-owned
+            # un-gameable verdict and is what the rest of the product is judged by, so it is what is reported
+            # here. MEASURED on the tests/test_customer_ingest fixture quad: 1.604 m, CREDIBLE WALK
+            # (straightness 0.825, upright_frac 1.0, cadence 33.33) -- the threshold and the classifier agree
+            # on THIS body, which is exactly why the disagreement had gone unnoticed.
+            _ev = evaluate_robot(gene)
+            own = float(_ev.get("value", 0.0))
+            try:
+                from virturoid.services import gait_quality as _gq
+                _own_verdict = _gq.classify(_ev.get("detail") or {}) or None
+            except Exception:  # noqa: BLE001 - the distance still stands if the classifier cannot be run
+                _own_verdict = None
+            result["imported_verdict"] = {
+                "walks_under_our_scripted_gait": own >= 0.5, "distance_m": round(own, 3),
+                "verdict": _own_verdict,
+                "body": "the customer's own imported geometry (not a substitute)",
+                "controller": "OURS, not yours -- we do not have your controller. This is what YOUR BODY did "
+                              "under a gait we wrote for it, which is why verify_robot withholds a locomotion "
+                              "verdict for this robot. adopt_control_script runs your parameters on it; "
+                              "train_reward learns a controller for the real body."}
+            if own < 0.5:
+                # measure (do NOT adopt) what a walkable template would do, so the offer is honest + quantified.
+                # The reference template is a QUADRUPED fan/crawl recipe, so it is only offered to quadruped-
+                # family bodies: proposing it for a biped is not a fixed version of the customer's robot, it is
+                # a different animal (and it quoted the generic quad's distance as if it were theirs).
+                _cls = (getattr(gene, "robot_class", "") or "").strip().lower()
+                if _cls in _QUAD_TEMPLATE_CLASSES:
+                    try:
+                        from virturoid.services.anatomy_compiler import ensure_walkable_quad
+                        tmpl = ensure_walkable_quad(gene, "imported quadruped", force=True)
+                        tval = float(evaluate_robot(tmpl).get("value", 0.0))
+                        result["walkable_template_offer"] = {
+                            "available": tval > own, "template_distance_m": round(tval, 3),
+                            "how_to_adopt": "call amend/edit with op 'adopt_walkable_template', or train the "
+                                            "imported body directly with train_reward — its geometry is "
+                                            "preserved either way"}
+                    except Exception:  # noqa: BLE001
+                        pass
+                else:
+                    result["walkable_template_offer"] = {
+                        "available": False,
+                        "why": f"the walkable reference template is a QUADRUPED fan/crawl recipe; this import is "
+                               f"a {_cls or 'legged'} body, so adopting it would hand back a different animal "
+                               f"rather than a walking version of yours",
+                        "how_to_proceed": "train the imported body directly with train_reward — for a biped, "
+                                          "dynamic walking is a learned-control problem, not a stance tweak"}
+                # ...and say so consistently: the ledger must not advertise a template the offer just declined
+                _offered = bool((result.get("walkable_template_offer") or {}).get("available"))
+                result["notes"].append(
+                    f"the imported {getattr(gene, 'robot_class', 'legged')} does not walk credibly as imported "
+                    f"({round(own, 3)} m under the scripted gait) -- its ORIGINAL geometry is kept as-is; "
+                    + ("a walkable reference template is available as an explicit opt-in (see "
+                       "walkable_template_offer), and " if _offered else
+                       "no walkable reference template fits this body (see walkable_template_offer), so ")
+                    + "train_reward can learn a gait for the real body.")
+        except Exception:  # noqa: BLE001 - the honest-verdict probe is best-effort; never block the ingest
             pass
 
     # 3) parse the NLP description into typed, provenance-tagged properties + edit ops
@@ -316,26 +787,83 @@ def _ingest_project(args: dict) -> dict:
     props = extract_properties(description)
     result["nlp"] = props.to_dict()
     result["notes"].extend(props.notes)
+    # EVERY note `nlp_properties` emits is of one shape: "we read this requirement and did NOT act on it"
+    # (a payload above the safe amend range, an unlabelled mass we refused to treat as a load, a stated DOF
+    # count). They landed in `notes`, which the summary counts nothing from -- so a customer who wrote
+    # "carries a 60 kg payload" read `payload=None kg ... Ready to edit/verify` with their requirement
+    # nowhere in the line. Unapplied is a finding, not a footnote.
+    for _n in props.notes:
+        _finding(result, _WARN, f"STATED BUT NOT APPLIED - {_n}")
 
     # fallback: no importable model but a description -> compose an editable robot from the words (still ingest-able)
+    composed_from_description = False
     if gene is None and description:
         try:
             from virturoid.services.morphology_composer import compose_robot
             gene = compose_robot(description)
+            composed_from_description = True
             result["notes"].append("no importable robot model found -> composed an editable robot from the description")
         except Exception as exc:  # noqa: BLE001
-            result["warnings"].append(f"could not compose a robot from the description: {exc}")
+            _finding(result, _ERROR, f"NOTHING COMPOSED - the description could not be turned into a robot "
+                                     f"either ({exc})")
     if gene is None:
-        result["warnings"].append("no robot could be produced (no importable model and no usable description)")
+        # This exit used to set ok=False and return with NO `summary` key at all, so the one line an agent
+        # relays did not exist and the envelope read "ingest_project reported failure without a reason".
+        # It goes through the same finalizer as every other exit now.
+        _finding(result, _ERROR, "NO ROBOT INGESTED - no importable model and no usable description, so this "
+                                 "call is holding nothing")
         if workdir:
             shutil.rmtree(workdir, ignore_errors=True)
-        return result
+        return _finalize_ingest(result)
 
     # 4) apply the stated materials (only to parts that EXIST -- no fabrication) + payload, one gate per op
     from virturoid.services.edit_operators import apply_op, segments_for_group
+
+    # GROUND THE ROBOT WE WERE HANDED -- DO NOT RE-DERIVE THE CUSTOMER'S MASSES.
+    #
+    # This step exists so `set_payload` has a real torque/mass baseline. It used to call `ground_gene(gene)`
+    # BARE, which takes the defaults material="aluminum", fill=0.3, preserve_mass=False -- so every link's
+    # mass was thrown away and recomputed as (primitive volume x aluminium density x 0.3) + one of OUR catalog
+    # motors, on a body whose manufacturer masses ALREADY include its motors. Every actuator was counted
+    # twice, against a shape we approximated, at a density nobody asked for. Measured through this tool on
+    # real Menagerie models:
+    #
+    #     Go2   15.206 -> 29.031 kg      Panda  17.452 -> 50.425 kg
+    #     G1    33.341 -> 42.339 kg      UR5e   20.995 -> 25.772 kg
+    #
+    # `grounded_physics.ground_gene`'s own docstring explains exactly why this call needs `preserve_mass` and
+    # names the Go2 as the example -- the knowledge was already in the file; only this call site never used it.
+    #
+    # `gene_build.ground_and_repair` is the SINGLE grounding path both exit doors (package build and
+    # `export_held`) already share, and it reads `grounding_config(gene)`, which sets preserve_mass=True for
+    # `metadata['mass_source'] == 'source_model'` (an import) and otherwise reproduces the body's own recorded
+    # material. Routing through it means the ingest door grounds a body the same way the export door will, so
+    # the robot the customer verifies cannot change weight or shape on its way out.
+    #
+    # It also stops us stamping a material nobody chose: `ground_gene` only records `metadata['grounding']`
+    # when it actually derived the masses, so a preserved import is no longer labelled "aluminum, fill 0.3"
+    # while the ingest report says the aluminium request was SKIPPED for want of a 'torso' part.
+    #
+    # SCOPED TO BODIES WHOSE MASSES ARE AUTHORITATIVE, i.e. an import. A body we COMPOSED from the customer's
+    # words has no manufacturer mass to protect, and moving its grounding is not free: `ground_gene` PINS
+    # `torque_req_nm` on the first ground, so a different first call sizes different motors and every later
+    # step compounds it -- and per [[body-and-gait-are-co-tuned]] a silent mass move trades walk verdicts
+    # across the design bench.
+    #
+    # It also cannot be measured here. The composed path is NOT DETERMINISTIC: three identical calls with
+    # "a quadruped robot dog, aluminum body, 5 kg payload" returned 46.172 / 49.715 / 22.368 kg over 23-25
+    # segments, so no before/after number on that path would mean anything, and a change we cannot measure is
+    # a change we should not make while fixing something else. The composed path therefore keeps exactly the
+    # call it had, and this fix cannot reach it. (That 2.2x spread is a real defect, but a different one.)
+    _shape_before = _link_shape(gene)
+    _authoritative = str((getattr(gene, "metadata", None) or {}).get("mass_source") or "") == "source_model"
     try:
-        from virturoid.services.grounded_physics import ground_gene
-        ground_gene(gene)                                        # real baseline torques/mass so set_payload is grounded
+        if _authoritative:
+            from virturoid.services.gene_build import ground_and_repair
+            ground_and_repair(gene)                              # honours preserve_mass; same path as export
+        else:
+            from virturoid.services.grounded_physics import ground_gene
+            ground_gene(gene)                                    # composed body: unchanged baseline
     except Exception:  # noqa: BLE001
         pass
     for op in props.ops:
@@ -355,9 +883,48 @@ def _ingest_project(args: dict) -> dict:
             elif name == "set_payload":
                 result["payload_kg"] = a.get("payload_kg")
                 if diff.get("warning"):
-                    result["warnings"].append(diff["warning"])
+                    # The summary quotes `payload=N kg` as an accomplished fact. When the actuator catalog
+                    # cannot actually reach that load the number is an aspiration, so the qualification has
+                    # to travel with it rather than sitting behind a count.
+                    _finding(result, _WARN, f"PAYLOAD OVER THE ACTUATOR ENVELOPE - {diff['warning']}")
         except Exception as exc:  # noqa: BLE001 - a bad op (incl. EditError) is skipped + noted, never aborts ingest
             result["skipped_ops"].append({**op, "reason": str(exc)})
+
+    # 4b) RECONCILE THE PROVENANCE WITH THE NUMBERS -- after the ops, not just after grounding, because an
+    # applied `set_material` / `set_payload` re-derives mass too (`edit_operators._reground_and_gate`). Whatever
+    # replaced the customer's masses, the label must name it; see :func:`_reconcile_mass_provenance`.
+    result["mass_provenance"] = _reconcile_mass_provenance(gene, _shape_before, result)
+    # ...and say the same about their GEOMETRY. Grounding grows a link that is too thin to house the actuator
+    # driving it -- correct for a body WE drew, but on an imported robot those radii are the customer's own
+    # measurements, so a silent change is a different robot handed back under their name (#215/B2). Disclosed,
+    # not suppressed: the growth is what keeps the held body identical to the one the export door emits.
+    if str((getattr(gene, "metadata", None) or {}).get("imported_from") or ""):
+        _now = _link_shape(gene)
+        _grew = [n for n, v in _now.items()
+                 if n in _shape_before and v[1] - _shape_before[n][1] > 1e-6]
+        if _grew:
+            _worst = max(_grew, key=lambda n: _now[n][1] / max(_shape_before[n][1], 1e-9))
+            result["notes"].append(
+                f"grounding widened {len(_grew)} of your link(s) so each can physically house the actuator "
+                f"that drives it (largest: '{_worst}' radius "
+                f"{round(_shape_before[_worst][1], 4)} -> {round(_now[_worst][1], 4)} m); lengths and masses "
+                f"are untouched, and this is the same body the export door produces")
+            result["geometry_changed_links"] = sorted(_grew)[:12]
+
+    # 4c) SAY WHERE THIS BODY CAME FROM. `design_source` defaults to "unknown" on RobotGene, and the import
+    # path never overwrote it -- so `get_robot` on a Go2 read straight off a named file answered
+    # `design_source: "unknown"`, which is not modesty, it is the one fact about provenance we most certainly
+    # had. "imported" is the existing vocabulary (`desktop._DESIGN_SOURCE_LABEL` already renders it as
+    # "imported model"), and it is deliberately NOT in `design_cassette.MODEL_AUTHORED_SOURCES`, so an
+    # imported body still counts as not-model-authored in the design-bench funnel.
+    #
+    # Keyed on `metadata['imported_from']` -- the flag `robot_import` sets when a real model file produced
+    # this body -- so it can never fire on a body composed from the description. That matters: the
+    # substitution gate in 6b reads `design_source` to catch an anatomy-composed body wearing a "faithful"
+    # lane label, and stamping it here would have blinded exactly that gate.
+    if str((getattr(gene, "metadata", None) or {}).get("imported_from") or ""):
+        if str(getattr(gene, "design_source", "") or "").lower() in ("", "unknown"):
+            gene.design_source = "imported"
 
     # 5) hold the unified robot in the session so it's immediately editable / verifiable
     from virturoid.services import session_state as S
@@ -385,7 +952,10 @@ def _ingest_project(args: dict) -> dict:
                 result["bom"] = {"source": bom_ref, "line_items": b.get("line_item_count") or len(b.get("items", [])),
                                  "total_mass_kg": b.get("total_mass_kg")}
             except Exception as exc:  # noqa: BLE001
-                result["warnings"].append(f"BOM import failed ({bom_ref}): {exc}")
+                # Their BOM is the cost/actuator ground truth. Dropping it silently means every downstream
+                # cost and mass figure comes from OUR catalog while the customer believes theirs was read.
+                _finding(result, _WARN, f"YOUR BOM WAS NOT READ - {bom_ref} could not be parsed ({exc}); cost, "
+                                        f"part and mass figures below come from Virturoid's catalog, not yours")
         if cad_ref and scan_root:
             try:
                 from virturoid.services.cad_importer import import_cad
@@ -396,20 +966,76 @@ def _ingest_project(args: dict) -> dict:
                 result["cad"] = {"source": cad_ref, "dimensions_m": c.get("dimensions_m") or c.get("bbox_m"),
                                  "est_mass_kg": c.get("est_mass_kg") or c.get("mass_kg")}
             except Exception as exc:  # noqa: BLE001
-                result["warnings"].append(f"CAD import failed ({cad_ref}): {exc}")
+                _finding(result, _WARN, f"YOUR CAD WAS NOT READ - {cad_ref} could not be imported ({exc}); no "
+                                        f"dimension or mass evidence from it reached the held robot")
 
-    # 7) INGESTION REPORT (P0, plan §P0.7): the honest three-ledger account of what the folder yielded —
-    # what we UNDERSTOOD, what we GUESSED, what we DROPPED — the same honesty contract as composition_notes.
+    # 6b) SUBSTITUTION GATE. A GENERATED body must never be presentable as the customer's own robot.
+    #
+    # Measured before this gate: dropping boston_dynamics_spot/ returned
+    #     ok=True  "Ingested -> robot_5eecc737: lane=faithful, 0 material(s) applied, ... 0 warning(s)."
+    # while the held robot was a composed quadruped and Spot had never been read. `lane=faithful` was true of the
+    # scene wrapper we happened to compile, not of the body we held -- the summary conflated the two -- and the
+    # only trace of the swap was a line in `notes`, which the customer-facing summary counts nothing from.
+    #
+    # We do NOT raise, because composing from words is a documented, legitimate mode (description-only ingest
+    # asks for exactly that). What must be impossible is MISTAKING one for the other, so:
+    #   * `lane_used` describes the HELD ROBOT, and can never read "faithful" for a body we generated;
+    #   * a compose that happened *after the customer handed us files* is a SUBSTITUTION -- an _ERROR finding,
+    #     which is what flips ok=False and puts the refusal at the FRONT of the summary. This gate is now
+    #     spelled the same way every other gate is; see `_finding` / `_finalize_ingest`.
+    _design_source = str(getattr(gene, "design_source", "") or "").lower()
+    if composed_from_description or (result.get("lane_used") == "faithful"
+                                     and _design_source.startswith("anatomy")):
+        result["lane_used"] = "composed_from_description"
+    result["held_robot_design_source"] = _design_source or "unknown"
+    if composed_from_description and path:
+        _pg = result.get("project_graph") or {}
+        seen = list(_pg.get("robot_models") or [])
+        # A project whose ONLY robot description is a USD or SDF is the single likeliest first contact we have
+        # (USD is the format NVIDIA trained the industry on). "no robot description file" would be a lie about
+        # a folder that visibly contains robot.usd, and a bare "unsupported" would waste their afternoon — so
+        # name the format, and name the conversion that works.
+        _unsupported = list(_pg.get("unsupported_models") or [])
+        _guidance = list(_pg.get("unsupported_model_guidance") or [])
+        if seen:
+            why = f"none of the {len(seen)} model file(s) in the project could be imported"
+        elif _unsupported:
+            why = (f"the project's only robot description(s) are in a format Virturoid cannot read "
+                   f"({', '.join(sorted(_unsupported)[:3])}) — it reads URDF and MJCF")
+        else:
+            why = "the project contained no robot description file (URDF/MJCF)"
+        result["substituted"] = True
+        result["substitution"] = {
+            "held_robot_is": "a robot GENERATED from the text description — NOT the robot in your project",
+            "reason": why,
+            "project_path": str(path),
+            "model_files_seen": seen[:8],
+            "unsupported_model_files": _unsupported[:8],
+            "import_errors": [f["message"] for f in (result.get("findings") or [])
+                              if f["message"].startswith(("MODEL NOT IMPORTED", "PROJECT NOT READ"))][:4],
+            "how_to_fix": ("; ".join(_guidance) if _guidance else
+                           "point ingest_project directly at the model file, or fix the import errors above; "
+                           "inspect_project_bundle shows every candidate and why each was ranked where it was"),
+        }
+        # LEADS the summary: when the model also failed to import (an _ERROR of its own) this is the more
+        # specific account of the same event, and it is the one the customer has to see first.
+        _finding(result, _ERROR,
+                 f"SUBSTITUTED - {result['robot_id']} IS NOT YOUR ROBOT: {why}, so this body was GENERATED "
+                 f"from your description. Your model was not ingested; see result['substitution'] for how to "
+                 f"fix it.", lead=True)
+
+    # 7) VERDICT + INGESTION REPORT. The summary/ok/error come first so the report -- and the JSON it persists
+    # next to the customer's project -- carries the same severities the caller was handed, not a flat list.
+    _finalize_ingest(result)
     report = _ingestion_report(result)
     result["ingestion_report"] = report
-    _persist_ingestion_report(report, scan_root if (path and not str(path).lower().endswith(".zip")) else path)
+    written = _persist_ingestion_report(
+        report, scan_root if (path and not str(path).lower().endswith(".zip")) else path)
+    if written:
+        result["ingestion_report_path"] = written
 
     if workdir:
         shutil.rmtree(workdir, ignore_errors=True)
-    lane = result.get("lane_used") or "none"
-    result["summary"] = (f"Ingested -> {result['robot_id']}: lane={lane}, "
-                         f"{len(result['materials_applied'])} material(s) applied, "
-                         f"payload={result['payload_kg']} kg, {len(result['warnings'])} warning(s). Ready to edit/verify.")
     return result
 
 
@@ -445,20 +1071,36 @@ def _ingestion_report(result: dict) -> dict:
     if result.get("control_scripts"):
         guessed.append(f"{len(result['control_scripts'])} control/policy file(s) found — not yet run "
                        "(call adopt_control_script)")
+    # `dropped` is a flat list of strings, so the JSON persisted next to the customer's project could not say
+    # which of its lines was "we could not parse your CSV" and which was "this robot cannot be stepped".
+    # The typed ledger travels with it.
     return {"understood": understood, "guessed": guessed, "dropped": dropped,
+            "findings": list(result.get("findings") or []), "ok": result.get("ok"),
+            "summary": result.get("summary"),
             "lane_used": result.get("lane_used"), "lanes_attempted": result.get("lanes_attempted", [])}
 
 
-def _persist_ingestion_report(report: dict, project_dir) -> None:
-    """Write ingestion_report.json next to the project (best-effort; a write failure never sinks an ingest)."""
+def _persist_ingestion_report(report: dict, project_dir) -> str | None:
+    """Write ingestion_report.json UNDER build/, and return where it landed.
+
+    It used to be written "next to the project", which put a Virturoid artifact inside the folder the
+    customer pointed us at -- measured on a real Menagerie Go2, an ingest left
+    ``unitree_go2/ingestion_report.json`` in their tree. Convenient, and not ours to do: that folder can be
+    a git checkout with a dirty-tree gate, a read-only mount, or a vendor drop nobody may modify. Keyed on
+    the source path by ``source_guard.staging_dir`` so two projects never overwrite each other's report.
+
+    Returns the path so the ingest result can NAME it -- a report the customer cannot find is a report that
+    did not happen, and moving it silently would just trade one honesty gap for another.
+    """
     import json
     try:
-        base = project_dir if (project_dir and os.path.isdir(str(project_dir))) else "build"
-        out = os.path.join(str(base), "ingestion_report.json")
+        from virturoid.services import source_guard
+        out = source_guard.staging_dir(project_dir or "project", kind="ingest") / "ingestion_report.json"
         with open(out, "w", encoding="utf-8") as fh:
             json.dump(report, fh, indent=2, ensure_ascii=False)
+        return str(out)
     except Exception:  # noqa: BLE001 - reporting is additive
-        pass
+        return None
 
 
 def _adopt_control_script(args: dict) -> dict:
@@ -529,6 +1171,21 @@ def _adopt_control_script(args: dict) -> dict:
     out["params_source"] = params_source
     if script_meta:
         out["control_script"] = script_meta
+    # ...AND LAND IT. Found by the same sweep that caught ``train_held`` (2026-08-08): this tool fits a
+    # controller to the held body, warm-started from the CUSTOMER'S OWN parameters, and said "improved the
+    # user's controller" while writing nothing — so the very next verify_robot re-measured the controller the
+    # robot had before, exactly the defect 248afca closed for the other three doors. Same contract
+    # (``trained_controller``): credible-gated, undoable, artifact-only under apply='never'. The gate is
+    # ``beat_imported``, which is already the tool's own honest bar (a CREDIBLE walk that travels further than
+    # the user's controller) — an "improvement" that failed it must never overwrite what the customer shipped.
+    from virturoid.services.trained_controller import apply_trained_gait
+    out["applied_to_robot"] = apply_trained_gait(
+        rid, out.get("improved_params") or {}, door="adopt_control_script",
+        apply=str(args.get("apply") or "auto").lower(),
+        credible=bool(out.get("beat_imported")), verdict=str(out.get("verdict") or ""),
+        evidence={"forward_m": (out.get("improved") or {}).get("forward_m"),
+                  "imported_forward_m": (out.get("utilised") or {}).get("forward_m"),
+                  "params_source": params_source})
     return out
 
 
@@ -603,8 +1260,15 @@ def _train_camera_policy(args: dict) -> dict:
     if gene is None:
         return {"error": f"no held robot {rid}"}
     from virturoid.services.camera_perception import robot_camera_part
+    from virturoid.services.sensor_provenance import camera_is_ours_to_add
     part = robot_camera_part(gene)
     if part is None:
+        # On the CUSTOMER'S imported machine the reason is a refusal, not a gap in their config — say which,
+        # or "give it a camera" reads as our tooling being unconfigured rather than their robot having none.
+        allowed, why = camera_is_ours_to_add(gene)
+        if not allowed:
+            return {"error": f"{why}. To train vision on a camera you intend to fit, pin_part it first "
+                             f"(pinned_parts.camera) — that records the camera as YOUR addition, not ours"}
         return {"error": "this robot carries no camera in its BOM; give it a camera (a nav/inspect task) or "
                          "pin_part a camera first, then train its vision"}
     from virturoid.services.robot_vision import train_robot_vision
@@ -658,6 +1322,23 @@ def _learn_gait(args: dict) -> dict:
         steps=int(args.get("steps", 900)), seed=int(args.get("seed", 0)), workers=int(args.get("workers", 1)))
     out["prompt"] = prompt
     out["deployable"] = True                                   # the learned params ARE the deploy controller
+    # ...and "deployable" now means DEPLOYED. ``learn_gait_flywheel`` fits an operating point to this exact body
+    # and hands back the numbers; nothing wrote them onto the held gene, so ``verify_robot`` afterwards ran the
+    # controller the robot had BEFORE training. Landing it here is what makes the ``deployable: True`` above a
+    # fact rather than a promise. See ``trained_controller`` for the contract (credible-gated, undoable).
+    if rid:
+        from virturoid.services.trained_controller import apply_trained_gait
+        out["applied_to_robot"] = apply_trained_gait(
+            rid, out.get("params") or {}, door="learn_gait", apply=str(args.get("apply") or "auto").lower(),
+            credible=bool(out.get("survived")) and bool(out.get("beats_default")),
+            verdict=str(out.get("stopped_reason") or ""),
+            evidence={"forward_m": out.get("forward_m"), "default_forward_m": out.get("default_forward_m"),
+                      "n_evals": out.get("n_evals"), "robustness_rel": out.get("robustness_rel")})
+    else:
+        out["applied_to_robot"] = {"applied": False, "reason": "no robot_id was given, so this gait was learned "
+                                                              "for a body composed on the fly and there is no "
+                                                              "held robot to apply it to; pass robot_id to train "
+                                                              "the robot you are actually holding"}
     return out
 
 
@@ -765,13 +1446,23 @@ INPUT_TRAINING_TOOLS: dict[str, dict] = {
         "handler": _sandbox_policy, "heavy": False,
     },
     "import_onnx_policy": {
-        "description": "PolicyImporter Tier P3: load an inbound ONNX policy and (given an observation) run one "
-                       "inference, validating the action's dimension/finiteness/limits. ONNX is a computation "
-                       "GRAPH (safe to load, unlike a torch pickle). Without an observation, returns the model's "
-                       "declared input/output tensor contract. No physics.",
+        "description": "PolicyImporter Tier P3: INSPECT and VALIDATE an inbound ONNX policy -- load it (a "
+                       "computation GRAPH, safe, unlike a torch pickle), read its declared input/output tensor "
+                       "contract, and, given an observation, run ONE inference and check the action's "
+                       "dimension/finiteness/safety-limits. Pass robot_id and the action width is checked "
+                       "against that held robot's actual actuator count. IT DOES NOT DEPLOY THE POLICY: nothing "
+                       "here makes it the robot's controller, verify_robot afterwards still measures OUR "
+                       "scripted controller on your body, and the result says so (`deployed: false` + a "
+                       "`deployment` block naming what an .onnx cannot tell us -- observation layout, joint "
+                       "order, torque-vs-position, action scale). To get a controller that DOES deploy: "
+                       "train_held with mode='gpu_rl' / train_reward with train_backend='gpu' (a native "
+                       "MorphPolicy, banked and then deployed by verify_robot), or adopt_control_script if your "
+                       "controller is parameterised. No physics.",
         "parameters": {"type": "object", "required": ["path"], "properties": {
             "path": {"type": "string", "description": "a .onnx policy file"},
             "observation": {"type": "array", "description": "one observation vector (omit to just inspect IO)"},
+            "robot_id": {"type": "string", "description": "a held robot to validate the action width against "
+                                                          "(its MuJoCo actuator count becomes action_dim)"},
             "action_dim": {"type": "integer"}, "safety_limits": {"type": "object"}}},
         "handler": _import_onnx_policy, "heavy": False,
     },
@@ -818,12 +1509,19 @@ INPUT_TRAINING_TOOLS: dict[str, dict] = {
                        "gait search WARM-STARTED from the user's params, returning a measured before/after + the "
                        "improved params. Honest: it keeps the user's controller if tuning can't credibly beat it. "
                        "Measured: an imported CPG that shuffled 0.34 m (not credible) improved to a 0.62 m credible "
-                       "walk (1.8x). Real MuJoCo, slow.",
+                       "walk (1.8x). Real MuJoCo, slow. The improved controller is COMMITTED to the held robot "
+                       "when it credibly beat the user's own (so the next verify_robot reports gait_source "
+                       "'tuned_for_this_body::adopt_control_script'); otherwise the customer's controller stands "
+                       "and applied_to_robot says why. Undo with edit_robot op:'undo'.",
         "parameters": {"type": "object", "required": ["robot_id"], "properties": {
             "robot_id": {"type": "string", "description": "the held robot to run/improve the controller on"},
             "script_path": {"type": "string", "description": "a .py control script (a sibling policy_params.json is auto-found)"},
             "params_path": {"type": "string", "description": "a policy_params.json (freq/amplitude/... )"},
             "params": {"type": "object", "description": "inline control params (alternative to a path)"},
+            "apply": {"type": "string", "enum": ["auto", "always", "never"], "default": "auto",
+                      "description": "'auto' commits the improved controller only when it credibly beat the "
+                                     "imported one; 'never' returns it without touching the robot; 'always' "
+                                     "commits it regardless and says so"},
             "generations": {"type": "integer", "default": 6}, "pop": {"type": "integer", "default": 16},
             "steps": {"type": "integer", "default": 800}, "seed": {"type": "integer", "default": 0}}},
         "handler": _adopt_control_script, "heavy": True,
@@ -882,12 +1580,21 @@ INPUT_TRAINING_TOOLS: dict[str, dict] = {
         "description": "LEARN a deployable walk for a legged body: CEM-optimize the crawl-gait controller's "
                        "parameters (freq/amps/duty/gains) with an un-gameable fitness (forward travel counts only "
                        "when upright + survived). Unlike an MJX policy, the result is CPU-deployable BY "
-                       "CONSTRUCTION (it IS the deploy controller). Returns the best gait + measured forward/height. "
-                       "Real MuJoCo, slow.",
+                       "CONSTRUCTION (it IS the deploy controller) -- and with a robot_id it is COMMITTED to that "
+                       "held robot, so the next verify_robot measures the gait you just learned and reports "
+                       "gait_source 'tuned_for_this_body::learn_gait' (undo with edit_robot op:'undo'; pass "
+                       "apply:'never' for a dry run). Consults the flywheel for a prior on this morphology "
+                       "first and banks a credible result after. Returns the best gait + measured "
+                       "forward/height. Real MuJoCo, slow -- the full budget; adapt_gait is the cheap version.",
         "parameters": {"type": "object", "properties": {
             "robot_id": {"type": "string", "description": "learn for THIS held robot (what verify_robot runs); "
-                                                          "omit to compose from prompt"},
+                                                          "omit to compose from prompt -- but then there is no "
+                                                          "held robot for the result to land on"},
             "prompt": {"type": "string", "default": "a quadruped robot dog"},
+            "apply": {"type": "string", "enum": ["auto", "always", "never"], "default": "auto",
+                      "description": "'auto' commits the learned gait to the held robot when it beat the default "
+                                     "and survived; 'never' returns it without touching the robot; 'always' "
+                                     "commits it regardless and says so"},
             "generations": {"type": "integer", "default": 10}, "pop": {"type": "integer", "default": 20},
             "steps": {"type": "integer", "default": 1000}, "seed": {"type": "integer", "default": 0}}},
         "handler": _learn_gait, "heavy": True,

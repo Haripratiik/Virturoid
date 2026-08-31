@@ -349,13 +349,23 @@ def novel_archetype_gene(prompt: str):
 
     p = (prompt or "").lower()
     # GEN-10 (docs/generality_plan.md): a MANY-legged body ("centipede", "millipede", or an explicit "N legs"
-    # with N>=10) must not collapse to the 4-leg generic quad (measured: offline lizard==centipede==horse). Route
-    # it to the PARAMETRIC radial-leg builder at that leg count. This is a leg-COUNT parameter, not a per-species
-    # shape, so it stays consistent with the anti-overfitting rule (a dog/horse still goes to the general compiler).
+    # with N>=10) must not collapse to the 4-leg generic quad (measured: offline lizard==centipede==horse). The
+    # leg COUNT below is a parameter, not a per-species shape, so it stays consistent with the anti-overfitting
+    # rule (a dog/horse still goes to the general compiler).
     mm = re.search(r"(\d+)[\s-]*(?:legs?|legged)\b", p)
     n_many = int(mm.group(1)) if mm else (14 if re.search(r"\bcentipede\b", p) else
                                           (16 if re.search(r"\bmillipede\b", p) else 0))
     if n_many >= 10:
+        # ...but the BODY PLAN this used to pick was ``build_spider``, a RADIAL fan: 14 legs sprayed around one
+        # 75 mm cephalothorax disc (measured, task #213 — see the render). Radial is right for an arachnid and
+        # wrong for everything else with this many legs, and it is not what "many legs" means: past four pairs a
+        # rigid trunk has no distinct stations left, so the body must SEGMENT. That plan now exists in the
+        # general anatomy compiler (``segmented_crawler_gene``) and is chosen on the structural capacity rule,
+        # with the radial archetype still reached below by an actual arachnid word.
+        from virturoid.services.anatomy_compiler import segmented_crawler_gene
+        seg = segmented_crawler_gene(n_legs=n_many, prompt=p)
+        if seg is not None:
+            return seg
         return build_spider(n_legs=min(n_many - (n_many % 2), 16))
     for words, builder in _ARCHETYPES:
         if any(re.search(rf"\b{re.escape(w)}\b", p) for w in words):

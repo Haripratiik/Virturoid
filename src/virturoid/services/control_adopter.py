@@ -15,10 +15,13 @@ from virturoid.services.gait_search import _HI, _LO, PARAM_NAMES
 
 
 def map_control_params(params: dict) -> dict:
-    """Map an imported control program's params into the gait-search space (freq/hip_amp/knee_amp/duty/kp/kd).
+    """Map an imported control program's params into the gait-search space (freq/hip_amp/knee_amp/kp/kd).
     Handles our exported CPG format (frequency_hz + a per-joint amplitude list/dict) and a freeform dict that
-    already names gait-search keys. Anything missing falls back to a sensible mid gait so the search still runs."""
-    out = {"freq": 1.5, "hip_amp": 0.9, "knee_amp": 1.0, "duty": 0.25, "kp": 120.0, "kd": 6.0}
+    already names gait-search keys. Anything missing falls back to a sensible mid gait so the search still runs.
+
+    An imported ``duty`` is deliberately NOT carried across: the crawl controller derives its swing fraction
+    structurally, so adopting the customer's number would only look like it was honored (task #265)."""
+    out = {"freq": 1.5, "hip_amp": 0.9, "knee_amp": 1.0, "kp": 120.0, "kd": 6.0}
     params = params or {}
     # explicit gait-search keys win outright
     for k in PARAM_NAMES:

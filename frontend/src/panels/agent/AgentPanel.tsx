@@ -135,24 +135,30 @@ export function AgentPanel() {
       invalidate();
       const store = useAssistantStore.getState();
       const result = (job.result ?? {}) as Record<string, unknown>;
+      // An honest refusal (`no_output`) is a legitimate outcome, not an error: the agent explains
+      // why nothing was built and offers a way forward, and no robot is loaded onto the stage.
+      if (job.status === "no_output" && job.kind === "autonomous_build") {
+        const reason =
+          typeof result.blocked_reason === "string"
+            ? result.blocked_reason
+            : typeof result.clarification === "string"
+              ? result.clarification
+              : "No robot package was generated.";
+        store.push({
+          type: "recovery",
+          id: feedId(),
+          ts: Date.now(),
+          title:
+            result.requires_clarification === true ? "Need a clearer robot brief" : "No robot was built",
+          detail: reason,
+          actions: [
+            { label: "Build a rover", prompt: "Build a wheeled rover that navigates to a goal" },
+            { label: "Build an arm", prompt: "Build a tabletop robot arm that sorts blocks" },
+          ],
+        });
+        return;
+      }
       if (job.status === "succeeded" && job.kind === "autonomous_build") {
-        if (result.requires_clarification === true) {
-          store.push({
-            type: "recovery",
-            id: feedId(),
-            ts: Date.now(),
-            title: "Need a clearer robot brief",
-            detail:
-              typeof result.clarification === "string"
-                ? result.clarification
-                : "Specify a body plan and task before Virturoid generates a robot.",
-            actions: [
-              { label: "Build a rover", prompt: "Build a wheeled rover that navigates to a goal" },
-              { label: "Build an arm", prompt: "Build a tabletop robot arm that sorts blocks" },
-            ],
-          });
-          return;
-        }
         const name = typeof result.output_name === "string" ? result.output_name : null;
         if (name) useAppStore.getState().setActivePackage(name);
         const cls = result.robot_class ?? "robot";

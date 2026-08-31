@@ -21,6 +21,54 @@ def _load(output_dir: Path, name: str) -> dict | None:
         return None
 
 
+def _assembly_rows(output_dir: Path, actuator_map: dict) -> dict:
+    """``{"rows": [(joint, parts_list_key, actuator_or_None)], "namespace", "mimic", "unused_keys"}``.
+
+    THE ASSEMBLY TABLE PRINTED THE PARTS LIST'S OWN KEYS UNDER A COLUMN HEADED "Joint", and on every composed
+    body those keys are SEGMENT names: it said ``shoulder`` where ``config/hardware_interface.yaml`` in the same
+    package says ``shoulder_joint`` (measured: 0 of 8 arm rows, 0 of 19 quadruped rows were joint names of the
+    shipped model). A customer cross-referencing the two documents finds names that match nothing and cannot
+    tell a convention from a mistake.
+
+    The two documents now resolve the map the SAME way -- ``ros2_exporter``'s ``_map_key_namespace`` /
+    ``_resolve_actuator``, which decide once per map whether it is keyed by segment or by joint and refuse to
+    guess when the evidence ties -- so the guide's joint names ARE the yaml's joint names, and the key each row
+    was looked up under is printed beside them rather than passed off as one. Nothing is re-derived: the joints
+    come from the package's own genome and URDF, exactly as the ROS 2 export read them.
+
+    A package with no genome on disk (the legacy path) gets rows with no joint name at all; the caller labels
+    that column honestly instead of inventing one.
+    """
+    from virturoid.services.ros2_exporter import (_joint_to_segment, _map_key_namespace,
+                                                  _mimic_joints_from_urdf, _resolve_actuator)
+    genome_p = Path(output_dir) / "robot" / "robot_genome.json"
+    urdf_p = Path(output_dir) / "robot" / "robot.urdf"
+    genome: dict = {}
+    if genome_p.exists():
+        try:
+            genome = json.loads(genome_p.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            genome = {}
+    urdf_text = urdf_p.read_text(encoding="utf-8") if urdf_p.exists() else ""
+    joints = [str(j["name"]) for j in genome.get("joints", []) or [] if isinstance(j, dict) and j.get("name")]
+    if not joints:
+        return {"rows": [(None, str(k), str(v)) for k, v in actuator_map.items()],
+                "namespace": None, "mimic": {}, "unused_keys": []}
+    seg_of = _joint_to_segment(genome, urdf_text)
+    mimic = _mimic_joints_from_urdf(urdf_text) if urdf_text else {}
+    commandable = [j for j in joints if j not in mimic]
+    links = [l if isinstance(l, str) else (l or {}).get("name", "") for l in genome.get("links", []) or []]
+    ns = _map_key_namespace(actuator_map, commandable, seg_of, links)
+    rows, used = [], set()
+    for j in commandable:
+        part, key = _resolve_actuator(j, actuator_map, seg_of, ns["namespace"])
+        rows.append((j, key, part))
+        if part is not None:
+            used.add(key)
+    return {"rows": rows, "namespace": ns, "mimic": mimic,
+            "unused_keys": sorted(str(k) for k in actuator_map if str(k) not in used)}
+
+
 def build_deployment_guide(output_dir) -> str:
     output_dir = Path(output_dir)
     spec = _load(output_dir, "spec_sheet.json") or {}
@@ -34,6 +82,9 @@ def build_deployment_guide(output_dir) -> str:
     has_ros2 = bool(list((output_dir / "export").rglob("package.xml"))) if (output_dir / "export").exists() else False
     has_control = (output_dir / "software" / "control_program.json").exists()
     has_urdf = (output_dir / "robot" / "robot.urdf").exists()
+    fusion = _load(output_dir, "fusion_manifest.json")
+    scripts = _load(output_dir, "script_manifest.json")
+    script_val = _load(output_dir, "script_validation.json")
 
     out: list[str] = []
     out.append(f"# Build *{name}* for real - deployment guide")
@@ -68,12 +119,46 @@ def build_deployment_guide(output_dir) -> str:
     out.append("## 2. Assemble the chassis")
     out.append("")
     if actuator_map:
-        out.append("Mount one actuator per joint as specified by the design:")
-        out.append("")
-        out.append("| Joint | Actuator |")
-        out.append("| --- | --- |")
-        for joint, act in actuator_map.items():
-            out.append(f"| {joint} | {act} |")
+        asm = _assembly_rows(output_dir, actuator_map)
+        ns = asm["namespace"]
+        if ns is None:
+            # No genome in this package: the parts list's keys are all we have, and they are NOT joint names.
+            out.append("Mount one actuator per entry as specified by the design. This package carries no robot "
+                       "genome, so the parts list's own keys are shown; they are not necessarily the joint "
+                       "names your ROS 2 package uses.")
+            out.append("")
+            out.append("| Parts-list key | Actuator |")
+            out.append("| --- | --- |")
+            for _, key, act in asm["rows"]:
+                out.append(f"| {key} | {act} |")
+        else:
+            out.append("Mount one actuator per joint as specified by the design. **Joint** is the joint name "
+                       "this robot's URDF and `config/hardware_interface.yaml` use, so the two documents can be "
+                       "read side by side; **parts-list key** is the entry in the bill of materials that row was "
+                       "looked up under"
+                       + (" (this parts list is keyed by the SEGMENT each joint drives, which is why the two "
+                          "names differ)." if ns["namespace"] == "segment" else
+                          " (this parts list is keyed by joint name)." if ns["namespace"] == "joint" else
+                          " -- but this parts list's keys match neither this robot's joint names nor its segment "
+                          "names, so NOTHING below was resolved from it and every actuator reads as unassigned. "
+                          "A list like that usually belongs to a different robot."))
+            out.append("")
+            out.append("| Joint | Parts-list key | Actuator |")
+            out.append("| --- | --- | --- |")
+            for joint, key, act in asm["rows"]:
+                out.append(f"| {joint} | {key} | {act if act else '_not named by the parts list_'} |")
+            if asm["mimic"]:
+                out.append("")
+                out.append("Not in the table (and deliberately): " + ", ".join(
+                    f"`{d}` is driven through a fixed transmission by `{m['joint']}`"
+                    for d, m in asm["mimic"].items())
+                    + " — a coupled joint has no motor of its own, so there is nothing to mount at it.")
+            if asm["unused_keys"]:
+                out.append("")
+                out.append(f"The parts list also carries {len(asm['unused_keys'])} entr"
+                           f"{'y' if len(asm['unused_keys']) == 1 else 'ies'} no commandable joint resolved to "
+                           "(`" + "`, `".join(asm["unused_keys"][:8])
+                           + ("`, ...)" if len(asm["unused_keys"]) > 8 else "`)") + ".")
         out.append("")
     out.append(f"Use `robot/robot.urdf` (the kinematic description) as the assembly reference."
                if has_urdf else "A URDF was not emitted for this build; use the MJCF in `simulation/` as the "
@@ -95,7 +180,86 @@ def build_deployment_guide(output_dir) -> str:
         out.append("The learned/derived controller is exported at `software/control_program.json` "
                    "(a downstream PD / ros2_control loop tracks its joint targets).")
         out.append("")
-    if not (has_ros2 or has_control):
+    if fusion:
+        kind = fusion.get("kind", "robot")
+        sens = fusion.get("sensors", [])
+        # "CARRIES n SENSOR(S)" IS A CLAIM OF POSSESSION, and on an imported robot the suite is a QUOTE: a
+        # Menagerie Go2 (ncam 0, nsensor 0) was told it "carries 2 sensor(s)" it has none of. The proposed count
+        # comes straight off the compiler's per-entry flag, so this line cannot drift from the config it describes.
+        n_prop = sum(1 for s in sens if s.get("proposed"))
+        carries = (f"This {kind} carries {len(sens)} sensor(s)" if not n_prop else
+                   (f"{n_prop} of these {len(sens)} sensor(s) are PROPOSED ADDITIONS — hardware your own model "
+                    f"does not declare, so their topics have no publisher until you fit them"))
+        out.append(f"**Sensor fusion (state estimation)** — compiled from the BOM, not hand-written. {carries}; "
+                   f"`fusion/` ships the deployable stack:")
+        out.append("")
+        for f in fusion.get("files", []):
+            out.append(f"- `fusion/{f}`")
+        fused = fusion.get("fused_states") or {}
+        if fused:
+            out.append("")
+            out.append("Fused state estimates: " + ", ".join(
+                f"**{st}** ({', '.join(srcs)})" for st, srcs in fused.items()) + ".")
+        for miss in (fusion.get("missing") or [])[:3]:
+            out.append(f"- ⚠️ {miss}")
+        out.append("")
+        out.append("```")
+        out.append("ros2 launch virturoid_robot sensor_fusion.launch.py")
+        out.append("```")
+        out.append("")
+    if scripts:
+        n = len(scripts.get("scripts", []))
+        passed = script_val.get("all_pass") if script_val else None
+        audit = (script_val or {}).get("torque_audit") or {}
+        astat = audit.get("status")
+        badge = "" if passed is None else (" — all **compiled + sim-dry-run** ✅" if passed
+                                           else " — ⚠️ some scripts failed validation")
+        out.append(f"**Operational control scripts** — {n} generated from the robot, not hand-written{badge}. "
+                   f"Under `software/scripts/`:")
+        out.append("")
+        out.append("| Script | Role |")
+        out.append("| --- | --- |")
+        _ROLE = {"obs_assembler.py": "builds the exact observation vector the policy trained on",
+                 "safety_filter.py": "clamps every command to each actuator's peak torque + joint limits",
+                 "state_machine.py": "estop / stand / active / fall-damping supervisory logic",
+                 "watchdog.py": "trips estop on a stalled loop, comms timeout, or joint-limit breach",
+                 "teleop.py": "keyboard/joystick velocity teleop stub",
+                 "calibrate.py": "captures each joint's encoder zero offset"}
+        for s in scripts.get("scripts", []):
+            out.append(f"| `{s}` | {_ROLE.get(s, 'operational control script')} |")
+        out.append("")
+        # The datasheet-torque claim is stated ONLY when the audit that proves it actually ran and passed.
+        # (Before: this paragraph asserted it unconditionally — an inflated control_config.json shipped with the
+        # sentence still under it, and nothing had checked.)
+        if astat == "not_applicable" or (astat == "pass" and not audit.get("n_joints")):
+            # A pass over ZERO joints is every check trivially true over an empty set. Printing the full
+            # "audit passed / the filter was EXECUTED at 10x each joint's peak" paragraph for a jointless body
+            # (a quadcopter) claimed a safety check that never ran on anything.
+            out.append("➖ **Datasheet-torque audit: not applicable** — this robot has no actuated joints, so "
+                       "there is no per-joint datasheet torque to check and nothing was executed. This is NOT a "
+                       "passed safety check; if you add actuated joints, rebuild so the audit can run.")
+        elif astat == "pass":
+            out.append(f"✅ **Datasheet-torque audit passed** ({audit.get('n_joints', '?')} joints). Every torque "
+                       f"ceiling in `control_config.json` was re-derived from the BOM actuator sized for that "
+                       f"joint, and `safety_filter.py` was **executed** on a command at "
+                       f"{audit.get('overdrive_x', 10):g}× each joint's datasheet peak: nothing above the peak "
+                       f"came back out, and `audit()` named every breach.")
+        elif astat == "fail":
+            out.append("⚠️ **This control stack FAILED the datasheet-torque audit — do not run it on hardware "
+                       "until these are resolved:**")
+            for v in (audit.get("violations") or [])[:6]:
+                out.append(f"  - {v}")
+        else:
+            out.append("⚠️ The datasheet-torque audit **did not run** for this build, so the torque ceilings in "
+                       "`control_config.json` have **not** been checked against the BOM actuators. Treat them as "
+                       "unverified.")
+        if audit.get("unaudited_scripts"):
+            out.append(f"  - Not covered by that audit: "
+                       f"{', '.join('`' + s + '`' for s in audit['unaudited_scripts'])} "
+                       f"(not generated by Virturoid). The audit also cannot check that your own code routes its "
+                       f"commands through `safety_filter.py` — that is on you.")
+        out.append("")
+    if not (has_ros2 or has_control or fusion or scripts):
         out.append("_No ROS2 package or control program was exported for this build._")
         out.append("")
 

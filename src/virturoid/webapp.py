@@ -11,13 +11,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import threading
 import traceback
 import uuid
 from pathlib import Path
 
 from fastapi import FastAPI
-from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
 
 from virturoid.services.agent import VirturoidAgent, parse_intent
 
@@ -147,18 +148,34 @@ def create_app(workspace: Path) -> FastAPI:
         import mujoco
         import numpy as np
 
-        from virturoid.services.gene_compiler import compile_gene_to_mjcf, gene_to_meshed_mjcf
+        from virturoid.services.gene_compiler import compile_gene_to_mjcf, write_packaged_visual_mjcf
         from virturoid.services.robot_factory import build_robot
         from virturoid.services.viewer_sim import _geom_metadata
 
         try:
             result = build_robot(prompt)
             gene = result["gene"]
-            try:
-                model_xml = gene_to_meshed_mjcf(gene)
-            except Exception:  # noqa: BLE001 - degrade preview to primitive geometry instead of failing
-                model_xml = compile_gene_to_mjcf(gene)
-            model = mujoco.MjModel.from_xml_string(model_xml)
+            mesh_uris = {}
+            # ONE DIRECTORY PER REQUEST. ``.preview`` used to be shared by every /api/preview call, which was
+            # merely wasteful while the visual writer only ever ADDED files -- and became destructive the moment
+            # it started removing the ones the current robot does not use. Measured with two concurrent
+            # previews of different robots into the shared directory: one lost 7 of its own 7 mesh assets and
+            # the other 5 of 18, so the URIs each response had just handed the browser 404'd. The assets have to
+            # outlive the response (the browser fetches them afterwards through /api/artifact-binary), so a lock
+            # around the write would not have helped; the requests need separate directories.
+            rel_root = Path(".preview") / uuid.uuid4().hex[:12]
+            preview_root = project_dir / rel_root
+            visual = write_packaged_visual_mjcf(gene, preview_root, include_floor=True)
+            if visual:
+                model = mujoco.MjModel.from_xml_path(str(preview_root / visual["model_uri"]))
+                index = json.loads((preview_root / visual["mesh_index_uri"]).read_text(encoding="utf-8"))
+                mesh_uris = {
+                    name: {**meta, "uri": (rel_root / meta["uri"]).as_posix()}
+                    for name, meta in index.get("meshes", {}).items()
+                }
+            else:
+                model = mujoco.MjModel.from_xml_string(compile_gene_to_mjcf(gene))
+            _reap_preview_dirs(project_dir)
         except Exception as exc:  # noqa: BLE001 - a bad/unbuildable prompt must not 500
             return JSONResponse({"error": f"Could not compose a robot: {exc}"}, status_code=400)
 
@@ -174,7 +191,7 @@ def create_app(workspace: Path) -> FastAPI:
         ee = gene.end_effector_type
         return {
             "preview": True, "task": "preview",
-            "geoms": _geom_metadata(model),
+            "geoms": _geom_metadata(model, mesh_uris),
             "frames": [frame], "frame_count": 1,
             "outcome": {"status": "preview", "placed_count": 0, "block_count": 0},
             "robot": {
@@ -219,7 +236,56 @@ def create_app(workspace: Path) -> FastAPI:
             return JSONResponse({"error": "not found"}, status_code=404)
         return PlainTextResponse(target.read_text(encoding="utf-8"))
 
+    @app.get("/api/artifact-binary")
+    def artifact_binary(path: str):
+        """Serve one package asset to the local Studio viewer.
+
+        The containment check is deliberately identical to the text artifact endpoint;
+        exposing an arbitrary local-file route for a convenience viewer would be unsafe.
+        """
+        target = (project_dir / path).resolve()
+        if project_dir.resolve() not in target.parents or not target.is_file():
+            return JSONResponse({"error": "not found"}, status_code=404)
+        return FileResponse(target, media_type="application/octet-stream")
+
     return app
+
+
+#: preview scratch directories to keep, and how long one is guaranteed to live. Every /api/preview writes its
+#: own; the browser fetches the meshes AFTER the response returns, so a directory is not free to go the moment
+#: the next request starts.
+_PREVIEW_KEEP = 8
+_PREVIEW_MIN_AGE_S = 120.0
+_PREVIEW_DIR_RE = re.compile(r"^[0-9a-f]{12}$")
+
+
+def _reap_preview_dirs(project_dir: Path) -> None:
+    """Drop old per-request preview scratch directories under ``.preview/``.
+
+    The only things removed are directories THIS server minted: the name has to be one of our 12-hex request
+    tokens AND the directory has to carry the visual-model index we write into it. That is the same rule the
+    exporters' prune follows -- delete what we can show is ours, leave everything else -- and it matters here
+    because ``project_dir`` is the customer's workspace. A directory is also never removed while it is one of
+    the ``_PREVIEW_KEEP`` most recent or younger than ``_PREVIEW_MIN_AGE_S``, so a response that has just handed
+    the browser a set of mesh URIs cannot have them swept out from under it.
+    """
+    import shutil
+    import time
+
+    root = Path(project_dir) / ".preview"
+    if not root.is_dir():
+        return
+    try:
+        mine = [(p.stat().st_mtime, p) for p in root.iterdir()
+                if p.is_dir() and _PREVIEW_DIR_RE.match(p.name)
+                and (p / "simulation" / "viewer_mesh_index.json").is_file()]
+    except OSError:
+        return
+    now = time.time()
+    for mtime, p in sorted(mine, key=lambda t: t[0], reverse=True)[_PREVIEW_KEEP:]:
+        if now - mtime < _PREVIEW_MIN_AGE_S:
+            continue
+        shutil.rmtree(p, ignore_errors=True)
 
 
 def _has_project(project_dir: Path) -> bool:

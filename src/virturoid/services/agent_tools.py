@@ -162,6 +162,14 @@ def _design_search(args: dict) -> dict:
             "best": ({"params": b.spec.get("params"), "forward_m": round(float(b.result.get("forward", 0)), 3),
                       "cadence": round(float(b.result.get("cadence", 0)), 1),
                       "failure_mode": b.artifact["failure_mode"], "fitness": b.fitness} if b else None),
+            # A tool that produces a controller must say where that controller went. This one searches a body
+            # COMPOSED FROM THE PROMPT and never held, so there is nothing for the winner to land on — which is
+            # a fine contract, but only if it is stated. (The sweep that closed ``train_held``, 2026-08-08.)
+            "applied_to_robot": {"applied": False, "reason": "design_search explores a body composed from the "
+                                 "prompt, not a held robot, so its winning parameters are an ARTIFACT and were "
+                                 "applied to nothing. To fit and LAND a controller on a robot you hold: "
+                                 "learn_gait / adapt_gait / train_held {robot_id}, or apply_gait with these "
+                                 "params once the body is held."},
             "tree": rep.tree()}
 
 
@@ -169,11 +177,35 @@ def _capabilities(_args: dict) -> dict:
     """The task types + skills the platform can build/evaluate (the capability registry)."""
     try:
         from virturoid.services.capability_registry import capability_summary
-        return capability_summary()
+        out = capability_summary()
     except Exception:  # noqa: BLE001 - registry shape varies; fall back to the known task types
-        return {"tasks": ["pick_place_sort", "pick_place", "stack", "shelf", "push", "transport",
-                          "grasp", "locomotion", "navigation", "spray_coverage"],
-                "morphologies": ["manipulator", "quadruped", "legged", "mobile_base", "humanoid", "spray"]}
+        out = {"tasks": ["pick_place_sort", "pick_place", "stack", "shelf", "push", "transport",
+                         "grasp", "locomotion", "navigation", "spray_coverage"],
+               "morphologies": ["manipulator", "quadruped", "legged", "mobile_base", "humanoid", "spray"]}
+    # An engineer looking for the sim-to-real gap searched exactly this tool and found nothing, because
+    # `capability_summary` enumerates TASKS a body can be scored on and system identification is not one. It is
+    # a capability all the same, and the answer to "can this product tell me how far its sim is from my robot?"
+    # cannot be silence. Derived from the live registry so it disappears if the tools ever do.
+    if isinstance(out, dict):
+        try:
+            from virturoid.services.sysid.tools import JOURNEY
+            steps = [dict(s) for s in JOURNEY if s["tool"] in TOOLS]
+        except Exception:  # noqa: BLE001
+            steps = []
+        if steps:
+            out["sim_to_real"] = {
+                "what": "measure how far this simulator is from a PHYSICAL robot, per joint, in rad / ms / N.m "
+                        "-- then fit the actuator parameters that close it and apply them, reversibly",
+                "entry_point": ("calibrate_to_hardware" if "calibrate_to_hardware" in TOOLS else steps[0]["tool"]),
+                "journey": steps,
+                "needs": "a log from a short bench experiment run on the real machine. Without hardware, "
+                         "simulate_bench_log produces one off a perturbed copy of the model and labels every "
+                         "downstream result as a simulation rather than a measurement",
+                "does_not_cover": "contact, terrain and payload: the experiment is deliberately run with the "
+                                  "robot on a stand so the residual is actuator dynamics and control-signal "
+                                  "delay, which is where the literature puts the dominant term",
+            }
+    return out
 
 
 # ---------------------------------------------------------------- the registry
@@ -298,24 +330,443 @@ try:
 except Exception:  # noqa: BLE001
     pass
 
+try:
+    from virturoid.services.reward_loop import REWARD_LOOP_TOOLS
+    TOOLS.update(REWARD_LOOP_TOOLS)                          # R1: LLM-authored-reward training from an NLP task
+except Exception:  # noqa: BLE001
+    pass
+
+# THE SIM-TO-REAL GAP -- our headline differentiator, and until this line it had no door. Four engineers used the
+# product, searched `list_tools` (67 tools), `capabilities`, the README and the Studio for it, and found nothing:
+# 3,156 lines under `services/sysid/` plus `services/sim2real.py` were reachable only by importing the package.
+# `grep -rn "import sim2real" src/` returned nothing, and the one README mention sat under "## Roadmap", telling
+# a prospect the feature did not exist. Their verdict once they got in by importing internals was "the gap report
+# is the best artifact in the product" -- which is what makes good-and-unreachable the worst combination there is.
+try:
+    from virturoid.services.sysid.tools import SYSID_TOOLS
+    TOOLS.update(SYSID_TOOLS)
+except Exception:  # noqa: BLE001 - the rest of the surface stays available if sysid has an issue
+    pass
+
+
+# ---------------------------------------------------------------- the ADVERTISED schema must be TRUE
+#
+# ``parameters`` is not documentation, it is the CONTRACT a strict MCP client validates ``tools/call`` arguments
+# against — an argument the schema does not declare is REJECTED before it ever reaches the handler. So a
+# parameter a handler honours but the schema hides is not a doc nit; it is a call the customer's agent CANNOT
+# MAKE. Measured at HEAD, 21 of 67 registered tools hid 39 accepted keys between them, and the worst was the one
+# we instruct agents to use most: ``verify_robot`` advertised ``{robot_id}`` alone while accepting ``mode``,
+# ``steps`` and ``scene_id`` — and both the MCP ``initialize`` instructions and the ``design_robot_workflow``
+# prompt told agents to send ``mode:'quick'``. A strict client rejected the exact call the server taught it.
+#
+# The repair DERIVES instead of restating: ``_accepted_params`` reads a handler's own body for the keys it pulls
+# out of its args dict, and ``_publish_accepted_params`` publishes every one the schema is missing. ``_PARAM_DOCS``
+# adds the enum/units/meaning an agent needs where the derived shape is too thin; ``_NOT_ADVERTISED`` is the one
+# place a key can be kept off the contract, and it must say why. Because the source of truth is the handler
+# itself, a parameter added tomorrow cannot go quietly unadvertised — ``tests/test_tool_registration.py`` fails.
+#
+# Applied HERE, in the aggregator, rather than in each sub-registry: this module is the single surface both
+# ``call_tool`` and the MCP server read, so one pass covers ai_native/design/input-training/reward tools alike
+# and there is exactly one schema per tool in the process (the specs are shared dicts, corrected in place).
+
+_COERCE = {"int": "integer", "float": "number", "bool": "boolean", "str": "string"}
+_LITERAL_TYPE = {bool: "boolean", int: "integer", float: "number", str: "string"}
+_ACCEPTED_CACHE: dict = {}
+
+
+def _accepted_params(handler, _seen: frozenset = frozenset()) -> dict[str, dict]:
+    """Every key ``handler`` pulls out of its args dict, with the type/default it is read with.
+
+    Reads the handler's own AST for ``args["k"]``, ``args.get("k")`` and ``args.pop("k")`` (including the
+    ``(args or {}).get("k")`` guard idiom), and infers the JSON-Schema type from the coercion wrapped around the
+    read (``int(...)``/``float(...)``/``bool(...)``/``str(...)``) or from a literal default.
+
+    IT FOLLOWS A WHOLESALE FORWARD (``_inner(args)``), and that is not a refinement — it is the fix for a
+    measured capability regression. This used to stop at the handler's own body and call the blind spot
+    harmless, on the reasoning that it "UNDER-reports rather than inventing parameters no handler honours".
+    Under-reporting is not the safe side here: ``_publish_accepted_params`` PUBLISHES what this returns, so a
+    key it cannot see is a key that DISAPPEARS from the tool's advertised schema. When ``ingest_project``'s
+    body moved behind a one-line read-only wrapper, ``nlp`` — the documented alias an agent uses to send
+    "aluminium chassis, carbon-fibre legs, 5 kg payload" — vanished from the schema while the handler went on
+    honouring it. Nothing was removed and nothing was deprecated; the parameter simply stopped being
+    advertised, which is the drift this whole file exists to prevent, arriving through the one door that was
+    left open on purpose.
+
+    Following is still one-sided in the safe direction: only a call passing the args dict ITSELF is followed
+    (``probe(gene, args)`` qualifies; ``probe(gene, args["spec"])`` does not), only to a function this module
+    can resolve and read source for, and ``_seen`` stops a recursive or mutually-recursive pair. A key found in
+    the wrapper keeps ITS type — the outer read is the more specific one.
+
+    Memoized per process. ``inspect.getsource`` reads the file by LINE NUMBER, so a source file edited while
+    this process is alive makes a later call disagree with the one that built the schema; the first read — at
+    import, the same moment the schema is published — is the one that counts."""
+    import ast
+    import inspect
+    import textwrap
+    try:
+        return _ACCEPTED_CACHE[handler]
+    except (KeyError, TypeError):
+        pass
+    try:
+        tree = ast.parse(textwrap.dedent(inspect.getsource(handler)))
+    except (OSError, TypeError, SyntaxError, IndentationError, ValueError):
+        return {}
+    fn = tree.body[0] if tree.body else None
+    if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)) or not fn.args.args:
+        return {}
+    argname = fn.args.args[0].arg
+    parent: dict[int, ast.AST] = {}
+    for node in ast.walk(fn):
+        for child in ast.iter_child_nodes(node):
+            parent[id(child)] = node
+
+    def is_args(node) -> bool:
+        if isinstance(node, ast.Name):
+            return node.id == argname
+        return (isinstance(node, ast.BoolOp) and isinstance(node.op, ast.Or)
+                and bool(node.values) and is_args(node.values[0]))
+
+    def coerced_type(node):
+        """Walk out through ``.lower()``/``or``/parens to the ``int(...)``-style call wrapping the read."""
+        cur = parent.get(id(node))
+        for _ in range(3):
+            if isinstance(cur, ast.Call) and isinstance(cur.func, ast.Name) and cur.func.id in _COERCE:
+                return _COERCE[cur.func.id]
+            if isinstance(cur, (ast.Call, ast.BoolOp, ast.Attribute)):
+                cur = parent.get(id(cur))
+                continue
+            return None
+        return None
+
+    found: dict[str, dict] = {}
+
+    def record(key: str, node, default=None) -> None:
+        prop = found.setdefault(key, {})
+        kind = coerced_type(node)
+        if kind:
+            prop.setdefault("type", kind)
+        if isinstance(default, ast.Constant) and type(default.value) in _LITERAL_TYPE:
+            prop.setdefault("type", _LITERAL_TYPE[type(default.value)])
+            prop.setdefault("default", default.value)
+
+    forwarded_to: list[ast.Call] = []
+    for node in ast.walk(fn):
+        if (isinstance(node, ast.Subscript) and is_args(node.value)
+                and isinstance(node.slice, ast.Constant) and isinstance(node.slice.value, str)):
+            record(node.slice.value, node)
+        elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr in ("get", "pop") and is_args(node.func.value) and node.args
+                and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str)):
+            record(node.args[0].value, node, node.args[1] if len(node.args) > 1 else None)
+        elif isinstance(node, ast.Call) and any(is_args(a) for a in node.args):
+            forwarded_to.append(node)                          # the whole dict went somewhere else; follow it
+
+    # Follow each wholesale forward into the callee and union what IT reads. Resolution is deliberately
+    # narrow — a bare name, or one attribute off a module-level name, both looked up in the handler's OWN
+    # globals — so an unresolvable or dynamically-built callee yields nothing rather than a guess.
+    seen = _seen | {handler}
+    for call in forwarded_to:
+        target, ref = None, call.func
+        if isinstance(ref, ast.Name):
+            target = handler.__globals__.get(ref.id) if hasattr(handler, "__globals__") else None
+        elif isinstance(ref, ast.Attribute) and isinstance(ref.value, ast.Name):
+            owner = handler.__globals__.get(ref.value.id) if hasattr(handler, "__globals__") else None
+            target = getattr(owner, ref.attr, None) if owner is not None else None
+        # A plain function only: it is the case that matters, it is always hashable (so `seen` is safe), and a
+        # class or builtin would just parse to nothing after a pointless `getsource`.
+        if not inspect.isfunction(target) or target in seen:
+            continue
+        for key, derived in _accepted_params(target, seen).items():
+            found.setdefault(key, dict(derived))               # the OUTER read, where there is one, wins
+
+    # Cache only the TOP-level answer. A result computed under a non-empty ``_seen`` may be missing whatever
+    # the cycle-breaker skipped, and storing that would hand a later direct call a silently truncated set —
+    # the same "a key quietly stops being advertised" failure this function was just fixed for.
+    if not _seen:
+        try:
+            _ACCEPTED_CACHE[handler] = found
+        except TypeError:                                      # unhashable handler; recompute next time
+            pass
+    return found
+
+
+# Keys a handler reads that are deliberately NOT part of the public contract. Empty on purpose: every key the
+# audit found was a real, useful lever an agent was simply unable to pull. An entry here must carry its reason,
+# because it is the one way to keep something off the advertised schema without the guard failing.
+_NOT_ADVERTISED: dict[str, frozenset[str]] = {}
+
+# Where the derived ``{type, default}`` is too thin for an agent to use the parameter correctly. Only consulted
+# for keys the schema was MISSING; a stale entry (naming a key the handler no longer reads) fails the guard.
+_PARAM_DOCS: dict[str, dict[str, dict]] = {
+    "verify_robot": {
+        "mode": {"type": "string", "enum": ["quick", "full"], "default": "full",
+                 "description": "'quick' = the fast iterate check (legged: 800 steps, no GIF, reports "
+                                "settled:false); 'full' = the definitive verdict over the settling horizon, "
+                                "with a GIF for a legged body. Iterate on quick, claim on full."},
+        "steps": {"type": "integer", "description": "override the simulated horizon; default is chosen per "
+                                                    "robot kind and mode (legged full = the settling horizon)"},
+        "scene_id": {"type": "string", "description": "run the verdict inside a HELD scene (create_scene/"
+                                                      "submit_scene_spec). Matters for drive/reach; a legged "
+                                                      "gait verdict stays obstacle-free and says so."},
+    },
+    "edit_robot": {
+        "gate_non_regression": {"type": "boolean", "default": True,
+                                "description": "auto-revert the edit if deterministic design findings get worse"},
+        "gate_connectivity": {"type": "boolean", "default": True,
+                              "description": "reject an edit that newly DETACHES a link from the body"},
+    },
+    "export_held": {
+        "task": {"type": "string", "description": "task the BOM/spec should be sized for (default: the robot's "
+                                                  "own prompt)"},
+        "out_dir": {"type": "string", "description": "output dir, confined under build/ (default agent_exports)"},
+        "certificate_margins": {"type": "boolean", "default": True,
+                                "description": "run the margin checks behind the 'certificate' format"},
+        "dr_sweep": {"type": "boolean", "default": False,
+                     "description": "add a frozen-policy domain-randomization sweep with a Clopper-Pearson bound"},
+        "dr_draws": {"type": "integer", "default": 12, "description": "draws in that DR sweep"},
+    },
+    "export_isaac": {"out_dir": {"type": "string",
+                                 "description": "output dir, confined under build/ (default agent_exports)"}},
+    "train_held": {
+        "iters": {"type": "integer", "default": 200, "description": "PPO iterations when mode='gpu_rl'"},
+        "build_root": {"type": "string", "description": "job workspace, confined under build/"},
+    },
+    "start_training": {
+        "target": {"type": "number", "default": 0.8, "description": "target success rate to build toward"},
+        "build_root": {"type": "string", "description": "job workspace, confined under build/"},
+    },
+    "create_robot": {"tune_gait": {"type": "boolean", "default": True,
+                                   "description": "fit a per-body gait after composing (legged only); false is "
+                                                  "much faster but the body arrives untuned"},
+                     "gait_budget_s": {"type": "number", "default": 180,
+                                       "description": "seconds of gait SEARCH this build may spend in total "
+                                                      "(0 = unbounded). Measured: the fit is >90% of a slow "
+                                                      "build and runs more than once per call, so it is ONE "
+                                                      "clock shared across them, started at the first search"}},
+    "assert_design": {"list": {"type": "boolean",
+                               "description": "shortcut for kind:'list' — return the assertion vocabulary"}},
+    "ingest_project": {
+        "path": {"type": "string", "description": "alias for project_path"},
+        "nlp": {"type": "string", "description": "alias for description (the plain-language spec to parse)"},
+    },
+    "submit_scene_spec": {
+        "name": {"type": "string", "default": "agent_scene", "description": "name for the held scene"},
+        "theme": {"type": "string", "description": "theme tag recorded on the scene (default 'custom')"},
+    },
+    "submit_task": {
+        "name": {"type": "string", "default": "agent_task", "description": "name for the authored task"},
+        "goal_text": {"type": "string", "description": "plain-language restatement of the goal, kept with the task"},
+    },
+    "pin_part": {"name": {"type": "string", "description": "alias for part"}},
+    "part_specs": {"name": {"type": "string", "description": "alias for part"}},
+    "bank_shape_word": {"program": {"type": "object", "description": "alias for shape_program"}},
+    "ask_episode": {"prompt": {"type": "string", "description": "alias for question"}},
+    "train_reward": {
+        "steps": {"type": "integer", "default": 800, "description": "physics steps per candidate rollout"},
+        "seed": {"type": "integer", "default": 0, "description": "search seed (set it to reproduce a run)"},
+    },
+    "learn_gait": {
+        "workers": {"type": "integer", "default": 1, "description": "parallel rollout workers"},
+        "db_path": {"type": "string", "description": "explicit memory DB path (default the shared memory dir)"},
+    },
+    "apply_gait": {
+        "apply": {"type": "string", "enum": ["always", "never"], "default": "always",
+                  "description": "'always' (default) commits the parameters — that is what this tool is for; "
+                                 "'never' validates them and reports what WOULD land, changing nothing"},
+    },
+    "adapt_gait": {
+        "steps": {"type": "integer", "default": 600, "description": "physics steps per candidate rollout"},
+    },
+    "plan_training": {"scene_set_refs": {"type": "array", "items": {"type": "string"},
+                                         "description": "scene sets the ladder should plan against"}},
+    "check_perception_leakage": {
+        "id": {"type": "string", "default": "contract_adhoc", "description": "id for this observation contract"},
+        "perception_rung": {"type": "string",
+                            "description": "perception rung of the contract (default rung 0, privileged)"},
+        "task_graph_id": {"type": "string", "default": "task"},
+        "scene_set_id": {"type": "string", "default": "scenes"},
+        "robot_genome_id": {"type": "string", "default": "body"},
+    },
+}
+
+
+def _publish_accepted_params() -> dict[str, list[str]]:
+    """Add every handler-accepted key the tool's schema was hiding. Returns ``{tool: [keys added]}``."""
+    added: dict[str, list[str]] = {}
+    for name, spec in TOOLS.items():
+        params = spec.get("parameters")
+        if not isinstance(params, dict) or params.get("type") != "object":
+            continue
+        props = params.setdefault("properties", {})
+        hidden = _NOT_ADVERTISED.get(name, frozenset())
+        docs = _PARAM_DOCS.get(name, {})
+        for key, derived in sorted(_accepted_params(spec.get("handler")).items()):
+            if key in props or key in hidden:
+                continue
+            props[key] = dict(docs.get(key) or derived)
+            added.setdefault(name, []).append(key)
+    return added
+
+
+def _derive_registry_backed_docs() -> None:
+    """Where a description RESTATES a registry, derive it instead — restating is how it drifts.
+
+    Two shipped instances, both found by diffing the prose against the registry behind it:
+      * ``edit_ops`` named 4 of the 8 ``edit_operators.OPERATORS``, and
+      * ``export_held`` named 8 of the 9 ``_EXPORT_FORMATS`` — the missing one being ``certificate``, the
+        verification certificate, which is the export an honest product most wants an agent to ask for.
+    """
+    _derive_operator_catalog()
+    _derive_export_formats()
+    _derive_reward_vocabulary()
+
+
+def _derive_reward_vocabulary() -> None:
+    """``train_reward``'s ``reward`` parameter must SHOW the DSL, from ``reward_dsl`` itself.
+
+    A third instance of the same defect, and the worst-shaped one: the MCP ``instructions`` told every connected
+    agent that ``train_reward`` is where "you author a reward-as-code objective", and until 2026-08-08 the tool
+    had no ``reward`` parameter to author into — while ``reward_dsl.REWARD_FEATURES``, the ten-term vocabulary
+    the whole DSL is built on, was exposed by NO tool in the registry. An agent could not have written a legal
+    expression if it wanted to. The parameter exists now, and the vocabulary rides on it derived rather than
+    restated, so adding an eleventh feature cannot leave the contract describing ten.
+    """
+    spec = TOOLS.get("train_reward")
+    if spec is None:
+        return
+    try:
+        from virturoid.services.reward_dsl import _SAFE_FUNCS, REWARD_FEATURES
+    except Exception:  # noqa: BLE001 - enrichment is never worth breaking the registry for
+        return
+    prop = spec["parameters"]["properties"].get("reward")
+    if not isinstance(prop, dict):
+        return
+    prop["description"] = (prop.get("description", "").rstrip()
+                           + " FEATURES (the only names allowed): " + ", ".join(REWARD_FEATURES)
+                           + ". FUNCTIONS: " + ", ".join(sorted(_SAFE_FUNCS))
+                           + ". Example: 'max(0.0, forward_vel)*alive + 0.3*upright - 0.2*slip'.")
+
+
+def _derive_export_formats() -> None:
+    """``export_held``'s format list, from ``agent_design_tools._EXPORT_FORMATS``, as prose AND as an enum."""
+    spec = TOOLS.get("export_held")
+    if spec is None:
+        return
+    try:
+        from virturoid.services.agent_design_tools import _EXPORT_FORMATS
+    except Exception:  # noqa: BLE001
+        return
+    fmts = list(_EXPORT_FORMATS)
+    missing = [f for f in fmts if f not in spec["description"]]
+    if missing:
+        spec["description"] = spec["description"].rstrip() + " Also accepts: " + ", ".join(missing) + "."
+    props = spec["parameters"]["properties"]
+    props["formats"] = {**(props.get("formats") or {}), "type": "array",
+                        "items": {"type": "string", "enum": fmts},
+                        "description": f"any of {', '.join(fmts)}; omit for all {len(fmts)}"}
+
+
+def _derive_operator_catalog() -> None:
+    """``edit_ops``/``edit_robot`` must name EVERY operator ``edit_operators.OPERATORS`` can apply.
+
+    Restating the list in prose let it drift: the shipped description named 4 of 8 (scale_group/set_height/
+    set_material/set_leg_count), so scale_robot, set_payload, add_limb and adopt_walkable_template — four real
+    capabilities, one of them the ONLY way to grow a new limb — were invisible to every agent reading
+    tools/list. Derived from the registry it cannot drift again, and the same names go into ``ops[].op`` as an
+    enum so a client that validates schemas discovers them without reading prose at all."""
+    try:
+        from virturoid.services.edit_operators import OPERATORS
+    except Exception:  # noqa: BLE001 - description enrichment is never worth breaking the registry for
+        return
+    ops = sorted(OPERATORS)
+    if "edit_ops" in TOOLS:
+        TOOLS["edit_ops"]["description"] = (
+            f"Discover the typed LOCALIZED edit operators and their args — all {len(ops)} of them: "
+            + " | ".join(ops) + ". Feed one to edit_robot as ops:[{op, args}].")
+    spec = TOOLS.get("edit_robot")
+    if spec:
+        props = spec["parameters"]["properties"]
+        # `{op:'undo'}` / `{op:'list'}` are accepted inside `ops` too (the single-verb shortcut), so the enum
+        # a strict client validates against has to admit them or it would reject a documented call.
+        verbs = sorted(set(ops) | {"undo", "list"})
+        prev = props.get("ops") or {}
+        props["ops"] = {**prev, "type": "array", "description": prev.get(
+            "description", "list of {op, args} localized edits"),
+            "items": {"type": "object", "required": ["op"],
+                      "properties": {"op": {"type": "string", "enum": verbs},
+                                     "args": {"type": "object", "description": "operator args; see edit_ops"}}}}
+
+
+SCHEMA_REPAIRS: dict[str, list[str]] = _publish_accepted_params()
+_derive_registry_backed_docs()
+
 
 # The CONSOLIDATED MCP surface (agent_first_plan.md G-G). Research: Cursor caps ~40 active tools ACROSS all
 # servers and SILENTLY drops the rest; Codex/weaker clients degrade with a big flat menu. So the MCP server
-# advertises this small, workflow-shaped view (<=15) instead of all ~30 registry tools. Every folded tool is
+# advertises this small, workflow-shaped view instead of all ~74 registry tools. Every folded tool is
 # still callable by name (call_tool dispatches the full registry) — we just don't crowd the menu with it:
 #   describe_robot/diagnose_body -> get_robot ; simulate_gait -> verify_robot(mode) ; undo_robot+edit_ops ->
 #   edit_robot(op) ; search_memory/nearest_bodies -> recall_knowledge ; list_tools/capabilities/design_brain/
 #   build_robot/evaluate_robot/design_search/start_training/submit_scene_spec -> covered by the loop tools +
 #   the server `instructions`. Ordered by the canonical loop so the menu reads as a workflow.
+#
+# WHAT THE CAP ACTUALLY PROTECTS, and why it moved from 15 to 16 on 2026-08-08. It is not a protocol limit and
+# nothing here enforces it; it is OUR SHARE of a CLIENT-side budget: Cursor's ~40 active tools across every
+# connected server, silently dropped past that. 15 was a share allocation, not a measurement (the plan's own
+# target was "~13"), and it leaves the rest of the customer's stack ~25 slots. There is a SECOND client budget
+# underneath it — Claude Code's ~25k-token cap on a tools/list response — and the two trade against each other,
+# which is the part that had gone unmeasured. The only way we had of keeping the count down was to name folded
+# tools inside an ANCHOR tool's description, and that spends the payload budget instead: measured 2026-08-08,
+# verify_robot's registry description is 387 chars and its tools/list description was 1,175 (+788 of sibling
+# text), train_held 154 -> 904. The whole payload is 11,676 bytes (~2.9k tokens) at 15 entries, so the token
+# budget is not the binding constraint — the COUNT is, and only against Cursor.
+#
+# The sim-to-real chain forced the question. Six tools named only inside verify_robot's paragraph is a door a
+# careful reader finds and a model's tool-SELECTION step does not. Six first-class entries would have cost
+# 10,761 bytes of payload (nearly doubling it) and 6 of Cursor's ~40 — that is the real thing the cap protects
+# against, and it is a cost worth refusing. So the chain is GROUPED behind one entry (`calibrate_to_hardware`,
+# which names all six in its own `step` enum and dispatches each) for ONE slot, and verify_robot's 788-char
+# sibling paragraph collapses to a one-line pointer. Net: +1 of 40 on the count budget, roughly flat on payload,
+# and the capability is selectable instead of buried. Add the 17th only with the same arithmetic.
 MCP_TOOL_VIEW: tuple[str, ...] = (
-    "get_design_schema", "submit_design", "create_robot",      # author / generate a robot
+    "get_design_schema", "submit_design", "critique_design",  # author / see-measure-critique
     "ingest_project",                                          # INGEST an existing robot folder (gateway, below)
     "get_robot", "edit_robot", "render_view",                  # inspect / localized-edit / see
-    "verify_robot", "evaluate_held", "run_task",               # honest verdict / task score / any-goal task
-    "create_scene", "edit_scene",                              # themed scene + re-theme
+    "verify_robot", "calibrate_to_hardware", "run_task",       # honest verdict / sim-to-real / any-goal task
+    "create_scene",                                             # themed scene (edit_scene stays callable)
     "train_held", "get_job", "export_held",                    # train (job) / poll / export
     "recall_knowledge", "llm_spend",                           # memory recall / zero-token proof
 )
+
+#: The cross-client COUNT budget above, in one place so the server, the tests and this module cannot drift on
+#: it. Raising it is a decision about the CUSTOMER's other MCP servers, so it is named rather than inlined.
+MCP_TOOL_VIEW_MAX = 16
+
+# ADVANCED AUTHORING (M5, 2026-07-24 audit): the reward-loop / sensor-fusion / control-script compilers are
+# callable-by-name but kept OUT of the lean core menu (which must stay within the cross-client budget). Like the
+# ingestion siblings, they are advertised by name in the anchor tool's description so an MCP client can discover
+# and call them without bloating tools/list.
+_ADVANCED_SIBLINGS: tuple[str, ...] = ("train_reward", "generate_fusion", "generate_control_scripts")
+
+# THE PER-BODY CONTROLLER FITTERS, which were on NO wire at all (2026-08-08). ``learn_gait`` and ``adapt_gait``
+# are the only two tools that fit a gait to a SPECIFIC body — the thing a customer with their own robot most
+# wants — and they were absent from ``tools/list``, absent from the server ``instructions``, and absent from
+# every sibling list, so a connected agent could only find them by grepping our source. They dispatch fine
+# through ``call_tool``; they were simply undiscoverable, which for an agent-driven product is the same as not
+# existing. ``apply_gait`` joins them because a fitted controller you cannot attach is a number, not a result.
+_GAIT_SIBLINGS: tuple[str, ...] = ("learn_gait", "adapt_gait", "apply_gait", "flywheel_hints")
+_DESIGN_SIBLINGS: tuple[str, ...] = ("create_robot", "evaluate_held")
+_SCENE_SIBLINGS: tuple[str, ...] = ("edit_scene", "submit_scene_spec")
+
+# MEASURE / DECLARE-INTENT and DRY-RUN-THE-AMEND. These three shipped fully implemented and were registered
+# NOWHERE — so `call_tool`, `tools/list` and `tools/call` all rejected them, while `get_design_schema` was
+# telling the customer's own model "Check it with probe_robot rather than reasoning about frames": we advertised
+# a tool that did not exist on the wire. They are registered in AI_NATIVE_TOOLS now (so tools/call dispatches
+# them), and advertised here on the anchor they belong to rather than added to MCP_TOOL_VIEW, because that view
+# is at its documented cross-client cap of 15 and test_agent_first asserts it. Same treatment as the ingest and
+# advanced-authoring siblings: named in the tools/list payload, callable by name.
+_INSPECT_SIBLINGS: tuple[str, ...] = ("probe_robot", "assert_design")
+_AMEND_SIBLINGS: tuple[str, ...] = ("scope_amend",)
 
 # INGESTION GATEWAY (P0, agentic-ingestion plan): the plan found ZERO ingestion tools in the MCP view, so a
 # customer's own agent (the BYOK model) could not DISCOVER ingestion from tools/list at all. Rather than crowd
@@ -327,10 +778,24 @@ _INGEST_SIBLINGS: tuple[str, ...] = (
     "import_cad", "adopt_control_script", "sandbox_policy",
 )
 
+# THE SIM-TO-REAL GAP. `verify_robot` is where a customer asks "is this verdict true?"; the next question
+# anyone with a physical robot asks is "true of MY machine?". That capability used to be advertised the way
+# every other folded sibling is — six names inside this paragraph, appended to verify_robot's description —
+# and an engineer re-walking the journey on a real Go2 found the whole chain ran end to end (309 s) while
+# `tools/list` returned 15 tools with NONE of the six among them. Names in another tool's prose are read by a
+# careful human and not by the tool-selection step of the model we are actually shipping to, which is the same
+# defect class as learn_gait/adapt_gait having been on no wire at all.
+#
+# So this one is not a sibling list any more: `calibrate_to_hardware` is a real entry in MCP_TOOL_VIEW (see the
+# budget arithmetic there) and the six names live in ITS `step` enum, where a client sees them as the values of
+# a validated parameter. verify_robot keeps a one-line pointer, because that is where the question is asked.
+_SIM_TO_REAL_ENTRY = "calibrate_to_hardware"
+
 
 def tool_specs(view: str | None = None) -> list[dict]:
     """The agent/MCP-discoverable tool list: ``[{name, description, parameters, heavy}]``. ``view='mcp'`` returns
-    only the consolidated <=15-tool MCP surface (G-G), in workflow order; default returns the full registry."""
+    only the consolidated MCP surface (G-G, ``MCP_TOOL_VIEW_MAX`` entries), in workflow order; default returns
+    the full registry."""
     if view == "mcp":
         out = []
         for n in MCP_TOOL_VIEW:
@@ -341,6 +806,45 @@ def tool_specs(view: str | None = None) -> list[dict]:
                 avail = [s for s in _INGEST_SIBLINGS if s in TOOLS]
                 desc = (desc + " Companion importers, each callable by name via a tools/call: "
                         + ", ".join(avail) + ".")
+            if n == "submit_design":
+                avail = [s for s in _DESIGN_SIBLINGS if s in TOOLS]
+                if avail:
+                    desc = desc + " Callable companions: " + ", ".join(avail) + "."
+            if n == "get_robot":                               # MEASURE the model / declare intent as checks
+                avail = [s for s in _INSPECT_SIBLINGS if s in TOOLS]
+                if avail:
+                    desc = (desc + " Callable companions: " + ", ".join(avail)
+                            + " (measure the COMPILED model — reach/clearance/mass/per-joint torque margin/"
+                              "swept self-collision through each joint's range; and state design intent as "
+                              "assertions the harness checks).")
+            if n == "edit_robot":
+                avail = [s for s in _AMEND_SIBLINGS if s in TOOLS]
+                if avail:
+                    desc = (desc + " Callable companion: " + ", ".join(avail)
+                            + " — DRY-RUN the same ops first (blast radius + what it invalidates, nothing edited).")
+            if n == "verify_robot":                            # SIM-TO-REAL: is this verdict true of MY machine?
+                if _SIM_TO_REAL_ENTRY in TOOLS:
+                    desc = (desc + " Is this verdict true of a PHYSICAL robot? That is " + _SIM_TO_REAL_ENTRY
+                            + ", its own entry in this menu — the bench experiment, the measured gap, the "
+                              "actuator fit, and the no-hardware path that can never read as a measurement.")
+            if n == "create_scene":
+                avail = [s for s in _SCENE_SIBLINGS if s in TOOLS]
+                if avail:
+                    desc = desc + " Callable companions: " + ", ".join(avail) + "."
+            if n == "train_held":                              # M5: advertise the advanced authoring compilers
+                gait = [s for s in _GAIT_SIBLINGS if s in TOOLS]
+                if gait:
+                    desc = (desc + " PER-BODY CONTROLLER FITTERS, each callable by name via a tools/call: "
+                            + ", ".join(gait) + " — learn_gait (full budget) and adapt_gait (short, warm-started "
+                            "from the flywheel's mined hints) FIT a gait to this exact body and COMMIT it to the "
+                            "held robot, so the next verify_robot measures what you trained and reports "
+                            "gait_source 'tuned_for_this_body::<tool>'; apply_gait lands parameters you already "
+                            "have; flywheel_hints shows what the corpus has learned. Every apply is undoable "
+                            "(edit_robot op:'undo') and skippable (apply:'never').")
+                adv = [s for s in _ADVANCED_SIBLINGS if s in TOOLS]
+                if adv:
+                    desc = (desc + " Advanced authoring companions, each callable by name via a tools/call: "
+                            + ", ".join(adv) + " (reward-as-code loop / sensor-fusion config / control scripts).")
             out.append({"name": n, "description": desc, "parameters": TOOLS[n]["parameters"],
                         "heavy": TOOLS[n].get("heavy", False)})
         return out
@@ -349,9 +853,17 @@ def tool_specs(view: str | None = None) -> list[dict]:
 
 
 def call_tool(name: str, args: dict | None = None) -> dict:
-    """Dispatch a tool by name. Returns ``{ok, tool, result}`` or ``{ok: False, tool, error}`` — never raises,
-    so an agent gets a structured error instead of a crash. H3: every result carries ``took_s`` so an agent can
-    budget (verify_full ~14 s vs quick ~0.1 s)."""
+    """Dispatch a tool by name. Returns ``{ok, tool, result}`` or ``{ok: False, tool, error, result?}`` — never
+    raises, so an agent gets a structured error instead of a crash. H3: every result carries ``took_s`` so an
+    agent can budget (verify_full ~14 s vs quick ~0.1 s).
+
+    ``ok`` means THE CALL DID WHAT WAS ASKED, not "the dispatcher survived". A handler that refused reports it
+    the way every handler here reports it — a top-level ``ok: False`` and/or a truthy ``error`` — and that is
+    lifted to the envelope, because ``{"ok": true, "result": {"error": "path not found: ..."}}`` is a success
+    envelope carrying a failure, and a client that checks the envelope (as an MCP host does, to decide whether
+    to set ``isError``) reads it as a success. A bad VERDICT is a different thing and stays ``ok: True``:
+    handlers report those as ``credible_walk``/``success``/``feasible`` false on an otherwise fine result.
+    """
     import time
     spec = TOOLS.get(name)
     if spec is None:
@@ -361,6 +873,11 @@ def call_tool(name: str, args: dict | None = None) -> dict:
         result = spec["handler"](args or {})
         if isinstance(result, dict):
             result.setdefault("took_s", round(time.monotonic() - t0, 3))
+            if result.get("ok") is False or result.get("error"):
+                # keep ``result`` on the envelope: the payload of a refusal is often the fix (the operator
+                # vocabulary, the accepted formats), and callers that read ``env["result"]`` still work.
+                return {"ok": False, "tool": name, "result": result,
+                        "error": str(result.get("error") or f"{name} reported failure without a reason")}
         return {"ok": True, "tool": name, "result": result}
     except KeyError as exc:
         return {"ok": False, "tool": name, "error": f"missing required argument: {exc}", "took_s": round(time.monotonic() - t0, 3)}
@@ -371,7 +888,19 @@ def call_tool(name: str, args: dict | None = None) -> dict:
 # H2 (plan_v5): confine agent-supplied write paths (out_dir/build_root) under build/ so a tool can't be
 # steered to write outside the workspace. Resolve + verify containment; fall back to the default on escape.
 def safe_build_path(value, default_subdir: str):
-    """Return an absolute path under ``build/`` for an agent-supplied dir arg, or the default if it escapes."""
+    """Return an absolute path under ``build/`` for an agent-supplied dir arg, or the default if it escapes.
+
+    DELIBERATELY CWD-RELATIVE -- do not "fix" this to ``install_paths.anchored()``; the sweep has been here.
+    This is the function from incident 2 (f77d092: 231 leaked ``runs`` rows), and the reason it was not
+    anchored then is that anchoring makes the memory leak WORSE, not better. ``memory_db`` decides what to do
+    with a destination by comparing it against ``conventional_memory_dir()``, which is pinned to the process's
+    INITIAL CWD. Anchor this and, from any working directory other than the checkout,
+    ``safe_build_path(None, "memory")`` starts returning the checkout's REAL bank -- which no longer matches
+    the conventional dir, so the chokepoint classifies it as an EXPLICIT destination and writes to it. Today
+    the same call returns a harmless ``<cwd>/build/memory``. The containment that matters here (an
+    agent-supplied path may not escape the build root) is unaffected either way, because it is a
+    relationship between two paths, not a property of where the root is.
+    """
     build_root = (Path.cwd() / "build").resolve()
     default = build_root / default_subdir
     if not value:

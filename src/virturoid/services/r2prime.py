@@ -88,8 +88,19 @@ def seed_corpus(db, prompts: tuple[str, ...] = _REFERENCE_PROMPTS, *, generation
     """Grow the corpus the flywheel way: search a body-FITTED gait for each reference and bank the best CREDIBLE
     one, keyed by morphology. Unlike the product path (which banks only a gait that BEATS the shipped default),
     R2' banks a working precedent for EVERY reference the search can walk — so the corpus has real per-morphology
-    coverage to retrieve, not a single global winner. A reference whose search finds no credible walk is skipped."""
-    from virturoid.services.gait_flywheel import _DEFAULT_GAIT, _DeployResult, bank_gait
+    coverage to retrieve, not a single global winner. A reference whose search finds no credible walk is skipped.
+
+    EVERY ROW IS MEASURED FOR FRAGILITY BEFORE IT IS BANKED, and the reading rides with it. This door can afford
+    the error bar where the ordinary verify path cannot: seeding one reference already costs ``seeds`` searches
+    (~250 rollouts at ``generations``x``pop``), so the 4-12 rollout ladder is a few percent on top. It is measured
+    at ``deploy_steps`` — the horizon the precedent was selected at — and ``bank_gait`` records that horizon.
+
+    A FRAGILE REFERENCE IS STILL BANKED, and stamped ``fragility_v1_fragile``. Refusing it would silently change
+    what R2' measures: the arms compare retrieval against no-grounding over whatever the corpus actually holds,
+    and dropping references would confound "retrieval helps" with "we curated the corpus harder". The stamp keeps
+    that choice visible and keeps the fragile rows out of ``mine_gait_hints(gated_only=True)``.
+    """
+    from virturoid.services.gait_flywheel import _DEFAULT_GAIT, _DeployResult, bank_gait, robustness_margin
     from virturoid.services.gait_search import evaluate_gait, search_gait
     banked = []
     for i, p in enumerate(prompts):
@@ -110,10 +121,15 @@ def seed_corpus(db, prompts: tuple[str, ...] = _REFERENCE_PROMPTS, *, generation
                 r = evaluate_gait(g, params, steps=deploy_steps)
                 if r.get("credible") and r.get("survived") and (best is None or r["forward"] > best[1]["forward"]):
                     best = (params, r)
-            sid = bank_gait(db, g, _DeployResult(best[0], best[1])) if best else None
+            # ``per_param=False``: the per-parameter breakdown is 3-5x the cost and does not enter this decision.
+            rob = robustness_margin(g, best[0], steps=deploy_steps, per_param=False) if best else None
+            sid = bank_gait(db, g, _DeployResult(best[0], best[1]), robustness=rob,
+                            door="r2prime.seed_corpus") if best else None
             banked.append({"prompt": p, "skill_id": sid,
                            "forward_m": round(float(best[1]["forward"]), 3) if best else None,
-                           "credible": best is not None})
+                           "credible": best is not None,
+                           "robustness_rel": (rob or {}).get("robustness_rel"),
+                           "robustness_probes": (rob or {}).get("probes")})
         except Exception as exc:  # noqa: BLE001 - a reference that won't learn is skipped, not fatal
             banked.append({"prompt": p, "error": f"{type(exc).__name__}: {exc}"})
     return banked

@@ -6,6 +6,7 @@ import type {
   BuildSummary,
   DesignBrainResponse,
   FlywheelResponse,
+  MoatResponse,
   PackagesResponse,
   ReadinessLedger,
   RobotGenome,
@@ -62,6 +63,14 @@ export function useDesignBrain() {
   });
 }
 
+/** The verified-morphology memory. Keyed by package so "what recall did for THIS build" refetches with it. */
+export function useMoat(pkg: string | null) {
+  return useQuery({
+    queryKey: ["moat", pkg],
+    queryFn: () => getJSON<MoatResponse>(pkg ? `/api/moat?package=${encodeURIComponent(pkg)}` : "/api/moat"),
+  });
+}
+
 // ---- Per-package artifacts (optional files; null = absent, rendered as honest empty states) ----
 
 function usePackageArtifact<T>(pkg: string | null, rel: string) {
@@ -97,6 +106,7 @@ export function useInvalidateAfterBuild() {
     void qc.invalidateQueries({ queryKey: ["scorecard"] });
     void qc.invalidateQueries({ queryKey: ["flywheel"] });
     void qc.invalidateQueries({ queryKey: ["design-brain"] });
+    void qc.invalidateQueries({ queryKey: ["moat"] });
     void qc.invalidateQueries({ queryKey: ["artifact"] });
   };
 }

@@ -11,6 +11,8 @@ into a fine-tune of an already-forward gait -- and it is the flywheel's transfer
 
 from __future__ import annotations
 
+from virturoid.services.install_paths import policy_bank_dir
+
 
 def evaluate_transfer(gene, npz_path, *, steps: int = 600, decimation: int | None = None) -> dict:
     """Zero-shot: roll a banked policy on ``gene`` with NO training -> its transferred locomotion metrics.
@@ -70,7 +72,7 @@ def gather_banked_policies(models_dir: str = "models", *, extra=None, recursive:
     """Collect candidate banked-policy npz paths from ``models_dir`` (recursively by default) plus any ``extra``
     paths, deduped with extras first. The candidate pool for a transfer sweep."""
     from pathlib import Path
-    p = Path(models_dir)
+    p = policy_bank_dir(models_dir)
     found = [str(x) for x in (p.rglob("*.npz") if recursive else p.glob("*.npz"))] if p.exists() else []
     return list(dict.fromkeys(list(extra or []) + found))
 

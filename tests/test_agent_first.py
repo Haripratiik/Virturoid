@@ -38,6 +38,14 @@ class DesignSubmissionTests(unittest.TestCase):
         r = self._call("submit_design", {"graph": sch["examples"]["hexapod"]})
         self.assertTrue(r["ok"])
         self.assertEqual(r["appendages"]["legs"], 6)
+        self.assertTrue(r["design_review"]["engineering"]["checks"]["visual_physics"])
+        self.assertTrue(r["design_review"]["visual_physics"]["ok"])
+        self.assertIn("anatomy", r["design_review"])
+        critique = self._call("critique_design", {"robot_id": r["robot_id"]})
+        self.assertTrue(critique["ok"])
+        self.assertIn("engineering", critique)
+        self.assertIn("visual_physics", critique)
+        self.assertIn("repair_contract", critique)
 
     def test_broken_graph_teaches(self):
         r = self._call("submit_design", {"graph": {"robot_class": "quadruped", "parts": [{"name": "x", "role": "leg"}]}})
@@ -124,14 +132,32 @@ class HeldChainTests(unittest.TestCase):
         rid = self._call("submit_design", {"graph": self._call("get_design_schema")["examples"]["quadruped"]})["robot_id"]
         jid = self._call("train_held", {"robot_id": rid, "mode": "gait_search", "max_evals": 3})["job_id"]
         self.assertIsNotNone(jid)
+        # Poll the OWNER's terminal set, not a copy of it. `no_output` was added as a fourth
+        # terminal status (a job that ran honestly and produced nothing is not a success and not
+        # an error) and this loop kept its own three-item list, so such a job polled until the
+        # budget ran out and the test failed on a timeout rather than on its actual subject.
+        from virturoid.services import job_registry
         for _ in range(60):
             j = self._call("get_job", {"job_id": jid})
-            if j["status"] in ("succeeded", "failed", "cancelled"):
+            if j["status"] in job_registry.TERMINAL_STATUSES:
                 break
             time.sleep(2)
-        self.assertEqual(j["status"], "succeeded")
+        # The subject is that the job REACHES A TERMINAL STATE AND REPORTS A VERDICT -- not that a
+        # 3-evaluation search finds a walk. It asserted `succeeded` back when `train_held` landed
+        # nothing and always said it had; now that landing is credible-gated, `max_evals=3` on a
+        # fresh design honestly produces NOTHING, and `no_output` is the correct answer. Asserting
+        # `succeeded` here would be asserting that three evaluations find a credible gait.
+        self.assertIn(j["status"], (job_registry.SUCCEEDED, job_registry.NO_OUTPUT))
         self.assertEqual(j["result"]["mode"], "gait_search")
-        self.assertIn("best", j["result"])
+        self.assertIn("best", j["result"])              # either way, the search reports what it found
+        if j["status"] == job_registry.NO_OUTPUT:
+            # It declined to land. The refusal lives on `applied_to_robot`, and it must be
+            # ACTIONABLE: say it did not apply, say why, and hand back the call that forces it.
+            applied = j["result"]["applied_to_robot"]
+            self.assertFalse(applied["applied"])
+            self.assertTrue(applied.get("reason"),
+                            f"a no_output job must say why it landed nothing: {applied}")
+            self.assertEqual(applied["apply_with"]["tool"], "apply_gait")
 
 
 @unittest.skipUnless(_MUJOCO, "needs MuJoCo")
@@ -284,15 +310,22 @@ class ZeroTokenSwitchTests(unittest.TestCase):
 
 
 class ToolConsolidationTests(unittest.TestCase):
-    """G-G: the MCP surface is a lean, workflow-shaped <=15-tool view; folded tools stay callable by name."""
+    """G-G: the MCP surface is a lean, workflow-shaped view; folded tools stay callable by name.
 
-    def test_mcp_view_is_at_most_15_and_workflow_shaped(self):
-        from virturoid.services.agent_tools import tool_specs, TOOLS
+    The budget is read from ``MCP_TOOL_VIEW_MAX`` rather than restated here. It was restated in four places and
+    they had already drifted (this file said 15, ``test_phase2_majors`` said 17), so "what is the cap?" had two
+    answers and neither was the one a reviewer would find first. What the cap protects — our share of Cursor's
+    ~40 active tools ACROSS servers, and the payload measurement that sized it — is documented where the tuple
+    lives. Moving it is a decision about the customer's OTHER MCP servers; it is not a test edit.
+    """
+
+    def test_mcp_view_is_within_the_cross_client_budget_and_workflow_shaped(self):
+        from virturoid.services.agent_tools import MCP_TOOL_VIEW_MAX, tool_specs, TOOLS
         view = tool_specs(view="mcp")
-        self.assertLessEqual(len(view), 17, "MCP menu must fit the cross-client budget (well under Cursor's ~40)")
+        self.assertLessEqual(len(view), MCP_TOOL_VIEW_MAX, "MCP menu must fit the cross-client budget")
         names = [t["name"] for t in view]
         for essential in ("submit_design", "get_robot", "edit_robot", "verify_robot", "export_held",
-                          "create_scene", "get_job", "llm_spend", "ingest_project"):
+                          "critique_design", "create_scene", "get_job", "llm_spend", "ingest_project"):
             self.assertIn(essential, names, f"{essential} must be in the MCP view")
         for n in names:                                          # every advertised tool really dispatches
             self.assertIn(n, TOOLS)
@@ -301,8 +334,9 @@ class ToolConsolidationTests(unittest.TestCase):
 
     def test_mcp_server_lists_the_consolidated_view(self):
         from virturoid.mcp_server import _handle
+        from virturoid.services.agent_tools import MCP_TOOL_VIEW_MAX
         listed = _handle("tools/list", {})["tools"]
-        self.assertLessEqual(len(listed), 17)
+        self.assertLessEqual(len(listed), MCP_TOOL_VIEW_MAX)
         self.assertTrue(all("inputSchema" in t for t in listed))
 
 

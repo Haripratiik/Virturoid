@@ -12,9 +12,12 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 import uuid
 from pathlib import Path
+
+from virturoid.services.install_paths import anchored
 
 _LOCK = threading.RLock()
 _ROBOTS: dict[str, dict] = {}      # id -> {"gene", "undo": [dict...], "label", "prompt", "_mtime"}
@@ -23,15 +26,46 @@ _UNDO_MAX = 20
 
 
 def _dir() -> Path:
-    return Path(os.environ.get("VIRTUROID_SESSIONS_DIR") or "build/sessions")
+    """Where the shared session store lives — ``VIRTUROID_SESSIONS_DIR``, else ANCHORED to the checkout.
+
+    The default used to be the bare relative ``"build/sessions"``, which is the shape that produced three
+    shipped incidents (see ``install_paths``). It mattered more here than anywhere else, because this
+    directory IS the cross-process contract: the module docstring above exists precisely because a stdio
+    MCP client spawns our server as its own process while ``ui_server`` runs as another, and file-backing
+    is what makes the app the live viewer of the agent's work. An MCP host sets its child's working
+    directory to whatever it likes -- so the two processes resolved ``build/sessions`` to two DIFFERENT
+    directories, and the failure mode is the exact one file-backing was introduced to fix: the agent
+    creates a robot, the viewer reports no such robot, and nothing errors on either side. MEASURED
+    2026-08-08: the same install resolved this to ``<repo>/build/sessions`` (39 held robots) from the repo
+    root and to ``C:/VSCodeFolders/build/sessions`` (absent, 0 robots) from one directory up.
+
+    The env override still wins and is still how a test or a night run gets a private store.
+    """
+    return Path(os.environ.get("VIRTUROID_SESSIONS_DIR") or anchored("build/sessions"))
+
+
+_UNSAFE_ID = re.compile(r"[^A-Za-z0-9._-]")
+
+
+def _safe_id(raw: str) -> str:
+    """A filesystem-safe session id — the containment boundary for robot_id / scene_id.
+
+    A caller (e.g. the public ``ingest_project`` MCP tool) may pass an agent-supplied id; without this a value
+    like ``..\\..\\..\\Windows\\Temp\\evil`` escaped the sessions dir and wrote arbitrary JSON at the repo root
+    (measured in the 2026-07-24 audit — B0). We strip every path separator, drive colon, and ``..`` to a single
+    flat token, so a session file can ONLY ever land inside ``build/sessions/{robots,scenes}/``. Sanitized here
+    AND at the path choke point (defense in depth), the same way ``agent_tools.safe_build_path`` confines builds.
+    """
+    s = _UNSAFE_ID.sub("_", str(raw or "")).strip("._")
+    return (s or "session")[:128]
 
 
 def _robot_path(rid: str) -> Path:
-    return _dir() / "robots" / f"{rid}.json"
+    return _dir() / "robots" / f"{_safe_id(rid)}.json"
 
 
 def _scene_path(sid: str) -> Path:
-    return _dir() / "scenes" / f"{sid}.json"
+    return _dir() / "scenes" / f"{_safe_id(sid)}.json"
 
 
 def _rid(prefix: str) -> str:
@@ -108,11 +142,34 @@ def prune_sessions(cap: int | None = None) -> int:
     return removed
 
 
+def prune_scene_sessions(cap: int | None = None) -> int:
+    """Cap SCENE sessions the same way prune_sessions caps robots -- delete the oldest scene files (and drop them
+    from the in-memory map) beyond ``cap``, most-recent kept. Before this, robots were capped but scenes grew
+    without bound over a long agent session (2026-07-24 audit). Best-effort; never raises."""
+    keep = _SESSION_CAP if cap is None else cap
+    d = _dir() / "scenes"
+    if keep <= 0 or not d.exists():
+        return 0
+    try:
+        files = sorted(d.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+    except OSError:
+        return 0
+    removed = 0
+    for p in files[keep:]:
+        try:
+            p.unlink(); removed += 1
+            with _LOCK:
+                _SCENES.pop(p.stem, None)                     # drop the in-memory record too
+        except OSError:
+            pass
+    return removed
+
+
 _gc_ticks = {"n": 0, "swept_once": False}
 
 
 def put_robot(gene, *, prompt: str = "", label: str = "created", robot_id: str | None = None) -> str:
-    rid = robot_id or _rid("robot")
+    rid = _safe_id(robot_id) if robot_id else _rid("robot")   # confine caller-supplied ids (B0)
     with _LOCK:
         rec = {"gene": gene, "undo": [], "label": label, "prompt": prompt, "_mtime": 0.0}
         _ROBOTS[rid] = rec
@@ -159,6 +216,23 @@ def undo_robot(robot_id: str):
         rec["label"] = "undo"
         _write_robot(robot_id, rec)
         return rec["gene"]
+
+
+def forget_robot(robot_id: str) -> bool:
+    """Drop a robot from the session (memory + its json). For SCRATCH holds -- e.g. ``export_held`` parks the
+    body it is about to ship under a temporary id so it can verify THAT body rather than the session one, and
+    must not leave the scratch entry sitting in the customer's session afterwards. Never raises."""
+    rid = _safe_id(robot_id)
+    with _LOCK:
+        existed = _ROBOTS.pop(rid, None) is not None
+    try:
+        p = _robot_path(rid)
+        if p.exists():
+            p.unlink()
+            existed = True
+    except OSError:  # noqa: PERF203 - housekeeping; a locked/absent file must never fail a build
+        pass
+    return existed
 
 
 def robot_meta(robot_id: str) -> dict:
@@ -232,11 +306,12 @@ def _fresh_scene(sid: str) -> dict | None:
 
 
 def put_scene(scene: dict, *, task: str = "", theme: str = "", scene_id: str | None = None) -> str:
-    sid = scene_id or _rid("scene")
+    sid = _safe_id(scene_id) if scene_id else _rid("scene")   # confine caller-supplied ids (B0)
     with _LOCK:
         rec = {"scene": dict(scene), "undo": [], "task": task, "theme": theme, "_mtime": 0.0}
         _SCENES[sid] = rec
         _write_scene(sid, rec)
+    prune_scene_sessions()                                    # cap scenes too, not just robots (2026-07-24 audit)
     return sid
 
 

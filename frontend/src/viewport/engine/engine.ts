@@ -41,6 +41,24 @@ const TASK_LABELS: Record<string, string> = {
   push: "push",
 };
 
+/**
+ * Turn a URDF mesh reference (already prefixed with the loader's workingPath) into a path that is
+ * safe to append to the package URL: normalize separators, collapse "." / ".." segments so
+ * "robot/../cad/stl/x.stl" becomes "cad/stl/x.stl", and drop any leading slash or leftover "..".
+ * Also accepts ROS-style "package://<name>/rest" references by keeping only <rest>.
+ */
+export function normalizeMeshPath(raw: string): string {
+  let p = String(raw).replace(/\\/g, "/").replace(/^package:\/\/[^/]+\//, "");
+  const out: string[] = [];
+  for (const seg of p.split("/")) {
+    if (!seg || seg === ".") continue;
+    if (seg === "..") out.pop();
+    else out.push(seg);
+  }
+  p = out.join("/");
+  return p;
+}
+
 export class ViewportEngine {
   private renderer: THREE.WebGLRenderer | null = null;
   private scene: THREE.Scene | null = null;
@@ -55,6 +73,7 @@ export class ViewportEngine {
   private currentObject: THREE.Object3D | null = null;
   private loadSeq = 0; // bumped on every (re)load; a stale async load aborts
   private raf = 0;
+  private _sizeTmp = new THREE.Vector2(); // reused by resize()'s change-guard, no per-frame allocation
   private raycaster = new THREE.Raycaster();
   private highlighted: THREE.Mesh | null = null;
   private highlightPrev: THREE.Color | null = null;
@@ -152,6 +171,11 @@ export class ViewportEngine {
 
     const animate = (now: number) => {
       this.raf = requestAnimationFrame(animate);
+      // M2 (2026-07-24 audit): the GL buffer was freezing at a stale layout size (measured 136x436 while the
+      // CSS box was 785x533), so the robot rendered stretched. resize() is now change-guarded (a no-op when the
+      // size and DPR are unchanged), so calling it every frame GUARANTEES the buffer tracks the container even
+      // if a ResizeObserver event is missed or fires before layout settles — it can never stay frozen.
+      this.resize();
       this.controls.update();
       this.stepEpisode(now || 0);
       renderer.render(scene, this.camera);
@@ -179,6 +203,13 @@ export class ViewportEngine {
     const w = this.container.clientWidth;
     const h = this.container.clientHeight;
     if (!w || !h) return;
+    // Change-guarded so it's safe to call every frame: bail unless the CSS box or the device-pixel-ratio
+    // actually changed (a monitor move / browser zoom changes DPR). setSize(w,h,false) keeps the canvas CSS at
+    // 100% (the container drives display size) and sizes only the drawing BUFFER to w*h*DPR.
+    const pr = Math.min(window.devicePixelRatio || 1, 2);
+    const size = this.renderer.getSize(this._sizeTmp);
+    if (size.x === w && size.y === h && this.renderer.getPixelRatio() === pr) return;
+    if (this.renderer.getPixelRatio() !== pr) this.renderer.setPixelRatio(pr);
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(w, h, false);
@@ -366,11 +397,12 @@ export class ViewportEngine {
     }
 
     const loader = new URDFLoader();
-    loader.workingPath = "";
+    // The URDF lives at <package>/robot/robot.urdf and addresses its meshes RELATIVE to itself
+    // ("meshes/foo.stl" -> <package>/robot/meshes/foo.stl). With an empty workingPath those
+    // resolved against the package ROOT instead, so every mesh 404'd.
+    loader.workingPath = "robot/";
     loader.loadMeshCb = (path, manager, onComplete) => {
-      const normalized = String(path)
-        .replace(/\\/g, "/")
-        .replace(/^(\.\.\/)+/, "");
+      const normalized = normalizeMeshPath(String(path));
       const meshUrl = packageUrl(pkg, normalized);
       const ext = normalized.split(".").pop()?.toLowerCase();
       if (ext === "stl") {
@@ -378,13 +410,9 @@ export class ViewportEngine {
           new STLLoader(manager).load(
             meshUrl,
             (geometry) => {
-              // CAD exporters write STL in MILLIMETERS; URDF origins are in
-              // meters. A tabletop robot whose mesh spans >10 "meters" is a
-              // unit mismatch, not a building-sized robot — rescale mm→m.
+              // Unit correction happens in normalizeMeshUnits(), AFTER the URDF's own <mesh scale>
+              // has been applied — see the note there.
               geometry.computeBoundingBox();
-              const bb = geometry.boundingBox!;
-              const span = Math.max(bb.max.x - bb.min.x, bb.max.y - bb.min.y, bb.max.z - bb.min.z);
-              if (span > 10) geometry.scale(0.001, 0.001, 0.001);
               const material = new THREE.MeshStandardMaterial({ color: 0x9aa3ad, metalness: 0.25, roughness: 0.5 });
               onComplete(new THREE.Mesh(geometry, material));
             },
@@ -413,28 +441,117 @@ export class ViewportEngine {
       }
     });
 
-    // STL meshes load asynchronously; give them a moment then assess.
-    setTimeout(() => {
-      if (myLoad !== this.loadSeq) return;
+    if (myLoad !== this.loadSeq) return; // superseded while parsing
+    this.content.add(robot);
+    this.robot = robot;
+    this.standOnFloor(robot);
+    this.applyWireframe();
+    this.events.onRobot?.(robot);
+    this.fitCamera(robot);
+    this.settleRobot(robot, myLoad);
+  }
+
+  /**
+   * Re-measure a loading robot until its geometry stops changing, then report.
+   *
+   * Every <mesh> visual is a separate async STL fetch, so the old single 250 ms timeout mis-measured
+   * any mesh-heavy body: on a 22-mesh quadruped it fired before the first STL arrived, framed and
+   * grounded an EMPTY bounding box, and the viewport ended up showing nothing at all. Poll instead,
+   * re-grounding and re-framing whenever the mesh count moves, and stop as soon as it holds still
+   * (or at the time limit) so a slow/failed mesh can never hang the assessment.
+   */
+  private settleRobot(robot: URDFRobot, myLoad: number): void {
+    const STEP_MS = 250;
+    const LIMIT_MS = 6000;
+    let lastCount = -1;
+    let stableTicks = 0;
+    let elapsed = 0;
+
+    const tick = () => {
+      if (myLoad !== this.loadSeq) return; // superseded by a newer load
       let meshCount = 0;
       robot.traverse((child) => {
         if ((child as THREE.Mesh).isMesh) meshCount += 1;
       });
+      if (meshCount !== lastCount) {
+        lastCount = meshCount;
+        stableTicks = 0;
+        this.normalizeMeshUnits(robot);
+        this.standOnFloor(robot);
+        this.fitCamera(robot);
+      } else {
+        stableTicks += 1;
+      }
+      elapsed += STEP_MS;
+      if (stableTicks < 2 && elapsed < LIMIT_MS) {
+        setTimeout(tick, STEP_MS);
+        return;
+      }
       if (meshCount === 0) {
         const added = this.addFallbackVisuals(robot);
+        this.standOnFloor(robot);
+        this.fitCamera(robot);
         this.status(`Robot loaded with ${added} placeholder shape(s) (URDF has no meshes). Try Scene mode for full 3D.`);
       } else {
         this.status(`Robot loaded (${meshCount} mesh part(s)).`);
       }
-      this.fitCamera(robot);
-    }, 250);
+    };
+    setTimeout(tick, STEP_MS);
+  }
 
-    if (myLoad !== this.loadSeq) return; // superseded while parsing
-    this.content.add(robot);
-    this.robot = robot;
-    this.applyWireframe();
-    this.events.onRobot?.(robot);
-    this.fitCamera(robot);
+  /**
+   * Correct millimetre STLs to metres — but only when the URDF has not already said so.
+   *
+   * CAD exporters write STL in MILLIMETRES while URDF origins are in metres, so a raw mm mesh has to
+   * be scaled by 1/1000. The catch is that gene_urdf already declares that conversion on the tag
+   * itself (`<mesh scale="0.001 0.001 0.001">`), which urdf-loader applies to the wrapping
+   * URDFVisual. Doing the correction on the geometry the moment it loads therefore applied it TWICE,
+   * shrinking a 0.5 m quadruped to half a millimetre — 22 meshes drawn, 162k triangles submitted, and
+   * an apparently empty viewport.
+   *
+   * Measuring after the URDF's scale is in effect makes the rule unambiguous: a link whose WORLD span
+   * exceeds 10 m is a unit mismatch (no robot link is that big), anything else is already in metres.
+   * Each mesh is judged once and flagged, so a re-poll never re-scales it.
+   */
+  private normalizeMeshUnits(robot: URDFRobot): void {
+    robot.updateMatrixWorld(true);
+    const worldScale = new THREE.Vector3();
+    robot.traverse((child) => {
+      const mesh = child as THREE.Mesh;
+      if (!mesh.isMesh || mesh.userData.unitsChecked) return;
+      mesh.userData.unitsChecked = true;
+      if (!mesh.geometry.boundingBox) mesh.geometry.computeBoundingBox();
+      const bb = mesh.geometry.boundingBox;
+      if (!bb) return;
+      mesh.getWorldScale(worldScale);
+      const factor = Math.max(Math.abs(worldScale.x), Math.abs(worldScale.y), Math.abs(worldScale.z));
+      const span = Math.max(bb.max.x - bb.min.x, bb.max.y - bb.min.y, bb.max.z - bb.min.z) * factor;
+      if (span > 10) mesh.geometry.scale(0.001, 0.001, 0.001);
+    });
+  }
+
+  /**
+   * Stand a loaded URDF on the ground plane.
+   *
+   * A URDF describes link poses relative to its ROOT link, and gene_to_urdf deliberately drops the
+   * model's standing spawn height (the root link owns the world origin). Robot mode dropped that root
+   * at y=0, where the scene's OPAQUE floor plane (y = -0.001) then swallowed everything below it: a
+   * hexapod's six legs hang 0.31 m under its torso, so 80% of the robot was hidden and all that
+   * rendered was the torso — a grey slab. Quadrupeds (80% buried), the humanoid (51%) and the mobile
+   * base (43%) had the same bug in milder form; arms start at y=0 and were the only class unaffected,
+   * which is why this went unnoticed. Episode mode never showed it because MuJoCo world poses already
+   * carry the spawn height.
+   *
+   * Lifting by the world-space bounding-box minimum reproduces exactly that spawn height from the
+   * geometry itself, so every class stands on the floor with its feet/wheels/base touching it.
+   */
+  private standOnFloor(robot: URDFRobot): void {
+    const box = new THREE.Box3().setFromObject(robot);
+    if (box.isEmpty() || !Number.isFinite(box.min.y)) return;
+    const drop = box.min.y - robot.position.y; // body-relative floor offset (position may already be set)
+    if (!Number.isFinite(drop)) return;
+    robot.position.y = -drop;
+    robot.updateMatrixWorld(true);
   }
 
   private addFallbackVisuals(robot: URDFRobot): number {

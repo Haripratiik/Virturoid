@@ -16,27 +16,27 @@
       "name": "blue_bin",
       "object_type": "container",
       "source_scene_ids": [
-        "regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_000",
-        "regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_001",
-        "regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_002",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_baseline_000",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_baseline_001",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_000",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_001",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_002",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout_000",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout_001",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout_002",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_000",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_001",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_002",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_003",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_004",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_005",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_006",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_007",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_008",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_009"
+        "regr_scene_938c34b8_stress_000",
+        "regr_scene_938c34b8_stress_001",
+        "regr_scene_938c34b8_stress_002",
+        "scene_938c34b8_baseline_000",
+        "scene_938c34b8_baseline_001",
+        "scene_938c34b8_edge_case_000",
+        "scene_938c34b8_edge_case_001",
+        "scene_938c34b8_edge_case_002",
+        "scene_938c34b8_holdout_000",
+        "scene_938c34b8_holdout_001",
+        "scene_938c34b8_holdout_002",
+        "scene_938c34b8_variation_000",
+        "scene_938c34b8_variation_001",
+        "scene_938c34b8_variation_002",
+        "scene_938c34b8_variation_003",
+        "scene_938c34b8_variation_004",
+        "scene_938c34b8_variation_005",
+        "scene_938c34b8_variation_006",
+        "scene_938c34b8_variation_007",
+        "scene_938c34b8_variation_008",
+        "scene_938c34b8_variation_009"
       ],
       "observation_keys": [
         "wrist_rgbd_camera"
@@ -54,27 +54,27 @@
       "name": "blue_block",
       "object_type": "cube",
       "source_scene_ids": [
-        "regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_000",
-        "regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_001",
-        "regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_002",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_baseline_000",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_baseline_001",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_000",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_001",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_002",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout_000",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout_001",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout_002",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_000",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_001",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_002",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_003",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_004",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_005",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_006",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_007",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_008",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_009"
+        "regr_scene_938c34b8_stress_000",
+        "regr_scene_938c34b8_stress_001",
+        "regr_scene_938c34b8_stress_002",
+        "scene_938c34b8_baseline_000",
+        "scene_938c34b8_baseline_001",
+        "scene_938c34b8_edge_case_000",
+        "scene_938c34b8_edge_case_001",
+        "scene_938c34b8_edge_case_002",
+        "scene_938c34b8_holdout_000",
+        "scene_938c34b8_holdout_001",
+        "scene_938c34b8_holdout_002",
+        "scene_938c34b8_variation_000",
+        "scene_938c34b8_variation_001",
+        "scene_938c34b8_variation_002",
+        "scene_938c34b8_variation_003",
+        "scene_938c34b8_variation_004",
+        "scene_938c34b8_variation_005",
+        "scene_938c34b8_variation_006",
+        "scene_938c34b8_variation_007",
+        "scene_938c34b8_variation_008",
+        "scene_938c34b8_variation_009"
       ],
       "observation_keys": [
         "wrist_rgbd_camera"
@@ -96,10 +96,10 @@
       "name": "distractor_0_0",
       "object_type": "cube",
       "source_scene_ids": [
-        "regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_000",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_000",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout_000",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_000"
+        "regr_scene_938c34b8_stress_000",
+        "scene_938c34b8_edge_case_000",
+        "scene_938c34b8_holdout_000",
+        "scene_938c34b8_variation_000"
       ],
       "observation_keys": [
         "wrist_rgbd_camera"
@@ -119,8 +119,8 @@
       "name": "distractor_0_1",
       "object_type": "cube",
       "source_scene_ids": [
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_000",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout_000"
+        "scene_938c34b8_edge_case_000",
+        "scene_938c34b8_holdout_000"
       ],
       "observation_keys": [
         "wrist_rgbd_camera"
@@ -140,7 +140,7 @@
       "name": "distractor_0_2",
       "object_type": "cube",
       "source_scene_ids": [
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_000"
+        "scene_938c34b8_edge_case_000"
       ],
       "observation_keys": [
         "wrist_rgbd_camera"
@@ -160,10 +160,10 @@
       "name": "distractor_1_0",
       "object_type": "cube",
       "source_scene_ids": [
-        "regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_001",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_001",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout_001",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_001"
+        "regr_scene_938c34b8_stress_001",
+        "scene_938c34b8_edge_case_001",
+        "scene_938c34b8_holdout_001",
+        "scene_938c34b8_variation_001"
       ],
       "observation_keys": [
         "wrist_rgbd_camera"
@@ -183,8 +183,8 @@
       "name": "distractor_1_1",
       "object_type": "cube",
       "source_scene_ids": [
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_001",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout_001"
+        "scene_938c34b8_edge_case_001",
+        "scene_938c34b8_holdout_001"
       ],
       "observation_keys": [
         "wrist_rgbd_camera"
@@ -204,7 +204,7 @@
       "name": "distractor_1_2",
       "object_type": "cube",
       "source_scene_ids": [
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_001"
+        "scene_938c34b8_edge_case_001"
       ],
       "observation_keys": [
         "wrist_rgbd_camera"
@@ -224,10 +224,10 @@
       "name": "distractor_2_0",
       "object_type": "cube",
       "source_scene_ids": [
-        "regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_002",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_002",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout_002",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_002"
+        "regr_scene_938c34b8_stress_002",
+        "scene_938c34b8_edge_case_002",
+        "scene_938c34b8_holdout_002",
+        "scene_938c34b8_variation_002"
       ],
       "observation_keys": [
         "wrist_rgbd_camera"
@@ -247,8 +247,8 @@
       "name": "distractor_2_1",
       "object_type": "cube",
       "source_scene_ids": [
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_002",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout_002"
+        "scene_938c34b8_edge_case_002",
+        "scene_938c34b8_holdout_002"
       ],
       "observation_keys": [
         "wrist_rgbd_camera"
@@ -268,7 +268,7 @@
       "name": "distractor_2_2",
       "object_type": "cube",
       "source_scene_ids": [
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_002"
+        "scene_938c34b8_edge_case_002"
       ],
       "observation_keys": [
         "wrist_rgbd_camera"
@@ -288,7 +288,7 @@
       "name": "distractor_3_0",
       "object_type": "cube",
       "source_scene_ids": [
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_003"
+        "scene_938c34b8_variation_003"
       ],
       "observation_keys": [
         "wrist_rgbd_camera"
@@ -308,7 +308,7 @@
       "name": "distractor_4_0",
       "object_type": "cube",
       "source_scene_ids": [
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_004"
+        "scene_938c34b8_variation_004"
       ],
       "observation_keys": [
         "wrist_rgbd_camera"
@@ -328,7 +328,7 @@
       "name": "distractor_5_0",
       "object_type": "cube",
       "source_scene_ids": [
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_005"
+        "scene_938c34b8_variation_005"
       ],
       "observation_keys": [
         "wrist_rgbd_camera"
@@ -348,7 +348,7 @@
       "name": "distractor_6_0",
       "object_type": "cube",
       "source_scene_ids": [
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_006"
+        "scene_938c34b8_variation_006"
       ],
       "observation_keys": [
         "wrist_rgbd_camera"
@@ -368,7 +368,7 @@
       "name": "distractor_7_0",
       "object_type": "cube",
       "source_scene_ids": [
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_007"
+        "scene_938c34b8_variation_007"
       ],
       "observation_keys": [
         "wrist_rgbd_camera"
@@ -388,7 +388,7 @@
       "name": "distractor_8_0",
       "object_type": "cube",
       "source_scene_ids": [
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_008"
+        "scene_938c34b8_variation_008"
       ],
       "observation_keys": [
         "wrist_rgbd_camera"
@@ -408,7 +408,7 @@
       "name": "distractor_9_0",
       "object_type": "cube",
       "source_scene_ids": [
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_009"
+        "scene_938c34b8_variation_009"
       ],
       "observation_keys": [
         "wrist_rgbd_camera"
@@ -428,27 +428,27 @@
       "name": "red_bin",
       "object_type": "container",
       "source_scene_ids": [
-        "regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_000",
-        "regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_001",
-        "regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_002",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_baseline_000",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_baseline_001",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_000",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_001",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_002",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout_000",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout_001",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout_002",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_000",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_001",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_002",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_003",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_004",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_005",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_006",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_007",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_008",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_009"
+        "regr_scene_938c34b8_stress_000",
+        "regr_scene_938c34b8_stress_001",
+        "regr_scene_938c34b8_stress_002",
+        "scene_938c34b8_baseline_000",
+        "scene_938c34b8_baseline_001",
+        "scene_938c34b8_edge_case_000",
+        "scene_938c34b8_edge_case_001",
+        "scene_938c34b8_edge_case_002",
+        "scene_938c34b8_holdout_000",
+        "scene_938c34b8_holdout_001",
+        "scene_938c34b8_holdout_002",
+        "scene_938c34b8_variation_000",
+        "scene_938c34b8_variation_001",
+        "scene_938c34b8_variation_002",
+        "scene_938c34b8_variation_003",
+        "scene_938c34b8_variation_004",
+        "scene_938c34b8_variation_005",
+        "scene_938c34b8_variation_006",
+        "scene_938c34b8_variation_007",
+        "scene_938c34b8_variation_008",
+        "scene_938c34b8_variation_009"
       ],
       "observation_keys": [
         "wrist_rgbd_camera"
@@ -466,27 +466,27 @@
       "name": "red_block",
       "object_type": "cube",
       "source_scene_ids": [
-        "regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_000",
-        "regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_001",
-        "regression_scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_stress_002",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_baseline_000",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_baseline_001",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_000",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_001",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_edge_case_002",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout_000",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout_001",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_holdout_002",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_000",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_001",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_002",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_003",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_004",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_005",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_006",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_007",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_008",
-        "scene_task_req_a_tabletop_robot_arm_that_sorts_red_and_blue_blo_variation_009"
+        "regr_scene_938c34b8_stress_000",
+        "regr_scene_938c34b8_stress_001",
+        "regr_scene_938c34b8_stress_002",
+        "scene_938c34b8_baseline_000",
+        "scene_938c34b8_baseline_001",
+        "scene_938c34b8_edge_case_000",
+        "scene_938c34b8_edge_case_001",
+        "scene_938c34b8_edge_case_002",
+        "scene_938c34b8_holdout_000",
+        "scene_938c34b8_holdout_001",
+        "scene_938c34b8_holdout_002",
+        "scene_938c34b8_variation_000",
+        "scene_938c34b8_variation_001",
+        "scene_938c34b8_variation_002",
+        "scene_938c34b8_variation_003",
+        "scene_938c34b8_variation_004",
+        "scene_938c34b8_variation_005",
+        "scene_938c34b8_variation_006",
+        "scene_938c34b8_variation_007",
+        "scene_938c34b8_variation_008",
+        "scene_938c34b8_variation_009"
       ],
       "observation_keys": [
         "wrist_rgbd_camera"

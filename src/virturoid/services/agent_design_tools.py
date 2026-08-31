@@ -9,7 +9,16 @@ verdict contract with teaching errors (SWE-agent ACI). Registered into ``agent_t
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
+
+# M11 honesty: goals that name a domain NONE of our tiers (land/mobile/legged/aerial/aquatic/manip) can run.
+# "fly to the target" is charitably a go-to for a legged body (handled by the proposer); "fly to the MOON",
+# "reach orbit", "teleport" have no honest reinterpretation, so run_task must say so instead of scoring the
+# body's default task 1.0.
+_OUT_OF_DOMAIN = re.compile(
+    r"\b(moon|outer ?space|to space|orbit|orbital|mars|jupiter|galaxy|interstellar|cosmos|"
+    r"teleport|time ?travel|through (?:the )?walls?|phase through|underground|to the stars)\b", re.I)
 
 # The REAL anatomy-graph vocabulary (extracted from anatomy_compiler.build_from_anatomy), so the schema we
 # teach the agent is accurate, not hallucinated. A part = one body/limb node; symmetry mirrors it to +-y.
@@ -45,6 +54,106 @@ _EXAMPLE_ROVER = {
         {"name": f"wheel{i+1}", "role": "wheel", "parent": "chassis",
          "attach": ["front_bottom", "rear_bottom"][i],
          "size": 0.2, "girth": 0.08, "symmetry": "left_right"} for i in range(2)]}   # 2 pairs = 4 wheels at corners
+
+# NON-ANIMAL worked examples. The three above are all creatures, and every example an agent had was a creature,
+# so the machine half of the vocabulary (prismatic joints, declared axes, open roles, parametric attach, a rest
+# stance) had no precedent showing how the pieces go together. These two are the load-bearing shapes: a SCARA is
+# the "declared axis + prismatic" case, an excavator the "articulated boom that must REST somewhere" case.
+#
+# `rest` is the part that is easy to skip and impossible to un-see once rendered: with every joint at 0 a chain
+# of forward-aimed links is a straight horizontal line, so the excavator below WITHOUT its rest angles lies flat
+# on the ground (measured: 0.025 m tall) and WITH them stands 1.248 m.
+_EXAMPLE_SCARA = {
+    "robot_class": "manipulator", "name": "agent_scara",
+    # 2R in a horizontal plane about Z, then a prismatic quill. `axis` matters: the role-derived default is a
+    # limb's (0,1,0) pitch, which would make this an elbow that bends the wrong way.
+    "parts": [
+        {"name": "base", "role": "body", "size": 0.22, "girth": 0.11},
+        # The COLUMN is the part that is easy to leave out and obvious once rendered: a SCARA's links work in a
+        # horizontal plane, so without a vertical standoff the whole arm sits at z~0 and reads as a pipe lying on
+        # the floor. Structure a machine needs to look like itself is the designer's job, not the compiler's.
+        {"name": "column", "role": "column", "like": "neck", "parent": "base", "attach": "front_top",
+         "aim": "up", "size": 0.45, "girth": 0.06},
+        # AXIS IS IN THE SEGMENT'S OWN FRAME, and a segment's local +z runs ALONG the part. So for a link aimed
+        # "forward", [0,0,1] is a ROLL joint about the arm's own length -- not a SCARA elbow, which turns about
+        # the vertical. Measured: with [0,0,1] both elbows came out horizontal (world axis 1,0,0) and driving
+        # link2 through 1.2 rad moved the tip 0.0000 m. The arm could not fold at all, while still compiling,
+        # passing every gate, and rendering as a plausible SCARA. Here [-1,0,0] is the local direction that maps
+        # to world +z for a forward-aimed link, and the tip travels 0.0837 m.
+        {"name": "link1", "role": "arm", "parent": "column", "aim": "forward",
+         "size": 0.35, "girth": 0.045, "joint": "revolute", "axis": [-1, 0, 0], "lower": -2.6, "upper": 2.6},
+        {"name": "link2", "role": "arm", "parent": "link1", "aim": "forward",
+         "size": 0.28, "girth": 0.038, "joint": "revolute", "axis": [-1, 0, 0], "lower": -2.6, "upper": 2.6,
+         "rest": 0.9},
+        {"name": "quill", "role": "quill", "like": "arm", "parent": "link2", "aim": "down",
+         "size": 0.18, "girth": 0.022, "joint": "prismatic", "axis": [0, 0, 1], "lower": -0.15, "upper": 0.0},
+    ]}
+_EXAMPLE_EXCAVATOR = {
+    "robot_class": "manipulator", "name": "agent_excavator",
+    # open roles (slew_ring / boom / stick / bucket) each declaring what they ARE via `like`, plus the rest
+    # stance that puts the machine in a working posture instead of flat on the floor.
+    "parts": [
+        {"name": "house", "role": "body", "size": 0.9, "girth": 0.30},
+        {"name": "slew", "role": "slew_ring", "like": "neck", "parent": "house", "attach": "front_top",
+         "aim": "up", "size": 0.16, "girth": 0.20, "joint": "revolute", "axis": [0, 0, 1],
+         "lower": -3.1, "upper": 3.1},
+        {"name": "boom", "role": "boom", "like": "arm", "parent": "slew", "aim": "forward",
+         "size": 0.95, "girth": 0.07, "joint": "revolute", "axis": [0, 1, 0],
+         "lower": -0.2, "upper": 1.2, "rest": -0.15},
+        {"name": "stick", "role": "stick", "like": "arm", "parent": "boom", "aim": "forward",
+         "size": 0.70, "girth": 0.05, "joint": "revolute", "axis": [0, 1, 0],
+         "lower": -2.2, "upper": 0.2, "rest": -1.6},
+        {"name": "bucket", "role": "bucket", "like": "hand", "parent": "stick", "aim": "forward",
+         "size": 0.32, "girth": 0.15, "joint": "revolute", "axis": [0, 1, 0],
+         "lower": -2.6, "upper": 0.4, "rest": -1.2},
+    ]}
+
+
+_EXAMPLE_DELTA = {
+    # A PARALLEL mechanism — the one shape a tree genuinely cannot express on its own, and the reason
+    # `loop_closures` exists. Three arms drive ONE shared platform, so two of the three joins are loops.
+    #
+    # The trap that cost two attempts: MuJoCo's `connect` locks in whatever offset the two parts have AT BUILD
+    # TIME. Declaring a loop between parts that are apart does not pull them together — it welds the gap. The
+    # first version's arm tips sat 0.5045 m from the platform before stepping and 0.5045 m after 2000 steps,
+    # with nu=3 / neq=2 and a clean validate the whole time. So every forearm's `aim` and `size` here are
+    # computed to land EXACTLY on the platform rim; `validate_gene_design` reports `loop_closures_meet` and
+    # will say so if an edit breaks that.
+    "robot_class": "delta", "name": "agent_delta", "base_height_m": 1.05,
+    "loop_closures": [{"a": "fore1", "b": "platform"}, {"a": "fore2", "b": "platform"}],
+    "parts": [
+        {"name": "plate", "role": "frame", "like": "body", "size": 0.40, "girth": 0.24},
+        # The STEM is structure we add, not a delta part: a tree needs ONE parent for the platform, and the
+        # platform has to be built where the arms will meet it. Drawn thin so it reads as a mast.
+        {"name": "stem", "role": "stem", "like": "neck", "parent": "plate", "joint": "fixed",
+         "attach": {"along": 0.5, "lateral": 0.0, "height": 0.0}, "aim": [0, 0, -1],
+         "size": 0.55, "girth": 0.018},
+        # SHORT disc at the stem's tip. Using a long `length` to position it instead draws a fat column down
+        # the middle — length both places a part and draws it.
+        {"name": "platform", "role": "platform", "like": "hand", "parent": "stem", "joint": "fixed",
+         "aim": [0, 0, -1], "size": 0.045, "girth": 0.105},
+        # Three actuated upper arms at 120 degrees. Only an explicit aim VECTOR can do this: every aim token
+        # has y >= 0, so a radial fan is unreachable through the named directions.
+        {"name": "up0", "role": "delta_upper", "like": "arm", "parent": "plate",
+         "attach": {"along": 0.5, "lateral": 0.0, "height": 0.0}, "aim": [0.800, 0.000, -0.600],
+         "size": 0.30, "girth": 0.026, "joint": "revolute", "axis": [0, 1, 0],
+         "lower": -0.9, "upper": 0.9, "rest": 0.0},
+        {"name": "up1", "role": "delta_upper", "like": "arm", "parent": "plate",
+         "attach": {"along": 0.5, "lateral": 0.0, "height": 0.0}, "aim": [-0.400, 0.693, -0.600],
+         "size": 0.30, "girth": 0.026, "joint": "revolute", "axis": [0, 1, 0],
+         "lower": -0.9, "upper": 0.9, "rest": 0.0},
+        {"name": "up2", "role": "delta_upper", "like": "arm", "parent": "plate",
+         "attach": {"along": 0.5, "lateral": 0.0, "height": 0.0}, "aim": [-0.400, -0.693, -0.600],
+         "size": 0.30, "girth": 0.026, "joint": "revolute", "axis": [0, 1, 0],
+         "lower": -0.9, "upper": 0.9, "rest": 0.0},
+        # Forearms converge INWARD and down; aim = (platform rim - upper arm's tip), size = that distance.
+        {"name": "fore0", "role": "delta_fore", "like": "arm", "parent": "up0",
+         "aim": [-0.636, 0.000, -0.772], "size": 0.4795, "girth": 0.018},
+        {"name": "fore1", "role": "delta_fore", "like": "arm", "parent": "up1",
+         "aim": [0.318, -0.551, -0.772], "size": 0.4795, "girth": 0.018},
+        {"name": "fore2", "role": "delta_fore", "like": "arm", "parent": "up2",
+         "aim": [0.318, 0.551, -0.772], "size": 0.4795, "girth": 0.018},
+    ]}
 
 
 def _corpus_grounding(args: dict) -> dict:
@@ -95,14 +204,34 @@ def get_design_schema(args: dict) -> dict:
                 "name": "unique str (required)", "role": f"one of {_ROLES} (required)",
                 "parent": "another part's name; omit for the root body",
                 "attach": f"where on the parent it mounts: {_ATTACH}",
-                "aim": f"the direction it points: {_AIM}",
+                "aim": (f"the direction it points: {_AIM} — or an explicit [x, y, z] vector for anything those "
+                        "cannot say. Every token has y >= 0, because they were written for ANIMALS whose limbs "
+                        "come in mirrored pairs (see `symmetry`), so a single part pointing at -y, or a RADIAL "
+                        "fan like three delta arms at 120 degrees, needs the vector. An unrecognised token is "
+                        "refused, never silently treated as 'forward'"),
                 "size": "length in metres (the segment's long axis)", "girth": "radius in metres",
                 "aspect": "BODY shape (root part only): 'deck'/'chassis' = a flat rectangular slab for a "
                           "rover/AGV (wheels mount at its corners); 'wide' = a broad low pod; 'round' = a "
                           "bulbous sac; omit for the default sleek barrel torso",
                 "segments": "int; a leg with 4 = 3 actuated joints + a welded foot (Go2-class)",
                 "symmetry": "'left_right' mirrors the part to a +y/-y PAIR (so one leg entry = two legs)",
-                "joint": "'revolute' to actuate it; omit for a welded/fixed part",
+                "joint": "'revolute' to actuate it, 'prismatic' for a SLIDING axis (a gantry ram, a rail "
+                         "carriage, a SCARA quill); omit for a welded/fixed part",
+                "axis": "[x,y,z] the joint's axis IN THE PART'S OWN FRAME, where local +z runs ALONG the part "
+                        "and the part is oriented by its `aim`. This is the easiest thing here to get wrong: for "
+                        "a link aimed 'forward', [0,0,1] is a ROLL about the arm's own length, NOT a vertical "
+                        "yaw — a SCARA built that way compiles, passes every check, renders correctly, and "
+                        "cannot fold (measured: tip travel 0.0000 m). For a forward-aimed link the vertical is "
+                        "[-1,0,0]; for an up-aimed one it is [0,0,1]. Check it with probe_robot rather than "
+                        "reasoning about frames. Omitted, the axis is derived from the ANIMAL role, which is "
+                        "right for a limb and wrong for a machine",
+                "lower": "float; joint travel limit (radians for revolute, metres for prismatic)",
+                "upper": "float; the other limit. Declare both for anything with a real stroke or range",
+                "rest": "float; the angle/extension this joint RESTS at, within [lower, upper]. Machines have no "
+                        "animal default, so every joint sits at 0 and a chain of forward-aimed links comes out as "
+                        "a straight horizontal line lying on the ground — declaring the working stance is what "
+                        "stands it up (a measured excavator went 0.025 -> 1.248 m tall). Legs keep their derived "
+                        "knee bend when this is omitted",
                 "curl": "float; a resting curl spread across a multi-segment part (a curved tail/neck)",
                 "geometry": "OPTIONAL shape program to AUTHOR a single-segment part; its build/export approximation "
                             "is kept with the segment and the high-fidelity mesh path realizes the full shape. See geometry_families."},
@@ -147,7 +276,10 @@ def get_design_schema(args: dict) -> dict:
                       "roles MUST come from the roles list above; an unknown role is rejected with a teaching "
                       "error (it is NOT silently compiled into a limb)",
                       "the compiler + validity gates run on submit; a broken graph returns a teaching error"],
-            "examples": {"quadruped": _EXAMPLE_QUAD, "hexapod": _EXAMPLE_HEX, "rover": _EXAMPLE_ROVER},
+            # Every example here used to be a CREATURE, so the machine half of the vocabulary had no precedent.
+            "examples": {"quadruped": _EXAMPLE_QUAD, "hexapod": _EXAMPLE_HEX, "rover": _EXAMPLE_ROVER,
+                         "scara_arm": _EXAMPLE_SCARA, "excavator": _EXAMPLE_EXCAVATOR,
+                         "delta_parallel": _EXAMPLE_DELTA},
             # HONEST out-of-box capability of each example (measured, not assumed): so the agent knows what
             # walks/drives immediately vs what needs training. The scripted wave gait is a strong PRIOR for a
             # 4-leg body but marginal for 6+ legs (a known frontier — the learned residual/train_held closes it).
@@ -314,7 +446,7 @@ def _robotics_grounding(gene) -> dict:
             return {}
         with MemoryDB(mem) as db:
             vm = RoboticsVectorMemory(db)
-            if vm.count(BODY) == 0:
+            if vm.body_index_needs_rebuild():        # empty, or written by an older body-embedding version
                 vm.index_species_bodies()
             near = vm.nearest_bodies(gene, k=3, min_sim=0.0)
             gait = recall_gait(db, gene)
@@ -346,10 +478,30 @@ def submit_design(args: dict) -> dict:
     if len(roots) != 1:
         return {"ok": False, "error": f"a design needs EXACTLY ONE root part with role 'body' and no parent "
                 f"(found {len(roots)}); see get_design_schema examples"}
-    bad_roles = sorted({str(p.get("role") or "").lower() for p in graph["parts"]} - _ROLESET - {""})
-    if bad_roles:                                              # T3: teach, never silently mis-compile an unknown role
-        return {"ok": False, "error": f"unknown part role(s) {bad_roles}; use only {sorted(_ROLESET)} "
-                f"(an unknown role is NOT silently turned into a limb)"}
+    # OPEN ROLE VOCABULARY, still nothing guessed. The 23 roles are an ANIMAL vocabulary, so a gantry, SCARA,
+    # turret, boom, rail carriage, track or rotor was not merely awkward to express -- it was rejected outright,
+    # and no amount of geometry authoring helped because the rejection happens before geometry is read. But the
+    # original guard is right that an unknown role must not be silently turned into a limb, so the rule becomes:
+    # any role NAME is allowed, and an unfamiliar one must say which known role it behaves like structurally.
+    # The agent states the semantics; the compiler still never guesses.
+    unknown = {}
+    for p in graph["parts"]:
+        r = str(p.get("role") or "").lower()
+        if not r or r in _ROLESET:
+            continue
+        like = str(p.get("like") or "").lower()
+        if like in _ROLESET:
+            p["role"] = like                                   # compile AS the declared structure...
+            p.setdefault("role_label", r)                      # ...while keeping what the designer called it
+        else:
+            unknown[r] = p.get("name")
+    if unknown:
+        return {"ok": False, "error": (
+            f"part role(s) {sorted(unknown)} are outside the built-in vocabulary. That is allowed, but you must "
+            f"say what each one IS structurally: add \"like\": one of {sorted(_ROLESET)}. For example a gantry "
+            f"column or an excavator boom is like an 'arm' (a serial chain), a track is like a 'wheel' (ground "
+            f"drive), a turret is like a 'neck' (a rotating mount). An unknown role is never silently turned "
+            f"into a limb, which is why this asks instead of assuming.")}
     scale_err = _check_scale(graph)                            # M16: reject absurd proportions with a teaching error
     if scale_err:
         return {"ok": False, "error": scale_err}
@@ -370,6 +522,33 @@ def submit_design(args: dict) -> dict:
         ground_gene(gene, material=str(args.get("material") or "aluminum"), fill=0.25)
     except Exception:  # noqa: BLE001 - grounding is value-add; a valid gene is still usable
         pass
+    # This is a true build gate, not a visual score: a contact-visible foot/wheel may not disagree with the
+    # collider that simulation trains against, and a free body may not start airborne. Return a teaching error
+    # before the invalid design is held or banked so an agent can amend the graph and resubmit it.
+    try:
+        from virturoid.services.visual_physics_gate import audit_gene
+
+        visual_physics = audit_gene(gene)
+        if not visual_physics.ok:
+            reasons = "; ".join(issue.detail for issue in visual_physics.issues[:3])
+            return {"ok": False, "error": f"design failed the visual/physics alignment gate: {reasons}",
+                    "visual_physics": visual_physics.to_dict()}
+    except ImportError:  # MuJoCo is optional for schema-only clients; the later verify step remains mandatory
+        visual_physics = None
+    except Exception as exc:  # a compiler/load failure is not safe to silently bank as a usable body
+        return {"ok": False, "error": f"design could not clear the visual/physics gate: {exc}"}
+    try:
+        from virturoid.services.structural_assertions import evaluate_structural_assertions
+
+        structural_contract = evaluate_structural_assertions(gene)
+        if not structural_contract.ok:
+            reasons = "; ".join(a.detail for a in structural_contract.assertions if not a.ok)
+            return {"ok": False, "error": f"design failed structural seam assertions: {reasons}",
+                    "structural_contract": structural_contract.to_dict()}
+    except ImportError:
+        structural_contract = None
+    except Exception as exc:
+        return {"ok": False, "error": f"design could not execute structural assertions: {exc}"}
     # NB (flywheel_breakthrough §3.M/§5d): in-place stance_repair was tried on this path and REVERTED — 0/5
     # measured product walk-rate lift (dominant failure is fore-aft LURCH, not lateral roll-over). Module kept
     # for the factory verify-build only.
@@ -383,6 +562,22 @@ def submit_design(args: dict) -> dict:
     except Exception:  # noqa: BLE001 - corpus growth is an accelerant, never blocks a valid design
         banked = []
     out = {"ok": True, **_summary(gene, rid), "name": graph.get("name")}
+    # Expose the same evidence used by the inline see→critique→fix loop. This keeps an accepted design useful
+    # to the external reasoning model: it sees which engineering checks passed and any non-blocking anatomy
+    # observations instead of receiving only a pretty render.
+    try:
+        from virturoid.services.gene_validation import validate_gene_design
+        from virturoid.services.anatomy_critic import critique_gene
+
+        out["design_review"] = {
+            "engineering": validate_gene_design(gene, material=str(args.get("material") or "aluminum")),
+            "anatomy": critique_gene(gene),
+            "visual_physics": visual_physics.to_dict() if visual_physics is not None else {"status": "not_run"},
+            "structural_contract": (structural_contract.to_dict()
+                                    if structural_contract is not None else {"status": "not_run"}),
+        }
+    except Exception:  # noqa: BLE001 - evidence is additive after the hard alignment gate
+        pass
     rg = _robotics_grounding(gene)                             # the robotics AI grounds the LLM's design in verified precedent
     if rg:
         out["robotics_grounding"] = rg
@@ -406,6 +601,69 @@ def submit_design(args: dict) -> dict:
     if img:
         out["artifacts"] = [img]
     return out
+
+
+def critique_design(args: dict) -> dict:
+    """Render and measure a held design so the external model can propose a localized edit.
+
+    The model is never the acceptance gate: this tool exposes deterministic engineering/anatomy/contact
+    findings plus the actual render, while ``edit_robot`` applies a proposed patch and the same gates can be
+    rerun. Keeping critique separate also lets callers stop when a round is non-improving.
+    """
+    from virturoid.services import session_state as S
+    from virturoid.services.ai_native_tools import _render_gene
+    from virturoid.services.anatomy_critic import critique_gene
+    from virturoid.services.gene_validation import validate_gene_design
+    from virturoid.services.structural_assertions import evaluate_structural_assertions
+    from virturoid.services.visual_physics_gate import audit_gene
+
+    rid = args.get("robot_id")
+    round_number = int(args.get("round") or 1)
+    if round_number < 1 or round_number > 4:
+        return {"ok": False, "error": "critique round must be 1..4; stop after the hard cap instead of over-repairing"}
+    gene = S.get_robot(rid)
+    if gene is None:
+        return {"ok": False, "error": f"no robot '{rid}'"}
+    engineering = validate_gene_design(
+        gene, material=str(args.get("material") or "aluminum"),
+        payload_kg=float(args.get("payload_kg") or 0.0),
+    )
+    anatomy = critique_gene(gene)
+    visual_physics = audit_gene(gene).to_dict()
+    structural_contract = evaluate_structural_assertions(gene).to_dict()
+    findings = [
+        {"source": "engineering", "severity": f["severity"], "detail": f["detail"]}
+        for f in engineering["risk_flags"] if f["severity"] in ("fatal", "high", "med")
+    ] + [
+        {"source": "anatomy", "severity": f["severity"], "detail": f["detail"]}
+        for f in anatomy["issues"] if f["severity"] in ("fatal", "high", "med")
+    ] + [
+        {"source": "visual_physics", "severity": "high", "detail": f["detail"]}
+        for f in visual_physics["issues"]
+    ] + [
+        {"source": "structural_contract", "severity": "high", "detail": f["detail"]}
+        for f in structural_contract["assertions"] if not f["ok"]
+    ]
+    img = _render_gene(
+        gene, f"{rid}_critique", azimuth=float(args.get("azimuth", 50.0)),
+        elevation=float(args.get("elevation", -16.0)),
+    )
+    return {
+        "ok": True,
+        "accepted": (engineering["ok"] and not anatomy["issues"] and visual_physics["ok"]
+                     and structural_contract["ok"]),
+        "findings": findings,
+        "engineering": engineering,
+        "anatomy": anatomy,
+        "visual_physics": visual_physics,
+        "structural_contract": structural_contract,
+        "artifacts": [img] if img else [],
+        "repair_contract": (
+            "Use edit_robot for one localized patch, rerun critique_design, and keep the edit only if fatal/high "
+            "findings do not increase. Stop after three total critique rounds (hard cap four)."
+        ),
+        "round": round_number,
+    }
 
 
 def submit_scene_spec(args: dict) -> dict:
@@ -456,11 +714,40 @@ def export_held(args: dict) -> dict:
     cad (meshes) | urdf (ROS/Gazebo robot description) | ros2 (installable ament_python package) | bom (real
     sized bill-of-materials: motors/sensors/battery, json+md) | spec (a spec sheet) | usd (OpenUSD physics for
     NVIDIA Isaac Sim) | isaac_lab (a full Isaac Lab hand-off: USD + ArticulationCfg + spawn/train scaffolds).
-    B3: the whole buildable-robot bundle, not just sim files. usd/isaac_lab need the ``usd-core`` package."""
+    B3: the whole buildable-robot bundle, not just sim files. usd/isaac_lab need the ``usd-core`` package.
+
+    IF THE TWIN CANNOT BE STEPPED, ``bom``, ``spec`` and ``certificate`` are REFUSED (``ok: False``, a
+    ``refused`` block, and a ``*.REFUSED.json`` where each would have been) while the geometry formats still
+    ship, stamped with the refusal in their own comment syntax. See :mod:`export_gate` for the line and the
+    argument for it."""
     from virturoid.services import session_state as S
     gene = S.get_robot(args["robot_id"])
     if gene is None:
         return {"ok": False, "error": f"no robot '{args['robot_id']}'"}
+    # B3c (2026-07-24 audit): GROUND the body up front through the SAME helper build_gene_package uses
+    # (ground_and_repair), so every exported format (mjcf, urdf, cad, bom, spec) describes the SAME buildable
+    # robot -- and it matches what the package builder would ship for this prompt. Before this, export_held
+    # exported the ungrounded held gene for the URDF/sim while the BOM grounded separately -> the two exit doors
+    # shipped physically different robots (3.57 kg URDF vs grounded ~8 kg BOM) for one prompt. Ground a COPY so
+    # the held session gene is untouched; grounding is idempotent so a pre-grounded (amended) body is unaffected.
+    #
+    # ...and PROVE it is still the same robot. ``ground_and_repair`` now reproduces the body's own recorded
+    # grounding instead of hardcoding carbon fibre, and preserves an imported robot's manufacturer masses
+    # outright, so this is normally a genuine no-op. It is not guaranteed to be (the structural-repair and
+    # housing-fit passes can still thicken an under-margined link), and when it is not, the customer must be
+    # told rather than shipped a package whose certificate claims deploy==measure. Measured before the fix: a
+    # Go2 verified at 27.362 kg exported at 19.151 kg, silently, on all 13 links.
+    import copy
+
+    from virturoid.services.grounded_physics import fingerprint_delta, physical_fingerprint
+    held_fp = physical_fingerprint(gene)
+    gene = copy.deepcopy(gene)
+    try:
+        from virturoid.services.gene_build import ground_and_repair
+        ground_and_repair(gene)
+    except Exception:  # noqa: BLE001 - grounding is the consistency layer; a failure still exports the raw body
+        pass
+    body_parity = fingerprint_delta(held_fp, physical_fingerprint(gene))
     fmts = args.get("formats") or list(_EXPORT_FORMATS)
     bad = [f for f in fmts if f not in _EXPORT_FORMATS]
     if bad:
@@ -468,12 +755,35 @@ def export_held(args: dict) -> dict:
     from virturoid.services.agent_tools import safe_build_path  # H2: confine writes under build/
     out_dir = safe_build_path(args.get("out_dir"), "agent_exports") / args["robot_id"]
     out_dir.mkdir(parents=True, exist_ok=True)
+    # THE SIMULABILITY GATE, ENFORCED AT THE DOOR IT WAS PROMISED AT. ``robot_import`` has told the customer
+    # since 9fbdcdc that an unsteppable twin yields "no verdict, certificate, BOM, spec sheet or calibration
+    # number" — and this function never read the flag. Measured on Menagerie's flybody: a complete, confident
+    # package including a $5,598 / 5.146 kg / 213.6 W bill of materials for a body weighing 0.000985 kg.
+    #
+    # The probe runs ONLY when a gated format was actually requested, so a geometry-only export costs nothing;
+    # and it runs on the GROUNDED COPY above, i.e. the body this package ships, not the one that was imported.
+    # See export_gate for which formats sit on which side of the line and why.
+    from virturoid.services import export_gate
+    gated_asked = [f for f in fmts if f in export_gate.GATED_FORMATS]
+    sim_check = export_gate.check_simulable(gene) if gated_asked else {"ok": True, "checked": False,
+                                                                       "reason": "no physics-asserting format "
+                                                                                 "was requested"}
+    simulable = bool(sim_check.get("ok"))
+    requested = list(fmts)
+    refusal = None
+    if not simulable:
+        refusal = export_gate.build_refusal(sim_check, requested)
+        fmts = list(refusal["still_shipped"])
     task = str(args.get("task") or (S.robot_meta(args["robot_id"]) or {}).get("prompt", ""))
     artifacts: dict = {}
     if "mjcf" in fmts:
-        from virturoid.services.gene_compiler import compile_gene_to_mjcf, standing_spawn_z
+        # write_exported_mjcf, not a bare compile+write: an IMPORTED robot's links are drawn from the customer's
+        # own baked STLs, and those have to be copied next to robot.xml and referenced relatively or the shipped
+        # model points back at this machine's build/_importmesh cache. For a body we generated there are no
+        # meshes to carry and this writes exactly the same XML it always did.
+        from virturoid.services.gene_compiler import standing_spawn_z, write_exported_mjcf
         p = out_dir / "robot.xml"
-        p.write_text(compile_gene_to_mjcf(gene, include_floor=True, spawn_z=standing_spawn_z(gene)), encoding="utf-8")
+        write_exported_mjcf(gene, p, include_floor=True, spawn_z=standing_spawn_z(gene))
         artifacts["mjcf"] = str(p)
     if "cad" in fmts:
         try:
@@ -482,37 +792,53 @@ def export_held(args: dict) -> dict:
             artifacts["cad"] = cad if isinstance(cad, dict) else str(out_dir / "cad")
         except Exception as exc:  # noqa: BLE001
             artifacts["cad_error"] = f"{type(exc).__name__}: {exc}"
-    if "urdf" in fmts or "ros2" in fmts:
-        # _write_genome_and_urdf produces robot_genome.json + robot.urdf + (best-effort) the installable ROS2 pkg
-        try:
-            from virturoid.services.gene_build import _write_genome_and_urdf
-            _write_genome_and_urdf(gene, out_dir)
-            urdf = out_dir / "robot" / "robot.urdf"
-            if "urdf" in fmts and urdf.exists():
-                artifacts["urdf"] = str(urdf)
-            ros2_root = out_dir / "export" / "ros2"
-            if "ros2" in fmts and ros2_root.exists():
-                pkgs = [str(p) for p in ros2_root.glob("*") if p.is_dir()]
-                artifacts["ros2"] = pkgs[0] if pkgs else str(ros2_root)
-        except Exception as exc:  # noqa: BLE001
-            artifacts["urdf_error"] = f"{type(exc).__name__}: {exc}"
+    # The parts list lands where THIS PACKAGE's own consumers look for it (`robot/bill_of_materials.json`), not
+    # only at the agent-facing `bom.json`: anything that later reads the exported package off disk -- a re-export,
+    # a downstream tool, a human -- must find the same list the shipped hardware_interface.yaml was written from.
+    #
+    # It runs first for readability only. The ROS2 hardware interface no longer DEPENDS on that ordering:
+    # `_write_genome_and_urdf` computes the actuator map from the gene it is exporting and hands it over, which
+    # is what stops a rebuild into a reused directory from picking up a PREVIOUS robot's parts list. Ordering
+    # alone therefore cannot be what a test of this door pins -- see tests/test_ros2_export.py.
     if "bom" in fmts:
         try:
             from virturoid.services.bom_builder import build_bom, format_bom_markdown
             bom = build_bom(gene, task=task)
             (out_dir / "bom.json").write_text(json.dumps(bom, indent=2, default=str), encoding="utf-8")
             (out_dir / "bom.md").write_text(format_bom_markdown(bom), encoding="utf-8")
+            (out_dir / "robot").mkdir(parents=True, exist_ok=True)
+            (out_dir / "robot" / "bill_of_materials.json").write_text(
+                json.dumps(bom, indent=2, default=str), encoding="utf-8")
             artifacts["bom"] = str(out_dir / "bom.json")
         except Exception as exc:  # noqa: BLE001
             artifacts["bom_error"] = f"{type(exc).__name__}: {exc}"
-    if "spec" in fmts:
+    if "urdf" in fmts or "ros2" in fmts:
+        # _write_genome_and_urdf produces robot_genome.json + robot.urdf + (best-effort) the installable ROS2 pkg
         try:
-            from virturoid.services.spec_sheet import write_spec_sheet
-            sp = write_spec_sheet(out_dir)
-            if sp:
-                artifacts["spec"] = str(sp)
+            from virturoid.services.gene_build import _write_genome_and_urdf
+            ros2_pkg = _write_genome_and_urdf(gene, out_dir, task=task)
+            urdf = out_dir / "robot" / "robot.urdf"
+            if "urdf" in fmts and urdf.exists():
+                artifacts["urdf"] = str(urdf)
+            if "ros2" in fmts:
+                # THE PACKAGE THIS EXPORT WROTE, named by the writer -- not `glob("export/ros2/*")[0]`, which is
+                # what stood here. Directory iteration is unordered, `out_dir` is reused across every export of
+                # this `robot_id`, and a package written under a different name by an earlier call (a re-export,
+                # a test harness, a reviewer's `package_name=`) sorts wherever the filesystem puts it. Measured:
+                # with `aaa_stale` and `zzz_other` beside the real `virturoid_robot`, [0] returned `aaa_stale` --
+                # and that exact substitution once produced 14 of 14 fabricated "disagreements" in a review of
+                # this export. `ros2_package` names the choice so the caller can check it rather than trust it.
+                if ros2_pkg is not None and Path(ros2_pkg).is_dir():
+                    artifacts["ros2"] = str(ros2_pkg)
+                    artifacts["ros2_package"] = Path(ros2_pkg).name
+                else:
+                    # No package came out of THIS export. A sibling on disk belongs to some other export, and
+                    # handing it over as this robot's is the whole defect; say so instead.
+                    artifacts["ros2_error"] = ("no ROS 2 package was produced by this export (the exporter "
+                                               "returned none); any package under export/ros2/ is from an "
+                                               "earlier export and is not this one")
         except Exception as exc:  # noqa: BLE001
-            artifacts["spec_error"] = f"{type(exc).__name__}: {exc}"
+            artifacts["urdf_error"] = f"{type(exc).__name__}: {exc}"
     if "usd" in fmts:
         # OpenUSD physics articulation for NVIDIA Isaac Sim (transcribed from the simulated MuJoCo model)
         try:
@@ -538,21 +864,100 @@ def export_held(args: dict) -> dict:
         try:
             from virturoid.services.ai_native_tools import verify_robot
             from virturoid.services.certificate_v2 import build_certificate_v2
-            v = verify_robot({"robot_id": args["robot_id"], "mode": "quick"})
+            # MEASURE THE BODY THIS PACKAGE SHIPS. This used to verify the SESSION robot_id and then staple the
+            # result onto the exported gene, so cert["verdict"]["checks"] described one robot while
+            # cert["model_sanity"]/["margins"] described another. Verify the exported body itself, under a
+            # scratch id so the customer's session is untouched, and hand the certificate the held-vs-shipped
+            # comparison so it can only claim deploy==measure when that is actually true.
+            _vid = f"__export__{args['robot_id']}"
+            S.put_robot(gene, robot_id=_vid, prompt=task, label="export-verify")
+            try:
+                v = verify_robot({"robot_id": _vid, "mode": "quick"})
+            finally:
+                S.forget_robot(_vid)
             cert = build_certificate_v2(gene, v, task=task, robot_id=args["robot_id"],
+                                        body_parity=body_parity,
                                         run_margins=bool(args.get("certificate_margins", True)),
                                         run_dr=bool(args.get("dr_sweep", False)),
                                         dr_draws=int(args.get("dr_draws", 12)))
+            # Say WHERE these numbers came from. They are a fresh rollout taken at export time on the shipped
+            # body -- not a transcript of whatever `verify_robot` the customer ran earlier, which may have used
+            # a different budget (full = 1500 steps vs quick = 800) and would legitimately read differently.
+            #
+            # ``same_as_held_body`` follows the certificate's own tri-state rather than the raw fingerprint:
+            # if no rollout ran there is nothing that was "measured on" anything, and a bare True here would
+            # reinstate the claim the certificate just stopped making.
+            _ran = bool((cert.get("verdict") or {}).get("rollout_ran"))
+            cert["measured_on"] = {"body": "the body in this package", "when": "export",
+                                   "mode": "quick", "rollout_ran": _ran,
+                                   "same_as_held_body": (bool(body_parity.get("same")) if _ran else None),
+                                   "note": ("re-measured here so the verdict and the shipped model are one "
+                                            "robot; an earlier interactive verdict at a different rollout "
+                                            "budget can differ and is not what this certificate signs") if _ran
+                                   else ("NO ROLLOUT RAN, so nothing was measured on any body and this "
+                                         "certificate signs no numbers")}
             (out_dir / "verification_certificate.json").write_text(
                 json.dumps(cert, indent=2, default=str), encoding="utf-8")
             artifacts["certificate"] = str(out_dir / "verification_certificate.json")
         except Exception as exc:  # noqa: BLE001 - a certificate failure must never sink the buildable export
             artifacts["certificate_error"] = f"{type(exc).__name__}: {exc}"
+    # THE SPEC SHEET GOES LAST, because it is a pure read-over-artifacts summary of everything above it. It used
+    # to be written between 'bom' and 'usd' -- i.e. BEFORE the certificate existed -- so the sheet in every
+    # exported package reported `task: "quadruped"` with no verdict, no forward distance and no cross-check
+    # against the certificate's motor selection, while a fully populated verification_certificate.json sat
+    # beside it. Nothing here computes; it only aggregates, so it must run once every input has been written.
+    if "spec" in fmts:
+        try:
+            from virturoid.services.spec_sheet import write_spec_sheet
+            sp = write_spec_sheet(out_dir)
+            if sp:
+                artifacts["spec"] = str(sp)
+        except Exception as exc:  # noqa: BLE001
+            artifacts["spec_error"] = f"{type(exc).__name__}: {exc}"
+    if refusal is not None:
+        # THE REFUSAL TRAVELS IN THE ARTIFACTS, not only in this envelope. An MJCF handed to a colleague, or a
+        # URDF loaded into ROS, has left the envelope behind; each shipped file carries the sentence in its own
+        # comment syntax, and each withheld one leaves a *.REFUSED.json where it would have been.
+        try:
+            written = export_gate.write_refusal_package(
+                out_dir, refusal, extra_targets=[artifacts.get("usd")])
+            artifacts["refusal_notice"] = written["notice"]
+            for fmt, path in (written.get("refused_docs") or {}).items():
+                artifacts[f"{fmt}_refused"] = path
+            refusal["stamped_artifacts"] = written["stamped"]
+        except Exception as exc:  # noqa: BLE001 - a stamping failure must not turn a refusal into a silent pass
+            refusal["stamp_error"] = f"{type(exc).__name__}: {exc}"
     real = {k: v for k, v in artifacts.items() if not k.endswith("_error")}
-    return {"ok": bool(real), "artifacts": artifacts, "out_dir": str(out_dir),
-            "note": "MJCF runs in sim; URDF/ROS2 deploy; BOM is the real sized parts list; spec is the datasheet; "
-                    "usd/isaac_lab hand off to NVIDIA Isaac Sim/Lab; verification_certificate.json is the "
-                    "un-gameable physics verdict that travels with the design"}
+    out = {"ok": bool(real), "artifacts": artifacts, "out_dir": str(out_dir),
+           # The customer should not have to open a json to learn whether they were shipped the robot they
+           # verified. ``same_as_verified`` is the whole invariant in one boolean.
+           "body_parity": {"same_as_verified": bool(body_parity.get("same")),
+                           "total_mass_kg": body_parity.get("total_mass_kg"),
+                           "n_links_changed": body_parity.get("n_links_changed")},
+           "note": "MJCF runs in sim; URDF/ROS2 deploy; BOM is the real sized parts list; spec is the datasheet; "
+                   "usd/isaac_lab hand off to NVIDIA Isaac Sim/Lab; verification_certificate.json is the "
+                   "un-gameable physics verdict that travels with the design"}
+    if not body_parity.get("same"):
+        out["warnings"] = [
+            f"EXPORT CHANGED THE BODY: {body_parity.get('n_links_changed')} link(s) differ from the robot you "
+            f"verified (total mass {body_parity.get('total_mass_kg')} kg, delta "
+            f"{body_parity.get('delta_mass_kg')} kg). The certificate in this package was re-measured on the "
+            "SHIPPED body and does not claim deploy==measure against your earlier verdict."]
+        out["body_parity"]["changed"] = body_parity.get("changed")
+    out["simulable"] = simulable
+    if refusal is not None:
+        # ``ok`` is FALSE here on purpose. The caller asked for a package including a parts list / a spec sheet
+        # / a certificate and did not get one; a scripted caller whose next line is `if res["ok"]: order_parts()`
+        # must stop. The geometry that DID ship is still listed in ``artifacts`` and named in the error.
+        out["ok"] = False
+        out["refused"] = refusal
+        out["error"] = (
+            f"EXPORT REFUSED IN PART — this twin is NOT SIMULABLE: {sim_check.get('reason')}. Withheld: "
+            f"{', '.join(refusal['refused'])} (each asserts a number measured by stepping this body). Still "
+            f"written: {', '.join(refusal['still_shipped']) or 'nothing'} — your own geometry, transcribed, "
+            f"unverified. See {out_dir / 'NOT_SIMULABLE.md'}.")
+        out.setdefault("warnings", []).insert(0, out["error"])
+    return out
 
 
 def export_isaac(args: dict) -> dict:
@@ -584,18 +989,39 @@ def export_isaac(args: dict) -> dict:
 def train_held(args: dict) -> dict:
     """Optimize/train a controller for the HELD robot and return a job_id (poll get_job). Default mode
     'gait_search' = the bounded, VERIFIED CPG search (CPU, reliable) on THIS gene; 'gpu_rl' = MJX PPO on the
-    box when reachable. The long-job handle pattern (start now, poll later)."""
+    box when reachable. The long-job handle pattern (start now, poll later).
+
+    THE RESULT LANDS ON THE ROBOT. 248afca closed the open training loop for ``train_reward``, ``learn_gait``
+    and ``adapt_gait`` and MISSED THIS ONE — the tool an engineer reaches for first and the only training tool
+    named in the MCP server ``instructions``. Measured on a real Menagerie Go2 through ``call_tool``: train_held
+    ran 15.0 s, reported ``status: succeeded``, and the held gene was BYTE-IDENTICAL afterwards
+    (``verify_robot`` 0.36 m, ``gait_source: flywheel_hint``); handing the very same numbers to ``apply_gait``
+    took 0.01 s and moved it to 0.466 m. The plumbing worked; this door was not connected to it. Same contract
+    as the other three (``trained_controller``): ``apply='auto'`` commits when the run's own un-gameable verdict
+    is a credible walk, ``'never'`` is artifact-only, ``'always'`` lands it loudly, and every commit goes
+    through ``session_state.commit_robot`` so ``edit_robot op:'undo'`` reverts it.
+    """
     from virturoid.services import job_registry as J
     from virturoid.services import session_state as S
+    from virturoid.services.trained_controller import APPLY_MODES
     rid = args.get("robot_id")
     if not rid or S.get_robot(rid) is None:
         return {"ok": False, "error": f"no robot '{rid}'; submit_design/create_robot first"}
+    mode = str(args.get("apply") or "auto").lower()
+    if mode not in APPLY_MODES:
+        return {"ok": False, "error": f"apply must be one of {', '.join(APPLY_MODES)} (got {mode!r})"}
     from virturoid.services.agent_tools import safe_build_path  # H2: confine writes under build/
     job = J.create("train_gene", {"robot_id": rid, "mode": args.get("mode", "gait_search"),
-                                  "max_evals": int(args.get("max_evals", 8)), "iters": int(args.get("iters", 200))},
+                                  "max_evals": int(args.get("max_evals", 8)), "iters": int(args.get("iters", 200)),
+                                  "apply": mode},
                    safe_build_path(args.get("build_root"), "agent_builds"))
-    return {"ok": True, "job_id": job.get("id"), "status": job.get("status"),
-            "note": "poll get_job(job_id, since) for progress + the honest gait verdict"}
+    return {"ok": True, "job_id": job.get("id"), "status": job.get("status"), "apply": mode,
+            "applies_to_robot": mode != "never",
+            "note": ("poll get_job(job_id, since) for progress + the honest gait verdict. The trained controller "
+                     "is COMMITTED to this robot when the run's own verdict is a credible walk (apply='auto'); "
+                     "the job result carries applied_to_robot saying whether it landed and why, and the job "
+                     "status is 'no_output' — never 'succeeded' — when nothing landed. Undo: edit_robot "
+                     "{robot_id, ops:[{op:'undo'}]}.")}
 
 
 def run_train_gene_job(args: dict, progress=None) -> dict:
@@ -617,6 +1043,7 @@ def run_train_gene_job(args: dict, progress=None) -> dict:
         rid = S.put_robot(gene, prompt=str(args["prompt"]).strip(), label="train_gene")
     else:
         return {"error": "provide 'robot_id' (a held robot) or 'prompt' (to compose one) to train"}
+    apply_mode = str(args.get("apply") or "auto").lower()
     mode = args.get("mode", "gait_search")
     if mode == "gpu_rl":
         from virturoid.services.gpu_trainer import default_training_recipe, gpu_available, train_gene_on_gpu
@@ -624,50 +1051,165 @@ def run_train_gene_job(args: dict, progress=None) -> dict:
             recipe = default_training_recipe(gene)           # AUTO recipe per body (cpg/adaptive/deploy deltas)
             say("train", f"GPU reachable — MJX PPO on the held gene (auto recipe: adaptive={recipe['adaptive']}, "
                          f"cpg={recipe['cpg']})")
-            out = Path("build/agent_builds") / rid / "policy.npz"
+            from virturoid.services.agent_tools import safe_build_path as _sbp
+            out = _sbp(None, "agent_builds") / rid / "policy.npz"
             out.parent.mkdir(parents=True, exist_ok=True)
             npz = train_gene_on_gpu(gene, out_path=str(out), iters=int(args.get("iters", 200)), envs=512,
                                     progress=lambda m: say("train", m), **recipe)
-            return {"mode": "gpu_rl", "policy": npz, "trained": bool(npz)}
+            return {"mode": "gpu_rl", "policy": npz, "trained": bool(npz),
+                    "applied_to_robot": _land_gpu_policy(rid, gene, npz, apply=apply_mode, say=say)}
         say("train", "GPU not reachable — falling back to the CPU gait search")
-    # gait_search: the bounded, honesty-gated CPG search on THIS gene (the verified multi-step search)
-    say("search", "sweeping CPG gait params, physics-evaluating each")
-    from virturoid.services.design_search import run_design_search
-    from virturoid.services.search_adapters import cpg_grid_proposer, make_cpg_evaluate
-    evaluate = make_cpg_evaluate(gene, steps=600)
-    gates = {"forward_m": 0.12, "cadence": 3.0, "upright": 0.5}
-    rep = run_design_search(propose=cpg_grid_proposer(), evaluate=evaluate, task_type="locomotion",
-                            max_evals=int(args.get("max_evals", 8)), gates=gates)
-    b = rep.best
-    say("done", f"searched {rep.n_evals} configs; solved={rep.solved}")
-    # B4: bank the real trained OUTCOME (walking distance -> success) into the flywheel, source=agent
-    _fwd = float(b.result.get("forward", 0)) if b else 0.0
-    _bank_to_flywheel(gene, prompt=f"[agent-trained] {gene.robot_class}", task="locomotion",
-                      success_rate=min(1.0, max(0.0, _fwd / 0.5)), source="agent_trained")
-    # FLYWHEEL FIX (flywheel_breakthrough_plan §3.I1): train_held FOUND working gait params but never banked them
-    # as a reusable skill — so a hard-won controller was discarded every run. Bank the winner (verified-only:
-    # solved => it cleared the un-gameable forward+cadence+upright gates) so the NEXT body can recall it.
-    banked_gait_id = None
-    if b and rep.solved and abs(_fwd) >= 0.15:
-        try:
-            import types
+    # One gait path owns recall, bounded search, classify()-credible early-stop, deploy comparison and banking.
+    say("search", "recalling prior gait hints, then physics-evaluating a bounded per-body search")
+    from virturoid.services.agent_tools import safe_build_path
+    from virturoid.services.gait_flywheel import learn_gait_flywheel
+    from virturoid.services.memory_db import MemoryDB
+    max_evals = max(1, int(args.get("max_evals", 8)))
+    mem = safe_build_path(None, "memory")
+    mem.mkdir(parents=True, exist_ok=True)
+    with MemoryDB(mem / "virturoid_memory.db") as db:
+        learned = learn_gait_flywheel(
+            gene, db, generations=max_evals, pop=min(8, max_evals), steps=600, deploy_steps=600,
+            seed=int(args.get("seed", 0)), workers=1, max_evals=max_evals, stop_on_credible=True,
+        )
+    # THREE DIFFERENT FACTS, THREE DIFFERENT NAMES. ``gait_flywheel`` reports them separately because they are
+    # not the same claim and this door had been collapsing them:
+    #   survived        the body was still up when the rollout stopped. The weakest fact a rollout produces.
+    #   credible_walk   THE CLAIM: ``classify()`` said CREDIBLE WALK, at a horizon a walk can be judged at (the
+    #                   flywheel re-runs the winner at the settling horizon when the deploy horizon — 600 here —
+    #                   is too short to settle, and ``credible_walk_reason`` is the sentence that justifies it).
+    #   beats_default   a BANK criterion: credible AND further than the free shipped default. It is a question
+    #                   about the shared corpus — whether this row should seed OTHER bodies' warm starts.
+    #
+    # MEASURED 2026-08-10 on a real Menagerie Unitree Go2 through ``agent_tools.call_tool``, this door returned
+    # all of this in ONE object::
+    #
+    #     credible: true    forward_m: 0.233    default_forward_m: 0.067    beats_default: false
+    #     reason: "...did not produce a credible walk (max_evals; survived=True, beats_default=False ...)"
+    #
+    # ``credible: true`` was ``survived`` wearing the wrong word, while the gate consulted the real verdict. The
+    # flywheel's actual answer for that run was ``CROUCH (low/unstable stance)`` — for the searched winner AND
+    # for the default. The refusal was RIGHT; only the boolean printed beside it was wrong, and it was wrong in
+    # the dangerous direction: an agent reading ``credible: true`` next to a refusal reaches for
+    # ``apply='always'``, so the payload was arguing for landing a crouch on a customer's Go2.
+    survived = bool(learned.get("survived"))
+    credible_walk = bool(learned.get("credible_walk"))
+    beats_default = bool(learned.get("beats_default"))
+    say("done", f"searched {learned['n_evals']} configs; credible walk={credible_walk} "
+                f"({learned.get('credible_walk_reason')}); beats the shipped default={beats_default}")
+    if learned.get("banked_skill"):
+        # SIGNED. ``forward_m`` is world-frame delta-x and it is signed at every producer, so ``abs`` scored a
+        # body that walked 0.5 m BACKWARD as a 1.0 success — the same unsigned-distance defect this pass fixed
+        # in the flywheel's own deploy-select. Latent here (banking already requires a credible walk, which
+        # requires forward >= 0.3) and written signed anyway, because latent is how it gets copied.
+        _bank_to_flywheel(gene, prompt=f"[agent-trained] {gene.robot_class}", task="locomotion",
+                          success_rate=min(1.0, max(0.0, float(learned["forward_m"]) / 0.5)),
+                          source="agent_trained")
+    # ...AND ONTO THE ROBOT. Banking the winner into the flywheel (above) made it available to the NEXT body and
+    # left THIS one untouched: the gene was byte-identical after a 15 s train_held on a real Go2, and the next
+    # verify_robot honestly reported it was still running ``flywheel_hint``. See ``trained_controller`` for the
+    # contract; ``door='train_held'`` is what the verdict's ``gait_source`` names afterwards.
+    from virturoid.services.trained_controller import apply_trained_gait
+    # WHAT THE GATE IS FOR: "is this a controller we can stand behind on this body?" — not "does it win a
+    # distance race?". ``apply_trained_gait``'s ``credible=`` is documented as "the training run's OWN
+    # un-gameable verdict", and its refusal sentence is worded for exactly that one question. This door was
+    # handing it ``survived and beats_default``, and both halves are the wrong question to answer with it:
+    #
+    #   * ``survived`` is not a walk. On the Go2 above it was True for a crouch.
+    #   * ``beats_default`` is a race against an alternative VERIFY RE-RUNS ANYWAY. ``ai_native_tools._honest_gait``
+    #     deploy-selects: it runs the shipped default alongside whatever is landed, keeps whichever is credible,
+    #     and (since a body with no op-point deploys the mined hint, not the default) puts that hint back in the
+    #     race too, disclosing the loser. Settling that race here protects nothing the customer is not already
+    #     protected from — while making it possible to print "did not produce a credible walk" about a credible
+    #     walk that merely came second, which is this defect again with the operands swapped. It is also measured
+    #     at ``deploy_steps`` = 600, the horizon ``trained_controller``'s docstring records an authored horse
+    #     "beating the default, 0.868 vs 0.471" at, right before it verified FELL at 6000.
+    #
+    # So the gate is ``credible_walk`` — confirmed at the horizon a walk is judged at — and nothing else, which
+    # makes the refusal sentence TRUE whenever it fires. ``beats_default`` stays what ``gait_flywheel`` uses it
+    # for (whether the row enters the shared bank) and is REPORTED either way, including the case where a
+    # credible walk lands that the default out-travelled: ``default_beat_it`` says so out loud rather than
+    # dressing it up as a run that failed.
+    landed_claim = credible_walk
+    default_beat_it = credible_walk and not beats_default
+    # NAME THE VERDICT. This string is the ONLY thing ``apply_trained_gait`` quotes — into the auto-refusal
+    # ("did not produce a credible walk (<verdict>)") and into the ``apply='always'`` override ("landed an
+    # operating point whose own verdict was <verdict>") — and the verdict is the single most useful word in
+    # either sentence: it is what tells an engineer WHY, and whether to spend more budget or change the body.
+    # Written as ``credible_walk_reason`` alone it degraded to "did not produce a credible walk" with an EMPTY
+    # parenthetical the moment that one key was absent — and a door that can only be honest when every upstream
+    # field is present is a door that goes quiet exactly when something upstream is wrong.
+    #
+    # ``credible_walk_reason`` already embeds the ``classify()`` string on every branch that builds it, so the
+    # verdict is prepended only when the sentence does NOT already contain it: real runs read unchanged, and a
+    # degraded result still names a verdict instead of shrugging. ``stopped_reason`` is the last resort — it is
+    # not a verdict ("max_evals"), but "we stopped on max_evals" beats saying nothing at all.
+    #
+    # WHICH verdict: the one from the horizon the DECISION was made at. A winner refuted by the settling check
+    # carries TWO classify() strings — "CREDIBLE WALK" at 600 steps and "FELL by ROLL-OVER" at 6000 — and naming
+    # the 600-step one would print "did not produce a credible walk (CREDIBLE WALK)", which is this whole defect
+    # again one field over. ``settling_check['verdict']`` is the final word whenever one was taken.
+    _sc = learned.get("settling_check") or {}
+    _reason = str(learned.get("credible_walk_reason") or "").strip()
+    _named = (str(_sc.get("verdict") or "").strip() or str(learned.get("verdict") or "").strip()
+              or str(learned.get("stopped_reason") or "").strip())
+    _verdict = _reason if (_named and _named in _reason) else "; ".join(x for x in (_named, _reason) if x)
+    _verdict = _verdict or "the search reported no verdict for its own winner"
+    if default_beat_it:
+        _verdict += (f" — but the shipped default measured further at the {learned.get('horizon_steps')}-step "
+                     f"horizon ({learned.get('default_forward_m')} m vs {learned.get('forward_m')} m), so this "
+                     f"point is NOT banked and verify's deploy-select may well report the default")
+    applied = apply_trained_gait(
+        rid, learned.get("params") or {}, door="train_held", apply=apply_mode,
+        credible=landed_claim, verdict=_verdict,
+        evidence={"forward_m": learned.get("forward_m"), "default_forward_m": learned.get("default_forward_m"),
+                  "credible_walk": credible_walk, "beats_default": beats_default,
+                  "judged_at_steps": learned.get("horizon_steps"), "settling_check": learned.get("settling_check"),
+                  "n_evals": learned.get("n_evals"), "robustness_rel": learned.get("robustness_rel"),
+                  "banked_gait": learned.get("banked_skill")})
+    say("apply", (f"committed to the held robot — verify_robot now reports "
+                  f"gait_source '{applied.get('gait_source_after')}'") if applied.get("applied")
+        else f"NOT applied: {applied.get('reason')}")
+    # THE CONTROLLER THE ROBOT ENDS UP WITH, named — because "we refused to land ours" does not say what it is
+    # now running, and on the Go2 the answer was a gait that is not a walk either. Read off the held robot rather
+    # than inferred: ``applied`` reports the write, ``held_gait`` reports the state.
+    from virturoid.services.trained_controller import held_gait
+    _held = held_gait(rid)
+    _door_now = ((_held.get("provenance") or {}) if isinstance(_held.get("provenance"), dict) else {}).get("door")
+    _now = ("the shipped default, or this body's mined flywheel hint — verify_robot names which" if not
+            _held.get("params") else
+            f"tuned_for_this_body{f'::{_door_now}' if _door_now else ''}")
+    return {"mode": "gait_search",
+            # ``solved`` = the run produced a walk AND it is good enough to seed other bodies. It is the
+            # conjunction, so it can never be True while either half below is False.
+            "solved": credible_walk and beats_default,
+            "credible": credible_walk,                          # THE claim, and the only key allowed this word
+            "credible_reason": learned.get("credible_walk_reason"),
+            "survived": survived,                               # the weaker fact, no longer wearing the word
+            "verdict": learned.get("verdict"),                  # the classify() string for the searched winner
+            "judged_at_steps": learned.get("horizon_steps"),    # ...and the horizon it was judged at
+            "settling_check": learned.get("settling_check"),    # None = the horizon was already long enough
+            "n_evals": learned["n_evals"], "stopped_reason": learned["stopped_reason"],
+            "reused_prior": learned["reused_prior"], "banked_gait": learned["banked_skill"],
+            "not_banked_reason": learned.get("not_banked_reason"),
+            "default_forward_m": learned["default_forward_m"], "beats_default": beats_default,
+            "default_verdict": learned.get("default_verdict"),  # the default is not automatically a walk either
+            "default_beat_it": default_beat_it,
+            "forward_m": learned["forward_m"], "applied_to_robot": applied,
+            "controller_now": _now,
+            "best": {"params": learned["params"], "forward_m": learned["forward_m"],
+                     "height_ratio": learned["height_ratio"]}}
 
-            from virturoid.services.agent_tools import safe_build_path
-            from virturoid.services.gait_flywheel import bank_gait
-            from virturoid.services.memory_db import MemoryDB
-            mem = safe_build_path(None, "memory")
-            mem.mkdir(parents=True, exist_ok=True)
-            _r = types.SimpleNamespace(best_survived=True, best_credible=True, best_forward=_fwd,
-                                       best_height_ratio=float(b.result.get("height_ratio", 0.7) or 0.7),
-                                       best_params=b.spec.get("params"))
-            with MemoryDB(mem / "virturoid_memory.db") as _db:
-                banked_gait_id = bank_gait(_db, gene, _r, task="locomotion")
-        except Exception:  # noqa: BLE001 - banking is an accelerant; a train result is still returned
-            banked_gait_id = None
-    return {"mode": "gait_search", "solved": rep.solved, "n_evals": rep.n_evals, "banked_gait": banked_gait_id,
-            "best": ({"params": b.spec.get("params"), "forward_m": round(float(b.result.get("forward", 0)), 3),
-                      "cadence": round(float(b.result.get("cadence", 0)), 1),
-                      "failure_mode": b.artifact.get("failure_mode")} if b else None)}
+
+def _land_gpu_policy(rid: str, gene, npz: str | None, *, apply: str, say) -> dict:
+    """Where the ``gpu_rl`` arm's artifact goes: ``policy_flywheel.land_gpu_policy``, which owns the contract.
+
+    It moved there because ``train_reward``'s GPU arm had the SAME hole and needed the same landing — it told the
+    agent its ``.npz`` "deploys through the POLICY bank (verify recalls it)" while no agent-reachable path had
+    ever called ``bank_morph_policy``. Two doors, one channel, one implementation.
+    """
+    from virturoid.services.policy_flywheel import land_gpu_policy
+    return land_gpu_policy(rid, gene, npz, apply=apply, door="train_held", say=say)
 
 
 def list_skills(_args: dict) -> dict:
@@ -699,6 +1241,12 @@ def run_task(args: dict) -> dict:
     goal = (str(raw).strip() if raw else "") or (S.robot_meta(args["robot_id"]) or {}).get("prompt", "")
     if not goal:
         return {"ok": False, "error": "provide goal: a plain-language task (e.g. 'navigate to the far corner')"}
+    if _OUT_OF_DOMAIN.search(goal):                            # M11: honest infeasible, never a fake 1.0
+        return {"ok": True, "goal": goal, "feasible": False, "success": False, "score": 0.0,
+                "goal_met": 0, "goal_total": 0, "task": "out_of_domain", "planned_skills": [], "steps": [],
+                "issues": ["the goal names an out-of-domain intent this platform has no tier for "
+                           "(no aerospace / teleportation / phase-through capability) — rephrase as a "
+                           "ground locomotion, navigation, or manipulation task"]}
     r = evaluate_task(str(goal), gene, llm="auto")             # llm None under NO_INTERNAL_LLM -> heuristic plan
     return {"ok": True, "goal": goal, "feasible": bool(r.get("feasible")), "success": bool(r.get("success")),
             "score": round(float(r.get("score", 0.0)), 3), "goal_met": r.get("goal_met"),
@@ -770,18 +1318,36 @@ AGENT_DESIGN_TOOLS: dict[str, dict] = {
                       "parameters": {"type": "object", "required": ["graph"], "properties": {
                           "graph": {"type": "object", "description": "anatomy graph: {robot_class, name, parts:[...]}"},
                           "material": {"type": "string"}}}},
+    "critique_design": {"description": "SEE + CRITIQUE a held design: returns an inline render plus deterministic "
+                        "engineering, anatomy, and visible-contact-vs-physics findings. The model proposes edits; "
+                        "Python remains the gate. Use at most three rounds (hard cap four).", "heavy": True,
+                        "handler": critique_design,
+                        "parameters": {"type": "object", "required": ["robot_id"], "properties": {
+                            "robot_id": {"type": "string"}, "material": {"type": "string"},
+                            "payload_kg": {"type": "number"}, "azimuth": {"type": "number"},
+                            "elevation": {"type": "number"}, "round": {"type": "integer", "minimum": 1,
+                            "maximum": 4}}}},
     "submit_scene_spec": {"description": "AUTHOR a scene: a list of objects + a robot spawn -> a validated held "
                           "scene (you are the scene designer).", "heavy": False, "handler": submit_scene_spec,
                           "parameters": {"type": "object", "required": ["objects"], "properties": {
                               "objects": {"type": "array", "items": {"type": "object"}}, "task": {"type": "string"},
                               "robot_spawn_xyz_rpy": {"type": "array"}}}},
     "evaluate_held": {"description": "Score the HELD robot on its task (real MuJoCo) — the exact gene you "
-                      "designed/edited, not a recompose.", "heavy": True, "handler": evaluate_held,
+                      "designed/edited, not a recompose. The task is IMPLIED BY THE MORPHOLOGY — it is not an "
+                      "input; use run_task/submit_task to give the robot a goal you choose.",
+                      "heavy": True, "handler": evaluate_held,
+                      # `task` used to be advertised here and was never read: `evaluate_held` scores the
+                      # morphology-implied task and derives the prompt from the held robot's own metadata, so an
+                      # agent that passed `task:'transport'` got the same verdict it would have got anyway and no
+                      # indication its argument had been dropped. A schema must not promise a lever that moves
+                      # nothing — removed rather than implemented, because task CHOICE already has two tools.
                       "parameters": {"type": "object", "required": ["robot_id"], "properties": {
-                          "robot_id": {"type": "string"}, "task": {"type": "string"}}}},
+                          "robot_id": {"type": "string"}}}},
     "export_held": {"description": "Export the HELD robot to real files. formats (default all): mjcf | cad | urdf | "
                     "ros2 | bom | spec | usd (OpenUSD physics for Isaac Sim) | isaac_lab (full Isaac Lab hand-off). "
-                    "Returns paths.", "heavy": True, "handler": export_held,
+                    "Returns paths. If the body cannot be STEPPED, bom/spec/certificate are refused (ok:false + a "
+                    "'refused' block) and only the customer's own geometry ships, stamped as unverified.",
+                    "heavy": True, "handler": export_held,
                     "parameters": {"type": "object", "required": ["robot_id"], "properties": {
                         "robot_id": {"type": "string"}, "formats": {"type": "array", "items": {"type": "string"}}}}},
     "export_isaac": {"description": "Package the HELD robot for NVIDIA Isaac Sim / Isaac Lab: a validated physics "
@@ -791,9 +1357,20 @@ AGENT_DESIGN_TOOLS: dict[str, dict] = {
                      "properties": {"robot_id": {"type": "string"},
                                     "robot_name": {"type": "string", "description": "name for the generated cfg/files"}}}},
     "train_held": {"description": "Optimize/train a controller for the HELD robot; returns a job_id (poll "
-                   "get_job). mode 'gait_search'(CPU, default) or 'gpu_rl'(MJX PPO when the box is up).", "heavy": False,
+                   "get_job). mode 'gait_search'(CPU, default) or 'gpu_rl'(MJX PPO when the box is up). The "
+                   "result LANDS: the searched controller is committed to the held robot when the run's own "
+                   "un-gameable verdict is a credible walk, so the next verify_robot measures what you trained "
+                   "and reports gait_source 'tuned_for_this_body::train_held' (gpu_rl banks a policy instead, "
+                   "gait_source 'learned_policy'). Undo with edit_robot op:'undo'; apply:'never' for a dry run. "
+                   "The job result's applied_to_robot says whether it landed and why, and the job finishes "
+                   "'no_output' rather than 'succeeded' when nothing landed.", "heavy": False,
                    "handler": train_held, "parameters": {"type": "object", "required": ["robot_id"], "properties": {
-                       "robot_id": {"type": "string"}, "mode": {"type": "string"}, "max_evals": {"type": "integer"}}}},
+                       "robot_id": {"type": "string"}, "mode": {"type": "string"}, "max_evals": {"type": "integer"},
+                       "apply": {"type": "string", "enum": ["auto", "always", "never"], "default": "auto",
+                                 "description": "'auto' commits the trained controller when this run produced a "
+                                                "credible walk that beat the default; 'never' returns it as an "
+                                                "artifact and touches nothing; 'always' commits it regardless "
+                                                "and reports the verdict it overrode"}}}},
     "list_skills": {"description": "The general TASK vocabulary: skills you can sequence + the predicate ops a "
                     "goal scores. Call before run_task/submit_task. No args.", "heavy": False,
                     "handler": list_skills, "parameters": {"type": "object", "properties": {}}},

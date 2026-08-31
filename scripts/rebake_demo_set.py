@@ -20,12 +20,13 @@ os.environ.setdefault("VIRTUROID_LLM_BACKEND", "off")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from virturoid.services.autonomous_builder import build_robot_package_from_prompt  # noqa: E402
+from virturoid.services.install_paths import anchored
 
 # id (the autodemo references these) -> the prompt that regenerates it
 DEMO_SET = {
     "arm_sort": "a tabletop robot arm that sorts red and blue blocks into matching bins",
     "build_a_quadruped_robot_that_walks": "build a quadruped robot that walks",
-    "build_a_dog_robot_that_walks": "build a dog robot that walks",
+    "dog_walk": "build a dog robot that walks",
     "hexapod_walk": "build a six-legged walking robot",
     "build_a_mobile_base_that_delivers_parts_indoors": "build a mobile base that delivers parts indoors",
     "humanoid": "a humanoid robot",
@@ -118,7 +119,11 @@ def _ensure_honest_reports(out: Path, prompt: str) -> None:
         print(f"  (scorecard) {exc}")
 
 
-def rebake(root: str = "build/ui_verify", only=None) -> int:
+def rebake(root: str = None, only=None) -> int:
+    # ANCHORED: this REGENERATES the git-tracked demo set (incident 3's own destination). A CWD-relative
+    # default meant running it from the wrong directory silently rebaked a stray tree while `git status`
+    # stayed clean -- which reads as "already up to date", the exact wrong conclusion.
+    root = root if root is not None else anchored("build/ui_verify")
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
     failures = 0

@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+from virturoid.services.install_paths import anchored
 
 
 def _pct(n, d):
@@ -115,7 +116,7 @@ def _arm_label(arm):
 
 def run_benchmark(*, split: str = "held_out", seeds=(20260701, 20260702, 20260703), with_baseline: bool = False,
                   baseline_llm=None, use_gpu: bool = False, max_evals: int = 12, steps: int = 600,
-                  families=("locomotion", "manipulation"), out_dir: str = "build/benchmark") -> dict:
+                  families=("locomotion", "manipulation"), out_dir: str = str(anchored("build/benchmark"))) -> dict:
     """Run the multi-seed head-to-head + write the prereg manifest, the Markdown report, and the JSON report to
     ``out_dir``. Returns the report dict (includes ``manifest_hash``). CPU by default (``use_gpu`` opts into the
     GPU rung)."""

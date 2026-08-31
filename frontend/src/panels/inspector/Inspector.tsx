@@ -7,6 +7,7 @@ import { useViewportStore } from "@/viewport/viewportState";
 import { EmptyState, KV, Pill, QueryState, SectionLabel, fmt, pct } from "@/components/ui";
 import { Term, Tip } from "@/components/Explain";
 import { usePackages } from "@/api/queries";
+import { robotStatus } from "@/state/status";
 import type { GenomeJoint } from "@/api/types";
 
 // Inspector: select → inspect. Tabs follow the Isaac Stage→Property backbone:
@@ -171,6 +172,7 @@ function PropertiesTab() {
   const genome = useGenome(activePackage);
   const selection = useSelectionStore((s) => s.selection);
   const meta = packages.data?.packages.find((p) => p.id === activePackage);
+  const status = robotStatus(meta);
 
   if (!activePackage) return <EmptyState title="No robot selected" sub="Build one via the Agent Rail or pick one in Library." />;
 
@@ -205,11 +207,23 @@ function PropertiesTab() {
       <KV k="class" v={meta?.robot_class ?? spec.data?.robot_class ?? "—"} />
       <KV k="species" v={meta?.species ?? spec.data?.species ?? "—"} />
       <KV k={<Term k="dof">DOF</Term>} v={meta?.dof ?? spec.data?.dof ?? "—"} />
-      <div className="px-3 py-1">
-        {meta?.valid === true && <Pill kind="ok" label="valid" />}
-        {meta?.valid === false && <Pill kind="bad" label="invalid" />}
-        {meta?.valid == null && <Pill kind="muted" label="unverified" />}
+      {/* The shared verdict, plus the facts UNDER it named individually — the inspector has the
+          room, so "the contract parses" and "real parts cover every joint" say so out loud
+          instead of collapsing into one generic word. */}
+      <div className="flex flex-wrap items-center gap-1 px-3 py-1">
+        {status && (
+          <Tip text={status.detail} side="bottom">
+            <Pill kind={status.kind} label={status.label} />
+          </Tip>
+        )}
+        {status?.buildable === false && <Pill kind="warn" label="not buildable from real parts" />}
+        {status?.contract_ok === false && <Pill kind="bad" label="contract artifacts missing" />}
       </div>
+      {status?.notes.map((n) => (
+        <p key={n} className="px-3 pb-1 text-2xs leading-relaxed text-muted">
+          {n}
+        </p>
+      ))}
       <SectionLabel>Physical</SectionLabel>
       <KV k="mass" v={spec.data?.physical?.mass_kg != null ? `${spec.data.physical.mass_kg} kg` : "—"} />
       <KV k="actuators" v={spec.data?.physical?.actuators ?? "—"} />

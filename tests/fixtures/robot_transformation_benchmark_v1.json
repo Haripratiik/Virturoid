@@ -1,0 +1,663 @@
+{
+  "version": "v1",
+  "note": "The Robot Transformation Benchmark: a FIXED instrument for the amend/generate loop, held separate from Design-Bench. Design-Bench measures prompt -> composed body (a regression gate that must stay green). This measures transformation of an EXISTING robot plus expressivity on machine classes we cannot yet express, so several cases are expected-red by construction and are marked `expect: fail` with the reason. Grade every case on its own acceptance criteria; never average across sections. Baselines are MuJoCo Menagerie models, referenced by their cached relative path; all 55 referenced models were confirmed importable by scratchpad/import_sweep.py (62/63 imported, see build/import_sweep.json).",
+  "sections": {
+    "A_local_edit": "One named part changes; every other part must stay byte-identical and both joint interfaces must survive.",
+    "B_structural": "Topology or multi-part change; out-of-scope parts still must not drift.",
+    "C_expressivity": "Non-animal machine classes. Probes the closed 23-role vocabulary; expected-red until the part language is opened.",
+    "D_intake": "Malformed, ambiguous or keyframe-less input. Correct behaviour is a TYPED actionable failure or an honest partial, never a silent guess."
+  },
+  "grading": {
+    "preserved_regions_exact": "Named parts must be byte-identical in the re-exported gene/MJCF.",
+    "interfaces_survive": "Each listed interface keeps its parent/child attachment and its transform within 1e-6 m.",
+    "verdict_not_worse": "gait_quality.classify verdict on the revision is no worse than on the baseline, using the revision's OWN tuned/learned controller.",
+    "invalidations_reported": "The change-impact report must name at least the listed rechecks; missing a safety-critical one is a hard fail.",
+    "typed_failure": "Failure must be a structured report naming the cause and a next action, not a raw exception."
+  },
+  "cases": [
+    {
+      "id": "A01",
+      "section": "A_local_edit",
+      "baseline": "unitree_go2/go2.xml",
+      "request": "make the lower leg segments 30% longer, from 0.213 m to 0.277 m",
+      "preserved": [
+        "base",
+        "FL_hip",
+        "FR_hip",
+        "RL_hip",
+        "RR_hip"
+      ],
+      "interfaces": [
+        "FL_thigh->FL_calf",
+        "FL_calf->FL_foot"
+      ],
+      "invalidations": [
+        "joint_range",
+        "self_collision",
+        "torque",
+        "stability",
+        "gait"
+      ],
+      "acceptance": "all four calves measure 0.277 +/- 0.002 m; feet still attached at the calf tip; hips unchanged; verdict not worse",
+      "expect": "pass"
+    },
+    {
+      "id": "A02",
+      "section": "A_local_edit",
+      "baseline": "unitree_go2/go2.xml",
+      "request": "lengthen only the FRONT thighs by 20%, leave the rear thighs alone",
+      "preserved": [
+        "base",
+        "RL_thigh",
+        "RR_thigh"
+      ],
+      "interfaces": [
+        "FL_hip->FL_thigh",
+        "FL_thigh->FL_calf"
+      ],
+      "invalidations": [
+        "stability",
+        "gait",
+        "torque"
+      ],
+      "acceptance": "front thighs 0.256 m, rear 0.213 m; asymmetry is deliberate and must survive re-grounding",
+      "expect": "pass",
+      "why": "the asymmetric fore/hind leg axis the co-design literature randomises; also the axis whose change broke 12 tests"
+    },
+    {
+      "id": "A03",
+      "section": "A_local_edit",
+      "baseline": "unitree_a1/a1.xml",
+      "request": "make the calves 40% thicker without changing their length",
+      "preserved": [
+        "trunk"
+      ],
+      "interfaces": [
+        "FL_thigh->FL_calf"
+      ],
+      "invalidations": [
+        "self_collision",
+        "mass",
+        "torque"
+      ],
+      "acceptance": "radius x1.4, length unchanged; mass and inertia re-derived, not copied",
+      "expect": "pass"
+    },
+    {
+      "id": "A04",
+      "section": "A_local_edit",
+      "baseline": "boston_dynamics_spot/spot.xml",
+      "request": "raise the standing height 15% by lengthening the legs",
+      "preserved": [
+        "body"
+      ],
+      "interfaces": [
+        "front_left_hip->front_left_upper_leg"
+      ],
+      "invalidations": [
+        "stability",
+        "gait",
+        "torque",
+        "reach"
+      ],
+      "acceptance": "standing height +15% via LINK LENGTH; no spacer/filler part introduced; body untouched",
+      "expect": "pass",
+      "why": "the user's explicit requirement: taller must not mean a block inserted into the legs"
+    },
+    {
+      "id": "A05",
+      "section": "A_local_edit",
+      "baseline": "universal_robots_ur5e/ur5e.xml",
+      "request": "extend the forearm by 100 mm to reach further across the bench",
+      "preserved": [
+        "base",
+        "shoulder_link",
+        "wrist_1_link",
+        "wrist_2_link",
+        "wrist_3_link"
+      ],
+      "interfaces": [
+        "upper_arm_link->forearm_link",
+        "forearm_link->wrist_1_link"
+      ],
+      "invalidations": [
+        "reach",
+        "torque",
+        "self_collision"
+      ],
+      "acceptance": "reach envelope grows; wrist stack still attached at the forearm tip; joint-2 torque demand recomputed",
+      "expect": "pass"
+    },
+    {
+      "id": "A06",
+      "section": "A_local_edit",
+      "baseline": "franka_fr3/fr3.xml",
+      "request": "the elbow joint stalls under load — fit a higher-torque actuator",
+      "preserved": [
+        "fr3_link0",
+        "fr3_link1"
+      ],
+      "interfaces": [
+        "fr3_link3->fr3_link4"
+      ],
+      "invalidations": [
+        "mass",
+        "torque",
+        "self_collision"
+      ],
+      "acceptance": "a real catalog part is selected whose envelope fits the housing; mass/BOM delta reported; NO invented catalog row",
+      "expect": "pass"
+    },
+    {
+      "id": "A07",
+      "section": "A_local_edit",
+      "baseline": "unitree_z1/z1.xml",
+      "request": "add a wrist camera mount without losing the gripper",
+      "preserved": [
+        "link00",
+        "link01"
+      ],
+      "interfaces": [
+        "link06->gripper"
+      ],
+      "invalidations": [
+        "mass",
+        "reach",
+        "self_collision"
+      ],
+      "acceptance": "sensor mount present at the wrist; gripper still attached with its transform unchanged",
+      "expect": "pass"
+    },
+    {
+      "id": "A08",
+      "section": "A_local_edit",
+      "baseline": "ufactory_lite6/lite6.xml",
+      "request": "make link 3 lighter without losing stiffness",
+      "preserved": [
+        "link1",
+        "link2"
+      ],
+      "interfaces": [
+        "link2->link3",
+        "link3->link4"
+      ],
+      "invalidations": [
+        "mass",
+        "torque"
+      ],
+      "acceptance": "link-3 mass drops with the interfaces preserved; the claim is derived from the revised solid, not asserted",
+      "expect": "pass"
+    },
+    {
+      "id": "A09",
+      "section": "A_local_edit",
+      "baseline": "trossen_vx300s/vx300s.xml",
+      "request": "increase reach 15% while staying inside the existing actuators' torque",
+      "preserved": [
+        "base_link"
+      ],
+      "interfaces": [
+        "upper_arm_link->forearm_link"
+      ],
+      "invalidations": [
+        "reach",
+        "torque",
+        "stability"
+      ],
+      "acceptance": "either a revision that meets both, or an honest report that torque is the binding constraint",
+      "expect": "pass",
+      "why": "a case where the correct answer may be 'no' — an honest infeasibility report scores as a pass"
+    },
+    {
+      "id": "A10",
+      "section": "A_local_edit",
+      "baseline": "robotiq_2f85/2f85.xml",
+      "request": "lengthen the fingers to grip a 90 mm tall bottle",
+      "preserved": [
+        "base_mount"
+      ],
+      "interfaces": [
+        "left_driver->left_coupler"
+      ],
+      "invalidations": [
+        "self_collision",
+        "reach",
+        "torque"
+      ],
+      "acceptance": "stroke still closes fully; fingers do not self-intersect through their range",
+      "expect": "pass"
+    },
+    {
+      "id": "A11",
+      "section": "A_local_edit",
+      "baseline": "google_barkour_vb/barkour_vb.xml",
+      "request": "widen the stance for better roll stability",
+      "preserved": [
+        "torso"
+      ],
+      "interfaces": [
+        "torso->leg_front_left_hip"
+      ],
+      "invalidations": [
+        "stability",
+        "gait",
+        "self_collision"
+      ],
+      "acceptance": "hip mount offsets widen; leg geometry itself unchanged; stance_aspect_w_h improves",
+      "expect": "pass"
+    },
+    {
+      "id": "A12",
+      "section": "A_local_edit",
+      "baseline": "unitree_go1/go1.xml",
+      "request": "fit larger foot pads for soft ground",
+      "preserved": [
+        "trunk",
+        "FL_thigh"
+      ],
+      "interfaces": [
+        "FL_calf->FL_foot"
+      ],
+      "invalidations": [
+        "ground_contact",
+        "stability",
+        "gait"
+      ],
+      "acceptance": "contact pad grows in the ground plane only; standing height re-derived so the pad rests ON the floor",
+      "expect": "pass",
+      "why": "guards the recorded 'boot 38 mm below the contact surface' defect"
+    },
+    {
+      "id": "B01",
+      "section": "B_structural",
+      "baseline": "unitree_go2/go2.xml",
+      "request": "mount a 6-DOF arm on its back",
+      "preserved": [
+        "FL_hip",
+        "FL_thigh",
+        "FL_calf",
+        "FR_hip",
+        "RL_hip",
+        "RR_hip"
+      ],
+      "interfaces": [
+        "base->arm_base"
+      ],
+      "invalidations": [
+        "mass",
+        "stability",
+        "torque",
+        "gait",
+        "self_collision"
+      ],
+      "acceptance": "12 -> 18 actuated DOF; legs byte-identical; carried arm mass excluded from the stance ratio; still walks",
+      "expect": "pass"
+    },
+    {
+      "id": "B02",
+      "section": "B_structural",
+      "baseline": "unitree_go2/go2.xml",
+      "request": "give it a third arm",
+      "preserved": [
+        "FL_hip",
+        "FL_thigh",
+        "FL_calf"
+      ],
+      "interfaces": [
+        "base->arm_base"
+      ],
+      "invalidations": [
+        "mass",
+        "stability",
+        "torque",
+        "gait",
+        "self_collision"
+      ],
+      "acceptance": "three distinct arms present and non-intersecting; balance re-checked; the answer may legitimately be a warning that payload is exceeded",
+      "expect": "pass",
+      "why": "the user asked for exactly this as the bar for amend capability"
+    },
+    {
+      "id": "B03",
+      "section": "B_structural",
+      "baseline": "unitree_go2/go2.xml",
+      "request": "make it taller",
+      "preserved": [
+        "base"
+      ],
+      "interfaces": [
+        "FL_thigh->FL_calf",
+        "FL_calf->FL_foot"
+      ],
+      "invalidations": [
+        "stability",
+        "gait",
+        "torque",
+        "reach"
+      ],
+      "acceptance": "height increases through LINK LENGTH and a re-derived stance; a spacer/filler segment is a HARD FAIL",
+      "expect": "pass"
+    },
+    {
+      "id": "B04",
+      "section": "B_structural",
+      "baseline": "unitree_h1/h1.xml",
+      "request": "remove the left arm and rebalance",
+      "preserved": [
+        "right_shoulder_pitch_link",
+        "left_hip_yaw_link"
+      ],
+      "interfaces": [],
+      "invalidations": [
+        "mass",
+        "stability",
+        "gait"
+      ],
+      "acceptance": "left-arm chain gone; COM shift reported; right arm untouched",
+      "expect": "pass"
+    },
+    {
+      "id": "B05",
+      "section": "B_structural",
+      "baseline": "boston_dynamics_spot/spot.xml",
+      "request": "add a tall sensor mast on top",
+      "preserved": [
+        "front_left_upper_leg",
+        "front_left_lower_leg"
+      ],
+      "interfaces": [
+        "body->mast"
+      ],
+      "invalidations": [
+        "mass",
+        "stability",
+        "self_collision"
+      ],
+      "acceptance": "mast present; the legged stance rule must NOT reject it as too-tall (carried mass is not stance)",
+      "expect": "pass",
+      "why": "regression guard for the carried-geoms fix"
+    },
+    {
+      "id": "B06",
+      "section": "B_structural",
+      "baseline": "universal_robots_ur5e/ur5e.xml",
+      "request": "add a second gripper on a Y-splitter at the wrist",
+      "preserved": [
+        "base",
+        "shoulder_link",
+        "upper_arm_link"
+      ],
+      "interfaces": [
+        "wrist_3_link->tool0"
+      ],
+      "invalidations": [
+        "mass",
+        "torque",
+        "reach",
+        "self_collision"
+      ],
+      "acceptance": "two end-effectors, both reachable, not intersecting through the wrist range",
+      "expect": "pass"
+    },
+    {
+      "id": "B07",
+      "section": "B_structural",
+      "baseline": "unitree_go2/go2.xml",
+      "request": "add a middle pair of legs to make it a hexapod",
+      "preserved": [
+        "FL_hip",
+        "RR_hip"
+      ],
+      "interfaces": [
+        "base->ML_hip",
+        "base->MR_hip"
+      ],
+      "invalidations": [
+        "gait",
+        "stability",
+        "mass",
+        "torque",
+        "self_collision"
+      ],
+      "acceptance": "6 ground-reaching chains; the gait engine handles the new leg count without a per-count special case",
+      "expect": "pass"
+    },
+    {
+      "id": "B08",
+      "section": "B_structural",
+      "baseline": "franka_fr3/fr3.xml",
+      "request": "put this arm on a mobile base so it can drive",
+      "preserved": [
+        "fr3_link1",
+        "fr3_link2",
+        "fr3_link3"
+      ],
+      "interfaces": [
+        "base->fr3_link0"
+      ],
+      "invalidations": [
+        "stability",
+        "mass",
+        "reach"
+      ],
+      "acceptance": "base_mount changes from table to free with a driving base; the arm chain is unchanged; verdict rubric switches to the DRIVING one honestly",
+      "expect": "pass"
+    },
+    {
+      "id": "C01",
+      "section": "C_expressivity",
+      "baseline": null,
+      "request": "a 3-axis cartesian gantry: two vertical columns carrying a horizontal beam, a carriage on the beam, and a vertical Z ram on the carriage",
+      "preserved": [],
+      "interfaces": [],
+      "invalidations": [
+        "reach",
+        "self_collision"
+      ],
+      "acceptance": "3 prismatic DOF along X, Y and Z with real travel limits; a rectangular work envelope",
+      "expect": "pass",
+      "why": "prismatic joints + per-part axes/limits + open roles landed; a gantry is 3 declared axes (was: vocabulary/joint-type limit)"
+    },
+    {
+      "id": "C02",
+      "section": "C_expressivity",
+      "baseline": null,
+      "request": "a SCARA arm: two revolute links in a horizontal plane plus a vertical prismatic Z at the wrist",
+      "preserved": [],
+      "interfaces": [],
+      "invalidations": [
+        "reach",
+        "torque"
+      ],
+      "acceptance": "2R + 1P with both revolutes about Z and a limited prismatic stroke",
+      "expect": "pass",
+      "why": "2R about Z + 1P about Z, all declared rather than inferred from an animal role (was: vocabulary/joint-type limit)"
+    },
+    {
+      "id": "C03",
+      "section": "C_expressivity",
+      "baseline": null,
+      "request": "a delta robot: a fixed top plate with three arms driving a shared moving platform",
+      "preserved": [],
+      "interfaces": [],
+      "invalidations": [
+        "reach",
+        "self_collision"
+      ],
+      "acceptance": "three arms converging on ONE shared platform",
+      "expect": "fail",
+      "why": "STRUCTURAL LIMIT, not vocabulary: RobotGene is a tree, and a delta is a closed kinematic chain. Needs MuJoCo equality constraints, so this case stays red until parallel mechanisms are modelled at all"
+    },
+    {
+      "id": "C04",
+      "section": "C_expressivity",
+      "baseline": null,
+      "request": "a tracked loader: two continuous tracks and a front loader boom with a bucket",
+      "preserved": [],
+      "interfaces": [],
+      "invalidations": [
+        "stability",
+        "torque",
+        "ground_contact"
+      ],
+      "acceptance": "track-driven locomotion (not discrete wheels) plus a 2-link boom and a bucket",
+      "expect": "fail",
+      "why": "tracks are a CONTACT MODEL we do not have, not a vocabulary gap — a track is not a wheel with a different name. Unchanged by the part-language work."
+    },
+    {
+      "id": "C05",
+      "section": "C_expressivity",
+      "baseline": null,
+      "request": "a rotating turret on a fixed pedestal, with a pitching barrel",
+      "preserved": [],
+      "interfaces": [],
+      "invalidations": [
+        "reach",
+        "self_collision"
+      ],
+      "acceptance": "yaw about Z at the pedestal, pitch about Y at the turret, both with limits",
+      "expect": "pass",
+      "why": "yaw about Z at the pedestal + pitch about Y at the turret, both with declared limits (was: vocabulary/joint-type limit)"
+    },
+    {
+      "id": "C06",
+      "section": "C_expressivity",
+      "baseline": null,
+      "request": "an excavator arm: boom, stick and bucket on a slewing house",
+      "preserved": [],
+      "interfaces": [],
+      "invalidations": [
+        "reach",
+        "torque",
+        "stability"
+      ],
+      "acceptance": "slew + 3 pitching joints with real limits and a bucket end-effector",
+      "expect": "pass",
+      "why": "slew + 3 pitching joints with declared axes and asymmetric limits (was: vocabulary/joint-type limit)"
+    },
+    {
+      "id": "C07",
+      "section": "C_expressivity",
+      "baseline": null,
+      "request": "a linear rail with a carriage that travels along it",
+      "preserved": [],
+      "interfaces": [],
+      "invalidations": [
+        "reach"
+      ],
+      "acceptance": "one prismatic DOF with a stroke that matches the rail's length",
+      "expect": "pass",
+      "why": "one prismatic axis with a stroke — the smallest expressivity probe (was: vocabulary/joint-type limit)"
+    },
+    {
+      "id": "C08",
+      "section": "C_expressivity",
+      "baseline": null,
+      "request": "a quadrotor: four rotors on arms around a central body",
+      "preserved": [],
+      "interfaces": [],
+      "invalidations": [
+        "mass",
+        "stability"
+      ],
+      "acceptance": "four rotor mounts in a symmetric cross; honest statement that thrust is not simulated",
+      "expect": "fail",
+      "why": "rotor mounts are now expressible, but thrust is not simulated, so the pass condition remains the honest out-of-tier answer rather than a fake hover."
+    },
+    {
+      "id": "D01",
+      "section": "D_intake",
+      "baseline": "shadow_hand/keyframes.xml",
+      "request": "import this file",
+      "preserved": [],
+      "interfaces": [],
+      "invalidations": [],
+      "acceptance": "a typed report saying this is an include-fragment, not a standalone model, naming the real model file to use",
+      "expect": "fail",
+      "why": "measured: raises ValueError('keyframe scissors: invalid qpos size, expected 0, got 24')"
+    },
+    {
+      "id": "D02",
+      "section": "D_intake",
+      "baseline": "robot_soccer_kit/robot_soccer_kit.xml",
+      "request": "import this file",
+      "preserved": [],
+      "interfaces": [],
+      "invalidations": [],
+      "acceptance": "detect that the file holds SEVERAL robots and ask which one, or return a typed multi-robot report",
+      "expect": "fail",
+      "why": "measured: flattens into one 65-segment 64-actuator 0.67 kg 'robot'"
+    },
+    {
+      "id": "D03",
+      "section": "D_intake",
+      "baseline": "unitree_h1/h1.xml",
+      "request": "import this humanoid and tell me what it is",
+      "preserved": [],
+      "interfaces": [],
+      "invalidations": [],
+      "acceptance": "robot_class == humanoid, and NO invented rest pose (h1.xml ships no keyframe)",
+      "expect": "fail",
+      "why": "measured: classifies as mobile_base — 12 of 12 bipeds in the corpus are misclassified"
+    },
+    {
+      "id": "D04",
+      "section": "D_intake",
+      "baseline": "wonik_allegro/left_hand.xml",
+      "request": "import this hand",
+      "preserved": [],
+      "interfaces": [],
+      "invalidations": [],
+      "acceptance": "robot_class == manipulator",
+      "expect": "fail",
+      "why": "measured: four fingers count as four limbs, so it classifies as a quadruped"
+    },
+    {
+      "id": "D05",
+      "section": "D_intake",
+      "baseline": "anybotics_anymal_c/anymal_c.xml",
+      "request": "import this quadruped",
+      "preserved": [],
+      "interfaces": [],
+      "invalidations": [],
+      "acceptance": "imports as a quadruped with no rest_pose (this model ships no keyframe) and is NOT posed with straight legs by default",
+      "expect": "pass"
+    },
+    {
+      "id": "D06",
+      "section": "D_intake",
+      "baseline": "unitree_go2/go2.xml",
+      "request": "import it and confirm the geometry is mine, not a lookalike",
+      "preserved": [],
+      "interfaces": [],
+      "invalidations": [],
+      "acceptance": "13 segments, 12 actuated, mass within 25% of 15.2 kg, every segment carrying source_mesh geometry, and the source 'home' stance",
+      "expect": "pass",
+      "why": "the intake fidelity floor; currently measured 13/12/15.21 kg/13 meshed/8 posed"
+    },
+    {
+      "id": "D07",
+      "section": "D_intake",
+      "baseline": "stanford_tidybot/base.xml",
+      "request": "import this robot",
+      "preserved": [],
+      "interfaces": [],
+      "invalidations": [],
+      "acceptance": "either flag that this is a sub-assembly of a larger robot, or report the 2-segment 120 kg result with that mass called out as implausible for its size",
+      "expect": "fail",
+      "why": "measured: 2 segments, 120 kg, accepted silently"
+    },
+    {
+      "id": "D08",
+      "section": "D_intake",
+      "baseline": "flybody/fruitfly.xml",
+      "request": "import this",
+      "preserved": [],
+      "interfaces": [],
+      "invalidations": [],
+      "acceptance": "a sub-gram 67-segment body must not produce a zero total mass that silently breaks grounding; report the scale honestly",
+      "expect": "fail",
+      "why": "measured: total mass rounds to 0.00 kg"
+    }
+  ]
+}

@@ -18,6 +18,23 @@ class CadGeometryTests(unittest.TestCase):
         self.assertTrue(solid.is_valid)
         self.assertGreater(solid.volume, 0.0)            # real, non-degenerate geometry
 
+    def test_motor_boss_uses_selected_datasheet_envelope_not_link_radius(self):
+        from virturoid.services.cad_geometry import build_link_solid
+        spec = {"shape": "cylinder", "axis_dim": 2, "envelope_m": (0.089, 0.089, 0.05025)}
+        solid = build_link_solid("capsule", 0.2, 0.01, actuated=True, actuator_spec=spec)
+        size = solid.bounding_box().size
+        self.assertGreaterEqual(max(float(size.X), float(size.Y)), 88.0)
+
+    def test_vented_fillet_shape_keeps_a_valid_finished_fallback(self):
+        from virturoid.services.cad_geometry import realize_shape
+        spec = {"family": "extrude", "height": 0.08,
+                "profile": [[-0.04, -0.02], [0.04, -0.02], [0.04, 0.02], [-0.04, 0.02]],
+                "cutouts": [[0.035, 0.0, 0.04, 0.012, 0.06, "z"]],
+                "chamfer": 0.004, "fillet": 0.004}
+        solid = realize_shape(spec)
+        self.assertTrue(solid.is_valid)
+        self.assertGreater(float(solid.volume), 0.0)
+
     def test_visual_meshes_are_cached_and_skip_fingers(self):
         from virturoid.services.cad_geometry import build_visual_meshes
         from virturoid.services.morphology_composer import compose_robot

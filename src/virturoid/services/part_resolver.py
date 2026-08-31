@@ -75,10 +75,10 @@ def _select_sensor(requirements: RequirementsRecord, components: list[Component]
         if component.sensor and component.sensor.sensor_type.lower() in requested:
             return component
     if "lidar" in requested:
-        return _component_by_id(components, "cmp_lidar_planar_l1")
+        return _sensor_by_type(components, "lidar", preferred_id="cmp_lidar_planar_l1")
     if "rgb_camera" in requested or "rgb camera" in requested or "normal camera" in requested:
-        return _component_by_id(components, "cmp_camera_rgb_mini")
-    return _component_by_id(components, "cmp_camera_rgbd_mini")
+        return _sensor_by_type(components, "rgb_camera", preferred_id="cmp_camera_rgb_mini")
+    return _sensor_by_type(components, "rgbd_camera", preferred_id="cmp_camera_rgbd_mini")
 
 
 def _select_category(
@@ -91,7 +91,24 @@ def _select_category(
     explicit = next((component for component in explicit_matches if component.category == category), None)
     if explicit:
         return explicit
-    return _component_by_id(components, fallback_id)
+    preferred = next((component for component in components if component.id == fallback_id), None)
+    if preferred is not None:
+        return preferred
+    fallback = next((component for component in components if component.category == category), None)
+    if fallback is None:
+        raise KeyError(f"Component catalog has no {category.value} part for role resolution.")
+    return fallback
+
+
+def _sensor_by_type(components: list[Component], sensor_type: str, *, preferred_id: str) -> Component:
+    preferred = next((component for component in components if component.id == preferred_id), None)
+    if preferred is not None and preferred.sensor and preferred.sensor.sensor_type == sensor_type:
+        return preferred
+    match = next((component for component in components
+                  if component.sensor and component.sensor.sensor_type == sensor_type), None)
+    if match is None:
+        raise KeyError(f"Component catalog has no {sensor_type} sensor.")
+    return match
 
 
 def _component_by_id(components: list[Component], component_id: str) -> Component:

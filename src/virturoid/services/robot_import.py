@@ -13,10 +13,19 @@ MJX-unsafe geoms rather than quietly papering over them. The returned gene is be
 
 from __future__ import annotations
 
+import os
+import re
 import tempfile
+from collections import defaultdict
 from pathlib import Path
 
 from virturoid.schemas.gene import RobotGene, GeneSegment
+from virturoid.services.body_kind import FLOATING_BASE_CLASSES, family_from_legs
+
+
+def _slug_name(value: str) -> str:
+    """Filesystem-safe stem for a link/robot name (customer link names are arbitrary)."""
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value or "part")).strip("_") or "part"
 
 # MuJoCo joint-type ints -> our gene joint types (mjtJoint: FREE=0, BALL=1, SLIDE=2, HINGE=3).
 _JNT = {3: "revolute", 2: "prismatic"}
@@ -26,52 +35,736 @@ _GEOM = {2: "sphere", 3: "capsule", 5: "cylinder", 6: "box"}
 _EE_NAME_HINTS = ("gripper", "hand", "finger", "effector", "tcp", "grasp")
 # Site names are deliberate (ee_site, tcp, tool0), so a short "ee" hint is safe there.
 _EE_SITE_HINTS = ("ee", "tcp", "tool", "grasp", "effector", "tip")
+# The nominal mass of a SYNTHESIZED base — a mounting frame with no counterpart in the customer's model, so
+# it should weigh nothing. `RobotGene.validate()` rejects mass <= 0, so this is instead the smallest value
+# that survives the coarsest mass rounding downstream (3 dp in `grounded_physics`). Always disclosed.
+_SYNTH_BASE_MASS_KG = 0.001
+
+
+def _quat_to_euler_xyz(quat) -> tuple[float, float, float]:
+    """MuJoCo body quaternion (w, x, y, z) -> the intrinsic XYZ euler MuJoCo's ``euler=`` attribute expects
+    (its default ``eulerseq`` is "xyz"), i.e. R = Rx(a) @ Ry(b) @ Rz(c)."""
+    import math
+
+    w, x, y, z = (float(v) for v in quat)
+    n = math.sqrt(w * w + x * x + y * y + z * z) or 1.0
+    w, x, y, z = w / n, x / n, y / n, z / n
+    r02 = 2.0 * (x * z + w * y)
+    r12 = 2.0 * (y * z - w * x)
+    r22 = 1.0 - 2.0 * (x * x + y * y)
+    r00 = 1.0 - 2.0 * (y * y + z * z)
+    r01 = 2.0 * (x * y - w * z)
+    b = math.asin(max(-1.0, min(1.0, r02)))
+    if abs(r02) > 0.999999:                        # gimbal lock: fold the free rotation into a
+        return (math.atan2(2.0 * (y * z + w * x), 1.0 - 2.0 * (x * x + y * y)), b, 0.0)
+    return (math.atan2(-r12, r22), b, math.atan2(-r01, r00))
+
+
+def _quat_mat(quat):
+    """MuJoCo quaternion (w, x, y, z) -> 3x3 rotation matrix."""
+    import numpy as np
+
+    w, x, y, z = (float(v) for v in quat)
+    n = (w * w + x * x + y * y + z * z) ** 0.5 or 1.0
+    w, x, y, z = w / n, x / n, y / n, z / n
+    return np.array([
+        [1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)],
+        [2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
+        [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)]])
+
+
+def _mat_to_euler_xyz(R) -> tuple[float, float, float]:
+    """3x3 -> the intrinsic XYZ euler MuJoCo's ``euler=`` attribute expects (R = Rx(a) @ Ry(b) @ Rz(c))."""
+    import math
+
+    b = math.asin(max(-1.0, min(1.0, float(R[0, 2]))))
+    if abs(float(R[0, 2])) > 0.999999:                       # gimbal lock
+        return (math.atan2(float(R[2, 1]), float(R[1, 1])), b, 0.0)
+    return (math.atan2(-float(R[1, 2]), float(R[2, 2])), b, math.atan2(-float(R[0, 1]), float(R[0, 0])))
+
+
+def _rot_z_to(v):
+    """Smallest rotation taking +z onto ``v`` (Rodrigues). Identity when v is already +z."""
+    import numpy as np
+
+    v = np.asarray(v, dtype=float)
+    n = float(np.linalg.norm(v))
+    if n < 1e-9:
+        return np.eye(3)
+    u = v / n
+    z = np.array([0.0, 0.0, 1.0])
+    c = float(np.dot(z, u))
+    if c > 1 - 1e-9:
+        return np.eye(3)
+    if c < -1 + 1e-9:                                        # antiparallel: flip 180 deg about x
+        return np.array([[1.0, 0, 0], [0, -1.0, 0], [0, 0, -1.0]])
+    a = np.cross(z, u)
+    K = np.array([[0, -a[2], a[1]], [a[2], 0, -a[0]], [-a[1], a[0], 0]])
+    return np.eye(3) + K + K @ K * (1.0 / (1.0 + c))
+
+
+def _link_vector(mj, body_id: int, children: dict, pos_of: dict | None = None):
+    """The link's own AXIS in its body frame: origin -> next joint (or, for a leaf, -> its farthest geom).
+
+    A RobotGene segment spans [0, length] along its local +z, but a real robot's links point wherever the design
+    puts them -- a Go2's thigh and calf both run DOWN (-z) from their joints. Importing without this, every link
+    was extruded along +z and came out MIRRORED ABOUT ITS OWN JOINT: joints in the right places, link bodies on
+    the wrong side of them, which rendered an imported Go2 as a bundle of pipes standing through its own chassis.
+
+    ``pos_of`` supplies each child's placement in THIS body's frame; it is ``_fold_frames``' composed table,
+    so a child reached through a dropped coordinate frame is measured to where it actually is, not to the
+    frame-local offset that would put it in the wrong place. Defaults to the raw ``body_pos``.
+    """
+    import numpy as np
+
+    kids = children.get(body_id, [])
+    _pos = (lambda c: np.asarray(pos_of[c], dtype=float)) if pos_of is not None \
+        else (lambda c: np.asarray(mj.body_pos[c], dtype=float))
+    if kids:
+        best = max(kids, key=lambda c: float(np.linalg.norm(_pos(c))))
+        return _pos(best)
+    far, best_n = np.zeros(3), 0.0
+    for g in range(mj.ngeom):
+        if int(mj.geom_bodyid[g]) != body_id:
+            continue
+        sz = mj.geom_size[g]
+        ext = float(sz[2] if int(mj.geom_type[g]) in (6, 7) else sz[max(0, len(sz) - 2)])
+        p = np.asarray(mj.geom_pos[g], dtype=float)
+        nrm = float(np.linalg.norm(p))
+        reach = nrm + abs(ext)
+        if reach > best_n:
+            best_n, far = reach, (p * (reach / nrm) if nrm > 1e-9 else np.array([0.0, 0.0, reach]))
+    return far
+
+
+def _urdf_world_fused_links(text: str) -> tuple[dict[str, float], float]:
+    """``({link: kg} MuJoCo welds into the WORLD, the URDF's total declared mass)``.
+
+    MuJoCo's URDF loader defaults to ``fusestatic="true"``: the root link, plus everything joined to it by
+    ``fixed`` joints, is merged into the worldbody and its ``<inertial>`` is DISCARDED. A link merged into a
+    MOVING parent is different -- its mass is added to the parent and nothing is lost. Measured on a 3-link
+    chain declaring 3.5 kg (static root 2.0, hinged middle 1.0, fixed-jointed leaf 0.5): MuJoCo compiles it to
+    ``nbody == 2`` totalling 1.5 kg, so exactly the static root's 2.0 kg is gone and the leaf's 0.5 kg is not.
+
+    This is a real, unavoidable-at-this-layer difference between the customer's file and every model built
+    from it -- including their own MuJoCo run -- and it is large: a fixed-base URDF quadruped declaring
+    5.2 kg imports as 3.2 kg, 38% light, because its 2.0 kg trunk is the static root. It used to be masked:
+    the synthesized base was handed a COPY of the first root's mass (0.8 kg here, a leg's), which covered
+    part of the hole with a number that meant nothing. It is now reported with its own figure instead.
+
+    Text-scanned rather than recompiled with ``fusestatic="false"``: reading the file the customer gave us
+    costs microseconds and cannot fail in a way that blocks an import, and the caller cross-checks the result
+    against the compiled total before saying anything (see the call site).
+    """
+    links: dict[str, float] = {}
+    starts = list(re.finditer(r"<link\b([^>]*)>", text, re.I))
+    for k, m in enumerate(starts):
+        nm = re.search(r"\bname\s*=\s*[\"']([^\"']+)[\"']", m.group(1), re.I)
+        if not nm:
+            continue
+        end = starts[k + 1].start() if k + 1 < len(starts) else len(text)
+        close = text.find("</link", m.end())
+        if close != -1:
+            end = min(end, close)
+        mv = re.search(r"<mass\b[^>]*\bvalue\s*=\s*[\"']([^\"']+)[\"']", text[m.end():end], re.I)
+        try:
+            links[nm.group(1)] = float(mv.group(1)) if mv else 0.0
+        except (TypeError, ValueError):
+            links[nm.group(1)] = 0.0
+
+    edges: list[tuple[str, str, str]] = []              # (parent, child, joint type)
+    for jm in re.finditer(r"<joint\b([^>]*)>(.*?)</joint\s*>", text, re.I | re.S):
+        jt = re.search(r"\btype\s*=\s*[\"']([^\"']+)[\"']", jm.group(1), re.I)
+        p = re.search(r"<parent\b[^>]*\blink\s*=\s*[\"']([^\"']+)[\"']", jm.group(2), re.I)
+        c = re.search(r"<child\b[^>]*\blink\s*=\s*[\"']([^\"']+)[\"']", jm.group(2), re.I)
+        if p and c:
+            edges.append((p.group(1), c.group(1), (jt.group(1) if jt else "").strip().lower()))
+
+    kids: dict[str, list[tuple[str, str]]] = {}
+    for p, c, t in edges:
+        kids.setdefault(p, []).append((c, t))
+    children = {c for _, c, _ in edges}
+    frontier = [n for n in links if n not in children]  # the URDF's root link(s)
+    static, seen = [], set()
+    while frontier:                                     # ... and everything FIXED to them
+        n = frontier.pop()
+        if n in seen:
+            continue
+        seen.add(n)
+        static.append(n)
+        frontier.extend(c for c, t in kids.get(n, []) if t == "fixed")
+    return ({n: links.get(n, 0.0) for n in static if links.get(n, 0.0) > 0.0}, float(sum(links.values())))
+
+
+def _frame_only_bodies(mj) -> set[int]:
+    """Source bodies that are COORDINATE FRAMES, not links: no mass, no geom, no joint.
+
+    Real models park empty bodies in the tree purely to name a pose — a sensor mount (``realsense``,
+    ``base_imu``, ``head_nav_cam``, ``oak/``), a mounting datum (``attachment``, ``link_grasp_center``,
+    ``world_link``), or the placement frame an ``<attach>``-ed submodel arrives with (shadow_dexee's
+    ``F0/ F1/ F2/``). They carry no matter and no surface; the source's own dynamics are identical with
+    them deleted.
+
+    Turning one into a segment invents a robot part: the importer's zero-mass floor gives it 0.01 kg, and
+    the compiler gives every segment a COLLISION PRIMITIVE, so a naked frame becomes a stub with mass and a
+    contact surface that the customer never built. Measured over MuJoCo Menagerie (100 models): 18 zero-mass
+    bodies exist and ALL 18 are of exactly this kind — none has a geom, none has a joint — so there is no
+    "massless but real link" case to weigh against dropping them. They are folded into their children
+    instead (``_fold_frames``), which preserves every surviving link's pose exactly.
+    """
+    return {i for i in range(1, mj.nbody)
+            if float(mj.body_mass[i]) <= 0.0
+            and int(mj.body_geomnum[i]) == 0
+            and int(mj.body_jntnum[i]) == 0}
+
+
+def _fold_frames(mj, frames: set[int]):
+    """Collapse the frame-only bodies out of the tree, composing their transforms into their children.
+
+    Returns ``(eff_parent, eff_pos, eff_rot, eff_body)``:
+      * ``eff_parent[i]`` — the nearest ancestor of ``i`` that is a real link (0 = world);
+      * ``eff_pos[i]`` / ``eff_rot[i]`` — where ``i`` sits IN THAT ancestor's frame, with every removed
+        frame's own translation and rotation composed in. Dropping a frame without this would silently
+        MOVE its subtree by the frame's transform: shadow_dexee's three fingers hang off ``F0/ F1/ F2/``,
+        which carry the entire finger placement (0.052 m of offset each, and 161.3 deg of yaw on two of the
+        three), so the three fingers would land on one point facing one way.
+      * ``eff_body[i]`` — the real link body ``i`` is rigidly part of (itself, unless it IS a frame). A
+        frame has no joint, so anything attached to it — a site especially — is welded to that link; this
+        re-homes such sites instead of losing them with the frame.
+
+    MuJoCo orders body ids parent-before-child, so one forward pass suffices.
+    """
+    import numpy as np
+
+    eff_parent: dict[int, int] = {}
+    eff_pos: dict[int, object] = {}
+    eff_rot: dict[int, object] = {}
+    eff_body: dict[int, int] = {0: 0}
+    for i in range(1, mj.nbody):
+        p = int(mj.body_parentid[i])
+        pos = np.asarray(mj.body_pos[i], dtype=float)
+        rot = _quat_mat(mj.body_quat[i])
+        while p in frames:
+            pos = eff_pos[p] + eff_rot[p] @ pos
+            rot = eff_rot[p] @ rot
+            p = eff_parent[p]
+        eff_parent[i], eff_pos[i], eff_rot[i] = p, pos, rot
+        eff_body[i] = p if i in frames else i
+    return eff_parent, eff_pos, eff_rot, eff_body
+
+
+def _root_own_span(mj, body_id: int):
+    """The root body's own longest COLLISION extent — how long the trunk actually is.
+
+    Not from its children: a torso's children are a symmetric pair of shoulders or four hips, and reading a shape
+    off where things are attached to it is what rebuilt a humanoid chest sideways. Not from visual geometry
+    either: the Go2's base carries five non-colliding shrouds, and measuring those with the collision box returns
+    0.530 m for a 0.376 m structure. The MAIN structural geom, unioned with the other collision geoms only where
+    they extend it along the same axis, keeps a nose or an antenna from becoming length.
+    """
+    import numpy as np
+
+    ids = [g for g in range(mj.ngeom)
+           if int(mj.geom_bodyid[g]) == body_id and int(mj.geom_type[g]) != 0]
+    hard = [g for g in ids if int(mj.geom_contype[g]) or int(mj.geom_conaffinity[g])] or ids
+    if not hard:
+        return None
+
+    def _half(g):
+        t, s = int(mj.geom_type[g]), np.asarray(mj.geom_size[g], dtype=float)
+        if t == 2:
+            return np.array([s[0]] * 3)
+        if t in (3, 5):                                    # capsule / cylinder: (radius, half-length)
+            return np.array([s[0], s[0], s[1] + (s[0] if t == 3 else 0.0)])
+        return np.abs(s[:3])
+
+    main = max(hard, key=lambda g: float(np.prod(_half(g)) + 1e-12))
+    h = _half(main)
+    span = float(2.0 * np.max(h))
+    return span if span >= 0.02 else None
+
+
+def _import_mesh_key(source: str, robot_id: str | None) -> str:
+    """Directory name under ``build/_importmesh`` for THIS import's baked link meshes.
+
+    The key used to be the caller's ``robot_id`` or, when that was absent, the model's BASENAME — and the
+    product's own ingest path passes no robot_id, so every customer who ever drops a ``go2.xml``, a
+    ``robot.urdf`` or a ``scene.xml`` wrote into one shared directory. Two imports of different robots then
+    overwrite each other's STLs link by link, and an import running while another reads produces a
+    partially-written file: measured, that surfaced as ``decoder failed for mesh file ... has wrong size;
+    perhaps this is an ASCII file?`` and MuJoCo refuses to compile the model AT ALL, so a name collision does
+    not degrade one link's appearance, it takes the whole robot down.
+
+    The basename is kept as a readable prefix (these directories get inspected by hand) and disambiguated with a
+    digest of the model's ABSOLUTE path, so the same file re-imported reuses its own directory — the cache still
+    works — while two different files never share one.
+    """
+    import hashlib
+
+    if robot_id:
+        return _slug_name(robot_id)
+    src = str(source or "")
+    stem = os.path.basename(src) or "import"
+    try:
+        ident = str(Path(src).resolve()) if (len(src) < 512 and Path(src).exists()) else src[:4096]
+    except OSError:
+        ident = src[:4096]
+    return f"{_slug_name(stem)}_{hashlib.md5(ident.encode('utf-8', 'replace')).hexdigest()[:10]}"
+
+
+def _link_mesh_stem(body_name: str, claimed: dict[str, str]) -> str:
+    """A filename stem for THIS link's baked STL that no OTHER link in the same import can take.
+
+    ``_slug_name`` is many-to-one: it rewrites every run of characters a filesystem dislikes into a single
+    ``_``, so a customer whose model names two links ``arm/1`` and ``arm:1`` -- or ``left hip`` and
+    ``left_hip``, both of which occur in CAD- and xacro-exported URDFs -- collapses them onto ONE file. The
+    second bake then overwrites the first and both segments' ``geometry.path`` point at it, so one link
+    silently renders as another link's geometry. Nothing errors; the model still compiles; the robot is just
+    wrong in a way that only shows up by eye. (Swept: zero of the 63 MuJoCo Menagerie packages collide, which
+    is exactly why this cannot be left to be caught by a real model in CI.)
+
+    MuJoCo body names are unique, so the body name itself is the key: the readable slug is kept when it is
+    free, and disambiguated with a digest OF THE ORIGINAL NAME when it is not. Deterministic, so re-importing
+    the same model reuses the same files, and stable regardless of the order links are baked in.
+    """
+    import hashlib
+
+    stem = _slug_name(body_name)
+    if claimed.setdefault(stem, body_name) != body_name:
+        stem = f"{stem}_{hashlib.md5(body_name.encode('utf-8', 'replace')).hexdigest()[:8]}"
+        claimed.setdefault(stem, body_name)
+    return stem
+
+
+_STL_MAX_FACES = 200000        # MuJoCo's own stl_decoder ceiling; over it the model is rejected outright
+
+
+def _bake_source_mesh(mj, body_id: int, S, out_path, *, notes: list | None = None, label: str = "") -> bool:
+    """Write THIS body's own mesh geoms, transformed into our LINK frame, as one binary STL (millimetres).
+
+    The importer builds two lanes: a FAITHFUL one that keeps the customer's MJCF + meshes, and an EDITABLE
+    RobotGene the amend operators work on. Measured, the editable lane carried the customer's geometry on
+    0 of 13 segments -- every link was rebuilt as a plain capsule -- so the robot you could edit and the robot
+    you saw rendered was a stick figure of the one you imported, no matter how exact the kinematics became.
+    Their real meshes were sitting in the faithful lane, unused. This baker is the bridge: each editable
+    segment gets the source geometry of the link it stands for, expressed in that segment's own frame.
+    """
+    import struct
+
+    import numpy as np
+
+    tris = []
+    for g in range(mj.ngeom):
+        if int(mj.geom_bodyid[g]) != body_id or int(mj.geom_type[g]) != 7:      # 7 = mjGEOM_MESH
+            continue
+        mid = int(mj.geom_dataid[g])
+        if mid < 0:
+            continue
+        v0, vn = int(mj.mesh_vertadr[mid]), int(mj.mesh_vertnum[mid])
+        f0, fn = int(mj.mesh_faceadr[mid]), int(mj.mesh_facenum[mid])
+        verts = np.asarray(mj.mesh_vert, dtype=float).reshape(-1, 3)[v0:v0 + vn]
+        faces = np.asarray(mj.mesh_face, dtype=int).reshape(-1, 3)[f0:f0 + fn]
+        R = _quat_mat(mj.geom_quat[g])
+        p = np.asarray(mj.geom_pos[g], dtype=float)
+        world = (verts @ R.T + p) @ S                       # geom -> body -> LINK frame (S maps link->body)
+        tris.append(world[faces] * 1000.0)                  # STL is millimetres, matching the compiler
+    if not tris:
+        return False
+    T = np.concatenate(tris, axis=0)
+    # MUJOCO'S STL DECODER REFUSES A MESH OVER 200 000 FACES, AND IT REFUSES THE WHOLE MODEL WITH IT. A link's
+    # baked STL is the WELD of every mesh geom on that body, so a body carrying several dense visual meshes can
+    # clear the cap even when no single source mesh does: measured on Menagerie's apptronik_apollo, `torso_link`
+    # welds to 201 358 triangles (150 000 + 51 358) and the twin then failed to compile at all -- not
+    # "the torso looks wrong", but `decoder failed for mesh file ... torso_link.stl` taking down a 37-segment
+    # humanoid. Truncate rather than emit a file MuJoCo will reject, and SAY SO: this drops geometry, and a
+    # customer whose torso is missing its last shroud is owed the reason. Truncation, not a uniform stride --
+    # these triangles are a SOUP, not an indexed mesh, so striding them halves the density everywhere and the
+    # link renders see-through, while truncating keeps whole sub-meshes intact in the order they were welded.
+    if len(T) > _STL_MAX_FACES:
+        if notes is not None:
+            notes.append(f"link {label!r} welds {len(T)} mesh triangles, over MuJoCo's {_STL_MAX_FACES}-face "
+                         f"STL decoder ceiling; the baked visual mesh was truncated to {_STL_MAX_FACES}. The "
+                         f"collider and all kinematics are unaffected — this is the drawn surface only, and "
+                         f"the untouched original is in the faithful native lane.")
+        T = T[:_STL_MAX_FACES]
+    # ATOMIC: build the whole STL beside the target and rename it into place. A binary STL declares its triangle
+    # count in the header, so a reader that opens one mid-write sees a length that disagrees with the file size
+    # and MuJoCo rejects it outright -- taking down the entire model, not just this link. Writing in place made
+    # that reachable whenever two imports overlapped; os.replace is atomic on both POSIX and Windows, so a reader
+    # now sees either the previous complete file or the new complete file and never a half of either.
+    tmp = f"{out_path}.{os.getpid()}.part"
+    try:
+        with open(tmp, "wb") as fh:
+            fh.write(b"\0" * 80)
+            fh.write(struct.pack("<I", len(T)))
+            for t in T:
+                n = np.cross(t[1] - t[0], t[2] - t[0])
+                ln = float(np.linalg.norm(n))
+                n = n / ln if ln > 1e-12 else np.zeros(3)
+                fh.write(struct.pack("<12fH", *n, *t[0], *t[1], *t[2], 0))
+        os.replace(tmp, out_path)
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        return False
+    return True
+
+
+_REST_KEY_PREFERENCE = ("home", "stand", "standing", "default", "retract", "init")
+
+
+def _source_rest_pose(mj, name_of, BODY) -> tuple[dict, str | None]:
+    """The source model's intended stance as ``{our_joint_name: angle}``, plus which keyframe it came from.
+
+    Prefers a conventionally-named key (`home`, `stand`, ...) and otherwise takes the first one. Only hinge and
+    slide joints are carried -- a free/ball base is not representable in a RobotGene chain and its height is
+    re-derived by ``standing_spawn_z`` anyway. Our joint name is ``{segment}_joint`` and a segment IS the source
+    body, so the source joint's own body gives the mapping.
+    """
+    import mujoco
+
+    kid, kname = _preferred_rest_key(mj, name_of)
+    if kid is None:
+        return {}, None
+    qpos = mj.key_qpos[kid]
+    pose: dict[str, float] = {}
+    for j in range(mj.njnt):
+        if int(mj.jnt_type[j]) not in (2, 3):                    # 2 = slide, 3 = hinge
+            continue
+        adr = int(mj.jnt_qposadr[j])
+        if not (0 <= adr < len(qpos)):
+            continue
+        bid = int(mj.jnt_bodyid[j])
+        # Match the segment builder's own naming, including its fallback for an unnamed body, or the pose keys
+        # silently miss those joints.
+        body = name_of(BODY, bid) or f"body{bid}"
+        val = float(qpos[adr])
+        if abs(val) > 1e-6:                                      # a zero angle is already the compiler's default
+            pose[f"{body}_joint"] = round(val, 5)
+    return pose, (kname or f"key{kid}")
+
+
+# --------------------------------------------------------------------------------- import memoization
+#
+# IMPORTING A REAL ROBOT IS NOT CHEAP, and the test suite imports the same handful over and over. MEASURED on
+# this checkout (2026-08-06, one CPU), a single ``import_robot`` call: Unitree G1 13.88 s, Go2 11.29 s, Talos
+# 7.45 s, Booster T1 4.93 s, Panda 4.07 s, Spot 3.84 s, UR5e 3.49 s, Cassie 2.79 s. The suite names ~115
+# Menagerie model references across nine test files -- go2.xml 26 times, g1.xml 13, ur5e.xml 11 -- and every one
+# re-parses the same unchanged file, re-walks the same body tree and re-bakes the same per-link STLs. A memoized
+# repeat costs 2-4 ms, so on those eight files alone the suite stops paying ~563 s (9.4 min).
+#
+#   VIRTUROID_IMPORT_CACHE=1   memoize the import on the SOURCE's identity for the life of the process.
+#
+# DEFAULT-OFF, exactly like ``VIRTUROID_GAIT_FIT_CACHE`` (gait_flywheel), so a product run is byte-identical and
+# a customer re-importing a file they just edited can never be handed yesterday's robot. Two things this has to
+# get right, and both were failure modes of the gait cache before it got them right:
+#
+#   * CALLERS MUTATE WHAT THEY ARE GIVEN. ``ingest_project`` re-grounds masses onto the gene, amend operators
+#     rewrite segments in place, and several tests set ``gene.loop_closures = []`` or poke ``metadata``. Handing
+#     the same object to the next caller would let one import silently rewrite another's robot. So the cache
+#     stores a SERIALIZED snapshot (``RobotGene.to_dict``, which round-trips) and every hit is rebuilt from a
+#     deep copy of it -- including the first store, so nothing the caller does afterwards can reach the cache.
+#   * THE KEY MUST COVER EVERYTHING THAT CHANGES THE ANSWER. Not just the path: a CONTENT DIGEST of the model
+#     file (mtime alone is not enough -- see ``_import_cache_key``), the two options that alter the result
+#     (``robot_id`` picks the baked-mesh directory and the gene id; ``species`` names it), AND a bounded
+#     fingerprint of the model's own directory -- because an MJCF pulls in ``<include>`` files, meshes and
+#     keyframes that live beside it, and a robot whose mesh changed is a different robot while its own .xml is
+#     byte-for-byte unchanged. An XML STRING has no path, so it is keyed by digest of the text itself.
+#
+# A FAILED import is never cached (same rule as gait_flywheel._remember): a parse error is not an answer about
+# the model, and the next caller must get a real attempt.
+_IMPORT_CACHE: dict[tuple, dict] = {}
+# The directory walk is bounded so a customer who drops a model into a 100k-file monorepo pays milliseconds, not
+# seconds. Truncation is recorded IN the fingerprint, so a truncated key never compares equal to a complete one.
+_DIR_FINGERPRINT_CAP = 5000
+
+
+def _dir_fingerprint(root: Path) -> tuple:
+    """``(n_files, total_bytes, newest_mtime_ns, truncated)`` for everything under ``root``.
+
+    Deterministic (sorted walk) and cheap: 30-200 files for a Menagerie package, a few milliseconds. It is a
+    fingerprint, not a hash of contents -- an edit that preserves a file's size AND its mtime is invisible to
+    it, which is the documented limit of a process-scoped, opt-in test cache.
+    """
+    n = total = newest = 0
+    try:
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames.sort()
+            for fn in sorted(filenames):
+                try:
+                    st = os.stat(os.path.join(dirpath, fn))
+                except OSError:
+                    continue
+                n += 1
+                total += int(st.st_size)
+                newest = max(newest, int(st.st_mtime_ns))
+                if n >= _DIR_FINGERPRINT_CAP:
+                    return (n, total, newest, True)
+    except OSError:
+        return (-1, 0, 0, False)
+    return (n, total, newest, False)
+
+
+_HASH_MODEL_MAX_BYTES = 4 * 1024 * 1024
+
+
+def _import_cache_key(source: str, robot_id: str | None, species: str | None):
+    """The identity of THIS import, or ``None`` when it must not be cached.
+
+    The MODEL FILE ITSELF is keyed by CONTENT DIGEST, not by mtime. Mtime alone is not safe here: a test that
+    writes a fixture URDF, imports it, rewrites it and imports again is an ordinary thing to do, and Windows
+    file timestamps are not guaranteed to resolve two writes milliseconds apart -- so an mtime key can hand back
+    the previous robot for the new file. A digest cannot. It costs microseconds on the tens-of-KB XML a robot
+    description actually is, and files past ``_HASH_MODEL_MAX_BYTES`` fall back to size+mtime.
+    """
+    import hashlib
+
+    if os.environ.get("VIRTUROID_IMPORT_CACHE") != "1":
+        return None
+    opts = (robot_id, species)
+    try:
+        p = Path(source)
+        if len(source) < 512 and p.is_file():
+            st = p.stat()
+            if int(st.st_size) <= _HASH_MODEL_MAX_BYTES:
+                with open(p, "rb") as fh:
+                    body = ("sha256", hashlib.sha256(fh.read()).hexdigest())
+            else:
+                body = ("stat", int(st.st_size), int(st.st_mtime_ns))
+            return ("file", str(p.resolve()), body, _dir_fingerprint(p.parent), opts)
+    except OSError:
+        return None
+    return ("text", hashlib.sha256(source.encode("utf-8", "replace")).hexdigest(), opts)
+
+
+def clear_import_cache() -> None:
+    """Drop the memoized imports. For a test that deliberately wants the parser to run again."""
+    _IMPORT_CACHE.clear()
+
+
+def _snapshot_import(out: dict) -> dict:
+    """A detached, serializable copy of an import result — safe to hand out again, whatever the caller does."""
+    import copy
+
+    gene = out.get("gene")
+    return {
+        "gene": copy.deepcopy(gene.to_dict()) if gene is not None else None,
+        "warnings": list(out.get("warnings") or []),
+        "backend_support": copy.deepcopy(out.get("backend_support") or {}),
+        "species": out.get("species"), "robot_class": out.get("robot_class"),
+        "valid": bool(out.get("valid")),
+        # The simulability verdict is part of the RESULT, not a side effect: a memoized import that dropped it
+        # would hand the second caller a twin marked simulable that was never simulated.
+        "simulable": bool(out.get("simulable", True)),
+        "simulation_check": copy.deepcopy(out.get("simulation_check") or {}),
+    }
+
+
+def _restore_import(snap: dict) -> dict:
+    import copy
+
+    d = snap.get("gene")
+    return {
+        "gene": RobotGene.from_dict(copy.deepcopy(d)) if d is not None else None,
+        "warnings": list(snap.get("warnings") or []),
+        "backend_support": copy.deepcopy(snap.get("backend_support") or {}),
+        "species": snap.get("species"), "robot_class": snap.get("robot_class"),
+        "valid": bool(snap.get("valid")),
+        "simulable": bool(snap.get("simulable", True)),
+        "simulation_check": copy.deepcopy(snap.get("simulation_check") or {}),
+    }
 
 
 def import_robot(source: str, *, robot_id: str | None = None, species: str | None = None) -> dict:
     """Import a URDF/MJCF (file path or XML string) into a RobotGene.
 
-    Returns ``{"gene", "warnings", "backend_support", "species", "robot_class", "valid"}``.
+    Returns ``{"gene", "warnings", "backend_support", "species", "robot_class", "valid", "simulable",
+    "simulation_check"}``. ``valid`` is true only when the gene passes schema validation AND the compiled twin
+    survives a bounded settle + excitation without going non-finite (see ``_simulability_probe``); ``simulable``
+    and ``simulation_check`` say which of the two failed and why.
     Needs MuJoCo. Raises only if the source can't be parsed at all (with a clear message).
+
+    Memoized ONLY under ``VIRTUROID_IMPORT_CACHE=1`` (see the block above); otherwise every call does the full
+    parse, exactly as before.
     """
+    key = _import_cache_key(source, robot_id, species)
+    snap = _IMPORT_CACHE.get(key) if key is not None else None
+    if snap is not None:
+        return _restore_import(snap)
+    out = _import_robot_uncached(source, robot_id=robot_id, species=species)
+    if key is not None:
+        try:                                     # a cache may make an import faster; it may never make it fail
+            _IMPORT_CACHE[key] = _snapshot_import(out)
+        except Exception:  # noqa: BLE001 - unsnapshotable result -> simply not memoized
+            pass
+    return out
+
+
+def _import_robot_uncached(source: str, *, robot_id: str | None = None, species: str | None = None) -> dict:
+    """The real import. ``import_robot`` is the (opt-in) memoizing front door onto this."""
     import mujoco
 
     warnings: list[str] = []
+
+    # M4 (2026-07-24 audit): a xacro TEMPLATE is not a loadable URDF. MuJoCo can't expand ${...}/<xacro:...>, so
+    # it used to crash into the generic fallback and hold a PHANTOM "mobile_base" that has nothing to do with the
+    # file. Detect it up front and REFUSE with the same expand instructions import_model gives (now also matching
+    # the .urdf.xacro suffix), instead of inventing a body.
+    try:
+        _p = Path(source)
+        _text = _p.read_text(encoding="utf-8", errors="replace") if (len(source) < 512 and _p.exists()) else source
+    except OSError:
+        _text = source
+    _is_xacro_suffix = len(source) < 512 and (source.endswith(".xacro") or source.endswith(".urdf.xacro"))
+    if "<xacro:" in _text or "${" in _text or _is_xacro_suffix:
+        return {
+            "gene": None, "backend_support": {}, "species": None, "robot_class": None, "valid": False,
+            "simulable": False,
+            "simulation_check": {"ok": False, "checked": False, "reason": "no gene was produced"},
+            "warnings": ["this is a xacro template with unexpanded macros (${...} / <xacro:...>), not a loadable "
+                         "URDF. Expand it first: `ros2 run xacro xacro robot.urdf.xacro > robot.urdf` (or "
+                         "`rosrun xacro xacro`), then import the generated .urdf."],
+        }
+
+    # AN INCLUDE FRAGMENT IS NOT A MODEL. Real model directories ship files meant to be pulled INTO a parent --
+    # keyframes.xml, assets.xml, a shared defaults block -- and a customer dropping a folder will hand us one.
+    # Measured on MuJoCo Menagerie: shadow_hand/keyframes.xml is the single import failure in the whole 63-model
+    # corpus, and it fails as a raw `ValueError: keyframe 'scissors': invalid qpos size, expected 0, got 24`,
+    # which tells the customer nothing. A <mujoco> root carrying no BODY is the signature: it declares things for
+    # someone else's worldbody. Say so, and name the model file sitting next to it.
+    if "<mujoco" in _text and "<body" not in _text:
+        _sibling = ""
+        try:
+            _p = Path(source)
+            if len(source) < 512 and _p.is_file():
+                _peers = sorted(q.name for q in _p.parent.glob("*.xml")
+                                if q != _p and "<body" in q.read_text(encoding="utf-8", errors="replace"))
+                if _peers:
+                    _sibling = f" The model in this directory is {_peers[0]!r}" + (
+                        f" (also: {', '.join(_peers[1:4])})." if len(_peers) > 1 else ".")
+        except OSError:
+            pass
+        return {
+            "gene": None, "backend_support": {}, "species": None, "robot_class": None, "valid": False,
+            "simulable": False,
+            "simulation_check": {"ok": False, "checked": False, "reason": "no gene was produced"},
+            "warnings": ["this is an MJCF INCLUDE FRAGMENT, not a standalone model: it has a <mujoco> root but "
+                         "declares no <body>, so it only contributes keyframes/assets/defaults to a parent model "
+                         "that <include>s it. Import the model file instead." + _sibling],
+        }
+
     mj = _load_model(source, mujoco, warnings)
 
     name_of = lambda obj, i: (mujoco.mj_id2name(mj, obj, i) or "")  # noqa: E731
     BODY, JNT, GEOM, SITE = (mujoco.mjtObj.mjOBJ_BODY, mujoco.mjtObj.mjOBJ_JOINT,
                              mujoco.mjtObj.mjOBJ_GEOM, mujoco.mjtObj.mjOBJ_SITE)
 
+    # THE ONE MASS DIFFERENCE WE CANNOT REMOVE, REPORTED WITH ITS NUMBER. MuJoCo's URDF loader welds the
+    # static base into the world and discards its `<inertial>` (see `_urdf_world_fused_links`), so the model
+    # every twin is built from is already lighter than the file the customer wrote -- as is their own MuJoCo
+    # run of it. We cannot recover it here without rebuilding the whole body tree on `fusestatic="false"`,
+    # which is a different change; what we can do is stop hiding it. It USED to be hidden, badly: the
+    # synthesized base was handed a copy of the first root's mass, which papered over part of the hole with an
+    # unrelated number. The text scan is CROSS-CHECKED against the compiled total before it says anything --
+    # if the two do not reconcile, the parse is not trusted and nothing is claimed.
+    if "<robot" in _text:
+        try:
+            _fused, _declared = _urdf_world_fused_links(_text)
+            _lost = sum(_fused.values())
+            _compiled = float(sum(float(mj.body_mass[i]) for i in range(1, mj.nbody)))
+            # The cross-check: the text scan is only believed when declared == compiled + fused. Anything
+            # else means the scan misread the file (or MuJoCo did something else with the mass), and a
+            # number we cannot reconcile is worse than no number.
+            _ok = abs(_declared - (_compiled + _lost)) <= max(1e-4, 0.005 * max(_declared, 1e-9))
+            if _lost > 1e-6 and _ok:
+                warnings.append(
+                    f"{_lost:.3f} kg of the {_declared:.3f} kg your URDF declares "
+                    f"({100.0 * _lost / max(_declared, 1e-9):.1f}%) is NOT in the imported twin: MuJoCo's URDF "
+                    f"loader welds the static base into the world and drops its <inertial>. The link(s) "
+                    f"affected: {', '.join(f'{n} ({kg:g} kg)' for n, kg in sorted(_fused.items()))}. The same "
+                    f"is true of the model your own MuJoCo compiles from this file, so the twin matches your "
+                    f"simulator at {_compiled:.3f} kg — it does not match your BOM. Re-export with the base "
+                    f"link jointed to a dummy root, or state the base mass when you ground the design.")
+        except Exception:  # noqa: BLE001 - a disclosure may never be the thing that fails an import
+            pass
+
     # Map each non-world body to a segment. Body 0 is the world; geoms on it (floor/table) are scenery.
+    #
+    # A COORDINATE FRAME IS NOT A LINK. Bodies with no mass, no geom and no joint exist only to name a pose
+    # (see `_frame_only_bodies`); emitted as segments they became physical stubs — 0.01 kg from the zero-mass
+    # floor below plus a collision primitive from the compiler — parts of the robot the customer never built.
+    # They are folded into their children here, transforms composed, so every real link keeps its exact pose.
+    _frames = _frame_only_bodies(mj)
+    eff_parent, eff_pos, eff_rot, eff_body = _fold_frames(mj, _frames)
     body_name = {i: (name_of(BODY, i) or f"body{i}") for i in range(mj.nbody)}
+    if mj.nbody > 1 and len(_frames) == mj.nbody - 1:
+        # EVERY body is a frame: there is no robot here, only a skeleton of poses. Refuse, the way an
+        # <include> fragment is refused. Emitting the frames as stubs invented a body; folding them all away
+        # and letting the base synthesis run invented a DIFFERENT one — a single 0.05 m box reported
+        # valid=True, simulable=True, which is worse because it looks healthy.
+        return {
+            "gene": None, "backend_support": {}, "species": None, "robot_class": None, "valid": False,
+            "simulable": False,
+            "simulation_check": {"ok": False, "checked": False, "reason": "no gene was produced"},
+            "warnings": [f"every body in this model ({', '.join(sorted(body_name[i] for i in _frames)[:8])}) "
+                         "is a COORDINATE FRAME — no mass, no geometry, no joint. There is no link to build a "
+                         "robot from. This is usually a mount/datum file or the frame half of a model whose "
+                         "links live in a separate file; import the file that declares the links."],
+        }
     children: dict[int, list[int]] = {}
     for i in range(1, mj.nbody):
-        children.setdefault(int(mj.body_parentid[i]), []).append(i)
-    leaves = {i for i in range(1, mj.nbody) if i not in children}
+        if i in _frames:
+            continue
+        children.setdefault(eff_parent[i], []).append(i)
+    leaves = {i for i in range(1, mj.nbody) if i not in _frames and i not in children}
+    if _frames:
+        warnings.append(
+            f"{len(_frames)} source body/bodies are COORDINATE FRAMES, not links — no mass, no geometry, no "
+            f"joint ({', '.join(sorted(body_name[i] for i in _frames)[:6])}"
+            f"{'...' if len(_frames) > 6 else ''}) — and were folded into their children rather than emitted "
+            "as segments. A gene segment always has mass and a collision surface, so emitting them would have "
+            "added parts the source does not have; their transforms are composed into the links below them, so "
+            "no link moves.")
 
     # Joints per body (a tree robot has one joint to its parent; flag anything else).
     jnts_of: dict[int, list[int]] = {}
     for j in range(mj.njnt):
         jnts_of.setdefault(int(mj.jnt_bodyid[j]), []).append(j)
-    # Actuator force range per actuated joint (for actuator_torque_nm).
-    jnt_force: dict[int, float] = {}
-    for u in range(mj.nu):
-        if int(mj.actuator_trntype[u]) == int(mujoco.mjtTrn.mjTRN_JOINT):
-            jid = int(mj.actuator_trnid[u, 0])
-            fr = mj.actuator_forcerange[u]
-            jnt_force[jid] = max(jnt_force.get(jid, 0.0), abs(float(fr[1])) or abs(float(fr[0])))
+    # THE CUSTOMER'S OWN TORQUE LIMITS, from all three places a real model puts them (see the helper).
+    jnt_force = _declared_joint_torque(mj, mujoco)
 
-    roots = [i for i in range(1, mj.nbody) if int(mj.body_parentid[i]) == 0]
+    roots = [i for i in range(1, mj.nbody) if i not in _frames and eff_parent[i] == 0]
     if len(roots) > 1:
         warnings.append(f"{len(roots)} root bodies attach to the world ({', '.join(body_name[r] for r in roots)}); "
                         "a RobotGene needs a single root. Imported as a multi-root tree — pick a base or split.")
 
     segments: list[GeneSegment] = []
+    seg_len_by_name: dict[str, float] = {}      # a child's mount z is measured from its parent's TIP
+    _rot_by_id: dict[int, object] = {}          # body id -> S_i, the body-frame -> LINK-frame rotation
+    try:                                        # per-link STLs of the customer's own meshes (visual only)
+        from pathlib import Path as _P
+        _mesh_dir = _P("build/_importmesh") / _import_mesh_key(source, robot_id)
+        _mesh_dir.mkdir(parents=True, exist_ok=True)
+    except Exception:  # noqa: BLE001 - baking source meshes is a fidelity aid, never an import blocker
+        _mesh_dir = None
+    _mesh_stems: dict[str, str] = {}            # baked STL stem -> the ONE link allowed to write it
     ee_candidates: list[str] = []
+    # The customer's declared ACTUATOR CAPACITY and JOINT DYNAMICS, kept as a record on the gene so grounding
+    # cannot overwrite what the file already told us (see the metadata block after the loop).
+    src_torque: dict[str, float] = {}
+    src_torque_where: dict[str, str] = {}
+    src_dynamics: dict[str, dict] = {}
+    src_dyn_undeclared: dict[str, list[str]] = {}
+    src_not_carried: dict[str, dict] = {}
+    src_actuator_kv: dict[str, float] = {}
+    undeclared_torque: list[str] = []
     for i in range(1, mj.nbody):
+        if i in _frames:                     # a pose, not a part — folded into its children above
+            continue
         bname = body_name[i]
-        parent = None if int(mj.body_parentid[i]) == 0 else body_name[int(mj.body_parentid[i])]
+        parent = None if eff_parent[i] == 0 else body_name[eff_parent[i]]
         shape, length_m, radius_m = _primary_geom(mj, i, GEOM, name_of, warnings)
         mass = float(mj.body_mass[i])
         if mass <= 0:
@@ -81,24 +774,127 @@ def import_robot(source: str, *, robot_id: str | None = None, species: str | Non
         # Recover a link's LENGTH from the kinematic span to its child joint. A URDF's joint origins encode link
         # lengths even when the visual/collision MESH is missing (it imported as a tiny placeholder box) — so a
         # limb whose geom underrepresents the span to the next joint is rebuilt as a capsule of that real length.
-        child_ids = children.get(i, [])
-        if child_ids:
-            span = max(float((mj.body_pos[c][0] ** 2 + mj.body_pos[c][1] ** 2 + mj.body_pos[c][2] ** 2) ** 0.5)
-                       for c in child_ids)
-            placeholder = shape == "box" and length_m <= 0.09 and abs(length_m - radius_m) < 0.03
-            if span >= 0.04 and (placeholder or span > length_m * 1.8):
-                length_m = float(min(1.5, span))
-                shape = "capsule"
-                radius_m = float(min(max(radius_m, 0.02), 0.12, max(0.02, span * 0.18)))
+        # JOINT-TO-JOINT DISTANCE IS THE GROUND TRUTH, so prefer it whenever a child exists rather than only
+        # when the geom looks like a placeholder. A geom bbox is the visual HULL -- it includes housings,
+        # brackets and overhang -- so it systematically over-reads: the Go2's thigh measured 0.373 m from its
+        # mesh against a true 0.213 m joint span, and the resulting oversized links drove grounded mass to
+        # 39.9 kg for a 15.2 kg robot. The old condition (`span > length_m * 1.8`) meant the exact span was
+        # DISCARDED exactly when the mesh was big, i.e. on every real mesh-based robot.
+        import numpy as _np
+        _v = _link_vector(mj, i, children, eff_pos)
+        _span = float(_np.linalg.norm(_v))
+        # THE ROOT measures its own body, not the reach to one child. `_link_vector` picks the farthest child,
+        # which is right for a serial link (the Go2's thigh comes out at 0.2130 m against a real 0.213) and close
+        # to meaningless for a torso: it imported the Go2's trunk at 0.199 m against a real ~0.387.
+        #
+        # Deliberately ROOT-ONLY, and deliberately from the body's OWN geometry. The first attempt at this
+        # (reverted, 3279c57) deformed 14 of 27 Menagerie models by up to 0.45 m, in three ways this avoids:
+        #   * it read the axis off the PRINCIPAL AXIS OF THE CHILD SPREAD, and a humanoid torso carries a
+        #     symmetric PAIR of shoulders — so that axis runs side to side and H1's chest was rebuilt 90 degrees
+        #     wrong. Here the axis comes from the body's own longest collision extent, which a symmetric pair
+        #     cannot mislead;
+        #   * it shifted a hub's frame origin without correcting the hub's own mount to ITS parent, so every
+        #     subtree below a NESTED hub slid. The root HAS no parent, so root-only removes that case entirely;
+        #   * it changed the datum under `_bake_source_mesh`, which rotates but does not translate. No datum
+        #     moves here — only the drawn LENGTH — so the customer's meshes stay where they were.
+        #
+        # Children are unaffected either way: a child's mount is computed as `local.z - parent_len`, so it
+        # self-compensates for whatever length the parent has. The length only decides how the segment is DRAWN.
+        # Gate: tests/test_imported_kinematics_are_preserved.py, which fails on the reverted version.
+        if parent is None:
+            _own = _root_own_span(mj, i)
+            if _own is not None and _own > _span:
+                _span = _own
+                _v = _v * (_own / max(float(_np.linalg.norm(_v)), 1e-9)) if float(_np.linalg.norm(_v)) > 1e-9 \
+                    else _np.array([_own, 0.0, 0.0])
+        if _span >= 0.02:
+            length_m = float(min(1.5, _span))
+            shape = "capsule" if shape != "box" or length_m > 2.5 * radius_m else shape
+            radius_m = float(min(max(radius_m, 0.015), 0.12, max(0.015, _span * 0.28)))
+        # S_i rotates the segment so its local +z runs along the REAL link axis (see _link_vector).
+        _S = _rot_z_to(_v) if _span >= 1e-6 else _np.eye(3)
+        _rot_by_id[i] = _S
 
-        joint_type, axis, lo, hi, torque = _joint_for_body(mj, i, jnts_of, jnt_force, bname, warnings)
+        joint_type, axis, lo, hi, torque, jid = _joint_for_body(mj, i, jnts_of, jnt_force, bname, warnings)
+        axis = tuple(float(a) for a in (_S.T @ _np.asarray(axis, dtype=float)))   # axis into the segment frame
+        if joint_type in ("revolute", "prismatic") and jid is not None:
+            # CARRY THE DRIVETRAIN, NOT JUST THE SKELETON. armature (reflected rotor inertia), damping and
+            # frictionloss are the three parameters `sysid.fit_parameters` identifies -- and the Go2 declares
+            # all three (0.01 / 2.0 / 0.2) and the Panda two (0.1 / 1.0) right there in the file. Discarding
+            # them and substituting the compiler's structural prior means a calibration run "identifies"
+            # numbers the customer handed us, and a customer comparing their sim to ours sees a gap we
+            # manufactured. The values recorded are the COMPILED ones, i.e. exactly what the customer's own
+            # MuJoCo integrates with. All three are RECORDED; damping and frictionloss are also CARRIED into
+            # the emitted model, armature is not (see the metadata block below and
+            # `gene_compiler._declared_joint_dynamics`) -- recording the one we decline to use is how the
+            # decline stays checkable.
+            _dyn = _source_joint_dynamics(mj, jid)
+            if _dyn is not None:
+                src_dynamics[bname] = _dyn
+                # A ZERO IS CARRIED, AND IT IS ALSO THE ONE VALUE WE CANNOT ATTRIBUTE. MuJoCo's own default
+                # for all three is 0, and a compiled model keeps no record of which attributes the XML wrote
+                # -- so a 0 here is either the author's declared zero or no declaration at all, and claiming
+                # to know which would be the same over-claim as the substitution this replaces. For damping
+                # and frictionloss their simulator integrates 0.0, so 0.0 is what the twin carries and the
+                # ambiguity is reported rather than resolved. For armature the same ambiguity is one of the
+                # two reasons it is not carried at all: 14 of the 59 packages read 0 on EVERY joint.
+                _zeros = [p for p, v in _dyn.items() if float(v) == 0.0]
+                if _zeros:
+                    src_dyn_undeclared[bname] = sorted(_zeros)
+            _extra = _source_joint_extras(mj, jid)
+            if _extra:
+                src_not_carried[bname] = _extra
+            _kv = _source_actuator_velocity_feedback(mj, jid)
+            if _kv:
+                src_actuator_kv[bname] = _kv
+            _decl = jnt_force.get(jid)
+            if _decl:
+                src_torque[bname] = float(_decl["nm"])
+                src_torque_where[bname] = str(_decl["where"])
+            else:
+                undeclared_torque.append(bname)
         is_leaf = i in leaves
         name_hit = any(h in bname.lower() for h in _EE_NAME_HINTS)
         if is_leaf or name_hit:
             ee_candidates.append(bname)
+        # CARRY THE CUSTOMER'S ACTUAL KINEMATICS. body_pos/body_quat are where this link really sits on its
+        # parent; without them every child defaults to mount_offset (0,0,0) and the whole robot COLLAPSES ONTO
+        # ONE POINT. Measured on the real Unitree Go2: our editable twin had all 13 links at (0,0,0) while the
+        # source places FL_hip at (0.193, 0.047, 0), FL_thigh at (0, 0.096, 0) and FL_calf at (0, 0, -0.213).
+        # The twin kept their link NAMES and masses but not their geometry, so "amend the customer's robot" was
+        # amending a pile of links -- and it verified CROUCH for a robot that walks. Note the span heuristic
+        # above already reads body_pos to infer a LENGTH; it just never kept the position itself.
+        #
+        # Two frames differ, and BOTH have to be converted or the twin is wrong in a different way each time:
+        #   * ORIGIN vs TIP  - MuJoCo's body_pos is relative to the parent's ORIGIN; our mount_offset is
+        #     relative to the parent's TIP (the compiler places a child at (mo.x, mo.y, parent.length + mo.z)).
+        #   * BODY vs LINK   - our segment's local +z IS the link axis, while a MuJoCo body's frame is whatever
+        #     the author chose. So everything expressed in the parent's body frame must be rotated into the
+        #     parent's LINK frame by S_p, and this segment's own rotation composes with its own S_i.
+        # Skipping the second conversion left joints correctly placed but every link body mirrored onto the
+        # wrong side of its joint (a Go2 rendered as pipes standing up through its own chassis).
+        if parent:
+            _Sp = _rot_by_id.get(eff_parent[i], _np.eye(3))
+            _p_len = float(seg_len_by_name.get(parent, 0.0))
+            _local = _Sp.T @ _np.asarray(eff_pos[i], dtype=float)          # parent body frame -> parent link frame
+            mount_offset = (float(_local[0]), float(_local[1]), float(_local[2]) - _p_len)
+            mount_euler = _mat_to_euler_xyz(_Sp.T @ _np.asarray(eff_rot[i], dtype=float) @ _S)
+        else:
+            mount_offset, mount_euler = (0.0, 0.0, 0.0), _mat_to_euler_xyz(_S)
+        seg_len_by_name[bname] = length_m
+        # Keep the customer's OWN geometry on the editable segment (see _bake_source_mesh). Visual only: the
+        # collider stays the primitive derived above, so physics/MJX behaviour is unchanged and every existing
+        # amend operator keeps working on numbers it understands.
+        _geo = None
+        if _mesh_dir is not None:
+            _fp = _mesh_dir / f"{_link_mesh_stem(bname, _mesh_stems)}.stl"
+            if _bake_source_mesh(mj, i, _S, _fp, notes=warnings, label=bname):
+                _geo = {"family": "source_mesh", "path": str(_fp.resolve()).replace("\\", "/"),
+                        "provenance": "customer_import"}
         segments.append(GeneSegment(
             name=bname, parent=parent, shape=shape, length_m=length_m, radius_m=radius_m, mass_kg=mass,
             joint_type=joint_type, joint_axis=axis, joint_lower=lo, joint_upper=hi,
+            mount_offset=mount_offset, mount_euler=mount_euler, geometry=_geo,
             actuator_torque_nm=torque, is_end_effector=False))
 
     # Normalize the base: a RobotGene needs exactly ONE WELDED root. MuJoCo merges a URDF's fixed base
@@ -109,25 +905,77 @@ def import_robot(source: str, *, robot_id: str | None = None, species: str | Non
     # likewise merged into the world on reload).
     root_segs = [s for s in segments if s.parent is None]
     if len(root_segs) != 1 or any(r.joint_type not in (None, "fixed") for r in root_segs):
+        import numpy as _np
+
         base_name = next((n for n in ("base_link", "imported_base", "base_mount")
                           if not any(s.name == n for s in segments)), "imported_base")
-        r0 = root_segs[0] if root_segs else None
+        _BASE_LEN = 0.05
+        # THE SYNTHESIZED BASE IS A MOUNTING FRAME, NOT A PART OF THE CUSTOMER'S ROBOT, so it must weigh
+        # (as near as the schema allows) NOTHING. It used to be given `max(root_segs[0].mass_kg, 0.05)` —
+        # a COPY of the first root's mass — which made the twin heavier than the machine it claims to be:
+        # aloha 8.517 -> 9.486 kg (+11.4%), shadow_dexee 4.139 -> 4.679 (+13.0%), apptronik_apollo
+        # 80.898 -> 88.344 (+9.2%), trossen_wxai 7.823 -> 8.080 (+3.3%). Nothing was being recovered by it:
+        # a fixed base link that MuJoCo fuses into the world loses its inertia there too (measured: a URDF
+        # base link of 3.5 kg compiles to nbody=2 with world mass 0.000), so the source's own total does not
+        # contain it either, and duplicating a DIFFERENT link's mass is not a reconstruction of it. That real
+        # loss is now reported on its own terms, with its own kilograms — see `_urdf_world_fused_links`.
+        #
+        # `RobotGene.validate()` requires a strictly positive mass on every segment, so the honest floor is
+        # the smallest mass that survives this repo's coarsest mass rounding (3 dp, `grounded_physics`)
+        # rather than zero. That residual is DISCLOSED in the warning below with its number, because a
+        # 1 g bookkeeping mass the customer can see beats a tuned one they cannot.
         segments.insert(0, GeneSegment(
-            name=base_name, parent=None, shape="box", length_m=0.05, radius_m=0.04,
-            mass_kg=max((r0.mass_kg if r0 else 0.1), 0.05), joint_type=None, is_end_effector=False))
+            name=base_name, parent=None, shape="box", length_m=_BASE_LEN, radius_m=0.04,
+            mass_kg=_SYNTH_BASE_MASS_KG, joint_type=None, is_end_effector=False))
+        # A REPARENTED ROOT KEEPS THE POSE IT HAD IN THE SOURCE'S WORLD. A root body's `body_pos`/`body_quat` ARE
+        # its world pose (its parent is the world), and the loop above threw both away — every root got
+        # mount_offset (0,0,0) and mount_euler from S alone — because a gene root's mount is normally
+        # meaningless. Reparenting makes it meaningful, and for a MULTI-ROOT model it is the whole robot:
+        # measured on Menagerie's ALOHA, whose two arms sit at x = -0.469 and +0.469 with the right one yawed
+        # 180 degrees, both arms landed on the SAME point (0, 0, 0.075) and interpenetrated by 0.142 m
+        # (left/base_link vs right/upper_arm_link), which then diverged to a bad-QACC NaN at t=0.83 s under
+        # excitation. Same collapse on trossen_wxai (-0.100 m). Two conversions, matching the child branch above:
+        #   * ORIGIN vs TIP - the compiler places a child at (mo.x, mo.y, parent.length + mo.z), so the world z
+        #     has the synthesized base's own length taken back out of it;
+        #   * BODY vs LINK  - the world quat composes with this segment's own S, exactly as `_Sp.T @ Q @ _S` does
+        #     for a child (the base is synthesized with an identity rotation, so its S_p is the identity).
+        _id_of = {body_name[i]: i for i in range(1, mj.nbody)}
         for r in root_segs:
             r.parent = base_name
+            _bi = _id_of.get(r.name)
+            if _bi is None:                                     # synthesized/renamed - nothing to preserve
+                continue
+            _wp = _np.asarray(eff_pos[_bi], dtype=float)
+            r.mount_offset = (float(_wp[0]), float(_wp[1]), float(_wp[2]) - _BASE_LEN)
+            r.mount_euler = _mat_to_euler_xyz(_np.asarray(eff_rot[_bi], dtype=float)
+                                              @ _rot_by_id.get(_bi, _np.eye(3)))
         warnings.append(f"synthesized a welded base segment {base_name!r} as the gene root — the URDF's "
                         "fixed base was merged into the world by the parser (or the robot had multiple "
-                        "roots), leaving an actuated/ambiguous root that a RobotGene cannot use directly.")
+                        "roots), leaving an actuated/ambiguous root that a RobotGene cannot use directly. "
+                        f"The {len(root_segs)} reparented root(s) keep their source world pose. It is a "
+                        f"MOUNTING FRAME, not a link of your robot: it carries {_SYNTH_BASE_MASS_KG:g} kg "
+                        "(the schema forbids a zero-mass segment), so the twin's total mass is that much "
+                        "above the source's.")
 
     # Exactly one end-effector. Priority: a body carrying an ee/tcp/tool SITE (robust, and round-trips
     # our own compiler's ee_site), then a name-hinted body, then any leaf.
+    # A SITE ON THE WORLD BODY IS NOT A SEGMENT. Attachment-style models park `tcp`/`attachment_site` on the
+    # worldbody so a parent scene can mount them; `body_name[0]` is then "world", which matches no segment, so
+    # `is_end_effector` was set on NOTHING and the gene failed validation ("exactly one segment must be the end
+    # effector, found 0") — i.e. the twin could not be compiled at all. Measured on Menagerie's shadow_dexee,
+    # whose first two sites are both on body 0. Only consider sites carried by a real segment.
+    _seg_names = {s.name for s in segments}
     ee_site_body = None
     for si in range(mj.nsite):
         if any(h in name_of(SITE, si).lower() for h in _EE_SITE_HINTS):
-            ee_site_body = body_name[int(mj.site_bodyid[si])]
-            break
+            # A site parked on a folded COORDINATE FRAME is welded to the link that frame hangs off (a frame
+            # has no joint), so read it there rather than losing the hint with the frame. Menagerie's
+            # panda_nohand puts `attachment_site` on exactly such a body.
+            _cid = eff_body[int(mj.site_bodyid[si])]
+            _cand = body_name[_cid]
+            if _cid != 0 and _cand in _seg_names:
+                ee_site_body = _cand
+                break
     ee_name = (ee_site_body
                or next((c for c in ee_candidates if any(h in c.lower() for h in _EE_NAME_HINTS)), None)
                or (body_name[max(leaves)] if leaves else (segments[-1].name if segments else None)))
@@ -140,22 +988,269 @@ def import_robot(source: str, *, robot_id: str | None = None, species: str | Non
             warnings.append(f"multiple end-effector candidates ({', '.join(sorted(set(ee_candidates)))}); "
                             f"chose {ee_name!r} — set the correct one if wrong.")
 
-    robot_class = _infer_class(segments, roots, mj)
+    robot_class = _infer_class(segments, roots, mj, name_of)
+    # THE CONSTRAINTS ARE PART OF THE MACHINE (see _source_equalities). Read before the gene is built so they
+    # are on it from the start and `validate()` below rules on them like any other field.
+    loop_closures, coupled_joints = _source_equalities(
+        mj, mujoco, body_name, _rot_by_id, segments, warnings, eff_body=eff_body, eff_parent=eff_parent)
     gene = RobotGene(
         id=robot_id or "imported_robot",
         species=species or f"{robot_class}.imported",
         robot_class=robot_class,
         segments=segments,
+        loop_closures=loop_closures,
+        coupled_joints=coupled_joints,
         # a robot that MOVES needs a FREE (floating 6-DOF) base, not a welded one -- "floor"/"table" weld the base
         # to the world so the body cannot translate at all (the compiled model has no base joint, and every gait
-        # rolls out to 0 forward). A manipulator stays table-mounted.
-        base_mount="free" if robot_class in ("mobile_base", "quadruped", "hexapod", "humanoid") else "table",
+        # rolls out to 0 forward). A manipulator stays table-mounted. The set is shared with anatomy_compiler:
+        # the private copy that used to sit here was missing "legged"/"biped"/"aerial"/"aquatic", so a body in
+        # one of those families was bolted to a table on the way in and then judged for not walking.
+        base_mount="free" if robot_class in FLOATING_BASE_CLASSES else "table",
         end_effector_type="gripper" if any("grip" in (s.name.lower()) for s in segments) else "none",
-        metadata={"imported_from": "mjcf_or_urdf", "n_bodies": mj.nbody, "n_joints": mj.njnt},
+        # ``mass_source`` marks these per-link masses as AUTHORITATIVE: they are the manufacturer's own
+        # ``body_mass`` read straight off the customer's model, not our estimate. Grounding must size actuators
+        # around them, never replace them -- re-deriving from primitive volume x density turned a Menagerie
+        # Go2's 15.206 kg into 13.235 kg of carbon-fibre guesswork (base 6.921 -> 6.107) at export time, so the
+        # package shipped a robot the customer never verified and never owned.
+        metadata={"imported_from": "mjcf_or_urdf", "n_bodies": mj.nbody, "n_joints": mj.njnt,
+                  "mass_source": "source_model"},
     )
+    # ``torque_source`` is to ACTUATOR CAPACITY what ``mass_source`` above is to mass: a marker that these
+    # numbers are the manufacturer's, not ours, so ``grounded_physics.ground_gene`` sizes a BOM part around them
+    # instead of replacing them with a catalog pick. There was no such marker, and the loss was total: a
+    # Menagerie Go2 that declares 23.7/23.7/45.43 N.m shipped as 10.6/10.6/1.5 -- with the ORDERING INVERTED,
+    # the knee being the strongest joint on the real machine and the weakest by 30x on ours -- and a UR5e's
+    # 150/150/150/28/28/28 became 360/360/48/4.1/1.5/0.5. The safety consequence is not hypothetical:
+    # ``sysid.excitation`` bounds a plan meant to be RUN ON PHYSICAL HARDWARE at a fraction of this number, and
+    # on the Panda that put 180 N.m of commanded torque on an 87 N.m joint.
+    if src_torque:
+        gene.metadata["torque_source"] = "source_model"
+        gene.metadata["source_actuator_torque_nm"] = dict(src_torque)
+        gene.metadata["source_actuator_torque_where"] = dict(src_torque_where)
+    # ``sensor_source`` is to PERCEPTION what ``mass_source`` and ``torque_source`` above are to mass and torque:
+    # a marker that what follows was READ, so every downstream surface can tell "your model declares no camera"
+    # apart from "we never looked". Recorded even when the model declares nothing -- an empty inventory is the
+    # load-bearing fact, and it is the one a Go2 supplies.
+    gene.metadata["sensor_source"] = "source_model"
+    gene.metadata["source_sensors"] = _source_sensor_inventory(mj, mujoco, body_name, segments)
+    # ``joint_dynamics_source`` is to the DRIVETRAIN what ``mass_source`` and ``torque_source`` are to mass and
+    # actuator capacity. It was the one of the four that was recorded and then IGNORED: the record landed here
+    # correctly, and ``gene_compiler._joint_dynamics_prior`` never read it, so the emitted model carried our
+    # structural guess anyway. Measured on a real Menagerie Go2 (declares damping=2.0 frictionloss=0.2 on all
+    # 12 leg joints) the twin compiled to 0.8 / 0.12 -- damping -60%, frictionloss -40% -- and on a Panda
+    # (damping=1.0 and NO dry friction) to 2.0 / 0.45, i.e. 0.45 N.m of stiction we invented outright.
+    #
+    # Worse than a fidelity loss, because these are exactly what ``sysid.fit_parameters`` identifies and it
+    # reads each parameter's baseline straight off the compiled model: a bench fit "corrected" friction by
+    # +300-500% and damping by +60-90% on the Go2, most of which was recovering our own substitution rather
+    # than measuring the customer's hardware. A sim-to-real number built on that is partly SELF-REFERENTIAL --
+    # we would be selling a customer a measurement of our own default.
+    #
+    # TWO OF THE THREE CARRY, AND THE THIRD IS DISCLOSED INSTEAD. The first version of this carried ARMATURE
+    # too and moved simulated dynamics across the whole product -- coupled joints stopped tracking on talos
+    # (0.00338 -> 0.15944 rad) and toddlerbot (0.02373 -> 1.52841), Cassie's carried solref stopped tightening
+    # its loop closure, and a real Spot stopped holding its own home pose (sag 0.038 -> 0.293 m, tilt 2.6 ->
+    # 31.8 deg). A one-parameter-at-a-time ablation put armature alone on the wrong side of every one of them.
+    # It is not a claim about the machine: MuJoCo's default is 0, a compiled model keeps no record of which
+    # attributes the XML wrote, and 14 of the 59 packages here read 0 on EVERY joint (spot, talos, anymal_b/c,
+    # iiwa_14, kinova_gen3, tiago, tiago_dual, stretch, tidybot, wxai, z1, leap_hand, allegro) -- so adopting
+    # it would be MuJoCo's default applied where the source said nothing. See
+    # ``gene_compiler._declared_joint_dynamics``. Carrying damping+frictionloss alone moves the numbers on all
+    # 59 packages and costs simulability on ONE (pal_tiago_dual, handled by the disclosed fallback below).
+    if src_dynamics:
+        _carried = ("damping", "frictionloss")
+        gene.metadata["joint_dynamics_source"] = "source_model"
+        gene.metadata["source_joint_dynamics"] = dict(src_dynamics)
+        gene.metadata["source_joint_dynamics_carried_params"] = list(_carried)
+        gene.metadata["source_joint_dynamics_provenance"] = (
+            "read from the customer's compiled model (dof_damping / dof_frictionloss / dof_armature) at "
+            "import. damping and frictionloss are CARRIED to the emitted model "
+            "(gene_compiler._joint_dynamics_prior takes a declared value over its structural prior), so a "
+            "bench fit measures your hardware rather than our substitution. armature is RECORDED AND NOT "
+            "CARRIED: it is a solver-conditioning term referenced to the model it was declared in, MuJoCo's "
+            "default for it is 0 so a compiled model cannot say whether it was declared at all, and carrying "
+            "it measurably destabilised couplings, loop closures and posture holds")
+        if src_dyn_undeclared:
+            gene.metadata["source_joint_dynamics_zero_in_source"] = dict(src_dyn_undeclared)
+        _lo = {p: min(float(d[p]) for d in src_dynamics.values()) for p in _carried}
+        _hi = {p: max(float(d[p]) for d in src_dynamics.values()) for p in _carried}
+        _arm = [float(d["armature"]) for d in src_dynamics.values()]
+        warnings.append(
+            f"joint drivetrain (damping / frictionloss) for {len(src_dynamics)} joint(s) was read from the "
+            f"source model and is treated as AUTHORITATIVE, exactly as mass and actuator torque are: "
+            f"damping {_lo['damping']:g}-{_hi['damping']:g}, "
+            f"frictionloss {_lo['frictionloss']:g}-{_hi['frictionloss']:g}. The compiler emits these instead "
+            f"of its structural prior, so the model you verify integrates the numbers your own file declares "
+            f"— and a sysid fit measures your hardware, not a default of ours. Your armature "
+            f"({min(_arm):g}-{max(_arm):g}) is recorded but NOT carried: it conditions the solver of the "
+            f"model it was written for, and this twin rebuilds your links as primitives and adds its own "
+            f"equality constraints, so your number does not mean the same thing here. Ours stands in and is "
+            f"on the model you can read.")
+        if src_dyn_undeclared:
+            # Counted over the CARRIED parameters only. A joint whose sole zero is ``armature`` belongs to the
+            # armature sentence above, not to this one — quoting it here would inflate "we could not attribute
+            # what your file integrates" with a value we do not integrate at all.
+            _zero_carried = {n: ps for n, ps in src_dyn_undeclared.items() if any(p in _carried for p in ps)}
+            _params = sorted({p for ps in _zero_carried.values() for p in ps if p in _carried})
+            if _params:
+                warnings.append(
+                    f"{len(_zero_carried)} joint(s) compile to 0.0 for {', '.join(_params)}. That 0.0 IS "
+                    f"carried — it is what your simulator integrates at the joint — but it is the one value "
+                    f"we cannot attribute: MuJoCo's default for these is also 0, and a compiled model keeps "
+                    f"no record of which attributes the file wrote. So this is either your declared zero or "
+                    f"no declaration at all, and we do not claim to know which. Nothing is invented in its "
+                    f"place.")
+        # ...AND A ZERO AT THE JOINT IS NOT ALWAYS A ZERO IN THE MACHINE. A <position kv=...> actuator applies
+        # -kv*qvel, which is damping that lives in the ACTUATOR and never touches dof_damping. 18 of the 59
+        # packages do exactly that and declare no joint damping at all -- spot 40, kuka_iiwa_14 200, ur5e 400,
+        # tidybot 50000 N.m.s/rad. We emit <motor> (pure torque), so there is nowhere for it to go. Saying
+        # "your model integrates 0" without saying this would turn an incomplete read into a claim.
+        if src_actuator_kv:
+            gene.metadata["source_actuator_velocity_feedback_not_carried"] = dict(src_actuator_kv)
+            _kv_zero = sorted(n for n, v in src_actuator_kv.items()
+                              if float((src_dynamics.get(n) or {}).get("damping", 0.0)) == 0.0)
+            _worst = max(src_actuator_kv, key=lambda n: float(src_actuator_kv[n]))
+            warnings.append(
+                f"{len(src_actuator_kv)} joint(s) get velocity feedback from their ACTUATOR rather than the "
+                f"joint (<position kv=...>), up to kv={float(src_actuator_kv[_worst]):g} on '{_worst}'. We "
+                f"emit torque (<motor>) actuators, so that term is NOT carried and nothing replaces it"
+                + (f" — and on {len(_kv_zero)} of them the joint's own damping is 0, so the twin's drivetrain "
+                   f"is undamped where yours is not. A settling or overshoot number measured here is ours, "
+                   f"not yours." if _kv_zero else ".")
+                + " Use the faithful native lane, which runs your actuators as written.")
+    # DELIBERATELY NOT nested under ``if src_dynamics``. Today the two are collected under the same guard and
+    # cannot diverge, but a disclosure of what we DROPPED must not be conditional on a record of what we kept
+    # — that is the coupling that produced this defect in the first place.
+    if src_not_carried:
+        gene.metadata["source_joint_attributes_not_carried"] = dict(src_not_carried)
+        _attrs = sorted({a for row in src_not_carried.values() for a in row})
+        # Lead with the SPRING when there is one, and name the joint that carries the largest one: a
+        # stiffness of 1250-1500 N.m/rad (Cassie's leaf springs) is a structural member of the machine,
+        # while a tightened solreflimit is a solver setting. Both are disclosed; only one of them is
+        # worth a sentence of its own, and claiming a spring where there is none is its own over-claim.
+        _springy = {n: r for n, r in src_not_carried.items() if "stiffness" in r or "springref" in r}
+        _sample = (max(_springy, key=lambda n: float(_springy[n].get("stiffness") or 0.0)) if _springy
+                   else sorted(src_not_carried)[0])
+        _why = (" A joint 'stiffness' is a physical RETURN SPRING: a twin without it is a different "
+                "machine, and no bench fit identifies stiffness, so nothing downstream recovers it."
+                if _springy else "")
+        warnings.append(
+            f"{len(src_not_carried)} joint(s) declare {', '.join(_attrs)} — attributes a RobotGene has no "
+            f"field for, so they are NOT carried and the twin falls back to MuJoCo's default. Example: "
+            f"{_sample} declares {src_not_carried[_sample]}.{_why} Use the faithful native lane where "
+            f"this matters.")
+    if src_torque:
+        _sites = sorted(set(src_torque_where.values()))
+        warnings.append(
+            f"actuator torque limits for {len(src_torque)} joint(s) were read from the source model "
+            f"({'; '.join(_sites)}) and are treated as AUTHORITATIVE: grounding will size a BOM part around "
+            f"them instead of replacing them with a catalog pick. Range "
+            f"{min(src_torque.values()):.2f}-{max(src_torque.values()):.2f} N.m.")
+    if undeclared_torque:
+        warnings.append(
+            f"{len(undeclared_torque)} actuated joint(s) declare NO torque limit anywhere in the source "
+            f"(no actuator forcerange, no force-mode ctrlrange, no joint actuatorfrcrange): "
+            f"{', '.join(sorted(undeclared_torque)[:6])}"
+            f"{'...' if len(undeclared_torque) > 6 else ''}. Grounding will size a catalog actuator for these "
+            f"from the structural load — an ESTIMATE, not your motor. Add actuatorfrcrange (or a motor "
+            f"forcerange) to the joints you care about.")
+    # CARRY THE SOURCE'S OWN STANDING POSE. A robot description ships the stance its designers intended as a
+    # named keyframe -- 45 of the 74 MuJoCo Menagerie models do (`home`, `stand`, `standing`, `retract`) -- and
+    # for a legged robot that pose is the whole point: a Go2's home key is base z=0.27 with every leg at
+    # (0, 0.9, -1.8), i.e. HIP FORWARD AND KNEE FOLDED BACK. We ignored it and spawned every imported robot at
+    # qpos 0, which for a quadruped means STRAIGHT LEGS: measured, that read 0.601 m tall against a real 0.394,
+    # and it is why an imported Go2 verified CROUCH/FELL. Our own composer has always baked a bent-knee rest
+    # pose (morphology_composer: thigh -0.55, calf +1.10) and gene_compiler emits it as a keyframe -- only the
+    # IMPORT path never populated it, so customer robots were held to a stance no real robot uses.
+    #
+    # Angles transfer 1:1 despite the link-frame rotation: S is a rotation, and the joint axis was carried into
+    # the segment frame by S^T, so a rotation of theta about (S^T a) equals a rotation of theta about a.
+    try:
+        _pose, _key = _source_rest_pose(mj, name_of, BODY)
+        if _pose:
+            gene.metadata = {**(gene.metadata or {}), "rest_pose": _pose,
+                             "rest_pose_source": f"source keyframe {_key!r}"}
+    except Exception as _exc:  # noqa: BLE001 - a pose is a fidelity aid, never an import blocker
+        # But it must not be a SILENT aid: this clause once swallowed a plain NameError introduced by a refactor,
+        # and every model quietly lost its stance. The breadth sweep spotted it first (Cassie's `posed` count went
+        # 15 -> 0) simply because it runs every model, and a dropped pose is indistinguishable from a model that
+        # ships no keyframe unless you are watching a robot known to have one. A warning makes it visible in the
+        # place the customer actually looks.
+        warnings.append(f"could not read the source's rest keyframe ({type(_exc).__name__}: {_exc}); the body "
+                        f"will spawn at its zero pose, which for a legged robot means straight legs.")
+    # WHERE THE CUSTOMER PUT THEIR OWN LINKS, carried onto the gene so the gate can check we did not move them.
+    # See `_source_link_placement` for why this is recorded rather than re-read, and `_placement_fidelity` for
+    # what rules on it.
+    _placement = _source_link_placement(mj, mujoco, body_name, segments)
+    if _placement:
+        gene.metadata["source_link_placement"] = _placement
+
     gene_issues = gene.validate()
     warnings.extend(f"gene validation: {iss}" for iss in gene_issues)
 
+    # THE GATE. Everything downstream of an import — the verdict, the certificate, the BOM, the spec sheet, the
+    # calibration gap — is a number computed by STEPPING this twin. A twin that diverges produces those numbers
+    # anyway, off a model that cannot be simulated, and nothing noticed: the import returned `valid=True` because
+    # `RobotGene.validate()` is a SCHEMA check (one root, parents present, acyclic) and says nothing about whether
+    # the thing survives contact. A twin whose links are in the WRONG PLACE produces them too, off a body that
+    # steps perfectly well and is not the customer's robot. Rule on both before anyone else does.
+    sim = _simulability_probe(gene) if not gene_issues else {
+        "ok": False, "checked": False, "reason": "gene failed schema validation; not simulated"}
+    # THE ONE CASE WHERE THE CUSTOMER'S OWN NUMBERS CANNOT BE CARRIED, and the only honest way to not carry
+    # them. Their drivetrain is declared against THEIR link inertias; our twin's are primitive approximations,
+    # and the two can be incompatible at our timestep.
+    #
+    # SWEPT, because both earlier estimates of the blast radius were wrong, in both directions. Across the 59
+    # cached Menagerie packages that yield a drivetrain record, carrying damping+frictionloss moves the numbers
+    # on ALL 59 -- the substitution was universal, not occasional -- and costs simulability on ONE:
+    # pal_tiago_dual (non-finite at t=1.052 s under excitation). An eight-package spot check had found one of
+    # what it then believed were five, which is exactly the sampling error this fallback must not be sized
+    # against; the five turned out to be four packages that the ARMATURE carry broke (hello_robot_stretch,
+    # kinova_gen3, pal_tiago, pndbotics_adam_lite -- all steppable again once armature stays ours) plus this
+    # one. The other 58 carry the full declaration.
+    #
+    # The two alternatives were both worse. Silently keeping our prior is the defect this whole change exists
+    # to remove. Shipping a NON-SIMULABLE twin costs the customer every downstream number (verdict, BOM, spec
+    # sheet, calibration) on a robot that used to produce them. So: carry by default, fall back only when
+    # carrying is demonstrably what made it unsteppable, and say so in full -- which joints, their numbers,
+    # ours, and the consequence for the gap number. A substitution the customer can read is a different object
+    # from one they cannot.
+    # ``placement_failed`` is excluded because the drivetrain cannot cause it -- the links are in the wrong
+    # PLACE, which no value of damping changes -- so retrying there only buys a second wasted probe on an
+    # import that is already being rejected for a different and more serious reason.
+    if (not sim.get("ok") and not gene_issues and src_dynamics
+            and sim.get("checked", True) and not sim.get("placement_failed")):
+        import dataclasses as _dc
+        _no_dyn = {k: v for k, v in gene.metadata.items() if k != "source_joint_dynamics"}
+        _retry_gene = _dc.replace(gene, metadata=_no_dyn)
+        _retry = _simulability_probe(_retry_gene)
+        if _retry.get("ok"):
+            gene.metadata["joint_dynamics_source"] = "our_structural_prior_declaration_not_steppable"
+            gene.metadata["source_joint_dynamics_carried"] = False
+            gene.metadata["source_joint_dynamics_not_carried_reason"] = str(sim.get("reason"))
+            warnings.insert(0, (
+                f"YOUR DECLARED JOINT DRIVETRAIN (damping, frictionloss) IS NOT CARRIED on this twin, and the "
+                f"compiler's structural prior stands in for all {len(src_dynamics)} joint(s). Carrying it made "
+                f"the twin unsteppable "
+                f"({sim.get('reason')}); removing it and changing nothing else made it steppable again, which "
+                f"is how we know the declaration is the cause. That is OUR limitation, not a defect in your "
+                f"file: your drivetrain is declared against your link inertias and this twin rebuilds them as "
+                f"primitives. Your numbers are still recorded verbatim under "
+                f"'source_joint_dynamics'. THE CONSEQUENCE: a sim-to-real gap measured on this twin is partly "
+                f"a measurement of our default, not of your hardware — do not quote it. Use the faithful "
+                f"native lane, which runs your model as-is."))
+            sim = _retry
+    if not sim.get("ok"):
+        _misplaced = bool(sim.get("placement_failed"))
+        warnings.insert(0, ("IMPORT REJECTED — the editable twin IS NOT YOUR ROBOT: " if _misplaced else
+                            "IMPORT REJECTED — the editable twin is NOT SIMULABLE: ")
+                        + f"{sim.get('reason')}. Every downstream number (verdict, certificate, BOM, spec sheet, "
+                        "calibration gap) is computed from this model, so none of them can be produced"
+                        + (" — they would describe a machine you do not own. " if _misplaced
+                           else ". Use the faithful native lane for simulation, and see the warnings above for "
+                                "what the twin got wrong.")
+                        + ("This is OUR reconstruction failing, not a defect in your file: the faithful native "
+                           "lane runs your model as-is and is unaffected." if _misplaced else ""))
     backend_support = _backend_support(segments)
     return {
         "gene": gene,
@@ -163,11 +1258,303 @@ def import_robot(source: str, *, robot_id: str | None = None, species: str | Non
         "backend_support": backend_support,
         "species": gene.species,
         "robot_class": robot_class,
-        "valid": not gene_issues,
+        # ``valid`` now means BOTH: the schema accepts it AND it survives a bounded settle+excitation without
+        # going non-finite. A caller that only ever looked at ``valid`` gets the gate for free; one that wants to
+        # tell the two apart reads ``simulable``/``simulation_check``.
+        "valid": bool(not gene_issues and sim.get("ok")),
+        "simulable": bool(sim.get("ok")),
+        "simulation_check": sim,
     }
 
 
 # --------------------------------------------------------------------------- helpers
+SETTLE_S = 0.5                 # passive settle, no control at all
+EXCITE_S = 1.5                 # then drive every actuator across its OWN declared ctrlrange
+EXCITE_HZ = 1.0
+
+#: How far a link may sit from where the customer put it, as a fraction of THEIR OWN model's longest
+#: link-to-link span, and an absolute floor under it. See ``_placement_fidelity`` for the measured margin.
+PLACEMENT_TOL_FRAC = 0.02
+PLACEMENT_TOL_FLOOR_M = 0.005
+
+
+def _source_link_placement(mj, mujoco, body_name: dict, segments) -> dict | None:
+    """Where the CUSTOMER's own model puts each link, recorded onto the gene at import.
+
+    THE GATE CANNOT CHECK OUR GEOMETRY AGAINST NOTHING. ``_simulability_probe`` takes a gene and a gene alone,
+    and a gene is only ever self-consistent: a twin whose limbs have been stacked on one point is a perfectly
+    well-formed gene, and the only thing that says otherwise is the model the customer handed us. That model is
+    in ``import_robot``'s hand for a few hundred lines and is then dropped. This carries the one fact from it
+    that a placement defect has to violate -- the pose of every link -- forward with the robot.
+
+    Recorded as WORLD POSITIONS AT THE ZERO CONFIGURATION, which is exactly the static tree ``body_pos`` /
+    ``body_quat`` define (MuJoCo's ``qpos0`` IS the configuration in which every body sits at its declared pose,
+    so this reads geometry and nothing about joint angles, keyframes or spawn height). The comparison built on
+    them is PAIRWISE DISTANCE, so an import may legitimately re-datum the whole robot -- weld a free base, hang
+    it off a synthesized mount, drop it at a standing height -- and only a link that actually MOVED is visible.
+
+    Only bodies that became segments are recorded: a folded coordinate frame (see ``_frame_only_bodies``) is not
+    a link of the twin and has nothing to be compared against. ``link_dims_m`` is not decoration -- it is the
+    record's own expiry date; see ``_placement_fidelity``.
+    """
+    try:
+        import numpy as np
+
+        seg_dims = {s.name: (float(s.length_m), float(s.radius_m)) for s in segments}
+        d = mujoco.MjData(mj)
+        mujoco.mj_resetData(mj, d)
+        mujoco.mj_forward(mj, d)
+        pos = {body_name[i]: [round(float(v), 6) for v in d.xpos[i]]
+               for i in range(1, mj.nbody) if body_name.get(i) in seg_dims}
+        if not pos:
+            return None
+        # A one-link model is recorded anyway, with an extent of 0. It cannot be CHECKED (a pairwise distance
+        # needs two points) and `_placement_fidelity` says exactly that -- which is a different sentence from
+        # "this robot was composed here", and three real packages depend on the difference.
+        P = np.asarray([pos[n] for n in sorted(pos)], dtype=float)
+        extent = float(np.linalg.norm(P[:, None] - P[None], axis=-1).max()) if len(pos) >= 2 else 0.0
+        return {
+            "frame": ("world positions of the customer's own links, at their model's zero configuration, in "
+                      "metres; compared PAIRWISE so a re-datum is invisible and a moved link is not"),
+            "positions": pos,
+            "link_dims_m": {n: [round(seg_dims[n][0], 6), round(seg_dims[n][1], 6)] for n in pos},
+            "extent_m": round(extent, 6),
+            "source": "read from the customer's compiled model at import",
+        }
+    except Exception:  # noqa: BLE001 - a provenance record may never be the reason an import fails
+        return None
+
+
+def _placement_fidelity(gene, m, mujoco) -> dict:
+    """Did the twin put the customer's links where the customer put them? The rule the penetration number owed.
+
+    WHY THIS AND NOT A PENETRATION BUDGET. The gate has always MEASURED ``max_self_penetration_m`` and compared
+    it to nothing, and the obvious fix -- a threshold on it -- cannot be written honestly. Measured across all
+    63 Menagerie packages (62 twins; flybody does not compile), the deepest overlap in a CORRECT twin is
+    0.06844 m (Apollo, a wrist 13 hops inside a hip) and the shallowest in a genuinely BROKEN one is 0.07468 m
+    (shadow_dexee with its roots stacked): a 9.1% window with one observation at each edge. Normalising by link
+    radius shrinks it to 4.9%. Restricting to bodies that SHARE NO KINEMATIC PATH -- the idea most worth trying,
+    since two arms inside each other is categorically unlike a thigh overlapping its own hip -- buys exactly
+    nothing: the compiler already excludes every ancestor/descendant pair, so all 62 twins report 0.0 m of
+    lineal penetration and the >= 2-hop statistic is IDENTICAL to the raw one. Push it to >= 6 hops and the two
+    populations INVERT (0.0684 correct against 0.0300 broken; 4 correct twins sit above the weakest defect). A
+    capsule twin overlaps at its joints BY CONSTRUCTION, and no constant tells that apart from a defect.
+
+    Penetration has two causes and only one of them is a bug: our collider approximation (legitimate, bounded
+    by nothing) and our own placement error (ours, and never acceptable). This measures the second directly.
+    Against the source model the two populations sit at 0.0000174 m (worst of 62 correct twins) and 0.0881 m
+    (weakest of the 4 defects) -- a 5000x window, not nine percent -- so the threshold below could move by a
+    factor of ten in either direction without changing a verdict. It is a statement about the product rather
+    than a constant fitted to four examples: *an imported twin may not move the customer's links*.
+
+    THE RECORD EXPIRES THE MOMENT THE ROBOT IS EDITED, which is what ``link_dims_m`` is for. A child sits at its
+    parent's TIP and at the parent's own lateral offsets, so changing a link's LENGTH or its GIRTH legitimately
+    moves things: ``scale_group`` scales a child's z-offset with length and its x/y with girth, and every amend
+    that resizes anything (``set_height``, ``scale_robot``, ``set_leg_count``, ``add_limb``, ``set_payload``,
+    the walkable-template swap) goes through one of those. Any change to a recorded link's length OR radius
+    retires the rule, and it says so rather than failing a customer's own edit. What it still rules on is the
+    export door: measured on Go2 / Panda / Talos, ``ground_and_repair`` changes neither dimension on any link,
+    so the body a package ships is still checked against the body the customer handed us.
+
+    Returns ``{"checked": bool, "ok": bool, ...}``; ``checked: False`` never fails anything.
+    """
+    rec = (getattr(gene, "metadata", None) or {}).get("source_link_placement")
+    if not isinstance(rec, dict) or not (rec.get("positions") or {}):
+        return {"checked": False, "reason": "this gene carries no record of a source model's link placement "
+                                            "(it was composed here, or imported before the record existed)"}
+    if len(rec["positions"]) < 2:
+        return {"checked": False, "n_recorded_links": len(rec["positions"]),
+                "reason": "the source model has only one link that became a segment; a pairwise-distance check "
+                          "needs two, so there is nothing here this rule can say"}
+    try:
+        import numpy as np
+
+        src = {str(k): [float(v) for v in vs] for k, vs in (rec.get("positions") or {}).items()}
+        want_dim = {str(k): [float(v) for v in vs] for k, vs in (rec.get("link_dims_m") or {}).items()}
+        have_dim = {s.name: (float(s.length_m), float(s.radius_m)) for s in gene.segments}
+        edited = [n for n, d0 in want_dim.items()
+                  if n not in have_dim or any(abs(have_dim[n][k] - d0[k]) > max(1e-6, 1e-4 * abs(d0[k]))
+                                              for k in (0, 1))]
+        if edited:
+            return {"checked": False, "n_edited_links": len(edited), "edited_links": sorted(edited)[:6],
+                    "reason": f"{len(edited)} link(s) have been resized since import "
+                              f"({', '.join(sorted(edited)[:4])}); a link's children hang off its TIP and its "
+                              f"own lateral offsets, so the import-time placement record no longer describes "
+                              f"where they belong"}
+        d = mujoco.MjData(m)
+        mujoco.mj_resetData(m, d)
+        mujoco.mj_forward(m, d)
+        twin = {mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_BODY, b): d.xpos[b] for b in range(1, m.nbody)}
+        shared = sorted(set(src) & set(twin))
+        if len(shared) < 2:
+            return {"checked": False, "reason": f"only {len(shared)} of the recorded links are in the compiled "
+                                                f"twin; there is nothing to compare"}
+        A = np.asarray([src[n] for n in shared], dtype=float)
+        B = np.asarray([twin[n] for n in shared], dtype=float)
+        dev = np.abs(np.linalg.norm(A[:, None] - A[None], axis=-1)
+                     - np.linalg.norm(B[:, None] - B[None], axis=-1))
+        i, j = np.unravel_index(int(dev.argmax()), dev.shape)
+        worst = float(dev[i, j])
+        extent = float(rec.get("extent_m") or 0.0)
+        tol = max(PLACEMENT_TOL_FLOOR_M, PLACEMENT_TOL_FRAC * extent)
+        out = {"checked": True, "ok": worst <= tol, "max_link_displacement_m": round(worst, 6),
+               "tolerance_m": round(tol, 6), "source_extent_m": round(extent, 6),
+               "n_links_compared": len(shared), "worst_pair": [shared[i], shared[j]]}
+        if not out["ok"]:
+            out["reason"] = (
+                f"the twin does not place your links where your model places them: {shared[i]!r} and "
+                f"{shared[j]!r} are {worst:.4f} m further apart (or closer) in the twin than in your file — "
+                f"{100.0 * worst / max(extent, 1e-9):.1f}% of the robot's own {extent:.3f} m span, against a "
+                f"{tol:.4f} m budget. This is OUR reconstruction being wrong, not your model")
+        return out
+    except Exception as exc:  # noqa: BLE001 - a check that crashes is not evidence of a broken twin
+        return {"checked": False, "reason": f"the placement check could not run ({type(exc).__name__}: {exc})"[:200]}
+
+
+def _simulability_probe(gene, *, settle_s: float = SETTLE_S, excite_s: float = EXCITE_S) -> dict:
+    """Is this twin fit to compute numbers from? TWO rules, and they fail for different reasons.
+
+    1. **Is it the customer's robot?** ``_placement_fidelity`` — the twin must put their links where their own
+       model puts them. Skipped, loudly, on a gene that was composed here or has been edited since import.
+    2. **Can it be STEPPED?** Compile it, settle it, excite it, and rule on finiteness — below.
+
+    Rule 2 alone was the whole gate until 2026-08-07, and it catches ONE of the four twins the multi-root bug
+    (9fbdcdc) broke: ALOHA, whose two stacked arms drive the solver to a NaN. The other three stack into a
+    geometry that is wrong but numerically survivable, and a divergence detector has nothing to say about
+    wrong. The number that looked like it should say it — ``max_self_penetration_m``, computed here since the
+    beginning — cannot: see ``_placement_fidelity`` for the measured 9.1% window that killed it.
+
+    Four things make rule 2 harder than ``np.isfinite(d.qpos)``, and the first is why nothing caught ALOHA:
+
+    * **MuJoCo HIDES the divergence.** ``mj_checkAcc`` reacts to a non-finite/huge ``qacc`` by raising
+      ``mjWARN_BADQACC`` **and calling ``mj_resetData``** — so the step after the blow-up reads perfectly finite,
+      at qpos 0. A post-hoc finiteness check on the state is therefore VACUOUS for the exact failure it is meant
+      to detect; the authoritative signal is ``d.warning[...].number``. (``structural_hygiene.penetration_report``
+      has the same hole, and reports ``finite=True`` on a model that exploded.)
+    * **The start pose is not one pose.** The gene carries the source's rest keyframe and the compiler emits it,
+      but a bare ``MjData`` is qpos 0, and the two disagree: the collapsed ALOHA twin survives the whole probe
+      from ``neutral_pose`` and hits bad-QACC at t=0.106 s from zero. Both are run, and either failing fails.
+    * **A settle alone would be a coin flip.** Deep interpenetration is metastable — whether it explodes in
+      0.1 s or holds for 10 depends on the pose it starts in. So after the passive settle the probe also DRIVES
+      every actuator, bounded by the customer's OWN ``ctrlrange`` and never past it, so a twin that survives
+      commands the customer could legitimately send is never failed here.
+    * **It must not itself be a way to fail.** A compile error is a real failure and is reported as one; anything
+      else (no MuJoCo, no actuators) reports ``checked=False`` and passes, because "we could not look" is not
+      evidence of a broken twin. Measured across all 63 Menagerie packages: 62 pass, and the one rejection
+      (flybody, a zero-inertia link) genuinely cannot be compiled at all.
+    """
+    try:
+        import mujoco
+        import numpy as np
+
+        from virturoid.services.gene_compiler import compile_gene_to_mjcf, standing_spawn_z
+    except Exception as exc:  # noqa: BLE001 - no simulator here; not the twin's fault
+        return {"ok": True, "checked": False, "reason": f"simulator unavailable ({type(exc).__name__})"}
+
+    try:
+        xml = compile_gene_to_mjcf(gene, include_floor=True, spawn_z=standing_spawn_z(gene))
+        m = mujoco.MjModel.from_xml_string(xml)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "checked": True, "stage": "compile",
+                "reason": f"the twin does not compile in MuJoCo: {type(exc).__name__}: {exc}"[:400]}
+
+    bad = {"BADQACC": mujoco.mjtWarning.mjWARN_BADQACC, "BADQVEL": mujoco.mjtWarning.mjWARN_BADQVEL,
+           "BADQPOS": mujoco.mjtWarning.mjWARN_BADQPOS, "BADCTRL": mujoco.mjtWarning.mjWARN_BADCTRL}
+    floor = {g for g in range(m.ngeom) if int(m.geom_type[g]) == mujoco.mjtGeom.mjGEOM_PLANE}
+    dt = float(m.opt.timestep) or 0.002
+    n_settle, n_excite = int(settle_s / dt), int(excite_s / dt)
+    lo, hi = (m.actuator_ctrlrange[:, 0].copy(), m.actuator_ctrlrange[:, 1].copy()) if m.nu else (None, None)
+    if m.nu:                              # an unlimited actuator gets a modest symmetric swing, not infinity
+        free = m.actuator_ctrllimited[:] == 0
+        lo[free], hi[free] = -1.0, 1.0
+    mid = (lo + hi) / 2.0 if m.nu else None
+    amp = (hi - lo) / 2.0 if m.nu else None
+    d = mujoco.MjData(m)
+
+    def _run(from_keyframe: bool) -> dict:
+        if from_keyframe:
+            mujoco.mj_resetDataKeyframe(m, d, 0)
+        else:
+            mujoco.mj_resetData(m, d)
+        mujoco.mj_forward(m, d)
+        # Worst self-interpenetration at the start pose, floor contacts excluded. Not itself pass/fail (a capsule
+        # twin overlaps a little at every joint by construction) but it is the NUMBER that explains a NaN.
+        worst, pair = 0.0, None
+        for c in d.contact[:d.ncon]:
+            if int(c.geom1) in floor or int(c.geom2) in floor or c.dist >= 0:
+                continue
+            if float(-c.dist) > worst:
+                worst = float(-c.dist)
+                pair = tuple(mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_BODY, int(m.geom_bodyid[g])) or f"body{g}"
+                             for g in (int(c.geom1), int(c.geom2)))
+        first_bad, stage = None, None
+        for k in range(n_settle + n_excite):
+            if m.nu and k >= n_settle:
+                phase = 2.0 * np.pi * EXCITE_HZ * (k - n_settle) * dt
+                d.ctrl[:] = mid + amp * np.sin(phase + np.arange(m.nu) * (np.pi / max(1, m.nu)))
+            mujoco.mj_step(m, d)
+            if any(int(d.warning[w].number) for w in bad.values()) or not (
+                    np.isfinite(d.qpos).all() and np.isfinite(d.qvel).all()):
+                first_bad, stage = k, ("settle" if k < n_settle else "excitation")
+                break
+        return {"from": "rest_keyframe" if from_keyframe else "zero_pose", "ok": first_bad is None,
+                "max_self_penetration_m": round(worst, 5),
+                "deepest_penetrating_pair": list(pair) if pair else None,
+                "first_bad_step": first_bad, "stage": stage,
+                "mujoco_warnings": {n: int(d.warning[w].number) for n, w in bad.items() if d.warning[w].number}}
+
+    # RULE 1, and the one the penetration number could never be. A statement about the MODEL rather than about a
+    # trajectory: a twin whose links are in the wrong place is wrong whether or not it survives two seconds of
+    # excitation, and three of the four known-broken twins do survive. See ``_placement_fidelity``.
+    place = _placement_fidelity(gene, m, mujoco)
+
+    # RULE 2, from BOTH START POSES, because both are reachable and they do not agree. The import carries the
+    # source's own rest keyframe onto the gene and the compiler emits it, but plenty of callers construct a bare
+    # ``MjData`` and get qpos 0. Measured on the collapsed ALOHA twin: from `neutral_pose` it survives the full
+    # 2 s, from zero it hits bad-QACC at t=0.106 s -- so a probe that picked either one alone would have missed
+    # the reported failure half the time. Neither start is a way to fail on its own account: across all 63
+    # Menagerie packages, every twin that passes one passes the other.
+    runs = [_run(True)] if m.nkey else []
+    runs.append(_run(False))
+    worst_run = next((r for r in runs if not r["ok"]), runs[0])
+    worst_pen = max((r["max_self_penetration_m"] for r in runs), default=0.0)
+    pen_run = max(runs, key=lambda r: r["max_self_penetration_m"])
+    out = {
+        "checked": True, "ok": all(r["ok"] for r in runs) and place.get("ok", True),
+        "settle_s": round(n_settle * dt, 4), "excite_s": round(n_excite * dt, 4),
+        "n_actuators": int(m.nu), "timestep_s": dt, "start_poses": [r["from"] for r in runs],
+        "max_self_penetration_m": worst_pen,
+        "deepest_penetrating_pair": pen_run["deepest_penetrating_pair"],
+        "mujoco_warnings": worst_run["mujoco_warnings"],
+        "placement_check": place,
+        "runs": runs,
+    }
+    diverged = not all(r["ok"] for r in runs)
+    if diverged:
+        k, counts = worst_run["first_bad_step"], worst_run["mujoco_warnings"]
+        out["first_bad_step"] = int(k)
+        out["first_bad_time_s"] = round(k * dt, 4)
+        out["stage"] = worst_run["stage"]
+        _p = worst_run["deepest_penetrating_pair"]
+        _pair = f" (deepest overlap {worst_run['max_self_penetration_m']:.3f} m between " \
+                f"{_p[0]!r} and {_p[1]!r})" if _p else ""
+        out["reason"] = (f"state went non-finite at t={k * dt:.3f} s during {worst_run['stage']}, starting from "
+                         f"the {worst_run['from']} "
+                         f"[{', '.join(f'{n}x{v}' for n, v in counts.items()) or 'non-finite qpos/qvel'}]"
+                         f"{_pair}")
+    if place.get("checked") and not place.get("ok"):
+        # A PLACEMENT FAILURE IS NOT A DIVERGENCE FAILURE, and when both are true the placement one LEADS: the
+        # body may step perfectly well and still not be the customer's body, and where a twin does both (ALOHA's
+        # stacked arms) the misplacement is the cause and the NaN is the symptom. The divergence detail is kept
+        # alongside rather than replaced -- ``first_bad_time_s``, ``mujoco_warnings`` and ``runs`` are all still
+        # populated, because a caller diagnosing the NaN needs them either way.
+        out["placement_failed"] = True
+        out["stage"] = "placement"
+        out["reason"] = str(place.get("reason")) + (
+            "  IT ALSO DIVERGED: " + out["reason"] if diverged else "")
+    return out
+
+
 def _sanitize_urdf_meshes(text: str, base_dir: str | None) -> tuple[str, int]:
     """Neutralize ``<mesh filename=...>`` references whose file can't be found (the #1 enterprise-URDF problem:
     a robot description ships without its meshes, or with them at a different relative path). A missing mesh geom
@@ -216,14 +1603,38 @@ def _load_model(source: str, mujoco, warnings: list[str]):
     def _compile(xml_text: str):
         if not is_urdf:
             return mujoco.MjModel.from_xml_string(xml_text)
-        with tempfile.NamedTemporaryFile("w", suffix=".urdf", delete=False, encoding="utf-8", dir=base_dir) as f:
-            f.write(xml_text); tmp = f.name                     # write NEXT TO the real meshes so relative paths resolve
+        # THE THIRD WRITE INTO THE CUSTOMER'S FOLDER, and the one that cost the most. This used to be
+        # `NamedTemporaryFile(dir=base_dir)` -- "write NEXT TO the real meshes so relative paths resolve" --
+        # the same good reason, and the same defect, as the two `source_guard` was built to stop. It was
+        # missed because it only fires on the RETRY path (a clean URDF loads straight from `from_xml_path`),
+        # and the as-published Go2 always takes that retry.
+        #
+        # Measured through `agent_tools.call_tool` on a real Go2: once the guard armed, this write was
+        # refused, `_load_model` raised, `_ingest_project` found no editable twin and composed one from the
+        # text description -- so the ingest silently reopened #215, answering `lane_used:
+        # composed_from_description` on a folder containing the customer's actual URDF. A read-only rule
+        # that turns "we imported your robot" into "we generated a proxy" is not a safer product.
+        #
+        # `_absolutise_mesh_paths` is what frees the file to move: a URDF's mesh filenames resolve against
+        # the URDF's own directory, which is the only reason the temp file sat there. It is the same weakest
+        # rewrite `model_import` uses -- relative -> absolute, only when the file is really there -- so
+        # `package://` URIs and genuinely missing meshes still fall through to the repair/sanitize passes
+        # below and are still REPORTED rather than papered over.
+        from virturoid.services.model_import import _absolutise_mesh_paths
+        from virturoid.services.source_guard import staging_dir
+        if base_dir:
+            xml_text = _absolutise_mesh_paths(xml_text, Path(base_dir))
+        out_dir = str(staging_dir(base_dir, kind="import")) if base_dir else None
+        with tempfile.NamedTemporaryFile("w", suffix=".urdf", delete=False, encoding="utf-8", dir=out_dir) as f:
+            f.write(xml_text); tmp = f.name
         try:
             return mujoco.MjModel.from_xml_path(tmp)
         finally:
             try:
                 Path(tmp).unlink()
-            except OSError:
+                if out_dir:                        # one empty dir per source path is litter in a long install;
+                    os.rmdir(out_dir)              # `rmdir` refusing a non-empty dir is the right behaviour when
+            except OSError:                        # a concurrent import still holds its own prep file there.
                 pass
 
     # 1) faithful attempt (a real file loads straight from its path so meshes/compiler resolve)
@@ -279,14 +1690,435 @@ def _primary_geom(mj, body_id: int, GEOM, name_of, warnings: list[str]):
     if gtype == 2:        # sphere: size = (radius,)
         r = max(float(size[0]), 1e-3)
         return "capsule", 2 * r, r
+    if gtype == 7:        # MESH: geom_size carries the bbox half-extents, same convention as a box.
+        # This used to fall through to the generic branch below, which reads size[0] -- the X half-extent -- as
+        # the LENGTH. Real limb meshes are long in Z and thin in X, so every mesh link imported as its own
+        # thickness: a Unitree Go2 calf (half-extents 0.019 x 0.029 x 0.158) came in at 2*0.0188 = 37.6 mm
+        # against a true 213 mm, 5.7x too short. That is what left visible gaps between hip/thigh/calf in the
+        # render and made an imported Go2 verify CROUCH. Mesh links are the norm in any real robot description.
+        return "capsule", max(2 * float(size[2]), 1e-3), max(float(max(size[0], size[1])), 1e-3)
     return "box", max(2 * float(size[0]), 1e-3), max(float(size[0]), 1e-3)
 
 
+def _declared_joint_torque(mj, mujoco) -> dict[int, dict]:
+    """``{joint_id: {"nm", "where"}}`` — the torque limit the CUSTOMER'S OWN FILE declares, from all three
+    places a real robot description puts it. We used to read exactly one of them and silently return zero.
+
+      * ``<general|motor forcerange>``     — the clamp MuJoCo applies to the actuator's scalar force.
+        Franka Panda 87/87/87/87/12/12/12, UR5e 150/150/150/28/28/28. This was the only site we read.
+      * ``<motor ctrlrange>`` in FORCE MODE — where ``ctrl`` IS the commanded force, so its range is a torque
+        range. The Unitree Go2 declares 23.7/23.7/45.43 N.m here with ``forcelimited=false``, so reading
+        forcerange returned ``[0, 0]`` and the importer recorded NOTHING for a robot whose real numbers were
+        sitting in the file.
+      * ``<joint actuatorfrcrange>``       — a cap on the TOTAL actuator force at that joint, which is where
+        the Unitree G1 puts its entire torque spec (88/139/50/25/5 N.m) and where nothing on the actuator
+        says anything at all.
+
+    ``ctrlrange`` IS ONLY A TORQUE FOR A FORCE-MODE ACTUATOR, and that has to be checked rather than assumed.
+    The G1's actuators are ``<position>`` servos whose ctrlrange is the joint's POSITION range in radians
+    (``inheritrange="1"``): reading it as a torque would give the 88 N.m hip a limit of 2.88 N.m — 30x too
+    weak — and stamp it as the manufacturer's own number, which is worse than reading nothing. Force mode is
+    ``gaintype=fixed`` (ctrl scaled by a constant), ``biastype=none`` (no position/velocity feedback term) and
+    ``dyntype=none`` (ctrl is not filtered or integrated into a state ctrlrange does not bound) — precisely
+    MJCF's ``<motor>``.
+
+    Units: MuJoCo clamps the scalar force to ``forcerange`` and then applies ``moment * force``, and for a
+    joint transmission the moment is ``gear[0]``. So the JOINT torque limit is ``|gear| * force``, and the
+    force-mode ctrl path is ``|gear| * |gain| * ctrl_max``.
+    """
+    JT = {int(mujoco.mjtTrn.mjTRN_JOINT), int(mujoco.mjtTrn.mjTRN_JOINTINPARENT)}
+    out: dict[int, dict] = {}
+    for u in range(mj.nu):
+        if int(mj.actuator_trntype[u]) not in JT:
+            continue
+        jid = int(mj.actuator_trnid[u, 0])
+        gear = abs(float(mj.actuator_gear[u, 0])) or 1.0
+        cands: list[tuple[float, str]] = []
+        if int(mj.actuator_forcelimited[u]):
+            f = max(abs(float(mj.actuator_forcerange[u][0])), abs(float(mj.actuator_forcerange[u][1])))
+            if f > 0.0:
+                cands.append((gear * f, "actuator/forcerange"))
+        force_mode = (int(mj.actuator_gaintype[u]) == int(mujoco.mjtGain.mjGAIN_FIXED)
+                      and int(mj.actuator_biastype[u]) == int(mujoco.mjtBias.mjBIAS_NONE)
+                      and int(mj.actuator_dyntype[u]) == int(mujoco.mjtDyn.mjDYN_NONE))
+        if force_mode and int(mj.actuator_ctrllimited[u]):
+            k = abs(float(mj.actuator_gainprm[u, 0]))
+            c = max(abs(float(mj.actuator_ctrlrange[u][0])), abs(float(mj.actuator_ctrlrange[u][1])))
+            if k > 0.0 and c > 0.0:
+                cands.append((gear * k * c, "actuator/ctrlrange (force-mode motor) x gear"))
+        if not cands:
+            continue
+        nm, where = min(cands)                      # both clamps apply in series -> the smaller one binds
+        prev = out.get(jid)
+        if prev is None or nm > float(prev["nm"]):  # several actuators on one joint: the strongest sets reach
+            out[jid] = {"nm": nm, "where": where}
+    # The joint-level cap applies whether or not any actuator declared anything — and where nothing else did,
+    # it IS the declaration.
+    for j in range(mj.njnt):
+        if not int(getattr(mj, "jnt_actfrclimited", [0] * mj.njnt)[j]):
+            continue
+        cap = max(abs(float(mj.jnt_actfrcrange[j][0])), abs(float(mj.jnt_actfrcrange[j][1])))
+        if cap <= 0.0:
+            continue
+        prev = out.get(j)
+        if prev is None:
+            out[j] = {"nm": cap, "where": "joint/actuatorfrcrange"}
+        elif cap < float(prev["nm"]):
+            out[j] = {"nm": cap, "where": f"{prev['where']} capped by joint/actuatorfrcrange"}
+    return {k: {"nm": round(float(v["nm"]), 3), "where": v["where"]} for k, v in out.items()
+            if round(float(v["nm"]), 3) > 0.0}
+
+
+def _source_joint_dynamics(mj, j: int) -> dict | None:
+    """``{armature, damping, frictionloss}`` for joint ``j`` as the customer's model compiles them.
+
+    These three are exactly what ``sysid.fit_parameters`` identifies. The Go2 declares all three
+    (``armature=0.01 damping=2.0 frictionloss=0.2``) and the Panda two (``armature=0.1 damping=1.0``); before
+    this the importer had no reference to any of them anywhere in the file and the compiler's structural
+    prior stood in — so a bench calibration "identified" values the customer had already handed us, and the
+    sim-to-sim gap against their own model was one we created at import.
+
+    All three are RECORDED here. Only damping and frictionloss are carried into the emitted model — see
+    ``gene_compiler._declared_joint_dynamics`` for why armature is not, and the metadata block above for how
+    that is disclosed. Recording the one we do not use is the point: it is what a reader checks the claim
+    against, and what ``sysid`` quotes its correction beside.
+    """
+    adr = int(mj.jnt_dofadr[j])
+    if adr < 0:
+        return None
+    return {"armature": round(float(mj.dof_armature[adr]), 6),
+            "damping": round(float(mj.dof_damping[adr]), 6),
+            "frictionloss": round(float(mj.dof_frictionloss[adr]), 6)}
+
+
+def _source_actuator_velocity_feedback(mj, j: int) -> float:
+    """``kv`` of the joint's own actuator — DAMPING THAT IS NOT AT THE JOINT — or 0.0.
+
+    A ``<position kp=... kv=...>`` (and the ``<general>`` it compiles to) applies ``-kv*qvel``, so a model can
+    declare ``dof_damping=0`` and still be heavily damped. Reading only ``dof_damping`` and reporting it as
+    "what your simulator integrates" is therefore an incomplete read, and on this corpus not a rare one: 18 of
+    the 59 packages that yield a drivetrain record put ALL of their velocity feedback here — Spot kv=40,
+    kuka_iiwa_14 200, ur5e 400, tidybot 50000 — and declare no joint damping at all.
+
+    We emit ``<motor>`` (pure torque) actuators because the verify/train harness computes its own PD, so there
+    is no ``kv`` on the twin to carry it into. This function exists so the loss can be NAMED with its number
+    rather than disappearing into a "0" that reads like a statement about the machine.
+
+    MuJoCo compiles the velocity term into ``actuator_biasprm[u][2]`` as ``-kv``. A ``<motor>`` has an
+    all-zero biasprm, so a source that already uses torque actuators reports nothing here.
+    """
+    import mujoco as _mj                                 # the enum, not a literal 0: mjtTrn is MuJoCo's to own
+
+    joint_trn = int(_mj.mjtTrn.mjTRN_JOINT)
+    kv = 0.0
+    for u in range(int(mj.nu)):
+        if int(mj.actuator_trntype[u]) != joint_trn:     # a tendon/site/body drive is not this joint's
+            continue
+        if int(mj.actuator_trnid[u][0]) != int(j):
+            continue
+        kv = max(kv, abs(float(mj.actuator_biasprm[u][2])))
+    return round(kv, 6)
+
+
+#: MuJoCo's own documented defaults for the joint attributes the compiler does not emit. A source value equal
+#: to one of these is not a loss -- the twin lands on the same number by omitting the attribute entirely. Only
+#: a DIFFERENCE is a substitution, and only differences are reported.
+_MJ_JOINT_DEFAULTS = {"stiffness": (0.0,), "springref": (0.0,), "margin": (0.0,),
+                      "solreflimit": (0.02, 1.0), "solimplimit": (0.9, 0.95, 0.001, 0.5, 2.0)}
+
+
+def _source_joint_extras(mj, j: int) -> dict:
+    """Joint attributes the customer's file sets to something OTHER than MuJoCo's default, which our compiler
+    has no way to emit -- with the number, so the loss is a disclosure and not a silence.
+
+    ``gene_compiler._body_xml`` writes exactly ``type/axis/range/damping/armature/frictionloss`` on a joint.
+    Everything else falls back to MuJoCo's default, and for most models that is harmless because the source
+    left it at the default too. It is NOT harmless when the source declared otherwise, and real MuJoCo
+    Menagerie packages do: 16 of the 63 declare a joint ``stiffness``, i.e. a physical RETURN SPRING (the
+    Robotiq 2F85's driver spring, Cassie's leaf springs, the xArm7 gripper). A twin that drops the spring is a
+    different machine, and dropping it silently is the same defect as the drivetrain substitution above --
+    with the aggravation that no bench fit identifies stiffness, so nothing downstream can even recover it.
+
+    ``RobotGene`` has no field for any of these, so this reports rather than repairs. That is the honest
+    boundary: the number is in the report, named, next to the reason it did not survive.
+    """
+    import numpy as _np
+
+    adr = int(mj.jnt_dofadr[j])
+    if adr < 0:
+        return {}
+    qadr = int(mj.jnt_qposadr[j])
+    got = {
+        "stiffness": (float(mj.jnt_stiffness[j]),),
+        "springref": (float(mj.qpos_spring[qadr]),),
+        "margin": (float(mj.jnt_margin[j]),),
+        "solreflimit": tuple(float(v) for v in _np.asarray(mj.jnt_solref[j], dtype=float)),
+        "solimplimit": tuple(float(v) for v in _np.asarray(mj.jnt_solimp[j], dtype=float)),
+    }
+    out = {}
+    for attr, value in got.items():
+        default = _MJ_JOINT_DEFAULTS[attr]
+        if len(value) == len(default) and all(abs(a - b) <= 1e-9 for a, b in zip(value, default)):
+            continue
+        out[attr] = round(value[0], 6) if len(value) == 1 else [round(v, 6) for v in value]
+    return out
+
+
+def _source_sensor_inventory(mj, mujoco, body_name: dict, segments) -> dict:
+    """WHAT SENSING DOES THE CUSTOMER'S OWN FILE DECLARE? Read verbatim off their compiled model, so a later
+    surface can quote it instead of guessing.
+
+    This exists because nothing anywhere read it. ``bom_builder._sensor_suite`` picks perception from the robot's
+    CLASS alone, so a Menagerie Go2 -- ``ncam 0, nsensor 0`` -- was told it carries an Intel RealSense D435i and
+    billed $334 for it, and ``verify_robot.vision`` reported ``sees: true`` through a camera we had synthesized
+    onto their machine ourselves. The fix needs a fact to stand on, and this is the fact.
+
+    Two deliberate refusals in the shape of what is recorded:
+
+    * an MJCF ``<camera>`` is a RENDER VIEWPOINT, not a declared piece of hardware. Across all 63 MuJoCo
+      Menagerie packages 19 declare one and most of those are tracking/cinematic cams (``track@trunk`` on the
+      Go1, ``hero``/``side``/``bottom`` on the fruitfly). So each camera is recorded with its name and mount
+      body and NOTHING is inferred from the count -- ``ncam > 0`` never licenses a part number or a price.
+    * ``<sensor>`` elements ARE declared instrumentation, and they are recorded by MuJoCo type
+      (``mjSENS_GYRO``...), again with no mapping to a catalog part.
+    """
+    cams = []
+    for i in range(int(mj.ncam)):
+        bid = int(mj.cam_bodyid[i])
+        host = body_name.get(bid, "world") if bid else "world"
+        cams.append({"name": (mujoco.mj_id2name(mj, mujoco.mjtObj.mjOBJ_CAMERA, i) or f"camera{i}"),
+                     "mount_body": host,
+                     "mount_body_in_twin": any(getattr(s, "name", "") == host for s in segments),
+                     "fovy_deg": round(float(mj.cam_fovy[i]), 1)})
+    sens, by_type = [], {}
+    for i in range(int(mj.nsensor)):
+        t = int(mj.sensor_type[i])
+        tname = next((n for n in dir(mujoco.mjtSensor)
+                      if n.startswith("mjSENS_") and int(getattr(mujoco.mjtSensor, n)) == t), f"type{t}")
+        sens.append({"name": (mujoco.mj_id2name(mj, mujoco.mjtObj.mjOBJ_SENSOR, i) or f"sensor{i}"), "type": tname})
+        by_type[tname] = by_type.get(tname, 0) + 1
+    return {"ncam": int(mj.ncam), "nsensor": int(mj.nsensor),
+            "cameras": cams, "sensors": sens[:64], "sensor_types": by_type,
+            "read_from": "your compiled model (mjModel.ncam / mjModel.nsensor), verbatim",
+            "what_this_is_not": ("a parts list. An MJCF <camera> is a render viewpoint and a <sensor> is a "
+                                 "simulated signal; neither names a manufacturer, a price or a mass, so nothing "
+                                 "here is turned into a BOM line for hardware fitted to your machine")}
+
+
+# MuJoCo's own defaults for a constraint's solver reference (mjModel is populated with these when the file
+# says nothing). Matching them is how "the source did not declare a stiffness" is told apart from "the source
+# declared exactly the default" -- in both cases we emit NOTHING and MuJoCo re-applies the same numbers, so the
+# twin never carries a stiffness we invented. See ``gene_compiler._solver_ref_attrs``.
+_MJ_DEFAULT_SOLREF = (0.02, 1.0)
+_MJ_DEFAULT_SOLIMP = (0.9, 0.95, 0.001, 0.5, 2.0)
+
+
+def _source_solver_ref(mj, e: int) -> dict:
+    """``{"solref": [...], "solimp": [...]}`` for equality ``e``, with defaulted entries OMITTED.
+
+    THE SOURCE'S STIFFNESS IS PART OF THE SOURCE'S MACHINE. ``agility_cassie/cassie.xml`` opens its equality
+    block with ``solref="0.005 1"`` -- four times stiffer than MuJoCo's default -- because a four-bar linkage
+    held at the default visibly comes apart. Carrying the ``<connect>`` but not its solver reference imported
+    the topology and dropped the tolerance, and the measured residual said so: 32.83 mm of separation between
+    the plantar rod and the foot over 2000 stepped frames, against 14.82 mm at the source's own number.
+
+    THE RESIDUAL THAT REMAINS IS NOT THIS. Cassie and iit_softfoot still sit at 14.82 / 25.13 mm while their
+    SOURCE models settle to 1.47 / 0.14 mm, and the gap is a SUSTAINED offset from ~0.5 s onward, not an impact
+    transient. Two hypotheses were tested and one survived: our fixed ``timestep`` is NOT the cause (rerunning
+    the twin at Cassie's own 0.0005 s gives 14.83 mm -- no change), while raising the constraint IMPEDANCE
+    collapses it (a diagnostic ``solimp="0.9999 ..."`` takes Cassie to 0.85 mm). So the twin's linkage carries a
+    sustained load the source's does not, and the default impedance yields under it. That is a defect in the
+    reconstructed geometry, NOT a dropped equality parameter -- and Cassie's file declares the DEFAULT solimp,
+    so stiffening it here would be inventing a number the customer never wrote in order to hide a mismatch
+    somewhere else. It stays default, and this comment is the record of why.
+    """
+    out: dict = {}
+    ref = [float(v) for v in mj.eq_solref[e]]
+    imp = [float(v) for v in mj.eq_solimp[e]]
+    if any(abs(a - b) > 1e-12 for a, b in zip(ref, _MJ_DEFAULT_SOLREF)):
+        out["solref"] = [round(v, 8) for v in ref]
+    if any(abs(a - b) > 1e-12 for a, b in zip(imp, _MJ_DEFAULT_SOLIMP)):
+        out["solimp"] = [round(v, 8) for v in imp]
+    return out
+
+
+def _source_equalities(mj, mujoco, body_name: dict, rot_by_id: dict, segments: list,
+                       warnings: list[str], *, eff_body: dict | None = None,
+                       eff_parent: dict | None = None) -> tuple[list[dict], list[dict]]:
+    """The source model's ``<equality>`` block, as far as a RobotGene can carry it: ``(loops, couplings)``.
+
+    A CLOSED-LOOP ROBOT WITHOUT ITS LOOPS IS A DIFFERENT MACHINE. Agility's Cassie declares four
+    ``<connect>`` constraints -- the plantar rod to the foot and the achilles rod to the heel spring, per leg --
+    and those four are what make each leg a four-bar linkage instead of a leg with two rods dangling off it.
+    The importer read the body tree and nothing else, so the twin compiled with ``neq = 0``: the rods swung
+    free, the linkage did not exist, and we verified, certified and exported that machine as the customer's.
+
+    A ROBOT WITHOUT ITS COUPLINGS IS EQUALLY A DIFFERENT MACHINE, and that is the second half. A Panda's two
+    fingers are ONE gripper DOF, joined by ``<equality><joint>``; so are a Robotiq's two drivers, a Stretch's
+    four telescoping stages, and a ToddlerBot's nine geared pairs. Those were disclosed-but-dropped, which left
+    a twin whose gripper can open one jaw.
+
+    Two frames have to be reconciled for a ``<connect>``, the same pair the rest of this importer reconciles:
+      * MJCF's ``anchor`` is in **body1's own frame**; a segment's frame is the LINK frame, whose +z runs
+        along the link axis (see ``_link_vector``). So the anchor is rotated by ``S^T`` like every other
+        vector this importer carries across.
+      * A ``<connect>`` may name SITES rather than bodies (both ToddlerBots do). Then the anchor is the
+        site's position on its body and ``eq_data`` is zero, so the site has to be resolved to its body.
+
+    A ``<joint>`` equality needs a third reconciliation, between JOINTS and SEGMENTS. A gene segment models
+    exactly one joint -- the one attaching it to its parent, which ``_joint_for_body`` picks as the body's
+    FIRST -- and the compiler names it ``<segment>_joint``. So a coupling is carryable only when each of its
+    two joints is its own body's first, the two bodies differ, and both survived as segments that actually have
+    a joint. Measured over the corpus that is 51 of the 96 ``<joint>`` equalities and 18 of the 19 packages
+    that declare one; the 45 that remain are all iit_softfoot's, where both coupled joints sit on the SAME
+    body (a multi-DOF link a one-joint segment cannot represent).
+
+    Everything the gene still CANNOT model is reported instead of dropped in silence -- a higher-degree
+    ``polycoef``, a coupling that pins one DOF to a constant, a ``<weld>``/``<tendon>``/``<flex>`` equality.
+    Saying so is the difference between a lossy import and a wrong one.
+    """
+    import numpy as np
+
+    CONNECT = int(mujoco.mjtEq.mjEQ_CONNECT)
+    JOINT = int(mujoco.mjtEq.mjEQ_JOINT)
+    SITE = int(mujoco.mjtObj.mjOBJ_SITE)
+    _TYPE = {int(getattr(mujoco.mjtEq, n)): n.replace("mjEQ_", "").lower()
+             for n in dir(mujoco.mjtEq) if n.startswith("mjEQ_")}
+    active0 = getattr(mj, "eq_active0", None)
+    if active0 is None:
+        active0 = getattr(mj, "eq_active", None)
+
+    # A constraint may name a body that is only a COORDINATE FRAME (see `_frame_only_bodies`), which is not a
+    # segment. It has no joint, so it is welded to the link above it — resolve to that link instead of
+    # reporting the constraint as naming something that "did not survive".
+    _eb = (lambda b: int(eff_body.get(int(b), int(b)))) if eff_body else (lambda b: int(b))
+    _ep = (lambda b: int(eff_parent.get(int(b), int(mj.body_parentid[b])))) if eff_parent \
+        else (lambda b: int(mj.body_parentid[b]))
+
+    def _up(frm: int, to: int, p):
+        """A point given in body ``frm``'s frame, re-expressed in ancestor ``to``'s frame.
+
+        The anchor of a ``<connect>`` is stated in body1's own frame; when body1 was a folded coordinate
+        frame, ``to`` is the link it hung off, and the frame's own offset/rotation has to travel with the
+        anchor or the loop would close at the wrong point. A no-op when nothing was folded.
+        """
+        b, q = int(frm), np.asarray(p, dtype=float)
+        while b != int(to) and b > 0:
+            q = np.asarray(mj.body_pos[b], dtype=float) + _quat_mat(mj.body_quat[b]) @ q
+            b = int(mj.body_parentid[b])
+        return q
+
+    first_joint_of: dict[int, int] = {}
+    for j in range(int(getattr(mj, "njnt", 0))):
+        first_joint_of.setdefault(int(mj.jnt_bodyid[j]), j)
+    jointed = {s.name for s in segments if s.joint_type in ("revolute", "prismatic")}
+
+    loops: list[dict] = []
+    couplings: list[dict] = []
+    unmodelled: dict[str, int] = {}
+    skipped: list[str] = []
+    for e in range(int(getattr(mj, "neq", 0))):
+        et = int(mj.eq_type[e])
+        if et not in (CONNECT, JOINT):
+            k = _TYPE.get(et, str(et))
+            unmodelled[k] = unmodelled.get(k, 0) + 1
+            continue
+        if active0 is not None and not int(active0[e]):
+            kind = "connect" if et == CONNECT else "joint"
+            skipped.append(f"one <{kind}> is shipped DISABLED (active=\"false\") and was not carried")
+            continue
+
+        if et == JOINT:
+            j1, j2 = int(mj.eq_obj1id[e]), int(mj.eq_obj2id[e])
+            poly = [float(v) for v in mj.eq_data[e][:5]]
+            if j2 < 0:
+                # One joint and a polynomial in nothing: this PINS the DOF to a constant. It is a lock, not a
+                # coupling, and calling it one would hold the joint at a value the design never chose.
+                skipped.append("a <joint> equality pins ONE joint to a constant rather than coupling two")
+                continue
+            if any(abs(v) > 1e-12 for v in poly[2:]):
+                skipped.append("a <joint> equality uses a higher-degree polycoef; a gene coupling is linear "
+                               "(offset + ratio), and truncating the curve would be a different machine")
+                continue
+            b1, b2 = int(mj.jnt_bodyid[j1]), int(mj.jnt_bodyid[j2])
+            n1, n2 = body_name.get(b1), body_name.get(b2)
+            if b1 == b2:
+                skipped.append(f"a <joint> equality couples two joints on the SAME body ({n1!r}); a gene "
+                               "segment models one joint, so a multi-DOF link cannot carry it")
+                continue
+            if first_joint_of.get(b1) != j1 or first_joint_of.get(b2) != j2:
+                skipped.append("a <joint> equality names a joint that is not its body's first; the segment "
+                               "models a different DOF of that link")
+                continue
+            if not n1 or not n2 or n1 not in jointed or n2 not in jointed:
+                skipped.append("a <joint> equality names a link that did not survive as a jointed segment")
+                continue
+            couplings.append({"a": n1, "b": n2, "offset": round(poly[0], 8), "ratio": round(poly[1], 8),
+                              **_source_solver_ref(mj, e)})
+            continue
+
+        objtype = int(mj.eq_objtype[e]) if hasattr(mj, "eq_objtype") else -1
+        o1, o2 = int(mj.eq_obj1id[e]), int(mj.eq_obj2id[e])
+        if objtype == SITE:
+            _s1 = int(mj.site_bodyid[o1])
+            b1, b2 = _eb(_s1), _eb(mj.site_bodyid[o2])
+            anchor = _up(_s1, b1, mj.site_pos[o1])
+        else:
+            b1, b2 = _eb(o1), _eb(o2)
+            anchor = _up(int(o1), b1, mj.eq_data[e][:3])
+        a, b = body_name.get(b1), body_name.get(b2)
+        if b1 <= 0 or b2 <= 0 or not a or not b:
+            skipped.append("a <connect> anchors a body to the WORLD; a RobotGene loop joins two segments")
+            continue
+        if a == b:
+            skipped.append(f"a <connect> joins {a!r} to itself")
+            continue
+        if _ep(b2) == b1 or _ep(b1) == b2:
+            # `validate()` rejects this on purpose: a parent and child are already rigidly related through
+            # their joint, so restating the edge as a loop is a contradiction rather than a second path.
+            skipped.append(f"a <connect> joins {a!r} and {b!r}, which are already parent and child")
+            continue
+        S = rot_by_id.get(b1)
+        local = (np.asarray(S, dtype=float).T @ anchor) if S is not None else anchor
+        loops.append({"a": a, "b": b, "anchor": [round(float(v), 6) for v in local],
+                      **_source_solver_ref(mj, e)})
+
+    if loops:
+        _pairs = ", ".join(sorted({f"{lc['a']}<->{lc['b']}" for lc in loops})[:4])
+        _stiff = sorted({str(lc["solref"]) for lc in loops if "solref" in lc})
+        warnings.append(
+            f"{len(loops)} closed kinematic loop(s) were read from the source's <equality><connect> and are "
+            f"carried on the gene ({_pairs}{'...' if len(loops) > 4 else ''}). Without them the twin is a "
+            f"DIFFERENT MACHINE — the loop members swing free and the linkage does not exist."
+            + (f" The source's own solver stiffness is carried with them (solref {', '.join(_stiff)})."
+               if _stiff else
+               " The source declares no solref, so MuJoCo's default stiffness applies — as it does for the"
+               " source itself."))
+    if couplings:
+        _pairs = ", ".join(sorted({f"{cj['a']}={cj['ratio']:g}x{cj['b']}" for cj in couplings})[:4])
+        warnings.append(
+            f"{len(couplings)} coupled (mimic/slaved) joint pair(s) were read from the source's "
+            f"<equality><joint> and are carried on the gene ({_pairs}"
+            f"{'...' if len(couplings) > 4 else ''}). These DOF move together, not independently — a gripper "
+            f"whose two fingers are one DOF opens as one jaw pair, not two.")
+    for msg in dict.fromkeys(skipped):
+        warnings.append(f"equality constraint not carried: {msg}.")
+    if unmodelled:
+        _kinds = ", ".join(f"{n}x <{k}>" for k, n in sorted(unmodelled.items()))
+        warnings.append(
+            f"the source declares {sum(unmodelled.values())} equality constraint(s) a RobotGene cannot model "
+            f"({_kinds}) and they were NOT carried. A <weld> pins two bodies rigidly and a <tendon> constrains "
+            f"a routed length; the twin's corresponding parts move independently.")
+    return loops, couplings
+
+
 def _joint_for_body(mj, body_id, jnts_of, jnt_force, bname, warnings):
-    """Return (joint_type, axis, lower, upper, torque) for the joint attaching this body to its parent."""
+    """Return (joint_type, axis, lower, upper, torque, joint_id) for the joint attaching this body to its
+    parent. ``joint_id`` is the SOURCE joint index (None for a weld) so the caller can carry the source's own
+    per-joint drivetrain record — armature/damping/frictionloss — off the same joint."""
     js = jnts_of.get(body_id, [])
     if not js:
-        return None, (0.0, 0.0, 1.0), None, None, None   # welded (fixed) link
+        return None, (0.0, 0.0, 1.0), None, None, None, None   # welded (fixed) link
     if len(js) > 1:
         warnings.append(f"body {bname!r} has {len(js)} joints; a gene segment models one. Using the first.")
     j = js[0]
@@ -295,56 +2127,207 @@ def _joint_for_body(mj, body_id, jnts_of, jnt_force, bname, warnings):
     if jt is None:
         warnings.append(f"body {bname!r} uses an unsupported joint type ({'free' if jt_int == 0 else 'ball'}); "
                         "modeled as a fixed weld. Free/ball joints aren't representable in a RobotGene chain.")
-        return None, (0.0, 0.0, 1.0), None, None, None
+        return None, (0.0, 0.0, 1.0), None, None, None, None
     axis = tuple(round(float(v), 4) for v in mj.jnt_axis[j])
     lo = hi = None
     if int(mj.jnt_limited[j]):
         lo, hi = float(mj.jnt_range[j][0]), float(mj.jnt_range[j][1])
     else:
         warnings.append(f"joint on {bname!r} has no limits (continuous); set joint_lower/upper for a bounded design.")
-    torque = round(jnt_force.get(j, 0.0), 3) or None
-    return jt, axis, lo, hi, torque
+    torque = float((jnt_force.get(j) or {}).get("nm") or 0.0) or None
+    return jt, axis, lo, hi, torque, j
 
 
-def _infer_class(segments, roots, mj) -> str:
-    """Species/class guess from the morphology. Counts LIMB-CHAINS hanging off the root (a child that begins a
-    chain of >=2 actuated segments = a leg/arm) so a symmetric multi-legged body is recognized as legged instead
-    of defaulting to 'manipulator' — which is what let an imported quadruped URDF read as an arm."""
-    from collections import defaultdict
+def _standing_limbs(mj, name_of) -> tuple[int, float]:
+    """``(how many limb-chains reach the ground, support-polygon area / height^2)`` in the source's rest stance.
 
+    Counting limb-chains alone cannot tell a leg from an arm or a finger, and that is the whole difficulty: a
+    humanoid has FOUR limbs (two legs + two arms) and a four-fingered hand has four too. What separates them is
+    that only legs carry the body -- so pose the model in the stance its designers shipped and ask which chains
+    touch down. Wheels are excluded for free by the >=2-actuated-joint test a limb already has to pass (a wheel is
+    one continuous hinge), which is also why a wheeled base with an arm counts ZERO standing limbs.
+
+    The second return value is the real physics of standing: the horizontal area spanned by the limb TIPS,
+    normalised by the body's height so it is scale-free. Measured across the corpus it separates cleanly --
+    quadrupeds 1.04-1.79, Tiago's four casters 0.078, and every hand, gripper and arm exactly 0.0 because
+    fingertips are collinear. That is what lets a FIXED-BASE body still be recognised as legged, which matters
+    because URDF has no floating-base concept: MuJoCo's URDF loader adds no freejoint, so an ordinary URDF
+    quadruped presents exactly like a hand does.
+    """
+    import mujoco
+    import numpy as np
+
+    kids = defaultdict(list)
+    for b in range(1, mj.nbody):
+        kids[int(mj.body_parentid[b])].append(b)
+    if not kids.get(0):
+        return 0, 0.0
+
+    d = mujoco.MjData(mj)
+    kid, _ = _preferred_rest_key(mj, name_of)
+    if kid is not None:
+        mujoco.mj_resetDataKeyframe(mj, d, kid)
+    mujoco.mj_forward(mj, d)
+
+    zlo, zhi, xy = {}, {}, {}
+    for g in range(mj.ngeom):
+        if int(mj.geom_type[g]) == int(mujoco.mjtGeom.mjGEOM_PLANE):
+            continue
+        R = d.geom_xmat[g].reshape(3, 3)
+        c, h = mj.geom_aabb[g][:3], mj.geom_aabb[g][3:]
+        p = d.geom_xpos[g] + R @ c
+        ctr, ext = float(p[2]), float((np.abs(R) @ h)[2])
+        b = int(mj.geom_bodyid[g])
+        if b not in zlo or ctr - ext < zlo[b]:
+            xy[b] = (float(p[0]), float(p[1]))                   # where this body's LOWEST point sits, in plan
+        zlo[b] = min(zlo.get(b, ctr - ext), ctr - ext)
+        zhi[b] = max(zhi.get(b, ctr + ext), ctr + ext)
+    if not zlo:
+        return 0, 0.0
+    lo, hi = min(zlo.values()), max(zhi.values())
+    height = max(hi - lo, 1e-6)
+    band = lo + 0.18 * height                                    # "touching down", tolerant of a bent-knee stance
+
+    def joints_deep(b: int, seen=None) -> int:                   # deepest run of actuated joints below b
+        seen = seen or set()
+        if b in seen:
+            return 0
+        seen.add(b)
+        n = sum(1 for j in range(mj.njnt) if int(mj.jnt_bodyid[j]) == b and int(mj.jnt_type[j]) in (2, 3))
+        return n + max((joints_deep(c, seen) for c in kids.get(b, [])), default=0)
+
+    def carries(b: int) -> bool:
+        """Does the subtree at ``b`` hold the robot up? Ground contact, articulation and SIZE together.
+
+        A LEG IS A SUBSTANTIAL FRACTION OF THE MACHINE'S HEIGHT; a caster is not, and that is what separates them
+        once ground contact and joint count both pass. Measured: Tiago's four casters are 2-joint chains that DO
+        touch the floor, spanning 0.08 of its height, against 0.54-0.68 for the legs of a G1, Go2 or OP3. Joint
+        LIMITS looked like the cleaner signal (a wheel turns without end) and separate Tiago perfectly -- but
+        ROBOTIS OP3 ships 20 actuated joints and zero ranges, so "limited" is a model-authoring choice, not a
+        physical property, and testing it dropped a real humanoid to mobile_base.
+        """
+        chain = _descendants(kids, b) | {b}
+        if joints_deep(b) < 2:                                   # a single-hinge wheel is not a limb
+            return False
+        if not any(zlo.get(x, hi) <= band for x in chain):
+            return False
+        solid = [x for x in chain if x in zhi]
+        return bool(solid) and (max(zhi[x] for x in solid) - min(zlo[x] for x in solid)) >= 0.25 * height
+
+    def tip_of(b: int) -> tuple[float, float]:
+        """Where this limb touches down, in plan view — its lowest ground-band body."""
+        chain = _descendants(kids, b) | {b}
+        low = [x for x in chain if x in zlo and zlo[x] <= band]
+        best = min(low or [x for x in chain if x in zlo] or [b], key=lambda x: zlo.get(x, hi))
+        return xy.get(best, (0.0, 0.0))
+
+    def walk(b: int, seen=None) -> list:
+        """Descend to where the load-bearing chains actually DIVERGE, then collect one tip per limb.
+
+        Counting the root's direct children is not enough: a humanoid's legs often hang off a pelvis or waist
+        rather than off the root, so the root sees ONE ground-reaching branch. Measured -- Booster T1's legs are
+        under `Waist` and both ToddlerBots' under `waist_gears`, and all three read as mobile_base until the walk
+        followed the single branch down to the hip split.
+        """
+        seen = seen or set()
+        if b in seen:
+            return []
+        seen.add(b)
+        limbs = [c for c in kids.get(b, []) if c not in seen and carries(c)]
+        if not limbs:
+            return []
+        if len(limbs) == 1:
+            return walk(limbs[0], seen) or [tip_of(limbs[0])]     # still one chain; keep descending
+        out = []
+        for c in limbs:                                           # the split: each side is its own limb
+            out += walk(c, seen) or [tip_of(c)]
+        return out
+
+    # Start at the WORLD, not at a chosen root body. For a normal model that descends through the single robot
+    # root and is identical to starting there; but MuJoCo FUSES a static root into the world, so a URDF whose
+    # torso has no joint to the world leaves four separate leg roots and no trunk at all. Picking the "biggest"
+    # root body then picked ONE LEG and counted one limb. Measured on the 4-leg fixture: 1 limb -> manipulator.
+    tips = walk(0)
+    if not tips:
+        return 0, 0.0
+    T = np.asarray(tips, dtype=float)
+    area = 0.0
+    if len(T) >= 3:                                               # shoelace over the angularly-sorted hull
+        ctr = T.mean(axis=0)
+        order = np.argsort(np.arctan2(T[:, 1] - ctr[1], T[:, 0] - ctr[0]))
+        P = T[order]
+        area = 0.5 * abs(float(np.sum(P[:, 0] * np.roll(P[:, 1], -1) - np.roll(P[:, 0], -1) * P[:, 1])))
+    return len(T), area / (height ** 2)
+
+
+def _descendants(kids: dict, b: int) -> set:
+    out, stack = set(), list(kids.get(b, []))
+    while stack:
+        x = stack.pop()
+        if x in out:
+            continue
+        out.add(x)
+        stack += kids.get(x, [])
+    return out
+
+
+def _preferred_rest_key(mj, name_of) -> tuple[int | None, str]:
+    """``(index, name)`` of the source's intended rest keyframe (`home`, `stand`, ...); ``(None, "")`` if none."""
+    import mujoco
+
+    if int(getattr(mj, "nkey", 0)) <= 0:
+        return None, ""
+    names = [(name_of(mujoco.mjtObj.mjOBJ_KEY, k) or "").lower() for k in range(mj.nkey)]
+    kid = next((i for pref in _REST_KEY_PREFERENCE for i, n in enumerate(names) if n == pref), None)
+    if kid is None:
+        kid = next((i for pref in _REST_KEY_PREFERENCE for i, n in enumerate(names) if pref in n), 0)
+    return kid, names[kid]
+
+
+def _infer_class(segments, roots, mj, name_of=None) -> str:
+    """Species/class guess from the morphology, decided by what CARRIES THE BODY rather than by branch count.
+
+    The previous rule counted limb-chains off the root and dispatched on the count, which made three whole
+    families unreachable (measured across 63 MuJoCo Menagerie models):
+
+      * ``limbs >= 4 -> quadruped`` caught every HUMANOID, because two legs plus two arms is four limbs, and
+        every four-fingered HAND (Allegro, LEAP) for the same reason;
+      * ``free_root -> mobile_base`` sat BEFORE the humanoid rule, and every legged robot has a free root, so
+        the ``limbs == 2`` humanoid branch could never fire for a floating-base biped.
+
+    Result: 12 of 12 bipeds misclassified (G1, H1, Cassie, Talos, Apollo, Fourier N1, Adam Lite, Berkeley ->
+    mobile_base; OP3, Booster T1, ToddlerBot x2 -> quadruped), while the four bodies labelled ``humanoid`` were a
+    bimanual station, a bimanual arm and two grippers -- precision 0/4 AND recall 0/12. Not cosmetic: the verify
+    rubric is chosen by kind, so an imported humanoid was judged by a wheeled-driving rubric.
+
+    Two corrections. ``free_root`` becomes a PRECONDITION for a locomotor instead of a disqualifier -- every
+    hand, gripper and arm in the corpus is fixed-base while every legged and wheeled robot is floating-base. And
+    among floating-base bodies the count that decides the class is ``_standing_limbs``: chains that actually
+    reach the ground in the source's own stance, so arms and fingers stop voting.
+    """
     n_rev = sum(1 for s in segments if s.joint_type == "revolute")
     has_grip = any("grip" in s.name.lower() or "finger" in s.name.lower() for s in segments)
     free_root = any(int(mj.jnt_type[j]) == 0 for j in range(mj.njnt))
 
-    by_name = {s.name: s for s in segments}
-    children = defaultdict(list)
-    for s in segments:
-        if s.parent:
-            children[s.parent].append(s.name)
-
-    def actuated_depth(name: str, seen=None) -> int:
-        seen = seen or set()
-        if name in seen or name not in by_name:
-            return 0
-        seen.add(name)
-        s = by_name[name]
-        deepest = max((actuated_depth(c, seen) for c in children.get(name, [])), default=0)
-        return (1 if s.joint_type in ("revolute", "prismatic") else 0) + deepest
-
-    root_names = [s.name for s in segments if not s.parent] or [segments[0].name] if segments else []
-    limbs = sum(1 for rn in root_names for c in children.get(rn, []) if actuated_depth(c) >= 2)
-
-    if limbs >= 6:
-        return "hexapod"
-    if limbs >= 4:
-        return "quadruped"
+    try:
+        legs, support = _standing_limbs(mj, name_of) if name_of is not None else (0, 0.0)
+    except Exception:  # noqa: BLE001 - a classification guess must never break the import
+        legs, support = 0, 0.0
     if free_root:
-        return "mobile_base"
-    if limbs == 2 and n_rev >= 6:
-        return "humanoid"                                       # a bipedal / two-limb body with many joints
+        # ONE ladder, shared with every other site that turns a leg count into a family (body_kind).
+        return family_from_legs(legs) or "mobile_base"          # nothing carries it: rolls, flies or is carried
+    # FIXED BASE, but that is weak evidence on its own: URDF has no floating-base concept, so MuJoCo's URDF
+    # loader adds no freejoint and an ordinary URDF quadruped -- or one whose static torso got fused into the
+    # world, leaving four separate leg roots -- looks exactly as "fixed" as a bench-mounted hand. Only a real
+    # SUPPORT POLYGON promotes it: >=3 limbs whose tips span meaningful ground area. Measured, that threshold has
+    # room on both sides (quadrupeds 1.04-1.79, casters 0.078, every hand and gripper exactly 0.0 because
+    # fingertips are collinear). Deliberately NOT extended to 2 limbs: a two-fingered gripper would become a
+    # biped, and a fixed-base URDF biped is far rarer than that mistake would be common.
+    if legs >= 3 and support >= 0.5:
+        return family_from_legs(legs)
     if n_rev <= 1 and not has_grip:
-        return "mobile_base"
-    return "manipulator"
+        return "mobile_base"                                    # a fixed sensor/prop, not an articulated machine
+    return "manipulator"                                        # fixed base + articulation = an arm or a hand
 
 
 def _backend_support(segments) -> dict:

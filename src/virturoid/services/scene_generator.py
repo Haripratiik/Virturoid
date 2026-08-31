@@ -132,7 +132,9 @@ def generate_regression_scene_set(task: TaskGraph, failures: list[FailureRecord]
         base_objects = source_scene.objects if (source_scene and source_scene.objects) else base.objects
         objects, applied = _condition_scene_on_failure(base_objects, failure.failure_type)
         base.objects = objects
-        base.id = failure.regression_scene_id or f"regression_{failure.id}"
+        # "regr_" (not "regression_"): this id is the scene's FILENAME under scenes/regression/, where the
+        # directory already says "regression" — see _task_token for why every character counts here.
+        base.id = failure.regression_scene_id or f"regr_{failure.id}"
         base.name = f"Regression for {failure.failure_type}: {failure.summary}"
         base.variation_parameters.update({
             "failure_type": failure.failure_type,
@@ -160,6 +162,25 @@ def generate_regression_scene_set(task: TaskGraph, failures: list[FailureRecord]
 def _scene_seed(task: TaskGraph, purpose: str, index: int) -> int:
     digest = sha256(f"{task.id}|{purpose}|{index}".encode("utf-8")).hexdigest()
     return int(digest[:8], 16) % (2**31)
+
+
+def _task_token(task: TaskGraph) -> str:
+    """A SHORT, stable stand-in for the task id inside scene ids.
+
+    A scene id becomes a FILENAME (``simulation/mujoco/scenes/<purpose>/<scene_id>.xml``) and the task id
+    carries a ~57-char slug of the user's prompt, so every scene file used to repeat the whole prompt six
+    directories deep — tracked paths reached 150 chars. Windows' default MAX_PATH is 260, so a clone root
+    deeper than ~110 chars could not check the repository out AT ALL (measured on a fresh-clone audit): a hard
+    shareability blocker, not a cosmetic one. An 8-hex-char digest of the full task id is deterministic and
+    collision-safe while cutting ~50 chars off every scene path. The readable identity is not lost — the
+    package directory names the build, and scene_set.json still carries the full task id and prompt.
+    """
+    return sha256(str(getattr(task, "id", "") or "").encode("utf-8")).hexdigest()[:8]
+
+
+def _scene_id(task: TaskGraph, purpose: str, index: int) -> str:
+    """The one place a scene id (== its on-disk filename) is composed. Keep it SHORT — see ``_task_token``."""
+    return f"scene_{_task_token(task)}_{purpose}_{index:03d}"
 
 
 def _generate_scene(task: TaskGraph, index: int, purpose: str, robot_radius: float | None = None) -> SceneGraph:
@@ -259,7 +280,7 @@ def _generate_sorting_scene(task: TaskGraph, index: int, purpose: str) -> SceneG
         ]
         vp = {"index": index, "purpose": purpose, "clutter": False, "seed": _scene_seed(task, purpose, index),
               "reach_frac": 0.80, "block_mass_kg": 0.35, **dr}
-        return SceneGraph(id=f"scene_{task.id}_{purpose}_{index:03d}", name=f"{task.name} stress scene {index + 1}",
+        return SceneGraph(id=_scene_id(task, purpose, index), name=f"{task.name} stress scene {index + 1}",
                           backend_targets=["mujoco"], robot_spawn_xyz_rpy=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
                           objects=objects, variation_parameters=vp,
                           requirement_trace=[task.task_type, purpose, "tabletop", "negative_hard_case"])
@@ -292,7 +313,7 @@ def _generate_sorting_scene(task: TaskGraph, index: int, purpose: str) -> SceneG
     variation_parameters = {"index": index, "purpose": purpose, "clutter": clutter, "seed": _scene_seed(task, purpose, index)}
     variation_parameters.update(dr)
     return SceneGraph(
-        id=f"scene_{task.id}_{purpose}_{index:03d}",
+        id=_scene_id(task, purpose, index),
         name=f"{task.name} {purpose} scene {index + 1}",
         backend_targets=["mujoco"],
         robot_spawn_xyz_rpy=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
@@ -340,7 +361,7 @@ def _generate_box_scene(task: TaskGraph, index: int, purpose: str) -> SceneGraph
     variation_parameters = {"index": index, "purpose": purpose, "clutter": clutter, "environment": "warehouse", "seed": _scene_seed(task, purpose, index)}
     variation_parameters.update(dr)
     return SceneGraph(
-        id=f"scene_{task.id}_{purpose}_{index:03d}",
+        id=_scene_id(task, purpose, index),
         name=f"{task.name} {purpose} scene {index + 1}",
         backend_targets=["mujoco"],
         robot_spawn_xyz_rpy=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
@@ -366,7 +387,7 @@ def _generate_stack_scene(task: TaskGraph, index: int, purpose: str) -> SceneGra
                                pose_xyz_rpy=(0.38, 0.0, 0.002, 0.0, 0.0, 0.0), material="matte_green", scale=0.6))
     vp = {"index": index, "purpose": purpose, "n_blocks": n, "seed": _scene_seed(task, purpose, index)}
     vp.update(dr)
-    return SceneGraph(id=f"scene_{task.id}_{purpose}_{index:03d}", name=f"{task.name} {purpose} scene {index + 1}",
+    return SceneGraph(id=_scene_id(task, purpose, index), name=f"{task.name} {purpose} scene {index + 1}",
                       backend_targets=["mujoco"], robot_spawn_xyz_rpy=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
                       objects=objects, variation_parameters=vp,
                       requirement_trace=[task.task_type, purpose, "tabletop", f"difficulty_{difficulty}"])
@@ -389,7 +410,7 @@ def _generate_push_scene(task: TaskGraph, index: int, purpose: str) -> SceneGrap
                                    pose_xyz_rpy=(0.38, 0.03, 0.04, 0.0, 0.0, 0.0), material="matte_gray", scale=0.7))
     vp = {"index": index, "purpose": purpose, "seed": _scene_seed(task, purpose, index)}
     vp.update(dr)
-    return SceneGraph(id=f"scene_{task.id}_{purpose}_{index:03d}", name=f"{task.name} {purpose} scene {index + 1}",
+    return SceneGraph(id=_scene_id(task, purpose, index), name=f"{task.name} {purpose} scene {index + 1}",
                       backend_targets=["mujoco"], robot_spawn_xyz_rpy=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
                       objects=objects, variation_parameters=vp,
                       requirement_trace=[task.task_type, purpose, "tabletop", f"difficulty_{difficulty}"])
@@ -449,7 +470,7 @@ def _generate_navigation_scene(task: TaskGraph, index: int, purpose: str, robot_
     }
     variation_parameters.update(dr)
     return SceneGraph(
-        id=f"scene_{task.id}_{purpose}_{index:03d}", name=f"{task.name} {purpose} scene {index + 1}",
+        id=_scene_id(task, purpose, index), name=f"{task.name} {purpose} scene {index + 1}",
         backend_targets=["mujoco"], robot_spawn_xyz_rpy=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
         objects=objects, variation_parameters=variation_parameters,
         requirement_trace=[task.task_type, purpose, "indoor_navigation", f"difficulty_{difficulty}"],
@@ -508,7 +529,7 @@ def _generate_maze_scene(task: TaskGraph, index: int, purpose: str, robot_radius
     vp = {"index": index, "purpose": purpose, "seed": _scene_seed(task, purpose, index),
           "n_rows": n_rows, "corridor_m": gap, "robot_radius_m": round(rs, 4), "clutter": n_rows > 3}
     vp.update(_domain_randomization(rng, difficulty))
-    return SceneGraph(id=f"scene_{task.id}_{purpose}_{index:03d}", name=f"{task.name} {purpose} maze {index + 1}",
+    return SceneGraph(id=_scene_id(task, purpose, index), name=f"{task.name} {purpose} maze {index + 1}",
                       backend_targets=["mujoco"], robot_spawn_xyz_rpy=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
                       objects=objects, variation_parameters=vp,
                       requirement_trace=[task.task_type, purpose, "maze_navigation", f"difficulty_{difficulty}"])
@@ -537,7 +558,7 @@ def _generate_lift_scene(task: TaskGraph, index: int, purpose: str) -> SceneGrap
     vp = {"index": index, "purpose": purpose, "seed": _scene_seed(task, purpose, index),
           "n_boxes": n, "environment": "warehouse"}
     vp.update(dr)
-    return SceneGraph(id=f"scene_{task.id}_{purpose}_{index:03d}", name=f"{task.name} {purpose} lift {index + 1}",
+    return SceneGraph(id=_scene_id(task, purpose, index), name=f"{task.name} {purpose} lift {index + 1}",
                       backend_targets=["mujoco"], robot_spawn_xyz_rpy=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
                       objects=objects, variation_parameters=vp,
                       requirement_trace=[task.task_type, purpose, "box_handling", f"difficulty_{difficulty}"])

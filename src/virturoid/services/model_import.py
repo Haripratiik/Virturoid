@@ -8,8 +8,11 @@ flows through ``robot_mjcf`` everywhere. Meshed URDFs need their mesh/asset file
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
+
+from virturoid.services import source_guard
 
 # ---------------------------------------------------------------------------------------------------------
 # URDF REPAIR PASS (P0, agentic-ingestion plan). Real customer URDFs — the AS-PUBLISHED Unitree Go2 among
@@ -20,6 +23,114 @@ _MATERIAL_FULL = re.compile(r"<material\s+name=\"(?P<name>[^\"]+)\"\s*>(?P<body>
 # any <material> — a full definition OR a name-only reference (self-closing / empty)
 _ANY_MATERIAL = re.compile(r"<material\b[^>]*?/>|<material\b[^>]*?>.*?</material\s*>", re.S)
 _VISUAL_BLOCK = re.compile(r"<visual\b[^>]*>.*?</visual\s*>", re.S)
+_MESH_REF = re.compile(r'<mesh\b[^>]*\bfilename="([^"]+)"[^>]*?(?:/>|>\s*</mesh\s*>)', re.S)
+_MESH_OK = (".stl", ".obj", ".msh")            # formats MuJoCo loads natively
+
+
+def _within(path: Path, root: Path | None) -> bool:
+    """True iff ``path`` canonicalizes INSIDE ``root``. The confinement that stops a HOSTILE URDF from resolving
+    a 'mesh' to an absolute path (``file:///etc/passwd``) or a ``../../..`` escape outside the imported project
+    -- which would let it use us as a host-filesystem read oracle, and (via _try_convert_dae) write the converted
+    .obj outside the project too. mesh_root is the URDF's own directory; a mesh that isn't under it is treated as
+    MISSING (the caller then boxes the link), never followed."""
+    if root is None:
+        return False
+    try:
+        rp = path.resolve(); rr = root.resolve()
+        return rp == rr or rr in rp.parents
+    except (OSError, RuntimeError):
+        return False
+
+
+def _resolve_mesh_path(fname: str, mesh_root: Path | None) -> Path | None:
+    """Resolve a URDF mesh filename (``package://``, ``file://``, absolute, or relative) to an EXISTING local
+    file CONFINED under ``mesh_root``, or None. Tries the ROS-package-relative path, the mesh_root join, and the
+    bare basename. A path that resolves OUTSIDE mesh_root (absolute or ``../`` escape) is rejected as missing."""
+    f = fname
+    if f.startswith("package://"):
+        f = f[len("package://"):].split("/", 1)[-1]     # drop the ROS package name, keep the path
+    elif f.startswith("file://"):
+        f = f[len("file://"):]
+    p = Path(f)
+    cands = ([p] if p.is_absolute() else []) + (
+        [mesh_root / f, mesh_root / p.name] if mesh_root is not None else []) + [p]
+    for c in cands:
+        try:
+            if c.exists() and _within(c, mesh_root):        # only follow meshes that stay inside the project
+                return c
+        except OSError:
+            pass
+    # last resort: the URDF's mesh subdir often differs from the on-disk layout (Franka references
+    # franka_description/meshes/visual/... but ships them elsewhere) -> find the basename anywhere under mesh_root.
+    if mesh_root is not None:
+        try:
+            hit = next(mesh_root.rglob(p.name), None)
+            return hit if (hit is not None and _within(hit, mesh_root)) else None  # a symlink under root may escape
+        except OSError:
+            pass
+    return None
+
+
+def _try_convert_dae(path: Path) -> Path | None:
+    """Convert a Collada ``.dae`` (Franka/KUKA visual meshes) to an ``.obj`` MuJoCo can load, best-effort via
+    trimesh. Returns the new path or None when trimesh is absent / the load fails (caller then boxes it)."""
+    try:
+        import trimesh
+        mesh = trimesh.load(str(path), force="mesh")
+        if mesh is None or not getattr(mesh, "vertices", None) is not None or len(mesh.vertices) == 0:
+            return None
+        out = path.with_suffix(".virturoid.obj")
+        mesh.export(str(out))
+        return out if out.exists() else None
+    except Exception:  # noqa: BLE001 - no trimesh / unreadable dae -> primitive fallback
+        return None
+
+
+def _mesh_elem_to_box(text: str, fname: str, size: str = "0.05 0.05 0.05") -> str:
+    """Replace every ``<mesh filename="fname" .../>`` with a placeholder ``<box>`` so a link whose mesh is
+    missing/unloadable still imports with its FRAME intact (the kinematics are what control iteration needs)."""
+    pat = re.compile(r'<mesh\b[^>]*\bfilename="' + re.escape(fname) + r'"[^>]*?(?:/>|>\s*</mesh\s*>)', re.S)
+    return pat.sub(f'<box size="{size}"/>', text)
+
+
+def _resolve_meshes(text: str, mesh_root: Path | None, repairs: list) -> str:
+    """Unified mesh pass (I1): resolve every mesh path, convert DAE→OBJ, and fall back a MISSING or unloadable
+    mesh to a placeholder box — so an as-published Franka/KUKA (relative + .dae + un-shipped meshes) INGESTS
+    instead of hard-failing on the first ``Error opening file``. Every outcome is reported, never silent."""
+    names = list(dict.fromkeys(_MESH_REF.findall(text)))
+    if not names:
+        return text
+    resolved = converted = 0
+    boxed: list[str] = []
+    for f in names:
+        real = _resolve_mesh_path(f, mesh_root)
+        suffix = real.suffix.lower() if real is not None else ""
+        if real is not None and suffix in _MESH_OK:
+            if real.as_posix() != f:
+                text = text.replace(f'filename="{f}"', f'filename="{real.as_posix()}"')
+            resolved += 1
+        elif real is not None and suffix == ".dae":
+            obj = _try_convert_dae(real)
+            if obj is not None:
+                text = text.replace(f'filename="{f}"', f'filename="{obj.as_posix()}"')
+                converted += 1
+            else:
+                text = _mesh_elem_to_box(text, f); boxed.append(Path(f).name)
+        else:
+            text = _mesh_elem_to_box(text, f); boxed.append(Path(f).name)
+    parts = []
+    if resolved:
+        parts.append(f"resolved {resolved} mesh path(s) locally")
+    if converted:
+        parts.append(f"converted {converted} Collada .dae mesh(es) to .obj")
+    if boxed:
+        shown = ", ".join(boxed[:4]) + ("..." if len(boxed) > 4 else "")
+        parts.append(f"replaced {len(boxed)} missing/unloadable mesh(es) with placeholder boxes ({shown}) — the "
+                     f"kinematic structure imports; supply the mesh files for full visual/collision fidelity")
+    if parts:
+        repairs.append({"kind": "mesh_resolve", "count": len(names), "detail": "; ".join(parts),
+                        "boxed": len(boxed)})
+    return text
 
 
 def repair_urdf_text(text: str, *, mesh_root: Path | None = None) -> tuple[str, list[dict]]:
@@ -77,25 +188,9 @@ def repair_urdf_text(text: str, *, mesh_root: Path | None = None) -> tuple[str, 
                                   f"stuffed into single <visual> elements (MuJoCo allows one per visual); "
                                   f"rendering unchanged"})
 
-    pkg = re.findall(r'filename="(package://[^"]+)"', text)
-    if pkg:
-        resolved = missing = 0
-        for uri in pkg:
-            rel = uri[len("package://"):].split("/", 1)[-1]      # drop the ROS package name, keep the path
-            hit = None
-            if mesh_root is not None:
-                cand = mesh_root / rel
-                if cand.exists():
-                    hit = cand
-                elif (mesh_root / Path(rel).name).exists():
-                    hit = mesh_root / Path(rel).name
-            if hit is not None:
-                text = text.replace(uri, hit.as_posix()); resolved += 1
-            else:
-                missing += 1
-        repairs.append({"kind": "package_uri", "count": len(pkg),
-                        "detail": f"resolved {resolved} package:// mesh path(s) locally; "
-                                  f"{missing} left to MuJoCo's missing-mesh tolerance"})
+    # MESHES (I1): resolve package://+relative paths, convert DAE→OBJ, and box a MISSING/unloadable mesh so an
+    # as-published Franka/KUKA/a1 ingests instead of hard-failing on the first "Error opening file".
+    text = _resolve_meshes(text, mesh_root, repairs)
 
     for tag in ("gazebo", "transmission"):
         stripped = re.subn(rf"<{tag}\b.*?</{tag}\s*>", "", text, flags=re.S)
@@ -105,6 +200,36 @@ def repair_urdf_text(text: str, *, mesh_root: Path | None = None) -> tuple[str, 
                             "detail": f"removed {stripped[1]} <{tag}> block(s) (simulator-plugin metadata "
                                       f"MuJoCo does not model)"})
     return text, repairs
+
+
+#: `filename="..."` on a <mesh> element, the one URDF reference that is resolved relative to the URDF's
+#: own directory (and therefore the one thing that used to pin our prep copy inside the customer's folder).
+_MESH_FILENAME = re.compile(r'(<mesh\b[^>]*?\bfilename=")([^"]+)(")')
+
+
+def _absolutise_mesh_paths(urdf_text: str, root: Path) -> str:
+    """Rewrite RELATIVE mesh filenames to absolute ones so the prepped copy can live anywhere.
+
+    Only touches a reference that (a) is relative, (b) is not a ``package://`` URI, and (c) resolves to a
+    file that actually exists under ``root``. Anything else is returned untouched, so the missing-mesh and
+    ``package://`` cases still reach ``repair_urdf_text`` and are still reported as repairs rather than
+    being quietly papered over here.
+    """
+    def _rewrite(m: re.Match) -> str:
+        ref = m.group(2)
+        if ref.startswith(("package://", "model://", "file://")) or os.path.isabs(ref):
+            return m.group(0)
+        try:
+            real = (root / ref).resolve()
+        except OSError:
+            return m.group(0)
+        # `_within` for the same reason `_resolve_mesh_path` uses it: a hostile `../../..` reference must not
+        # be turned into a working absolute path by us. Left alone, it stays subject to the existing pass.
+        if not real.is_file() or not _within(real, root):
+            return m.group(0)
+        return m.group(1) + real.as_posix() + m.group(3)
+
+    return _MESH_FILENAME.sub(_rewrite, urdf_text)
 
 
 def _ensure_floor(xml: str) -> str:
@@ -133,6 +258,26 @@ def _add_actuators(mjcf: str, model) -> tuple:
     return mjcf2, mujoco.MjModel.from_xml_string(mjcf2)
 
 
+def _inject_mujoco_compiler(urdf_text: str) -> str:
+    """M3 (2026-07-24 audit): keep a URDF's BASE-LINK inertial alive through MuJoCo's compile.
+
+    MuJoCo's URDF loader defaults to ``fusestatic="true"``, which welds the root link into the world and
+    DISCARDS its ``<inertial>`` -- so a customer's ``mass=2 kg`` base silently vanishes, and after we bolt on a
+    free joint (``reroot_free_base``) the robot weighs less than the URDF declared. MuJoCo reads compiler
+    options from a ``<mujoco>`` extension element inside ``<robot>`` (XMLreference/URDF-extension); adding
+    ``<compiler fusestatic="false" inertiafromgeom="auto"/>`` preserves the real base inertial (and lets links
+    that genuinely ship no ``<inertial>`` derive one from geometry, rather than defaulting to ~1 kg). Idempotent:
+    a URDF that already carries a ``<mujoco>`` block is returned untouched, so we never override a customer's
+    explicit MuJoCo directives (maintainer yuvaltassa, mujoco#1176)."""
+    if re.search(r"<mujoco\b", urdf_text):
+        return urdf_text                                   # respect a customer-provided <mujoco> block
+    m = re.search(r"<robot\b[^>]*>", urdf_text)
+    if not m:
+        return urdf_text
+    block = '\n  <mujoco>\n    <compiler fusestatic="false" inertiafromgeom="auto" balanceinertia="true"/>\n  </mujoco>'
+    return urdf_text[:m.end()] + block + urdf_text[m.end():]
+
+
 def import_model(path: str) -> dict:
     """Load an MJCF/URDF robot file. Returns ``{mjcf, name, parts, actuated, free_base, ok, note}`` —
     ``mjcf`` is a normalized MJCF string (ground ensured) usable everywhere a composed gene is."""
@@ -148,31 +293,97 @@ def import_model(path: str) -> dict:
     repairs: list[dict] = []
     try:
         if sfx in (".xml", ".mjcf"):
-            mjcf = _ensure_floor(p.read_text(encoding="utf-8"))
-            model = mujoco.MjModel.from_xml_string(mjcf)            # validate it loads
+            # COMPILE FROM A PATH IN THE MODEL'S OWN DIRECTORY, never from a bare string. MuJoCo resolves
+            # <include file=...>, meshdir and every asset RELATIVE TO THE XML'S LOCATION, so from_xml_string has
+            # no directory context and any real-world model that ships its meshes beside it fails to load.
+            # Measured: all three canonical MuJoCo Menagerie robots failed this way --
+            #   unitree_go2/go2.xml   -> "Error opening file 'assets/base_0.obj'"
+            #   unitree_go2/scene.xml -> "Error opening file 'go2.xml'"   (the <include> itself)
+            #   unitree_h1/h1.xml     -> "Error opening file 'assets/pelvis.stl'"
+            # and each still returned a 0-body import. Menagerie is the most common source a customer brings, so
+            # "bring your own robot" was broken for the format it is most often brought in. The URDF branch had
+            # the directory context right first (it wrote a SIBLING temp file "so relative meshes still
+            # resolve"); the MJCF branch never got the same treatment.
+            #
+            # ...AND THE SIBLING FILE WAS A WRITE INTO THE CUSTOMER'S OWN FOLDER. Measured through
+            # `call_tool` on a real Menagerie Go2, an ingest created and then deleted
+            # `unitree_go2/go2.__mjcfprep__.xml` in the directory the customer pointed us at. The unlink is
+            # why a before/after mtime diff never showed it, and it is also why the write survived this long.
+            # A folder a customer hands us is theirs; see `source_guard`.
+            #
+            # The prep write turns out to be UNNECESSARY here, which is the whole fix: `_ensure_floor` is
+            # applied AGAIN to the round-tripped XML three lines below, and that second application is the
+            # one that lands in the MJCF we hand downstream. So compile the customer's file exactly as it
+            # sits -- no copy, no floor -- and let the existing post-round-trip `_ensure_floor` add the plane.
+            # Verified identical (nbody / njnt / nu) on 7 real packages spanning both a bare model and an
+            # `<include>`-bearing scene: unitree_go2 go2.xml + scene.xml, unitree_h1, franka_emika_panda,
+            # boston_dynamics_spot, agility_cassie, robotiq_2f85.
+            model = mujoco.MjModel.from_xml_path(str(p))
+            # Round-trip through the compiled model so the MJCF we hand downstream is self-contained (includes
+            # expanded, asset paths absolute) rather than only loadable from the source directory.
+            tmp = tempfile.NamedTemporaryFile(suffix=".xml", delete=False); tmp.close()
+            mujoco.mj_saveLastXML(tmp.name, model)
+            mjcf = _ensure_floor(Path(tmp.name).read_text(encoding="utf-8"))
+            os.unlink(tmp.name)
         elif sfx == ".urdf":
             # REPAIR FIRST (P0): a raw customer URDF (Go2!) may not compile. Try as-is, and on failure run the
             # deterministic repair pass and retry — so a clean file is untouched but a real one still loads.
             raw = p.read_text(encoding="utf-8")
+            if "<xacro:" in raw or "${" in raw:                    # a xacro TEMPLATE, not a URDF — can't repair it
+                return {"ok": False, "repairs": [],
+                        "note": "this is a xacro template with unexpanded macros (${...} / <xacro:...>), not a "
+                                "loadable URDF. Expand it first: `ros2 run xacro xacro robot.urdf.xacro "
+                                "> robot.urdf` (or `rosrun xacro xacro`), then import the generated .urdf."}
+            # M3: compile a copy carrying <compiler fusestatic="false"> so the base-link inertial survives --
+            # from_xml_path on the original would fuse it away. The copy CANNOT go beside the original: that
+            # directory belongs to the customer (see `source_guard`). It goes to a staging dir under build/,
+            # and `_absolutise_mesh_paths` is what buys the move -- a URDF's mesh filenames are relative to
+            # the URDF's own location, which is the reason the copy sat there in the first place.
+            #
+            # The rewrite is deliberately the WEAKEST one that works: relative -> absolute, and only when the
+            # file is really there. `package://` URIs and genuinely missing meshes are left exactly as written
+            # so they still fall through to `repair_urdf_text` and are still REPORTED as repairs -- a clean
+            # URDF must keep loading on the first attempt with an empty repair list, and a broken one must
+            # keep producing the same repair ledger. Verified identical (nbody/njnt/nu/nmesh) against the
+            # in-source copy on unitree a1 + go1, ability_hand, and google_barkour_v0 (whose missing
+            # `meshes/powercable.stl` fails the first attempt both ways and is boxed by the repair pass).
+            staging = source_guard.staging_dir(p.parent, kind="import") / f"{p.stem}.prep.urdf"
+            prepped = _absolutise_mesh_paths(_inject_mujoco_compiler(raw), p.parent)
+            staging.write_text(prepped, encoding="utf-8")
             try:
-                model = mujoco.MjModel.from_xml_path(str(p))
-            except Exception:  # noqa: BLE001 - the as-published file did not compile; repair + retry
-                fixed, repairs = repair_urdf_text(raw, mesh_root=p.parent)
-                tmp_urdf = p.with_name(p.stem + ".__repaired__.urdf")
-                tmp_urdf.write_text(fixed, encoding="utf-8")       # sibling so relative mesh paths still resolve
                 try:
-                    model = mujoco.MjModel.from_xml_path(str(tmp_urdf))
-                finally:
-                    try:
-                        tmp_urdf.unlink()
-                    except OSError:
-                        pass
+                    model = mujoco.MjModel.from_xml_path(str(staging))
+                except Exception:  # noqa: BLE001 - the as-published file did not compile; repair + retry
+                    # `repair_urdf_text` already rewrites every mesh it can resolve to an ABSOLUTE path, so
+                    # the repaired text needs no help from its location.
+                    fixed, repairs = repair_urdf_text(raw, mesh_root=p.parent)
+                    staging.write_text(_inject_mujoco_compiler(fixed), encoding="utf-8")
+                    model = mujoco.MjModel.from_xml_path(str(staging))
+            finally:
+                try:
+                    staging.unlink()
+                    # ...and take the directory with it when nothing else is using it. One empty dir per
+                    # distinct source path ever imported is slow-growing litter in a long-lived install.
+                    # `rmdir` refusing on a non-empty dir is exactly the right behaviour if a concurrent
+                    # import of a sibling file is still holding its own prep file there.
+                    staging.parent.rmdir()
+                except OSError:
+                    pass
             tmp = tempfile.NamedTemporaryFile(suffix=".xml", delete=False); tmp.close()
             mujoco.mj_saveLastXML(tmp.name, model)
             mjcf = _ensure_floor(Path(tmp.name).read_text(encoding="utf-8"))
             os.unlink(tmp.name)
             model = mujoco.MjModel.from_xml_string(mjcf)            # re-validate the normalized MJCF
         else:
+            # A bare "unsupported" costs the customer an afternoon. Name the format and the step that works —
+            # USD in particular is the format an Isaac engineer will arrive with, and we have no reader for it
+            # (the only Usd.Stage.Open in this repo is usd_exporter re-reading what it just wrote).
+            from virturoid.services.input_classifier import (UNSUPPORTED_MODEL_ADVICE,
+                                                             UNSUPPORTED_MODEL_FORMATS)
+            fam = UNSUPPORTED_MODEL_FORMATS.get(sfx)
+            if fam:
+                return {"ok": False, "format": fam,
+                        "note": f"{sfx} is {fam}. {UNSUPPORTED_MODEL_ADVICE[fam]}"}
             return {"ok": False, "note": f"unsupported format {sfx!r} — use .xml/.mjcf or .urdf"}
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "note": f"could not load model: {exc}",

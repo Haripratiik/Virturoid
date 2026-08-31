@@ -1,5 +1,5 @@
 {
-  "scene_id": "pick_place_sort_built_manipulator_7seg_1",
+  "scene_id": "pick_place_sort_1",
   "grasp_model": "contact",
   "geoms": [
     {

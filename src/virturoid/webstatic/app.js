@@ -395,6 +395,11 @@ function initThree() {
   const canvas = $("viewer-canvas");
   renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.outputColorSpace = THREE.SRGBColorSpace;
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 1.05;
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
   scene = new THREE.Scene();
   scene.background = new THREE.Color(0x090b0a);
   camera = new THREE.PerspectiveCamera(45, 1, 0.01, 50);
@@ -406,7 +411,11 @@ function initThree() {
   scene.add(new THREE.AmbientLight(0xffffff, 0.62));
   const key = new THREE.DirectionalLight(0xffffff, 1.1);
   key.position.set(1.5, -1, 2.5);
+  key.castShadow = true;
   scene.add(key);
+  const rim = new THREE.DirectionalLight(0x91b8ff, 0.42);
+  rim.position.set(-1.2, 1.5, 1.2);
+  scene.add(rim);
   const grid = new THREE.GridHelper(4, 32, 0x38423b, 0x1a201c);
   grid.rotation.x = Math.PI / 2;
   scene.add(grid);
@@ -428,7 +437,12 @@ function resize() {
 }
 
 function buildMeshes(geoms) {
-  while (meshGroup.children.length) meshGroup.remove(meshGroup.children[0]);
+  while (meshGroup.children.length) {
+    const old = meshGroup.children[0];
+    meshGroup.remove(old);
+    old.geometry?.dispose();
+    old.material?.dispose();
+  }
   meshGroup.userData.meshes = geoms.map((geom) => {
     let shape;
     const size = geom.size || [0.05, 0.05, 0.05];
@@ -441,7 +455,10 @@ function buildMeshes(geoms) {
       shape = new THREE.CapsuleGeometry(size[0], 2 * size[1], 6, 16);
       shape.rotateX(Math.PI / 2);
     } else if (geom.type === "plane") {
-      shape = new THREE.PlaneGeometry(2.2, 1.6);
+      shape = new THREE.PlaneGeometry(2 * (size[0] || 1.1), 2 * (size[1] || 0.8));
+    } else if (geom.type === "ellipsoid") {
+      shape = new THREE.SphereGeometry(1, 28, 20);
+      shape.scale(size[0], size[1], size[2]);
     } else {
       shape = new THREE.BoxGeometry(2 * size[0], 2 * size[1], 2 * (size[2] || size[0]));
     }
@@ -450,13 +467,69 @@ function buildMeshes(geoms) {
       color: new THREE.Color(color[0], color[1], color[2]),
       transparent: color[3] < 1,
       opacity: color[3],
-      metalness: 0.16,
-      roughness: 0.58,
+      metalness: Number(geom.metalness ?? 0.08),
+      roughness: Number(geom.roughness ?? 0.68),
     });
     const mesh = new THREE.Mesh(shape, material);
+    mesh.castShadow = geom.type !== "plane";
+    mesh.receiveShadow = true;
     meshGroup.add(mesh);
+    if (geom.type === "mesh" && geom.mesh_uri) hydrateStlMesh(mesh, geom);
     return mesh;
   });
+}
+
+async function hydrateStlMesh(mesh, geom) {
+  try {
+    const params = new URLSearchParams({ path: geom.mesh_uri });
+    const response = await fetch(`/api/artifact-binary?${params}`);
+    if (!response.ok) throw new Error(`asset ${response.status}`);
+    const exactGeometry = parseStl(await response.arrayBuffer());
+    const scale = Number(geom.mesh_scale ?? 0.001);
+    exactGeometry.scale(scale, scale, scale);
+    exactGeometry.computeBoundingSphere();
+    const placeholder = mesh.geometry;
+    mesh.geometry = exactGeometry;
+    placeholder.dispose();
+  } catch (error) {
+    // A portable package can be copied without its optional viewer assets.  Keep the
+    // physics-derived primitive instead of blanking the robot when that happens.
+    console.warn(`Studio kept the collider fallback for ${geom.name}:`, error);
+  }
+}
+
+function parseStl(buffer) {
+  const view = new DataView(buffer);
+  const binaryTriangles = buffer.byteLength >= 84 ? view.getUint32(80, true) : 0;
+  const isBinary = binaryTriangles > 0 && 84 + binaryTriangles * 50 === buffer.byteLength;
+  const positions = [];
+  const normals = [];
+  if (isBinary) {
+    let offset = 84;
+    for (let tri = 0; tri < binaryTriangles; tri++, offset += 50) {
+      const nx = view.getFloat32(offset, true);
+      const ny = view.getFloat32(offset + 4, true);
+      const nz = view.getFloat32(offset + 8, true);
+      for (let vertex = 0; vertex < 3; vertex++) {
+        const at = offset + 12 + vertex * 12;
+        positions.push(view.getFloat32(at, true), view.getFloat32(at + 4, true), view.getFloat32(at + 8, true));
+        normals.push(nx, ny, nz);
+      }
+    }
+  } else {
+    const text = new TextDecoder().decode(buffer);
+    const vertexPattern = /vertex\s+([-+\d.eE]+)\s+([-+\d.eE]+)\s+([-+\d.eE]+)/g;
+    let match;
+    while ((match = vertexPattern.exec(text)) !== null) {
+      positions.push(Number(match[1]), Number(match[2]), Number(match[3]));
+    }
+  }
+  if (positions.length < 9 || positions.length % 9 !== 0) throw new Error("invalid STL triangle data");
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  if (normals.length === positions.length) geometry.setAttribute("normal", new THREE.Float32BufferAttribute(normals, 3));
+  else geometry.computeVertexNormals();
+  return geometry;
 }
 
 function applyFrame(index) {

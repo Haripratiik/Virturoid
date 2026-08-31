@@ -11,7 +11,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
-
+from virturoid.services.install_paths import anchored
+from virturoid.services.install_paths import checkout_root as _install_checkout_root
+from virturoid.services.package_status import has_robot_package, package_status
 
 DEFAULT_PROMPT = "Build a tabletop robot arm that sorts red and blue blocks."
 
@@ -44,22 +46,92 @@ _ASSISTANT_SYSTEM_PROMPT = (
 )
 
 
+def checkout_root() -> Path | None:
+    """The source checkout this module was imported from, or None when it is an installed wheel.
+
+    Everything about the build root used to be resolved against the PROCESS's working directory, which is only
+    the checkout when you happen to launch from the checkout. Measured: launching the same command one directory
+    up gave a build root of ``<that dir>/build/ui_workbench``, no demo-set fallback (``build/ui_verify`` is also
+    CWD-relative), and a Robot Library that renders EMPTY on a machine whose clone contains four tracked demo
+    packages. Anchoring to the checkout makes 'which robots do I see' a property of the install, not of the
+    shell's pwd.
+
+    The rule itself now lives in ``services.install_paths`` -- it is needed by the sessions store, the render
+    directory and the policy bank too, and a second copy of "find the checkout" is the very drift this whole
+    class of bug is made of. Kept as a name here because callers and tests import it from this module."""
+    return _install_checkout_root()
+
+
+def default_build_root() -> Path:
+    """Where console-triggered builds are written when ``--build-root`` is not given."""
+    return anchored("build/ui_workbench")
+
+
+def _memory_dir_candidates(build_root: Path) -> tuple[Path, ...]:
+    """Where the Memory/Moat panels look for a bank: BUILD-ROOT-RELATIVE, and deliberately so.
+
+    The 2026-08-08 CWD-relative sweep flagged these three guesses as "a status surface re-deriving a
+    destination ``memory_db`` owns" and tried to consult ``default_memory_dir()`` first. That was WRONG, and
+    the suite said so -- ``test_moat_panel`` pins two contracts that the change broke:
+    ``test_the_route_reads_the_build_roots_own_memory_directory`` (a demo build set and a customer workspace
+    each report THEIR OWN bank, not the developer's) and
+    ``test_a_build_root_with_no_bank_answers_honestly_instead_of_erroring`` (an empty root must report
+    ``db_present: false``, not silently borrow some other bank's numbers and present them as this build's).
+
+    The distinction the sweep missed, and the one that matters: ``build_root`` is an EXPLICIT, absolute,
+    caller-supplied path -- ``create_server(host, port, build_root)``, already anchored by
+    ``_resolve_build_root``. Nothing here resolves against the process CWD, so this is not the bug shape at
+    all. A destination scoped to a caller's argument is not the same thing as a destination scoped to the
+    install; see docs/where_things_live.md.
+    """
+    return (Path(build_root) / "memory", Path(build_root), Path(build_root).parent / "memory")
+
+
+def _has_packages(d: Path) -> bool:
+    """Does this directory hold anything the library would LIST?
+
+    Deliberately ``has_robot_package`` -- the same predicate ``_list_packages`` uses -- and not the looser
+    "has a robot/ or simulation/ subdirectory" rule this used to carry. With two different rules, a root
+    holding a half-written package satisfied the resolver, suppressed the demo-set fallback, and then listed
+    zero robots: an empty library served from a root the server had just declared non-empty."""
+    from virturoid.services.package_status import has_robot_package
+    try:
+        return d.exists() and any(has_robot_package(c) for c in d.iterdir() if c.is_dir())
+    except OSError:
+        return False
+
+
 def _resolve_build_root(build_root: Path) -> Path:
     """If the chosen build root has no built packages but the curated demo set (build/ui_verify) does, use the
     demo set -- so `python -m virturoid.ui_server` shows the demo instead of an empty studio (the demo foot-gun:
     the auto-demo references package IDs that only exist under build/ui_verify). Once the user builds into their
-    own root, that root has packages and is used as-is."""
-    def _has_packages(d: Path) -> bool:
-        return d.exists() and any((c / "robot").exists() or (c / "simulation").exists()
-                                  for c in d.iterdir() if c.is_dir())
-    if not _has_packages(build_root):
-        demo = Path("build") / "ui_verify"
+    own root, that root has packages and is used as-is.
+
+    The demo set is looked for in the CHECKOUT, and ONLY there. Those four packages are tracked in git, so a
+    fresh clone has them and an installed wheel does not -- which means "no checkout" and "no demo set" are the
+    same fact, and there is nothing to fall back to.
+
+    It used to also try a bare relative ``build/ui_verify``, which resolves against the PROCESS'S CWD. That is
+    the same defect as the memory bank's second default rule: a path that looks like a constant and is actually
+    a function of where you happened to be standing. It added nothing when a checkout existed (the anchored
+    candidate already covers it) and, with no checkout, silently retargeted the library at whatever
+    ``./build/ui_verify`` happened to be -- so the same install showed different robots from different
+    directories. Anchored or absent; not "wherever I am"."""
+    if _has_packages(build_root):
+        return build_root
+    root = checkout_root()
+    candidates = [root / "build" / "ui_verify"] if root else []
+    for demo in candidates:
         try:
             if demo.resolve() != build_root.resolve() and _has_packages(demo):
                 print(f"[ui] build root {build_root} has no packages; serving the demo set at {demo}")
                 return demo
         except OSError:
-            pass
+            continue
+    # Nothing anywhere -- say so HERE rather than let the user read an empty grid as a broken app.
+    print(f"[ui] no robot packages under {build_root} (and no demo set found). The Robot Library will be empty "
+          f"until you build one: describe a robot in the Agent rail, or run "
+          f"`python scripts/run_mvp_demo.py --mini`.")
     return build_root
 
 
@@ -90,8 +162,9 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8765, help="Port for the local server.")
     parser.add_argument(
         "--build-root",
-        default=str(Path("build") / "ui_workbench"),
-        help="Directory where builds triggered from the console are written.",
+        default=str(default_build_root()),
+        help="Directory where builds triggered from the console are written "
+             "(default: <checkout>/build/ui_workbench, so it does not move with your shell's pwd).",
     )
     parser.add_argument(
         "--web",
@@ -102,8 +175,9 @@ def main() -> None:
         "--ui",
         choices=("legacy", "studio"),
         default=os.environ.get("VIRTUROID_UI", "legacy"),
-        help="Which frontend the native desktop window opens: the legacy console (/) "
-             "or Virturoid Studio (/studio). Default legacy until Studio reaches parity.",
+        help="Which frontend to open: the legacy console (/) or Virturoid Studio (/studio/). "
+             "Applies to BOTH the native desktop window and --web (which prints the matching URL). "
+             "Default legacy until Studio reaches parity.",
     )
     args = parser.parse_args()
     build_root = _resolve_build_root(Path(args.build_root))
@@ -115,20 +189,32 @@ def main() -> None:
         args.ui = "legacy"
 
     if args.web:
-        _run_web(args.host, args.port, build_root)
+        _run_web(args.host, args.port, build_root, ui=args.ui)
         return
 
     try:
         run_desktop(args.host, args.port, build_root, ui=args.ui)
-    except ImportError:
-        print("pywebview is not installed; falling back to browser mode.")
-        print("Install the desktop runtime with:  pip install pywebview")
-        _run_web(args.host, args.port, build_root)
+    except ImportError as exc:
+        # pywebview is an OPTIONAL extra (pyproject `[desktop]`); it is imported lazily so the web
+        # path never needs it. Name the extra, not a bare `pip install pywebview`, so the fix
+        # matches how the rest of the project is installed.
+        print(f"The native desktop window needs pywebview, which is not installed ({exc}).")
+        print('Install it with:  pip install -e ".[desktop]"     (or: pip install pywebview)')
+        print("Falling back to browser mode.")
+        _run_web(args.host, args.port, build_root, ui=args.ui)
 
 
-def _run_web(host: str, port: int, build_root: Path) -> None:
-    server = create_server(host, port, build_root)
-    print(f"Virturoid console running at http://{host}:{port}")
+def _run_web(host: str, port: int, build_root: Path, ui: str = "legacy") -> None:
+    """Serve in the browser. ``ui`` selects which URL is printed -- Studio lives at /studio/, and
+    printing only the root sent every reader of the README's headline command to the LEGACY console
+    (which also brands itself 'Virturoid Studio', so the mistake was invisible)."""
+    server = create_server(host, port, build_root, ui=ui)
+    if ui == "studio":
+        print(f"Virturoid Studio running at http://{host}:{port}/studio/")
+        print(f"  (http://{host}:{port}/ redirects here; the legacy build console is at /legacy)")
+    else:
+        print(f"Virturoid build console running at http://{host}:{port}/")
+        print(f"Virturoid Studio (React app) at    http://{host}:{port}/studio/")
     print(f"Build output root: {build_root.resolve()}")
     server.serve_forever()
 
@@ -145,7 +231,7 @@ def run_desktop(host: str, port: int, build_root: Path, ui: str = "legacy") -> N
 
     import webview  # noqa: PLC0415  (optional desktop dependency)
 
-    server = create_server(host, port, build_root)
+    server = create_server(host, port, build_root, ui=ui)
     threading.Thread(target=server.serve_forever, daemon=True).start()
 
     studio = ui == "studio"
@@ -206,11 +292,14 @@ class _DesktopApi:
             self._window.destroy()
 
 
-def create_server(host: str, port: int, build_root: Path) -> ThreadingHTTPServer:
+def create_server(host: str, port: int, build_root: Path, ui: str = "legacy") -> ThreadingHTTPServer:
+    """``ui`` decides what ``/`` is. Default "legacy" keeps the historical behaviour byte-for-byte."""
     build_root = Path(build_root)
+    home_ui = ui
 
     class VirturoidRequestHandler(_Handler):
         root = build_root
+        home = home_ui
 
     return ThreadingHTTPServer((host, port), VirturoidRequestHandler)
 
@@ -300,9 +389,9 @@ def build_ui_html() -> str:
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Virturoid Local Build Workbench</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" />
+  <!-- No external font CDN: this is a LOCAL-FIRST offline console (2026-07-24 audit). Loading Google Fonts
+       hung/flashed with no network and leaked a request off-box; styles.css already declares system fallbacks
+       ("Segoe UI"/system-ui/Consolas) so the console renders cleanly with zero external dependencies. -->
   <link rel="stylesheet" href="/app/styles.css" />
   <script type="importmap">
     {
@@ -570,17 +659,56 @@ def _extract_build_action(text: str) -> dict | None:
     return None
 
 
-_BUILD_INTENT = re.compile(
-    r"\b(build|create|make|design|generate|assemble|spawn)\b.*\b(robot|arm|manipulator|gripper|"
-    r"mobile|base|rover|drone|bot|machine)\b",
+# --- Build-intent detection (no local model) ---------------------------------
+# THE MATCHING RULE, in three layers. The old rule required an IMPERATIVE VERB BEFORE THE NOUN
+# ("build a quadruped robot"), so the phrasing the input placeholder itself invites — a bare NOUN
+# PHRASE, "a quadruped robot that walks" — fell through to the offline hint and the primary
+# interaction dead-ended. A robot is a THING, so naming the thing is a legitimate request for it.
+#
+#   1. ASKING (wins over everything): the message opens with an interrogative or a meta verb
+#      ("what is a quadruped?", "explain the gripper", "is this arm valid?"). Never a build --
+#      these ask ABOUT robots rather than FOR one.
+#   2. IMPERATIVE: a build verb anywhere before a robot noun ("build a quadruped robot",
+#      "can you make me an arm?"). A build even when phrased as a polite question, because the
+#      verb states the intent.
+#   3. NOUN PHRASE: no verb needed -- the message NAMES a robot or a robot morphology
+#      ("a quadruped robot that walks", "six-legged walker, 3 kg") and is not itself a question.
+#      A trailing "?" disqualifies this layer, which is what keeps "a quadruped?" out.
+_ROBOT_NOUN = (
+    r"robots?|arms?|manipulators?|grippers?|end[ -]effectors?|mobile bases?|rovers?|drones?|"
+    r"quadcopters?|bots?|machines?|quadrupeds?|bipeds?|hexapods?|octopods?|humanoids?|"
+    r"walkers?|crawlers?|cobots?|exoskeletons?|gantr(?:y|ies)"
+)
+_BUILD_VERB = r"build|create|make|design|generate|assemble|spawn|construct|prototype"
+
+# Layer 1 -- opens by ASKING. Interrogatives + meta verbs + greetings, never a dispatchable build.
+_ASKING = re.compile(
+    r"^\W*(?:what|why|how|when|where|which|who|whose|is|are|was|were|do|does|did|am|has|have|had|"
+    r"explain|tell|show|list|compare|describe|define|summari[sz]e|help|hi|hello|hey|thanks|thank)\b",
     re.IGNORECASE,
 )
+# Layer 2 -- an imperative build verb standing before a robot noun.
+_BUILD_IMPERATIVE = re.compile(rf"\b(?:{_BUILD_VERB})\b.*?\b(?:{_ROBOT_NOUN})\b", re.IGNORECASE | re.DOTALL)
+# Layer 3 -- the message names a robot at all.
+_ROBOT_MENTION = re.compile(rf"\b(?:{_ROBOT_NOUN})\b", re.IGNORECASE)
+
+# Kept as the documented name for the imperative form (external callers/tests import it).
+_BUILD_INTENT = _BUILD_IMPERATIVE
 
 
 def _fallback_build_action(text: str) -> dict | None:
-    """Heuristic build detection used when no local model is available."""
-    if text and _BUILD_INTENT.search(text):
-        return {"action": "build", "prompt": text.strip(), "train": False}
+    """Heuristic build detection used when no local model is available. See the rule above."""
+    body = (text or "").strip()
+    if not body:
+        return None
+    if _ASKING.match(body):                                  # 1. asking ABOUT robots -> chat
+        return None
+    if _BUILD_IMPERATIVE.search(body):                       # 2. "build/make/design ... a robot"
+        return {"action": "build", "prompt": body, "train": False}
+    if body.endswith("?"):                                   # a question with no build verb -> chat
+        return None
+    if _ROBOT_MENTION.search(body):                          # 3. a bare noun phrase naming a robot
+        return {"action": "build", "prompt": body, "train": False}
     return None
 
 
@@ -666,10 +794,19 @@ def run_assistant_turn(payload: dict, build_root: Path) -> dict:
         return {"role": "assistant", "content": raw_reply.strip(), "action": "chat", "model_used": True}
 
     # No model and no build intent: a helpful, honest local reply.
+    # Name the variables that ACTUALLY control this chat assistant. VIRTUROID_LLM_BACKEND /
+    # OPENAI_API_KEY (the README's Configuration table) drive the DESIGN pipeline, not this layer --
+    # a user who set those exactly as documented was still told to install Ollama, with no way to
+    # discover why. Say which knob is which, and say that builds work without any of them.
     hint = (
-        "A local model isn't running. AI-first robot design is paused rather than substituting a template body. "
-        "To enable planning and build generation, start Ollama and pull a model "
-        f"(current target: {selected_model})."
+        f"No chat model is reachable, so I can only answer with the build pipeline itself "
+        f"(describe a robot and I will build it -- that path needs no model at all).\n\n"
+        f"This chat assistant is configured by VIRTUROID_ASSISTANT_PROVIDER "
+        f"(currently {ASSISTANT_PROVIDER!r}), VIRTUROID_ASSISTANT_MODEL (currently {selected_model!r}) "
+        f"and, for the ollama provider, OLLAMA_HOST (currently {OLLAMA_HOST}). Start that runtime and "
+        f"pull the model to enable free-form chat.\n\n"
+        f"Note these are SEPARATE from VIRTUROID_LLM_BACKEND / OPENAI_API_KEY, which choose the "
+        f"language model that authors robot anatomy in the build pipeline."
     )
     return {"role": "assistant", "content": hint, "action": "chat", "model_used": False}
 
@@ -696,11 +833,31 @@ def _summarize_build(build: dict, used_model: bool) -> str:
 
 
 class _Handler(BaseHTTPRequestHandler):
-    root: Path = Path("build") / "ui_workbench"
+    #: ANCHORED, not ``Path("build") / "ui_workbench"``. ``create_server`` always overrides this on the
+    #: subclass it builds, so the class default is only ever a fallback -- but it is a fallback that
+    #: ``_serve_package_file``/``_send_package`` use as the CONFINEMENT root (``self.root.resolve() not in
+    #: [pkg, *pkg.parents]``), and a confinement root that moves with the shell's pwd is not a boundary.
+    #: Same defect as ``_resolve_build_root``'s old bare ``build/ui_verify``; see ``services.install_paths``.
+    root: Path = default_build_root()
+    #: Which frontend ``/`` belongs to. "legacy" (default) keeps the original console at the root;
+    #: "studio" redirects the root to /studio/ and leaves the console at /legacy.
+    home: str = "legacy"
 
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         if parsed.path == "/":
+            # WHOEVER STARTED THE SERVER ASKED FOR A FRONTEND; the root should be that frontend. Launching with
+            # --ui studio and then serving the LEGACY console at / is how a first-run evaluator ends up looking
+            # at a Build Workbench viewport that reads "Unknown package." and concludes the product is broken --
+            # Studio was running the whole time, one path segment away, with no sign anywhere that said so.
+            if self.home == "studio" and (FRONTEND_DIST / "index.html").exists():
+                self.send_response(HTTPStatus.FOUND)
+                self.send_header("Location", "/studio/")
+                self.end_headers()
+                return
+            self._send_text(build_ui_html(), "text/html; charset=utf-8")
+            return
+        if parsed.path in ("/legacy", "/legacy/"):     # the console keeps an address of its own under --ui studio
             self._send_text(build_ui_html(), "text/html; charset=utf-8")
             return
         if parsed.path == "/app" or parsed.path.startswith("/app/"):
@@ -727,6 +884,9 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/design_brain":
             self._send_json(self._design_brain())
+            return
+        if parsed.path == "/api/moat":                         # the verified-morphology memory, gates and all
+            self._send_json(self._moat(parsed))
             return
         if parsed.path == "/api/tools":                        # agentic tool surface: DISCOVER the tools
             from virturoid.services.agent_tools import tool_specs
@@ -837,6 +997,34 @@ class _Handler(BaseHTTPRequestHandler):
         except (OSError, json.JSONDecodeError) as exc:
             return {"series": [], "n_cycles": 0, "compounding": False, "headline": f"unreadable: {exc}"}
 
+    def _moat(self, parsed) -> dict:
+        """GET /api/moat[?package=<id>] -> what the verified-morphology memory holds and what recall did.
+
+        The moat was the one part of the product with no surface: `/api/flywheel` reads a JSON file a demo
+        script writes, and `/api/design_brain` reports coverage and edge COUNTS. Neither could answer "how many
+        banked rows carry a measured error bar" (1 of 101) or "did recalling memory make the robot walk further"
+        (on the dominant kind: no -- -0.0336 m over 2163 deploys). Both are read straight from the bank here.
+
+        Memory-dir resolution matches `_design_brain`: the build root's own `memory/` first, then the root, then
+        its sibling -- so a demo build set and the developer's workspace each report their own bank.
+        """
+        from urllib.parse import parse_qs
+
+        from virturoid.services.moat_panel import moat_panel
+        name = (parse_qs(parsed.query).get("package") or [""])[0]
+        pkg = None
+        if name:
+            candidate = self.root / _safe_output_name(name)
+            pkg = candidate if candidate.exists() else None
+        for cand in _memory_dir_candidates(self.root):
+            try:
+                out = moat_panel(cand, package_dir=pkg)
+            except Exception as exc:  # noqa: BLE001 - a status panel must never take the server down
+                return {"error": str(exc), "db_present": False}
+            if out.get("db_present"):
+                return out
+        return moat_panel(self.root / "memory", package_dir=pkg)   # honest empty + the path it looked in
+
     def _design_brain(self) -> dict:
         """The Design Brain panel (the moat MEASURED): MAP-Elites coverage/QD-score + provenance compounding
         from the build set's shared memory. Best-effort over candidate memory dirs; zeros + a hint until real
@@ -855,7 +1043,7 @@ class _Handler(BaseHTTPRequestHandler):
                 s["brain"] = None
             return s
 
-        for cand in (self.root / "memory", self.root, self.root.parent / "memory"):
+        for cand in _memory_dir_candidates(self.root):
             s = _with_brain(cand)
             if s.get("archive_coverage") or s.get("provenance_edges") or (s.get("brain") or {}).get("episodes"):
                 return s
@@ -987,9 +1175,7 @@ class _Handler(BaseHTTPRequestHandler):
             for child in sorted(root.iterdir(), key=lambda item: item.name.lower()):
                 if not child.is_dir():
                     continue
-                has_urdf = (child / "robot" / "robot.urdf").exists()
-                has_scenes = (child / "simulation" / "mujoco" / "compiled_scene_index.json").exists()
-                if not (has_urdf or has_scenes):  # list packages that can render (URDF) OR replay (scenes)
+                if not has_robot_package(child):  # list packages that can render (URDF) OR replay (scenes)
                     continue
                 scene_count = 0
                 index_path = child / "simulation" / "mujoco" / "compiled_scene_index.json"
@@ -998,18 +1184,22 @@ class _Handler(BaseHTTPRequestHandler):
                         scene_count = len(json.loads(index_path.read_text(encoding="utf-8")).get("scenes", []))
                     except (json.JSONDecodeError, OSError):
                         scene_count = 0
-                valid: bool | None = None
+                # ONE status derivation for every surface (header chip, library card, inspector,
+                # status bar, Verify tab). `valid` stays on the wire as the raw contract fact for
+                # older clients, but no surface renders it as a generic verdict any more --
+                # see services/package_status.py for why they used to contradict each other.
+                status = package_status(child)
+                valid: bool | None = status["contract_ok"]
                 robot_class: str | None = None
                 species: str | None = None
                 contract_path = child / "reports" / "robot_package_contract.json"
                 if contract_path.exists():
                     try:
                         contract = json.loads(contract_path.read_text(encoding="utf-8"))
-                        valid = bool(contract.get("ok"))
                         robot_class = contract.get("robot_class")
                         species = contract.get("species")
                     except (json.JSONDecodeError, OSError):
-                        valid = None
+                        pass
                 # Real morphology facts from the actual model -- the accurate species + actuated DOF, so the
                 # memory shows what was really built (not a hardcoded placeholder species/DOF).
                 dof: int | None = None
@@ -1044,6 +1234,7 @@ class _Handler(BaseHTTPRequestHandler):
                         "id": child.name,
                         "scene_count": scene_count,
                         "has_meshes": (child / "cad" / "mesh" / "visual").exists(),
+                        "status": status,
                         "valid": valid,
                         "robot_class": robot_class,
                         "species": species,
@@ -1052,7 +1243,26 @@ class _Handler(BaseHTTPRequestHandler):
                         "honesty": honesty,
                     }
                 )
-        return {"build_root": str(root), "packages": packages}
+        out: dict = {"build_root": str(root), "packages": packages}
+        if not packages:
+            # AN EMPTY LIBRARY IS A STATE, NOT A BUG -- but only if the app says which of the two it is. A
+            # first-run evaluator who sees an empty grid cannot tell "you have not built anything yet" from
+            # "this is pointed at the wrong folder", so hand the panel both facts: the directory that was
+            # actually scanned, and the two commands that fill it.
+            out["empty"] = {
+                "scanned": str(root),
+                "exists": root.exists(),
+                "reason": ("nothing in this directory looks like a robot package"
+                           if root.exists() else "this directory does not exist yet"),
+                "next_steps": [
+                    "Describe a robot in the Agent rail — the build lands here and appears in this list.",
+                    "Or run `python scripts/run_mvp_demo.py --mini` for a self-contained gallery "
+                    "(a few minutes on CPU).",
+                    "Or point the server at an existing build root: "
+                    "`python scripts/run_ui.py --ui studio --web --build-root <dir>`",
+                ],
+            }
+        return out
 
     def _send_json(self, payload: dict, status: HTTPStatus = HTTPStatus.OK) -> None:
         self._send_text(json.dumps(payload, indent=2), "application/json; charset=utf-8", status=status)
