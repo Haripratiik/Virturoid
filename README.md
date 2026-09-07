@@ -42,7 +42,6 @@ Every body below was generated from a one-line prompt by the same pipeline — n
 - [Configuration](#configuration)
 - [Recent improvements](#recent-improvements)
 - [Roadmap](#roadmap)
-- [License](#license)
 
 ## What makes it different
 
@@ -471,7 +470,3 @@ the tests that certified the old behaviour rewritten to fail on it.
 - **Faster, command-conditioned gaits.** Steer a trained policy by target speed and direction.
 - **Onboard perception.** Range sensing and vision so robots can act in unknown environments.
 - **A hardware log.** Measuring the sim-to-real gap ships today (see *Close the sim-to-real gap on a robot you own*), but every number it has produced so far came from a simulated stand-in. Running the bench experiment on a physical robot, and carrying a trained controller onto it, needs a design partner.
-
-## License
-
-Released under the MIT License. See [LICENSE](LICENSE).
