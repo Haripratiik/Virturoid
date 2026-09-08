@@ -737,3 +737,45 @@ def test_a_same_robot_rebuild_does_not_adopt_the_customers_edit(tmp_path):
     assert victim.name in (set(out.get("left_modified") or []) | set(out.get("left_not_ours") or [])), (
         "a file we declined to remove must be reported, or the customer cannot tell it was left behind")
     assert out.get("removed_stale"), "the prune must still clear the genuinely stale meshes of the old body"
+
+
+# ------------------------------------------------- 11. the ledger's leading dot is what keeps it off the robot
+
+def test_the_staging_ledger_never_ships_inside_the_ros2_package():
+    """A REVIEW FLAGGED THIS AS A DEFECT AND IT IS NOT ONE -- but only because of a single character.
+
+    The generated ROS 2 package installs its geometry with ``glob("meshes/*")`` (the setup.py template in
+    ``ros2_exporter``), which is deliberately wholesale: an orphaned mesh left in that directory really would be
+    installed, which is why the prune exists. Our own bookkeeping lives in that same directory, so the obvious
+    reading is that it ships too.
+
+    It does not, because ``glob`` does not match a leading dot. That makes the dot in
+    ``.virturoid_staged.json`` load-bearing rather than cosmetic, and nothing said so -- a rename to
+    ``virturoid_staged.json``, which reads like tidying, would start installing our ledger onto a robot beside
+    its meshes. This asserts the mechanism (glob's behaviour, on a real directory) rather than just the string,
+    so it fails whichever way the property is broken: renaming the ledger, or changing the install glob to
+    something that does match dotfiles.
+    """
+    import glob as globmod
+    import os
+    import tempfile
+
+    from virturoid.services.gene_compiler import STAGE_LEDGER_NAME
+
+    assert STAGE_LEDGER_NAME.startswith("."), (
+        f"{STAGE_LEDGER_NAME!r} must begin with a dot or the ROS 2 package installs it with the meshes")
+
+    d = Path(tempfile.mkdtemp(prefix="ledger_glob_"))
+    (d / "meshes").mkdir()
+    (d / "meshes" / "base.stl").write_text("solid\n", encoding="utf-8")
+    (d / "meshes" / STAGE_LEDGER_NAME).write_text("{}", encoding="utf-8")
+    cwd = os.getcwd()
+    try:
+        os.chdir(d)
+        installed = sorted(globmod.glob("meshes/*"))     # verbatim the pattern setup.py ships
+    finally:
+        os.chdir(cwd)
+
+    assert any(x.endswith("base.stl") for x in installed), "precondition: the glob does install real meshes"
+    assert not any(STAGE_LEDGER_NAME in x for x in installed), (
+        f"the staging ledger would be installed onto the robot: {installed}")

@@ -535,6 +535,13 @@ def stage_mesh(src, dst_dir, owner: str, claimed: dict) -> "Path":
 
 #: Where a staged directory records WHAT WE PUT THERE, so a later export can tell its own leftovers from the
 #: customer's files. It sits beside the files it describes, so it travels with a copied package.
+#:
+#: THE LEADING DOT IS LOAD BEARING -- do not rename this to ``virturoid_staged.json``. The generated ROS 2
+#: package installs its meshes with ``glob("meshes/*")`` (see ``ros2_exporter``'s setup.py template), and
+#: Python's ``glob`` does not match names beginning with a dot. MEASURED: a directory holding ``base.stl``
+#: and ``.virturoid_staged.json`` globs to ``['meshes/base.stl']`` only. That is the whole reason our
+#: bookkeeping does not end up installed on a robot alongside the geometry -- a review flagged it as
+#: shipping and it does not, but only because of the dot. Drop the dot and it ships.
 STAGE_LEDGER_NAME = ".virturoid_staged.json"
 
 
