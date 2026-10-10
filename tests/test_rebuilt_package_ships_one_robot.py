@@ -779,3 +779,49 @@ def test_the_staging_ledger_never_ships_inside_the_ros2_package():
     assert any(x.endswith("base.stl") for x in installed), "precondition: the glob does install real meshes"
     assert not any(STAGE_LEDGER_NAME in x for x in installed), (
         f"the staging ledger would be installed onto the robot: {installed}")
+
+
+# ------------------------------------------- 12. the guard could not see a package that writes no contract
+
+@pytest.mark.skipif(not _MUJOCO, reason="a real package build needs MuJoCo")
+def test_a_legacy_package_that_writes_no_contract_is_still_a_package(tmp_path):
+    """THE GUARD READ A CONTRACT, AND ONE OF OUR OWN WRITERS DOES NOT WRITE ONE.
+
+    ``mvp.write_mvp_robot_arm_project`` produces 140 files and no
+    ``reports/robot_package_contract.json``, so ``_existing_package_path`` returned "no package of ours" and a
+    legged build was let straight in. MEASURED: 98 of those files are manipulator-specific and NOT ONE is in
+    ``_BRAIN_ARTIFACTS``, so the legged build kept all of them -- including
+    ``datasets/synthetic_observations/.../wrist_rgbd_camera/`` on a robot with no wrist.
+
+    The evidence list had to be chosen against the false-refusal direction, which is the expensive mistake here:
+    ``reports/mvp_summary.md`` looks like a marker and is written by GENE packages too, so using it would have
+    refused every ordinary rebuild. Hence the two negative cases below -- they are the half of this that can
+    actually break someone's workflow.
+    """
+    from virturoid.mvp import write_mvp_robot_arm_project
+    from virturoid.services.gene_build import (MixedRobotPackageError, _existing_package_path,
+                                               build_gene_package, ground_and_repair)
+    from virturoid.services.morphology_composer import _compose_robot_impl
+
+    legacy = tmp_path / "legacy"
+    write_mvp_robot_arm_project(legacy)
+    assert not (legacy / "reports" / "robot_package_contract.json").exists(), (
+        "precondition: this writer ships no contract, which is why evidence is needed at all")
+    assert _existing_package_path(legacy)[0] == "manipulation"
+
+    quad = _compose_robot_impl("a quadruped walking robot", llm=None)
+    ground_and_repair(quad)
+    with pytest.raises(MixedRobotPackageError):
+        build_gene_package(quad, "a quadruped walking robot", legacy)
+
+    # NEGATIVE 1: the same build path is not a conflict -- a gene arm belongs in a manipulator directory.
+    legacy2 = tmp_path / "legacy2"
+    write_mvp_robot_arm_project(legacy2)
+    arm = _compose_robot_impl("a 6-dof robotic arm", llm=None)
+    ground_and_repair(arm)
+    build_gene_package(arm, "a 6-dof robotic arm", legacy2)      # must not raise
+
+    # NEGATIVE 2: an ordinary same-class rebuild, which is what autonomous_build does after a redesign.
+    fresh = tmp_path / "fresh"
+    build_gene_package(quad, "a quadruped walking robot", fresh)
+    build_gene_package(quad, "a quadruped walking robot", fresh)  # must not raise

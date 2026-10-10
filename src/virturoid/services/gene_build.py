@@ -435,6 +435,18 @@ _LOCOMOTION_ONLY_ARTIFACTS = ("simulation/locomotion_qpos.json", "software/gait_
                               "software/control_program.json", "simulation/robot_visual.xml",
                               "simulation/viewer_mesh_index.json")
 
+#: Evidence for the OTHER contract-less package this repo can produce: ``mvp.write_mvp_robot_arm_project``
+#: writes 140 files and NO ``robot_package_contract.json`` at all, so the contract branch above sees
+#: nothing and every build was let through. MEASURED: 98 of those files are manipulator-specific and not
+#: one is in ``_BRAIN_ARTIFACTS``, so a legged build into that directory keeps the lot -- including a
+#: synthetic training dataset for a WRIST RGBD CAMERA, on a robot that has no wrist.
+#:
+#: ``reports/mvp_summary.md`` is NOT in this list and must not be added: a gene package writes it too, so
+#: using it as evidence would refuse every ordinary rebuild. Each entry below was checked against a freshly
+#: built gene locomotion AND gene manipulation package and appears in neither.
+_MANIPULATOR_TRAINING_ARTIFACTS = ("reports/mvp_evaluation_report.json", "training/training_run_config.json",
+                                   "training/training_manifest.json", "datasets/synthetic_observations")
+
 #: What a rebuild on a different path leaves behind pointing at the WRONG robot. Listed in the refusal so the
 #: message is actionable rather than an abstract objection.
 _BRAIN_ARTIFACTS = _LOCOMOTION_ONLY_ARTIFACTS + (
@@ -475,6 +487,10 @@ def _existing_package_path(output_dir: Path) -> tuple:
     if present:
         return "locomotion", ("this directory carries " + ", ".join(present)
                               + ", which only a locomotion build writes")
+    present = [rel for rel in _MANIPULATOR_TRAINING_ARTIFACTS if (Path(output_dir) / rel).exists()]
+    if present:
+        return "manipulation", ("this directory carries " + ", ".join(present)
+                                + ", which only the MVP manipulator training build writes")
     return None, "this directory carries no package of ours"
 
 
