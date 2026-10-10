@@ -284,32 +284,37 @@ def _root_own_span(mj, body_id: int):
     return span if span >= 0.02 else None
 
 
-def _import_mesh_key(source: str, robot_id: str | None) -> str:
-    """Directory name under ``build/_importmesh`` for THIS import's baked link meshes.
+def _import_mesh_key(source: str) -> str:
+    """Directory name under ``build/_importmesh`` for this model's baked link meshes.
 
-    The key used to be the caller's ``robot_id`` or, when that was absent, the model's BASENAME — and the
-    product's own ingest path passes no robot_id, so every customer who ever drops a ``go2.xml``, a
-    ``robot.urdf`` or a ``scene.xml`` wrote into one shared directory. Two imports of different robots then
-    overwrite each other's STLs link by link, and an import running while another reads produces a
-    partially-written file: measured, that surfaced as ``decoder failed for mesh file ... has wrong size;
-    perhaps this is an ASCII file?`` and MuJoCo refuses to compile the model AT ALL, so a name collision does
-    not degrade one link's appearance, it takes the whole robot down.
+    KEYED BY THE MODEL, NEVER BY THE CALLER. Until 2026-10-10 a caller's ``robot_id`` took precedence, so every
+    import that named its robot got a directory of its own, even when it imported the same file as the last one.
+    MEASURED on this checkout: 1,892 directories holding 81 distinct robots, 16.85 GB of which 13.47 GB was
+    duplicates. The Menagerie Go2 alone had been baked into 73 directories (``abl_unitree_go2``,
+    ``advfinA_unitree_go2``, ...), one per probe or test that happened to pick a fresh id. Nothing the bake
+    produces depends on that id: the meshes are a function of the model, and ``import_robot``'s only other
+    input is a species label.
 
-    The basename is kept as a readable prefix (these directories get inspected by hand) and disambiguated with a
-    digest of the model's ABSOLUTE path, so the same file re-imported reuses its own directory — the cache still
-    works — while two different files never share one.
+    So the key is ``_source_identity``, the same definition of "the same model" the import cache uses. Two
+    different models never share a directory, so the collision an earlier key was written against cannot come
+    back: two ``go2.xml`` files overwriting each other's links, where one half-written STL made MuJoCo refuse
+    the whole robot. Two imports of the SAME model now share one, which is safe for reasons checked rather than
+    assumed: ``_bake_source_mesh`` writes a per-process ``.part`` file and ``os.replace``s it, so a reader never
+    sees a partial mesh, and every import re-bakes every link, so a shared directory never serves a stale one.
+    An edited model gets a new digest and so a new directory, which keeps a saved robot's meshes the ones it was
+    imported with.
+
+    The basename stays as a readable prefix because these directories get inspected by hand. Inline XML has no
+    basename worth keeping, so it is labelled ``inline`` rather than whatever text follows its last slash.
     """
     import hashlib
 
-    if robot_id:
-        return _slug_name(robot_id)
     src = str(source or "")
-    stem = os.path.basename(src) or "import"
-    try:
-        ident = str(Path(src).resolve()) if (len(src) < 512 and Path(src).exists()) else src[:4096]
-    except OSError:
-        ident = src[:4096]
-    return f"{_slug_name(stem)}_{hashlib.md5(ident.encode('utf-8', 'replace')).hexdigest()[:10]}"
+    is_path = len(src) < 512 and "<" not in src
+    stem = (os.path.basename(src) if is_path else "") or "inline"
+    ident = _source_identity(src) or ("unreadable", src[:4096])
+    digest = hashlib.sha256(repr(ident).encode("utf-8", "replace")).hexdigest()[:10]
+    return f"{_slug_name(stem)[:48]}_{digest}"
 
 
 def _link_mesh_stem(body_name: str, claimed: dict[str, str]) -> str:
@@ -510,20 +515,24 @@ def _dir_fingerprint(root: Path) -> tuple:
 _HASH_MODEL_MAX_BYTES = 4 * 1024 * 1024
 
 
-def _import_cache_key(source: str, robot_id: str | None, species: str | None):
-    """The identity of THIS import, or ``None`` when it must not be cached.
+def _source_identity(source: str) -> tuple | None:
+    """What makes two imports THE SAME MODEL, independent of who asked or what they named the robot.
 
-    The MODEL FILE ITSELF is keyed by CONTENT DIGEST, not by mtime. Mtime alone is not safe here: a test that
-    writes a fixture URDF, imports it, rewrites it and imports again is an ordinary thing to do, and Windows
-    file timestamps are not guaranteed to resolve two writes milliseconds apart -- so an mtime key can hand back
-    the previous robot for the new file. A digest cannot. It costs microseconds on the tens-of-KB XML a robot
-    description actually is, and files past ``_HASH_MODEL_MAX_BYTES`` fall back to size+mtime.
+    A file is its content digest plus a fingerprint of the directory its meshes and ``<include>``s live in, so a
+    mesh edited beside an unchanged XML still counts as a different model. Inline XML is the digest of its text.
+    ``None`` when the file cannot be read.
+
+    The model file is keyed by CONTENT, not mtime. Mtime alone is not safe: a test that writes a fixture URDF,
+    imports it, rewrites it and imports again is an ordinary thing to do, and Windows timestamps are not
+    guaranteed to resolve two writes milliseconds apart, so an mtime key can hand back the previous robot for the
+    new file. A digest cannot. It costs microseconds on the tens-of-KB XML a robot description actually is, and
+    files past ``_HASH_MODEL_MAX_BYTES`` fall back to size and mtime.
+
+    Shared by the import cache and the baked-mesh directory, so the two cannot disagree about what "the same
+    model" means. They used to: the cache keyed on content while the mesh directory keyed on the caller's id.
     """
     import hashlib
 
-    if os.environ.get("VIRTUROID_IMPORT_CACHE") != "1":
-        return None
-    opts = (robot_id, species)
     try:
         p = Path(source)
         if len(source) < 512 and p.is_file():
@@ -533,10 +542,23 @@ def _import_cache_key(source: str, robot_id: str | None, species: str | None):
                     body = ("sha256", hashlib.sha256(fh.read()).hexdigest())
             else:
                 body = ("stat", int(st.st_size), int(st.st_mtime_ns))
-            return ("file", str(p.resolve()), body, _dir_fingerprint(p.parent), opts)
+            return ("file", str(p.resolve()), body, _dir_fingerprint(p.parent))
     except OSError:
         return None
-    return ("text", hashlib.sha256(source.encode("utf-8", "replace")).hexdigest(), opts)
+    return ("text", hashlib.sha256(source.encode("utf-8", "replace")).hexdigest())
+
+
+def _import_cache_key(source: str, robot_id: str | None, species: str | None):
+    """The identity of THIS import, or ``None`` when it must not be cached.
+
+    The model's identity is ``_source_identity``. The caller's ``robot_id`` and ``species`` are added here and
+    only here, because they change what the import RETURNS (the gene carries both) even though they change
+    nothing about the geometry, which is why the baked-mesh directory leaves them out.
+    """
+    if os.environ.get("VIRTUROID_IMPORT_CACHE") != "1":
+        return None
+    ident = _source_identity(source)
+    return None if ident is None else (*ident, (robot_id, species))
 
 
 def clear_import_cache() -> None:
@@ -744,8 +766,12 @@ def _import_robot_uncached(source: str, *, robot_id: str | None = None, species:
     seg_len_by_name: dict[str, float] = {}      # a child's mount z is measured from its parent's TIP
     _rot_by_id: dict[int, object] = {}          # body id -> S_i, the body-frame -> LINK-frame rotation
     try:                                        # per-link STLs of the customer's own meshes (visual only)
-        from pathlib import Path as _P
-        _mesh_dir = _P("build/_importmesh") / _import_mesh_key(source, robot_id)
+        from virturoid.services.install_paths import anchored
+        # ANCHORED, not ``Path("build/_importmesh")``. A relative path resolves against whatever directory the
+        # process happened to start in, so launching from anywhere else baked a second, parallel mesh tree
+        # there: the same duplication the content key above removes, reintroduced by location instead of by id.
+        # ``build/_viewmesh`` next door was already anchored this way.
+        _mesh_dir = anchored("build/_importmesh") / _import_mesh_key(source)
         _mesh_dir.mkdir(parents=True, exist_ok=True)
     except Exception:  # noqa: BLE001 - baking source meshes is a fidelity aid, never an import blocker
         _mesh_dir = None
