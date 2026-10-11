@@ -345,6 +345,9 @@ def _equality_xml(gene: RobotGene) -> str:
         if not (isinstance(anchor, (list, tuple)) and len(anchor) == 3):
             anchor = (0.0, 0.0, float(getattr(seg, "length_m", 0.0) or 0.0))   # a's tip, in a's own frame
         ax, ay, az = (float(v) for v in anchor)
+        framed = _framed_root(gene, seg) if seg is not None else None
+        if framed is not None:                        # MuJoCo reads the anchor in a's BODY frame, which a framed
+            ax, ay, az = _quat_rotate(_euler_xyz_to_quat(*framed), (ax, ay, az))   # root keeps unrotated
         lines.append(f'    <connect body1="{escape(a)}" body2="{escape(b)}" '
                      f'anchor="{ax:.5f} {ay:.5f} {az:.5f}"{_solver_ref_attrs(lc)}/>')
     for cj in (getattr(gene, "coupled_joints", None) or []):
@@ -425,6 +428,39 @@ def _euler_xyz_to_quat(a: float, b: float, c: float) -> tuple[float, float, floa
     return mul(mul(qx, qy), qz)
 
 
+def _quat_mul(p, q) -> tuple[float, float, float, float]:
+    w1, x1, y1, z1 = p
+    w2, x2, y2, z2 = q
+    return (w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
+            w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+            w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
+            w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2)
+
+
+def _quat_rotate(q, v) -> tuple[float, float, float]:
+    _, x, y, z = _quat_mul(_quat_mul(q, (0.0, *v)), (q[0], -q[1], -q[2], -q[3]))
+    return (x, y, z)
+
+
+def _framed_root(gene: RobotGene, seg) -> tuple[float, float, float] | None:
+    """The rounded ``mount_euler`` of a FREE root that carries one, or ``None``.
+
+    Such a root is emitted as an unrotated body whose contents sit inside ``<frame euler=...>``. Every link lands
+    exactly where it did, but the floating base's own frame (what ``qpos[3:7]``, ``xmat`` and anything mounted on
+    the base read) is the robot's: z up, x forward. ``robot_import`` rotates a root to draw the trunk along the
+    gene's local +z, and left on the body that rotation made an imported Go2 read as lying on its side. Standing
+    level at a height ratio of 0.99, its crawl uprightness term averaged -0.085 against the native model's
+    +0.986, so every gait the search found for it was judged CROUCH. Sixty-four places read the base orientation
+    that way, so it is fixed where the frame is made rather than in each of them. The composer rotates one root
+    of its own, a snake's head laid along +x, whose base read pitched 90 degrees: the gimbal-lock point, where a
+    heading taken from the quaternion is undefined.
+    """
+    me = getattr(seg, "mount_euler", None) or (0.0, 0.0, 0.0)
+    if seg.parent is not None or gene.base_mount != "free" or not any(abs(float(v)) > 1e-9 for v in me):
+        return None
+    return tuple(round(float(v), 5) for v in me)
+
+
 def _pose_keyframe(gene: RobotGene, base_z: float) -> str:
     """Emit a MuJoCo ``<keyframe>`` from ``gene.metadata['rest_pose']`` (joint_name -> angle) so the body
     renders/spawns in a recognizable baked stance instead of a default straight-out star. The qpos vector
@@ -432,15 +468,17 @@ def _pose_keyframe(gene: RobotGene, base_z: float) -> str:
     actuated joint contributes 1, in the same pre-order DFS as ``_body_xml``. Every actuated/free body gets a
     named ``home`` key; ``rest`` is retained as a compatibility alias for existing rollout/render paths.
 
-    The base quaternion must mirror the root's ``mount_euler``, not be hardcoded to identity. Composed bodies
-    have an unrotated root so identity was right by accident; an IMPORTED root carries the rotation that aligns
-    its reconstructed link frame (``robot_import._rot_z_to``), and overwriting that with identity threw the whole
-    robot into a ~19 deg pitch — an imported Go2 measured 0.803 m tall against a real 0.394 m, legs splayed."""
+    The base quaternion must agree with the root BODY's orientation, not be hardcoded. An imported root carries
+    a ``mount_euler`` that aligns its reconstructed link frame (``robot_import._rot_z_to``), and a keyframe that
+    disagreed with the body tag threw the whole robot into a ~19 deg pitch: an imported Go2 measured 0.803 m
+    tall against a real 0.394 m, legs splayed. A free root's rotation now lives on a ``<frame>`` inside an
+    unrotated body (``_framed_root``), so the quaternion that agrees with that body is the identity."""
     pose = (getattr(gene, "metadata", None) or {}).get("rest_pose") or {}
     qpos: list[float] = []
     if gene.base_mount == "free":
         root_euler = getattr(gene.root(), "mount_euler", None) or (0.0, 0.0, 0.0)
-        qw, qx, qy, qz = _euler_xyz_to_quat(*(float(v) for v in root_euler))
+        qw, qx, qy, qz = ((1.0, 0.0, 0.0, 0.0) if _framed_root(gene, gene.root()) is not None
+                          else _euler_xyz_to_quat(*(float(v) for v in root_euler)))
         qpos += [0.0, 0.0, float(base_z), qw, qx, qy, qz]
     base_len = len(qpos)
 
@@ -881,19 +919,28 @@ def _lowest_world_z(mj, d) -> float:
 
 def standing_spawn_z(gene: RobotGene, *, clearance: float | None = None, meshed: bool = True) -> float:
     """Spawn height for a free-base body so its LOWEST point rests ~``clearance`` above the floor — it spawns
-    standing on its feet instead of penetrating the floor (legacy fixed 0.1) and getting ejected. ``meshed``
-    measures the DISPLAYED visual meshes (what the viewport shows — the mesh can hang below the primitive
-    collider, which was the visible foot-penetration bug); pass ``meshed=False`` on hot training paths to
-    measure the cheap primitive model instead. Falls back to the legacy height if MuJoCo is unavailable.
+    standing on its feet instead of penetrating the floor (legacy fixed 0.1) and getting ejected. Falls back to
+    the legacy height if MuJoCo is unavailable.
 
-    ``meshed=False`` means PRIMITIVE, and it has to keep meaning that. When ``compile_gene_to_mjcf`` learned to
-    resolve an imported link's own STL, this branch silently started loading every one of the customer's meshes
-    too: measured, the "cheap" path on a Unitree G1 went 0.032 -> 0.159 s and on a Go2 0.024 -> 0.251 s, and the
-    two branches returned the same number to the digit because they had become the same model. So it asks for
-    ``source_meshes=False`` explicitly rather than relying on a default that has already changed once.
+    ONE HEIGHT FOR EVERY COMPILE OF A BODY, measured on the PRIMITIVE model the verdict runs. ``meshed=True``
+    used to measure the displayed visual meshes instead, so the render, the export and the certificate (which
+    take the default) could stand a body at a different height from the verdict (which passes False) whenever a
+    visual mesh hung below the colliders. On composed bodies the two agreed. On imported ones they stopped
+    agreeing once the twin's colliders matched the source's own collision geometry: the Menagerie Go2's foot
+    meshes hang 2.3 mm below its collision spheres and the G1's 3.4 mm, a gap in the customer's own model, so the
+    render floated the robot that much above where the verdict stood it. A visual mesh never touches the floor in
+    the physics, so the spawn is measured where contact is, and a picture whose mesh dips into the floor shows
+    the model as it is. ``meshed`` is still accepted so the callers that pass it need not change; it no longer
+    changes the answer.
+
+    PRIMITIVE has to keep meaning primitive. When ``compile_gene_to_mjcf`` learned to resolve an imported link's
+    own STL, this measurement silently started loading every one of the customer's meshes too: measured, it went
+    0.032 -> 0.159 s on a Unitree G1 and 0.024 -> 0.251 s on a Go2. So it asks for ``source_meshes=False``
+    explicitly rather than relying on a default that has already changed once.
 
     ``clearance`` defaults to 2 mm for every free body. Visual/collision disagreement is rejected by the
     visual-physics gate instead of being hidden behind an airborne legged-body safety margin."""
+    del meshed                                                   # see the docstring: one height for every compile
     if clearance is None:
         # The former 30 mm legged margin hid foot visual/collider mismatches by spawning robots visibly airborne.
         # The visual-physics CI gate now rejects those mismatches, so every free body starts at its real contact.
@@ -901,23 +948,18 @@ def standing_spawn_z(gene: RobotGene, *, clearance: float | None = None, meshed:
     if gene.base_mount != "free":
         return _base_z_for(gene)
     ref = _MOUNT_Z["free"]                                       # measure the body's downward reach at 0.1
-    for build_xml in ((lambda: gene_to_meshed_mjcf(gene, include_floor=False, spawn_z=ref)) if meshed else None,
-                      lambda: compile_gene_to_mjcf(gene, include_floor=False, spawn_z=ref,
-                                                   source_meshes=False)):
-        if build_xml is None:
-            continue
-        try:
-            import mujoco
+    try:
+        import mujoco
 
-            mj = mujoco.MjModel.from_xml_string(build_xml())
-            d = mujoco.MjData(mj)
-            if mj.nkey > 0:                      # measure the body in its baked rest stance, not splayed flat
-                mujoco.mj_resetDataKeyframe(mj, d, 0)
-            mujoco.mj_forward(mj, d)
-            return round((ref - _lowest_world_z(mj, d)) + clearance, 4)
-        except Exception:  # noqa: BLE001 - meshing/MuJoCo issue -> try the primitive build, then legacy
-            continue
-    return _MOUNT_Z["free"]
+        mj = mujoco.MjModel.from_xml_string(compile_gene_to_mjcf(gene, include_floor=False, spawn_z=ref,
+                                                                 source_meshes=False))
+        d = mujoco.MjData(mj)
+        if mj.nkey > 0:                          # measure the body in its baked rest stance, not splayed flat
+            mujoco.mj_resetDataKeyframe(mj, d, 0)
+        mujoco.mj_forward(mj, d)
+        return round((ref - _lowest_world_z(mj, d)) + clearance, 4)
+    except Exception:  # noqa: BLE001 - a MuJoCo issue -> the legacy height
+        return _MOUNT_Z["free"]
 
 
 def compile_gene_with_scene(gene: RobotGene, scene_objects, *, table: bool = True,
@@ -997,7 +1039,8 @@ def _body_xml(gene: RobotGene, seg, pos: tuple[float, float, float], indent: int
     px, py, pz = pos
     euler = ""
     me = getattr(seg, "mount_euler", (0.0, 0.0, 0.0))
-    if any(abs(v) > 1e-9 for v in me):
+    framed = _framed_root(gene, seg)
+    if any(abs(v) > 1e-9 for v in me) and framed is None:
         euler = f' euler="{me[0]:.5f} {me[1]:.5f} {me[2]:.5f}"'
     lines = [f'{pad}<body name="{escape(seg.name)}" pos="{px:.5f} {py:.5f} {pz:.5f}"{euler}>']
 
@@ -1018,6 +1061,19 @@ def _body_xml(gene: RobotGene, seg, pos: tuple[float, float, float], indent: int
             f'axis="{ax}"{rng} damping="{damping:.4f}" armature="{armature:.4f}" '
             f'frictionloss="{frictionloss:.4f}"/>'
         )
+    fq = _euler_xyz_to_quat(*framed) if framed is not None else None
+    inertial = _declared_inertial(gene, seg, pre=fq)
+    if inertial is not None:                     # an imported link's own mass distribution; see the helper
+        lines.append(f"{pad}  {inertial}")
+    if framed is not None:
+        # Both of these stay outside the frame because both belong to the BASE frame. MuJoCo accepts an
+        # <inertial> inside a <frame> and silently leaves it unrotated, and the IMU must report the base's
+        # orientation rather than the trunk capsule's. The site keeps the world position it always had.
+        if not physics_only:
+            ix, iy, iz = _quat_rotate(fq, (0.0, 0.0, seg.length_m / 2.0))
+            lines.append(f'{pad}  <site name="imu_site" pos="{ix:.5f} {iy:.5f} {iz:.5f}" size="0.005" '
+                         f'rgba="0 0 0 0"/>')
+        lines.append(f'{pad}  <frame euler="{framed[0]:.5f} {framed[1]:.5f} {framed[2]:.5f}">')
 
     # Per-part MATERIAL drives the colour/finish: a coloured shell body, metal feet/hands, dark carbon limbs,
     # etc. (GeneSegment.material, set per role + refined per task). A structural link with NO material hint now
@@ -1045,12 +1101,19 @@ def _body_xml(gene: RobotGene, seg, pos: tuple[float, float, float], indent: int
     # MJCF material reference, never `seg.material`, so density, the BOM and every mass are untouched.
     elif meshed and _anatomy_role_of(seg) == "foot_pad":
         material = "mat_rubber"
-    lines.append(_geom_xml(seg, pad + "  ", material=material, meshed=meshed, physics_only=physics_only))
-    if seg.parent is None and not physics_only:
+    root_collision = _declared_root_collision(gene, seg)
+    if root_collision is not None:               # an imported root's own collision geometry; see the helper
+        lines.append(_root_collision_xml(seg, root_collision, pad + "  ", material=material, meshed=meshed,
+                                         physics_only=physics_only))
+    else:
+        lines.append(_geom_xml(seg, pad + "  ", material=material, meshed=meshed, physics_only=physics_only,
+                               declared_contact=_declared_contact(gene, seg)))
+    if seg.parent is None and not physics_only and framed is None:
         lines.append(f'{pad}  <site name="imu_site" pos="0 0 {seg.length_m / 2.0:.5f}" size="0.005" rgba="0 0 0 0"/>')
     # physics_only strips ALL visual-only decoration (cylinder motor cans, collars, housings, sensor pucks)
     # so the model is MJX/GPU-safe — those cosmetic cylinders crash mjx.put_model even at contype=0.
-    if not meshed and not physics_only:    # the visual mesh already has housings/collars; primitives get them added
+    # Nor on a root drawn from its source collision: the collar would mark the tip of a capsule that is not there.
+    if not meshed and not physics_only and root_collision is None:   # the visual mesh already has housings/collars
         # When real actuators are shown, suppress the generic guessed "motor can" (the real datasheet-sized
         # housing replaces it); the distal collar/flange still helps read the link.
         detail = _detail_geoms_xml(seg, pad + "  ", suppress_motor=show_actuators)
@@ -1117,6 +1180,8 @@ def _body_xml(gene: RobotGene, seg, pos: tuple[float, float, float], indent: int
                                indent=indent + 2, meshes=meshes, show_actuators=show_actuators,
                                sensor_geoms=sensor_geoms, physics_only=physics_only))
 
+    if framed is not None:
+        lines.append(f"{pad}  </frame>")
     lines.append(f"{pad}</body>")
     return "\n".join(lines) + "\n"
 
@@ -1231,6 +1296,199 @@ def _declared_joint_dynamics(gene: RobotGene, seg) -> tuple[float, float] | None
     return (out[0], out[1])
 
 
+def _declared_inertial(gene: RobotGene, seg, pre=None) -> str | None:
+    """An ``<inertial>`` element carrying the SOURCE link's own mass distribution, or ``None``.
+
+    Without one, MuJoCo derives a body's inertia from its geoms, and a segment's only massive geom is the
+    primitive collider we draw for it, so its centre of mass lands mid-capsule wherever the source's really is.
+    Only ``robot_import`` writes ``metadata['source_inertials']``, so a composed body never reaches this.
+
+    A row is used only while it still describes the segment: the same mass and the same length and radius it
+    was recorded with. Resizing a link or regrounding its mass retires the row for that link alone, and the link
+    falls back to the geometry-derived inertia every body had before. Defensive like ``_declared_joint_dynamics``
+    because ``metadata`` is free-form and survives a JSON round trip: anything malformed falls back too.
+    """
+    import math
+
+    meta = getattr(gene, "metadata", None)
+    table = meta.get("source_inertials") if isinstance(meta, dict) else None
+    row = table.get(getattr(seg, "name", "") or "") if isinstance(table, dict) else None
+    if not isinstance(row, dict):
+        return None
+
+    def nums(key, n):
+        v = row.get(key)
+        if not isinstance(v, (list, tuple)) or len(v) != n:
+            return None
+        if any(isinstance(x, bool) or not isinstance(x, (int, float)) or not math.isfinite(float(x)) for x in v):
+            return None
+        return [float(x) for x in v]
+
+    pos, quat, inertia, dims = nums("pos", 3), nums("quat", 4), nums("diaginertia", 3), nums("link_dims_m", 2)
+    mass = row.get("mass")
+    if None in (pos, quat, inertia, dims) or isinstance(mass, bool) or not isinstance(mass, (int, float)):
+        return None
+    mass = float(mass)
+    if not (math.isfinite(mass) and mass > 0.0) or min(inertia) <= 0.0 or sum(q * q for q in quat) < 1e-12:
+        return None
+    if abs(mass - float(seg.mass_kg)) > 1e-9 * max(1.0, mass):
+        return None
+    if abs(dims[0] - round(float(seg.length_m), 6)) > 1e-9 or abs(dims[1] - round(float(seg.radius_m), 6)) > 1e-9:
+        return None
+    a, b, c = inertia
+    if a + b < c or a + c < b or b + c < a:                   # MuJoCo refuses such a body outright
+        return None
+    if pre is not None:                                       # a framed root: into its unrotated body frame
+        pos, quat = list(_quat_rotate(pre, pos)), list(_quat_mul(pre, quat))
+    # Full precision: a planar link sits exactly ON the A + B >= C boundary, and rounding can push it off.
+    return (f'<inertial pos="{pos[0]:.17g} {pos[1]:.17g} {pos[2]:.17g}" '
+            f'quat="{quat[0]:.17g} {quat[1]:.17g} {quat[2]:.17g} {quat[3]:.17g}" mass="{mass:.17g}" '
+            f'diaginertia="{a:.17g} {b:.17g} {c:.17g}"/>')
+
+
+def _declared_contact(gene: RobotGene, seg) -> str | None:
+    """The SOURCE link's contact model as collider attributes, or ``None`` to keep the compiler's own.
+
+    Only ``robot_import`` writes ``metadata['source_contacts']``. On an imported Go2 this is what made the twin
+    walk like the source: under one fixed controller the twin travelled 0.750 m with our contact defaults and
+    2.347 m with the feet the source declares, against 2.353 m for the source itself. Malformed rows fall back.
+    """
+    meta = getattr(gene, "metadata", None)
+    table = meta.get("source_contacts") if isinstance(meta, dict) else None
+    row = table.get(getattr(seg, "name", "") or "") if isinstance(table, dict) else None
+    return _contact_attrs(row)
+
+
+def _contact_attrs(row) -> str | None:
+    """One source contact row (``robot_import._source_contact``) as collider attributes, or ``None`` if malformed."""
+    import math
+
+    if not isinstance(row, dict):
+        return None
+
+    def nums(key, n):
+        v = row.get(key)
+        if not isinstance(v, (list, tuple)) or len(v) != n:
+            return None
+        if any(isinstance(x, bool) or not isinstance(x, (int, float)) or not math.isfinite(float(x)) for x in v):
+            return None
+        return [float(x) for x in v]
+
+    friction, solref, solimp = nums("friction", 3), nums("solref", 2), nums("solimp", 5)
+    scalars = [row.get(k) for k in ("condim", "priority", "solmix", "margin", "gap")]
+    if None in (friction, solref, solimp) or any(
+            isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(float(v)) for v in scalars):
+        return None
+    condim, priority, solmix, margin, gap = scalars
+    if int(condim) not in (1, 3, 4, 6) or min(friction) < 0.0 or min(solmix, margin, gap) < 0.0:
+        return None
+    return (f' friction="{friction[0]:.6g} {friction[1]:.6g} {friction[2]:.6g}" condim="{int(condim)}"'
+            f' priority="{int(priority)}" solref="{solref[0]:.6g} {solref[1]:.6g}"'
+            f' solimp="{" ".join(f"{v:.6g}" for v in solimp)}" solmix="{solmix:.6g}"'
+            f' margin="{margin:.6g}" gap="{gap:.6g}"')
+
+
+_ROOT_GEOM_SIZES = {"sphere": 1, "capsule": 2, "cylinder": 2, "ellipsoid": 3, "box": 3}
+
+
+def primitive_volume(kind: str, size) -> float:
+    """Volume of a MuJoCo primitive from its ``size`` (half-extents, radius and half-length as MJCF writes them)."""
+    s = [float(v) for v in size]
+    if kind == "sphere":
+        return 4.0 / 3.0 * math.pi * s[0] ** 3
+    if kind == "capsule":
+        return math.pi * s[0] ** 2 * 2.0 * s[1] + 4.0 / 3.0 * math.pi * s[0] ** 3
+    if kind == "cylinder":
+        return math.pi * s[0] ** 2 * 2.0 * s[1]
+    if kind == "ellipsoid":
+        return 4.0 / 3.0 * math.pi * s[0] * s[1] * s[2]
+    return 8.0 * s[0] * s[1] * s[2]
+
+
+def _declared_root_collision(gene: RobotGene, seg) -> list[dict] | None:
+    """The SOURCE root's own collision geoms, validated, or ``None`` to draw the segment's primitive as always.
+
+    A segment's primitive runs from its origin along its local +z, the shape of a limb. A trunk's origin is its
+    centre, so for the root that shape is wrong: the imported Go2's trunk came out as a capsule from its origin
+    to the front-left hip, 0.376 m long with a 0.098 m radius, overhanging the source's nose by 0.12 m and
+    reaching 0.14 m past the trunk's left side, with nothing behind the origin past 0.098 m. Only ``robot_import``
+    writes ``metadata['source_root_collision']``, so a composed body never reaches this.
+
+    Used only while it still describes the segment: the same root, length, radius and frame it was recorded with,
+    so a resized or re-framed trunk falls back to the primitive drawn from its new dimensions. Anything malformed
+    falls back too, as one, rather than drawing part of a trunk.
+    """
+    import math
+
+    if getattr(seg, "parent", None) is not None:
+        return None
+    meta = getattr(gene, "metadata", None)
+    rec = meta.get("source_root_collision") if isinstance(meta, dict) else None
+    if not isinstance(rec, dict) or rec.get("segment") != getattr(seg, "name", None):
+        return None
+
+    def nums(v, n):
+        if not isinstance(v, (list, tuple)) or len(v) != n:
+            return None
+        if any(isinstance(x, bool) or not isinstance(x, (int, float)) or not math.isfinite(float(x)) for x in v):
+            return None
+        return [float(x) for x in v]
+
+    dims, frame = nums(rec.get("link_dims_m"), 2), nums(rec.get("mount_euler"), 3)
+    if dims is None or frame is None:
+        return None
+    if abs(dims[0] - round(float(seg.length_m), 6)) > 1e-9 or abs(dims[1] - round(float(seg.radius_m), 6)) > 1e-9:
+        return None
+    me = getattr(seg, "mount_euler", None) or (0.0, 0.0, 0.0)
+    if any(abs(a - float(b)) > 1e-6 for a, b in zip(frame, me)):
+        return None
+    geoms = rec.get("geoms")
+    if not isinstance(geoms, list) or not geoms:
+        return None
+    rows = []
+    for g in geoms:
+        if not isinstance(g, dict) or g.get("type") not in _ROOT_GEOM_SIZES:
+            return None
+        pos, quat = nums(g.get("pos"), 3), nums(g.get("quat"), 4)
+        size, contact = nums(g.get("size"), _ROOT_GEOM_SIZES[g["type"]]), _contact_attrs(g.get("contact"))
+        if None in (pos, quat, size, contact) or min(size) <= 0.0 or sum(q * q for q in quat) < 1e-12:
+            return None
+        rows.append({"type": g["type"], "pos": pos, "quat": quat, "size": size, "contact": contact})
+    return rows
+
+
+def _root_collision_xml(seg, rows: list[dict], pad: str, *, material: str, meshed: bool,
+                        physics_only: bool) -> str:
+    """The declared root collision (``_declared_root_collision``) as geoms, in the segment frame.
+
+    The first, and largest, keeps the name ``<segment>_geom``. The segment's mass is split by volume so a link
+    whose source inertial has retired still takes its mass distribution from the source's shape rather than from
+    a capsule; while the inertial holds, MuJoCo ignores geom masses. ``physics_only`` keeps the model MJX-safe:
+    a cylinder or an ellipsoid becomes the box with its own extents. Not the capsule ``_geom_xml`` uses for a
+    cylinder, because two caps would lengthen it by its diameter, and on the Go2's head that is 0.1 m of trunk.
+    """
+    vols = [primitive_volume(r["type"], r["size"]) for r in rows]
+    total = sum(vols) or 1.0
+    surf = (' class="collision" rgba="0 0 0 0" group="3"' if meshed
+            else f' class="collision" material="{material}"')
+    out = []
+    for k, (r, v) in enumerate(zip(rows, vols)):
+        gtype, size = r["type"], r["size"]
+        if physics_only and gtype == "cylinder":
+            gtype, size = "box", [size[0], size[0], size[1]]
+        elif physics_only and gtype == "ellipsoid":
+            gtype = "box"
+        name = f"{escape(seg.name)}_geom" + (f"_{k}" if k else "")
+        out.append(f'{pad}<geom name="{name}" type="{gtype}" pos="{" ".join(f"{v_:.7g}" for v_ in r["pos"])}" '
+                   f'quat="{" ".join(f"{v_:.7g}" for v_ in r["quat"])}" '
+                   f'size="{" ".join(f"{v_:.7g}" for v_ in size)}" '
+                   f'mass="{float(seg.mass_kg) * v / total:.17g}"{surf}{r["contact"]}/>')
+    if meshed:
+        out.append(f'{pad}<geom class="visual" name="{escape(seg.name)}_vis" type="mesh" mesh="{escape(seg.name)}_vis" '
+                   f'material="{material}" mass="0" contype="0" conaffinity="0"/>')
+    return "\n".join(out)
+
+
 def _calibrated_dynamics(gene: RobotGene, seg_name: str) -> dict:
     """``{param: fitted_value}`` from an applied sysid calibration, or ``{}``.
 
@@ -1318,7 +1576,8 @@ def _joint_dynamics_prior(gene: RobotGene, seg) -> tuple[float, float, float]:
     return _out(0.6, 0.03, 0.08)
 
 
-def _geom_xml(seg, pad: str, material: str = "mat_body", meshed: bool = False, physics_only: bool = False) -> str:
+def _geom_xml(seg, pad: str, material: str = "mat_body", meshed: bool = False, physics_only: bool = False,
+              declared_contact: str | None = None) -> str:
     name = f'{escape(seg.name)}_geom'
     # When meshed, the primitive becomes collision-only: invisible (alpha 0) + group 3, but its shape/size/
     # mass are untouched, so dynamics & contacts stay byte-identical to the primitive model. The visible
@@ -1327,6 +1586,8 @@ def _geom_xml(seg, pad: str, material: str = "mat_body", meshed: bool = False, p
     name_l = (seg.name or "").lower()
     if seg.joint_type in (None, "fixed") and any(token in name_l for token in ("foot", "paw", "leg", "hoof")):
         contact = ' condim="6" priority="1" solimp="0.9 0.95 0.001"'
+    if declared_contact is not None:             # an imported link's own contact model (``_declared_contact``)
+        contact = declared_contact
     surf = (' class="collision" rgba="0 0 0 0" group="3"' if meshed
             else f' class="collision" material="{material}"')
     surf += contact

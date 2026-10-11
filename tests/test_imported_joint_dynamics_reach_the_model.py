@@ -333,35 +333,64 @@ def test_carrying_the_declaration_does_not_cost_simulability(rel):
     assert res["simulable"], f"{rel}: {res.get('simulation_check')}"
 
 
-def test_a_declaration_that_makes_our_twin_unsteppable_falls_back_loudly():
-    """The one case where the customer's own numbers cannot be carried, and the only honest way not to.
+def test_tiago_dual_now_steps_the_declaration_it_could_not():
+    """TIAGo++ was the one robot whose declared drivetrain the twin could not step, and that reason is gone.
 
-    TIAGo++ declares 1000 N.s/m of damping on its torso lift and 40 N.m.s/rad across both arms. That is stable
-    in ITS model, whose link inertias are real, and goes non-finite in ours at t=1.052 s, whose link inertias
-    are primitives. Carrying it anyway would cost the customer every downstream number on a robot that used to
-    produce them; keeping our prior QUIETLY is the defect this file exists to remove. So it falls back, keeps
-    their numbers verbatim, and says which, why, and what it means for the gap.
-
-    It is the last member of a set that used to have five, and the shrinking is the point: the other four
-    (stretch, kinova_gen3, tiago, adam_lite) were broken by carrying ARMATURE, not by carrying the customer's
-    damping. A fallback sized against the wider carry was firing on four robots whose declarations our twin
-    can integrate perfectly well.
+    It declares 1000 N.s/m of damping on its torso lift and 40 N.m.s/rad across both arms. That is stable in ITS
+    model, whose link inertias are real, and went non-finite in ours at t=1.052 s while ours were primitives. The
+    twin now carries each link's own inertial from the source, and with them it steps the customer's declaration
+    as declared. On the way, unitree_g1 and agility_cassie needed the fallback below for a while (truer inertias
+    had stopped masking our torque motors and fixed step), until the colliders took their girth from the source's
+    collision geometry; no cached package needs it now. It stays for a customer's model that does.
     """
     res = _import("pal_tiago_dual/tiago_dual.xml")
     md = res["gene"].metadata
     assert res["simulable"], res.get("simulation_check")
-    assert md["source_joint_dynamics_carried"] is False
-    assert md["joint_dynamics_source"] == "our_structural_prior_declaration_not_steppable"
+    assert md.get("source_joint_dynamics_carried") is not False
+    assert md["joint_dynamics_source"] == "source_model"
     assert md["source_joint_dynamics"]["torso_lift_link"] == {
         "armature": 0.0, "damping": 1000.0, "frictionloss": 0.0}
-    hit = [w for w in res["warnings"] if "NOT CARRIED" in w]
+    assert not [w for w in res["warnings"] if "YOUR DECLARED JOINT DRIVETRAIN" in w], res["warnings"][:3]
+    from virturoid.services.gene_compiler import _joint_dynamics_prior
+    seg = next(s for s in res["gene"].actuated_joints() if s.name == "torso_lift_link")
+    assert _joint_dynamics_prior(res["gene"], seg)[0] == pytest.approx(1000.0)
+
+
+def test_a_declaration_that_makes_our_twin_unsteppable_falls_back_loudly(monkeypatch):
+    """The fallback itself, forced, so the test does not depend on which cached packages happen to need it.
+
+    The probe here fails exactly while the declared drivetrain is on the gene, which is the condition the import
+    rules on: carrying it is then demonstrably what breaks the twin. Carrying it anyway would cost the customer
+    every downstream number; keeping our prior QUIETLY is the defect this file exists to remove. So it falls
+    back, keeps their numbers verbatim, and says which, why, and what it means for the gap.
+    """
+    from virturoid.services import robot_import as ri
+
+    real = ri._simulability_probe
+
+    def probe(gene):
+        if "source_joint_dynamics" in (gene.metadata or {}):
+            return {"ok": False, "checked": True, "reason": "non-finite at t=1.052 s"}
+        return real(gene)
+
+    monkeypatch.setattr(ri, "_simulability_probe", probe)
+    # conftest memoizes imports, and this file imports the same Go2 under the same id elsewhere: a cached
+    # result would never reach the probe this test installs.
+    monkeypatch.delenv("VIRTUROID_IMPORT_CACHE", raising=False)
+    res = _import("unitree_go2/go2.xml")
+    md = res["gene"].metadata
+    assert res["simulable"], res.get("simulation_check")
+    assert md["source_joint_dynamics_carried"] is False
+    assert md["joint_dynamics_source"] == "our_structural_prior_declaration_not_steppable"
+    assert md["source_joint_dynamics"]["FL_calf"] == {"armature": 0.01, "damping": 2.0, "frictionloss": 0.2}
+    hit = [w for w in res["warnings"] if "YOUR DECLARED JOINT DRIVETRAIN" in w]
     assert len(hit) == 1, res["warnings"][:3]
     assert "do not quote it" in hit[0] and "faithful" in hit[0], hit[0]
     # And the compiler must AGREE with the flag: a record that is kept but not carried must not reach the
     # model, or the fallback is exactly the same shape of defect as the substitution it replaces.
     from virturoid.services.gene_compiler import _joint_dynamics_prior
-    seg = next(s for s in res["gene"].actuated_joints() if s.name == "torso_lift_link")
-    assert _joint_dynamics_prior(res["gene"], seg)[0] != pytest.approx(1000.0)
+    seg = next(s for s in res["gene"].actuated_joints() if s.name == "FL_calf")
+    assert _joint_dynamics_prior(res["gene"], seg)[0] != pytest.approx(2.0)
 
 
 def test_damping_that_lives_in_the_ACTUATOR_is_named_rather_than_read_as_a_zero():

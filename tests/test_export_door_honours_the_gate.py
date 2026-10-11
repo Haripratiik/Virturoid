@@ -64,14 +64,22 @@ def _export(gene, label: str, formats) -> dict:
 
 @pytest.fixture(scope="module")
 def flybody_export():
-    """flybody exported for real, once, asking for both sides of the line."""
+    """flybody exported for real, once, asking for both sides of the line.
+
+    flybody imports and steps since 2026-10-10: its 3.2 mg ``haustellum`` carries its own source inertial instead
+    of a primitive's, whose derived inertia fell under MuJoCo's floor. The door still has to refuse that body for
+    the next customer whose model produces one, so this exports the twin we used to build, the same gene with its
+    ``source_inertials`` record removed, and checks first that it really cannot be stepped.
+    """
     if not _MUJOCO:
         pytest.skip("the gate is a MuJoCo probe")
-    from virturoid.services.robot_import import import_robot
+    from virturoid.services.robot_import import _simulability_probe, import_robot
     imp = import_robot(_menagerie("flybody", "fruitfly.xml"), robot_id="flybody_gate")
-    assert imp.get("simulable") is False, (
-        "flybody is the live unsimulable test case; if it now imports as simulable this test needs a new one")
-    env = _export(imp["gene"], "fruit fly", _GEOMETRY_ASKED + _PHYSICS_ASKED)
+    gene = imp["gene"]
+    gene.metadata = {k: v for k, v in (gene.metadata or {}).items() if k != "source_inertials"}
+    assert _simulability_probe(gene)["ok"] is False, (
+        "premise gone: flybody on primitive inertias now steps too; this test needs a new unsimulable twin")
+    env = _export(gene, "fruit fly", _GEOMETRY_ASKED + _PHYSICS_ASKED)
     res = env.get("result") or {}
     return env, res, Path(res["out_dir"])
 

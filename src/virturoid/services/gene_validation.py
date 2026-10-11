@@ -220,6 +220,10 @@ def _mujoco_checks(gene, cls, checks, flag) -> None:
                 _anc = (_lc or {}).get("anchor")
                 if not (isinstance(_anc, (list, tuple)) and len(_anc) == 3):
                     _anc = (0.0, 0.0, float(getattr(_sa, "length_m", 0.0) or 0.0))
+                from virturoid.services.gene_compiler import _euler_xyz_to_quat, _framed_root, _quat_rotate
+                _fr = _framed_root(gene, _sa) if _sa is not None else None
+                if _fr is not None:                   # the anchor is in a's SEGMENT frame; a framed root's body
+                    _anc = _quat_rotate(_euler_xyz_to_quat(*_fr), tuple(float(v) for v in _anc))   # is unrotated
                 _pa = _np.asarray(d.xpos[_ia], dtype=float) + d.xmat[_ia].reshape(3, 3) @ _np.asarray(_anc,
                                                                                                       dtype=float)
                 # Distance to b's SURFACE, not to its origin. A body's origin is wherever its frame happens to

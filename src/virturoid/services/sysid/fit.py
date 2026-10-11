@@ -133,6 +133,14 @@ scores 1.791x, the best model in the family reaches 2.277x (+27%), and this pack
 already above the figure that was being called a bound. The conclusion survives on the envelope; the word
 "ceiling" does not.
 
+RE-MEASURED 2026-10-10, once the imported twin carried the Go2's own link inertials, and the conclusion survives
+with less to spare: on the full plan the family's best is 1.374x at 30 ms (1.397x on a finer two-joint grid
+around the peak) and 1.006x at 40 ms, still under the 1.5x line; at 20 ms the truth scores 2.044x, the family
+reaches 3.138x (+54%) and the fit reads 2.208x. What the scoring change buys there is now mixed, and both halves
+are pinned in ``tests/test_sysid_delay_wedge.py``: at 30 and 40 ms it lifts the CORRECT fit over the tracking
+gate (6.254x and 1.569x on the full plan) and a rival check then refuses it as a part that is not wrong, and
+on two-joint plans the tracking gate's own refusal on the merits has moved out to 50 ms.
+
 What is reused from Stage 1, unchanged: the bench rig (``bench_model``/``bench_gains``/``pd_replay``/
 ``inverse_torque``/``central_derivative``), the log alignment and per-joint windowing (``_align_log``,
 ``_windows``), the model's own sensitivity columns (``_sensitivity_columns``), the excitation statistics
@@ -169,7 +177,8 @@ TRUST_FLOOR_MULT = 20.0
 #: above 1.012x -- so on a robot with real latency it refused every fit, including ones that had recovered all
 #: three parameters to within 13.3%. (That range used to be written here as a CEILING of 1.016x at 20 ms. Both
 #: halves were wrong: the figure was measured on a twin carrying 40% of Unitree's declared damping, and it is
-#: not a bound at all -- see ``_trajectory_improvement``.)
+#: not a bound at all; see ``_trajectory_improvement``. Re-measured 2026-10-10 on a twin that also carries the
+#: Go2's own link inertials, that 30 ms figure is 1.374x on the full plan: still under the line, by 8%.)
 #:
 #: RE-MEASURED at the new scoring point, Go2, full 12-joint 120 s plan, three injections x three delays:
 #:
@@ -189,6 +198,24 @@ TRUST_FLOOR_MULT = 20.0
 #: any delay measured -- and that scoping matters, because the table is one family: see the retraction below,
 #: where two other families clear 1.5 outright. Moving the threshold down to admit 1.484 would put it within
 #: 40% of that family's ceiling, which is not a trade this package should make silently.
+#:
+#: RE-MEASURED AGAIN 2026-10-10, same plan, on a twin that carries the Go2's declared drivetrain AND its own
+#: link inertials (the table above had 40% of the declared damping and neither):
+#:
+#:                                              0 ms      20 ms     40 ms
+#:   +30% link mass and inertia                 0.999     1.375     1.013    refused by tracking at every delay
+#:   hardware IS the sim (nothing to find)      n/a*      0.000     0.000    refused at every delay
+#:   ------------------------------------------------------------------- the band the threshold sits in
+#:   frictionloss/damping/armature (correct)    7.514    73.660     1.569    40 ms REFUSED anyway, by a rival
+#:
+#: The band moved and did not open. The misspecified ceiling in the table rose to 1.375; the 40 ms correct
+#: case now clears the line and is refused regardless, by the global-scale rival naming a 0.53x gear the
+#: harness never set (a false refusal, measured on every narrow joint selection that excites a hip). And two
+#: entries this table does not have now reach the far side of the line at the package's default 20 ms on a
+#: two-joint plan: +40% / +50% link mass and inertia track 1.973 / 1.686 and are refused only by that same
+#: rival, and a 1.35x torque-constant error on top of the correct injection tracks 4.974 and is APPLIED, with
+#: neither rival claiming it. The threshold is not moved for any of it. See ``tests/test_sysid_delay_wedge.py``
+#: and ``tests/test_sysid_torque_channel.py``.
 #:
 #: The ORIGINAL calibration, taken with both replays at delay 0 on a composed 14-DOF quadruped and a 35 s
 #: excitation, is kept below because it is what sized the number:
@@ -289,6 +316,9 @@ TRUST_FLOOR_MULT = 20.0
 #: on the full plan, both already false negatives at 1.5 -- and (b) be sized against a GRID MAXIMUM over four
 #: families on one body, which is not a bound and would be the same fiction this paragraph just retracted.
 #: A constant cannot separate these cases; only a wider model or a second, independent check can.
+#: (Re-measured 2026-10-10 on the twin carrying the Go2's own link inertials, that 40 ms correct case reads
+#: 1.569 on the full plan and 2.499 on two joints, over the line in both; it is refused anyway, by the
+#: global-scale rival naming a 0.53x gear the harness never set. See the re-measured table above.)
 #:
 #: RE-MEASURED with this gate and the corrected floor gate BOTH in place, same robot and 35 s excitation, so
 #: the band can be checked against the code as shipped rather than only against the code it was sized on:
@@ -312,7 +342,9 @@ TRUST_FLOOR_MULT = 20.0
 #: see ``_trajectory_improvement``. The composed dog's bench loop tolerates delay in a way a real quadruped's does not -- its worst
 #: tracking RMS moves 0.0339 -> 0.0365 rad across 0-40 ms of delay while the Go2's hips go 0.0298 -> 0.1848 --
 #: which is why every number in this package needs re-taking on an imported body before it is quoted as
-#: general. See ``docs/calibration_wedge_under_delay.md`` section 3c.
+#: general. See ``docs/calibration_wedge_under_delay.md`` section 3c. (Re-taken 2026-10-10 on the twin that
+#: carries the Go2's own link inertials: the 20 ms case reads 73.66 on the full plan and 13.646 on two joints,
+#: the true parameters' delay-blind score at 20 ms is 2.044, and the 60-point family's best at 30 ms is 1.374.)
 MIN_TRACKING_IMPROVEMENT_X = 1.5
 
 # ---------------------------------------------------------------------------------------------------------
@@ -1647,6 +1679,15 @@ def application_gate(trajectory: dict | None, n_identified: int, *,
             "ONLY anywhere inside the band on the dog or the hexapod -- that family steps across it "
             "discontinuously as more pairs become identified (dog 1.129x at +0.118 to 3.042x at +0.120; "
             "hexapod 1.267x at +0.060 to 3.427x at +0.070), and every straddling point is applied. "
+            "AN IMPORTED BODY HAS SINCE BEEN SAMPLED, ONE, AND IT IS NOT REASSURING (2026-10-10): on a Unitree "
+            "Go2 twin carrying the robot's own declared drivetrain and link inertials, both rivals refuse "
+            "CORRECTLY-SPECIFIED fits under actuation delay. At 30 ms the link-inertia rival refuses a correct "
+            "fit that tracks 4.899x (two joints) or 6.254x (all twelve) as a 15.9x inertia scale; at 40 ms the "
+            "global-scale rival refuses one that tracks 2.499x (two joints) or 1.569x (all twelve) as a 0.53x "
+            "torque scale. Neither error was injected. Both happen where a single number that quiets a delayed "
+            "hip loop tracks the log better than a fit that is right to within about 20% per parameter, and "
+            "neither was seen at 0 or 20 ms. The 40 ms refusal held on every joint selection that excites a hip; "
+            "the 30 ms one did not survive an 8 s plan or the hip excited alone, which were applied. "
             "AND AN EXTRAPOLATION THAT USED TO STAND HERE IS RETRACTED (2026-08-13): this field said nothing "
             "was claimed for a body whose joints' rotational inertias span much more than the 1.53-1.55x the "
             "first two do, because 'a wider span would make this check SHARPER -- a prediction, not a "
@@ -1685,6 +1726,11 @@ def application_gate(trajectory: dict | None, n_identified: int, *,
             "-- but it is also not a breach: it scores under 1.5x and this gate refuses it. A CENTRE-OF-MASS "
             "or LINK-MASS error still reaches neither rival, because the tracking gate already refuses that "
             "family at <= 1.000x -- if you ever see one of those clear 1.5x, nothing here is watching for it. "
+            "THAT HAS NOW BEEN SEEN (2026-10-10), on the imported Go2 at this package's default 20 ms of delay: "
+            "+40% and +50% link mass and inertia clear 1.5x at 1.973x and 1.686x on two joints, and what "
+            "refuses them is the global-scale rival, as a torque-scale error, which is the wrong part for a "
+            "defensible reason; +30% reads 1.390x and the tracking gate still refuses it. The family is held at "
+            "<= 1.000x at zero delay, not under delay on a ringing hip. "
             "AND A RISK ON THE OTHER CHECK, NAMED RATHER THAN PATCHED: the torque-scale rival is still scored "
             "with the un-normalised statistic the link-inertia check had to abandon, so it too rises as the "
             "fit weakens. Over the same dense 1.5x-3.0x sweep its largest value on a CORRECT fit is 0.852 "
@@ -1746,6 +1792,13 @@ def application_gate(trajectory: dict | None, n_identified: int, *,
             "stop it is gone) and honestly LOSES at 0.869, because the log really does contain a change no "
             "single scalar produces. Neither rival is the instrument for that one; every value in such a fit "
             "is out by the same factor while the fit itself is the better explanation of the log. "
+            "MEASURED AGAIN 2026-10-10 on the imported Go2, through a motor-current log, at this package's "
+            "default 20 ms of delay: a 1.35x-wrong constant on top of a real dissipation change tracks 4.974x "
+            "and is APPLIED, the gear rival at 0.727x and the inertia rival at 0.975x, against 13.646x for the "
+            "same log with the constant right; the two armature values it writes both have intervals that "
+            "exclude the injected truth. Every constant from 0.7x to 1.35x that was tried is applied there. It "
+            "is a hip phenomenon: with only the thigh and calf excited the same error reads 1.010x and is "
+            "refused, and at 0 and 40 ms the tracking gate refuses it (1.024x, 1.239x). "
             "So a PASS says your simulator now tracks your log, and that neither a single global torque scale "
             "nor a single link-inertia scale explains it as well as the fit does. It does not say these three "
             "numbers are the three physical quantities they are named after. If your link inertia tensor is "
@@ -2331,8 +2384,9 @@ def fit_parameters(gene, log: dict, *, plan: dict | None = None,
     # LATENCY FIRST, and that ordering is load-bearing. ``_trajectory_improvement`` replays the loop, and a
     # replay run at the wrong delay measures the delay instead of the fit -- MEASURED on the Go2 at 30 ms of
     # injected delay, NOTHING the estimator can express scores above 1.012x on the delay-blind metric, against a
-    # 1.5x threshold. Scoring both replays at the IDENTIFIED delay is what makes the ratio about the parameters
-    # again, and that requires knowing the delay before the trajectory is measured.
+    # 1.5x threshold (1.374x since the twin carries the Go2's own link inertials, re-measured 2026-10-10; still
+    # under). Scoring both replays at the IDENTIFIED delay is what makes the ratio about the parameters again,
+    # and that requires knowing the delay before the trajectory is measured.
     if measure_delay:
         out["latency"] = _delay_on_the_fitted_model(gene, model, aligned, deltas, dofs, kp, kd, log, plan,
                                                     joints, int(delay_max_ticks))
@@ -2513,6 +2567,14 @@ def _trajectory_improvement(gene, model, aligned, deltas, dofs, kp, kd, log, pla
     was being called a ceiling. Nothing here is a bound; the collapse of the RANGE is the finding, and it is now
     measured over the family rather than argued from one point.
 
+    RE-MEASURED 2026-10-10 on a twin that also carries the Go2's own link inertials, full plan: the family's
+    best delay-blind score is 1.374x at 30 ms and 1.006x at 40 ms, so the argument stands with less margin. At
+    20 ms the truth scores 2.044x, ``armature +0.08`` 3.138x and the fit 2.208x (its armature 0.0350-0.0363
+    against 0.030). At 40 ms the fit identifies 32 cells with a median error of 15% (the worst a thigh's dry
+    friction, 48% low) and scores 1.003x at the old point. Scored at the delay, the same fit reads 1.569x and
+    clears the gate, and is then refused by the global-scale rival as a 0.53x gear the harness never set:
+    ``tests/test_sysid_delay_wedge.py`` pins what that does and does not mean.
+
     Running both sides at the same, correct delay cancels the timing term the way the ratio always assumed it
     did. The old figure is kept as ``improvement_x_at_zero_delay`` so the two can be read against each other,
     and when the delay could NOT be identified this falls back to zero delay and says so -- scoring at a delay
@@ -2576,8 +2638,12 @@ def _trajectory_improvement(gene, model, aligned, deltas, dofs, kp, kd, log, pla
             "both replays carry the same actuation delay, so the timing error cancels in the ratio and what is "
             "left is the fitted parameters. Scored at 0 ms this number's RANGE is set by the delay rather than "
             "by the fit -- measured on the Menagerie Go2 at 30 ms, no parameter set this estimator can express "
-            "scores above 1.012x against a 1.5x gate, so a refusal there would be about your log's latency and "
-            "not about your parameters."
+            "scores above 1.374x against a 1.5x gate (re-measured 2026-10-10 on a twin carrying the robot's own "
+            "link inertials; it was 1.012x before them), so a refusal there would be about your log's latency "
+            "and not about your parameters. On a delay-sensitive joint (the Go2's hip), read a PASS or a "
+            "rival's refusal at 20 ms of delay or more together with application.what_this_gate_does_not_catch: "
+            "scored at the delay, this ratio has been measured passing a fit whose torque constant was 1.35x "
+            "wrong at 20 ms, and clearing the gate for correct fits that a rival then refused at 30 and 40 ms."
             if d else
             ("the log shows no actuation delay, so 0 ms is the correct scoring point" if delay_identified else
              "the actuation delay could NOT be identified, so this falls back to 0 ms. Any timing error in the "

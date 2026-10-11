@@ -19,14 +19,16 @@ reacts to a non-finite ``qacc`` by raising ``mjWARN_BADQACC`` *and calling* ``mj
 ``np.isfinite(d.qpos)`` reads True on a model that exploded a millisecond earlier. Any gate written the obvious
 way passes the exact case it was written to catch.
 
-ONE FIXTURE MOVED, AND THE REASON MATTERS. The collapsed ALOHA above is no longer the divergence anchor: once
+THE FIXTURES MOVED, AND THE REASONS MATTER. The collapsed ALOHA above is no longer the divergence anchor: once
 ``robot_import`` began carrying the source's own joint damping (ALOHA declares 1.2-40 N.m.s/rad where our
 structural prior substituted 2.0) the stacked twin became well-damped enough to survive contact it has no
 business surviving. It is still REJECTED — by ``_placement_fidelity``, which is the door that was always right
 for "the links are in the wrong place" — and that is asserted directly in
-``test_a_collapsed_twin_is_STILL_REJECTED_even_though_it_no_longer_diverges``. The divergence door is anchored
-instead on PAL's TIAGo++, the one package in the corpus whose own declaration our twin genuinely cannot
-integrate. Re-anchoring beat the alternative of under-damping a customer's robot so an assertion keeps passing.
+``test_a_collapsed_twin_is_STILL_REJECTED_even_though_it_no_longer_diverges``. Its replacement, PAL's TIAGo++,
+stopped diverging when the importer began carrying each link's source inertial, and flybody, the corpus's
+twin that would not compile, compiles for the same reason. The cached corpus no longer has a twin that cannot
+be stepped, so both doors are anchored on defects injected into a real twin. Each re-anchoring beat the
+alternative of making a customer's robot less faithful so an assertion keeps passing.
 """
 from __future__ import annotations
 
@@ -195,31 +197,24 @@ def test_the_right_arm_keeps_its_180_degree_yaw():
 
 # --------------------------------------------------------------------------- the gate
 def _a_twin_that_really_diverges():
-    """A REAL twin, from the real corpus, that MuJoCo cannot step — the anchor for the divergence half.
+    """A real twin that MuJoCo cannot step, the anchor for the divergence half.
 
-    It used to be the collapsed ALOHA, and is not any more. When the importer started carrying the source's own
-    joint DAMPING (ALOHA declares 1.2-40 N.m.s/rad against the 2.0 our structural prior used to substitute),
-    the collapsed twin became well-damped enough to survive 600 steps of contact it has no business surviving.
-    That is a faithfulness win and a coverage loss at the same time, and the honest response is to re-anchor
-    rather than to under-damp ALOHA on purpose so an assertion keeps passing.
+    The collapsed ALOHA stopped diverging when the importer began carrying the source's joint damping. Its
+    replacement, TIAGo++, stopped when the importer began carrying each link's source inertial: its 1000 N.s/m
+    torso lift was stable against its real link inertias all along, and went non-finite (t=1.052 s) only against
+    the primitive ones we used to substitute. Both are faithfulness wins and coverage losses, and the honest
+    response to each is to re-anchor rather than make a customer's robot less faithful so an assertion keeps
+    passing.
 
-    The replacement is PAL's TIAGo++, the one package in the whole corpus whose own declaration our twin cannot
-    integrate: 1000 N.s/m on the torso lift and 40 N.m.s/rad across both arms, stable against their real link
-    inertias and non-finite against our primitives at t=1.052 s. ``robot_import`` detects exactly that and
-    falls back to our prior with a loud disclosure, so this rebuilds the gene it declined — the model the gate
-    is FOR.
+    So the defect is injected, into a real twin, in the one way a customer's own file can make the twin
+    unsteppable while the probe stays inside that file's ranges: an actuator limit no joint has. A Go2 whose
+    motors declare 1e9 N.m settles quietly (the probe holds ctrl at zero while it settles) and goes non-finite on
+    the first commanded step from both start poses, so it fails exactly where this door looks.
     """
-    import dataclasses
-
-    out = _import("pal_tiago_dual/tiago_dual.xml", "diverge")
-    gene = out["gene"]
-    assert gene.metadata.get("source_joint_dynamics_carried") is False, (
-        "premise gone: TIAGo++'s declaration is now steppable on our twin, so this is no longer the corpus's "
-        "diverging case. Re-derive the anchor before weakening anything below.")
-    return dataclasses.replace(
-        gene, metadata={k: v for k, v in gene.metadata.items()
-                        if k not in ("source_joint_dynamics_carried",
-                                     "source_joint_dynamics_not_carried_reason")})
+    gene = copy.deepcopy(_import("unitree_go2/go2.xml", "diverge")["gene"])
+    for s in gene.actuated_joints():
+        s.actuator_torque_nm = 1e9
+    return gene
 
 
 def test_mujoco_hides_the_divergence_so_a_finiteness_check_on_state_is_vacuous():
@@ -315,18 +310,41 @@ def test_the_gate_reports_a_named_reason_it_could_not_compile():
     assert "does not compile" in res["reason"], res["reason"]
 
 
-def test_an_unsimulable_import_is_not_reported_as_valid():
-    """``valid`` may not be true for a body nobody can step. flybody is the corpus case: at HEAD it imported
-    ``valid=True`` and its gene could not be compiled at all (a zero-inertia link, 'haustellum')."""
+def test_flybody_imports_now_that_its_links_carry_their_own_inertia():
+    """flybody was the corpus's twin that would not compile: its 3.2 mg 'haustellum' got a primitive whose
+    derived inertia fell under MuJoCo's floor. Carrying the source's own inertial fixed that, so pin it."""
     rel = "flybody/fruitfly.xml"
     if not (_MEN / rel).exists():
         pytest.skip("flybody is not in the local Menagerie cache")
-    out = _import(rel, "unsim")
-    assert out["simulable"] is False, "flybody's twin does not compile; the import must say so"
+    out = _import(rel, "fly")
+    assert out["simulable"] and out["valid"], out["simulation_check"]
+    assert "haustellum" in out["gene"].metadata["source_inertials"]
+
+
+def test_an_unsimulable_import_is_not_reported_as_valid(monkeypatch):
+    """``valid`` may not be true for a body nobody can step, and the reason must name the link.
+
+    Injected, because no cached package fails this way any more (see flybody above): the real probe is handed
+    the real twin with one link made massless and sizeless, which MuJoCo refuses to compile.
+    """
+    from virturoid.services import robot_import as ri
+
+    real = ri._simulability_probe
+
+    def probe(gene):
+        broken = copy.deepcopy(gene)
+        calf = broken.segment("FL_calf")
+        calf.mass_kg, calf.length_m, calf.radius_m = 0.0, 0.0, 0.0
+        return real(broken)
+
+    monkeypatch.setattr(ri, "_simulability_probe", probe)
+    monkeypatch.delenv("VIRTUROID_IMPORT_CACHE", raising=False)   # a memoized import never reaches the probe
+    out = _import("unitree_go2/go2.xml", "unsim")
+    assert out["simulable"] is False, "the twin does not compile; the import must say so"
     assert out["valid"] is False, "an unsimulable twin may not be reported valid"
     assert any("NOT SIMULABLE" in w for w in out["warnings"]), out["warnings"][:3]
     assert out["simulation_check"]["stage"] == "compile"
-    assert "haustellum" in out["simulation_check"]["reason"], (
+    assert "FL_calf" in out["simulation_check"]["reason"], (
         f"the reason must name the offending link: {out['simulation_check']['reason']}")
 
 

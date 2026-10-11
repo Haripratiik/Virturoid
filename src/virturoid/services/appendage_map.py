@@ -85,6 +85,31 @@ def _world_axis_role(wa) -> str:
     return {0: "abduction", 1: "stride", 2: "yaw"}[ax]
 
 
+def _inside_support(points, com) -> bool:
+    """Does ``com`` (x, y) lie strictly inside the convex hull of ``points``? Fewer than three points that are
+    not collinear span no polygon, and a body cannot stand on a line."""
+    pts = sorted({(float(x), float(y)) for x, y in points})
+    if len(pts) < 3:
+        return False
+
+    def cross(o, a, b):
+        return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+
+    lower, upper = [], []
+    for p in pts:
+        while len(lower) >= 2 and cross(lower[-2], lower[-1], p) <= 0:
+            lower.pop()
+        lower.append(p)
+    for p in reversed(pts):
+        while len(upper) >= 2 and cross(upper[-2], upper[-1], p) <= 0:
+            upper.pop()
+        upper.append(p)
+    hull = lower[:-1] + upper[:-1]                       # counter-clockwise
+    if len(hull) < 3:
+        return False
+    return all(cross(hull[i], hull[(i + 1) % len(hull)], com) > 1e-12 for i in range(len(hull)))
+
+
 def build_appendage_map(model, *, ground_tol: float = 0.10, spine_min: int = 6) -> AppendageMap:
     """Discover + classify the body's appendages from the compiled model. Pure geometry/contact + kinematics —
     no names, no ``robot_class``. ``ground_tol`` = how close (m) a chain's lowest geom must ride to the body's
@@ -206,8 +231,13 @@ def build_appendage_map(model, *, ground_tol: float = 0.10, spine_min: int = 6) 
     # rubric and offered a quadruped crawl gait.
     #
     # A fixed base is only promoted on evidence of a real STANCE (body_kind.MIN_STANCE_CHAINS /
-    # STANCE_LEVEL_FRAC): enough chains reaching down TOGETHER, to a common level. That is what still keeps
-    # #214's quadruped legged — MuJoCo fused its static torso into the world, and its four level limbs qualify.
+    # STANCE_LEVEL_FRAC): enough chains reaching down TOGETHER, to a common level, around the body they carry.
+    # That is what still keeps #214's quadruped legged: MuJoCo fused its static torso into the world, and its
+    # four level limbs stand at the corners of it. "Around" is the support-polygon rule, the physical meaning of
+    # standing: the body's centre of mass must project inside the polygon its tips span. Level alone stopped
+    # being enough once a LEAP hand's thumb collider ended at the thumb's real collision geometry: at the zero
+    # pose the hand lies flat, its four fingertips came out level, and four fingers that support nothing were a
+    # quadruped again. Their polygon misses the hand's centre of mass by about 3 cm.
     # FLOATING bodies are untouched: they really do stand on whatever reaches the floor.
     floating = any(int(model.jnt_type[j]) == int(mujoco.mjtJoint.mjJNT_FREE) for j in range(int(model.njnt)))
     if not floating:
@@ -215,7 +245,9 @@ def build_appendage_map(model, *, ground_tol: float = 0.10, spine_min: int = 6) 
         zmax = max((max(float(gz[gi]) for gi in gs) for b, gs in body_geoms.items() if b != 0), default=zmin)
         tips = [body_low(c["tip_body"]) for c in grounded_chains]
         level = bool(tips) and (max(tips) - min(tips)) <= STANCE_LEVEL_FRAC * max(zmax - zmin, 1e-6)
-        if len(grounded_chains) < MIN_STANCE_CHAINS or not level:
+        supported = _inside_support(
+            [c["tip_xy"] for c in grounded_chains], (float(data.subtree_com[0][0]), float(data.subtree_com[0][1])))
+        if len(grounded_chains) < MIN_STANCE_CHAINS or not level or not supported:
             for c in chains:
                 c["grounded"] = False
             grounded_chains = []

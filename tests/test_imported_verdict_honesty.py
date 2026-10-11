@@ -128,15 +128,19 @@ def test_a_real_quadruped_stands_at_its_own_declared_home_pose():
         assert facts["static_holding_torque"]["ok"], f"{pkg} needs more torque than it declares: {facts}"
 
 
-def test_tilt_is_relative_to_spawn_not_an_absolute_euler_angle():
-    """An imported root carries the rotation that aligns its reconstructed link frame, so the Go2's base
-    quaternion reads roll 90.0 / pitch 76.5 deg AT STEP ZERO on a body standing square on four feet. An
-    absolute gate would fail every imported robot before physics ran."""
+def test_an_imported_base_reads_level_where_it_stands():
+    """The Go2's base quaternion used to read roll 90.0 / pitch 76.5 deg AT STEP ZERO on a body standing square
+    on four feet, because the compiled base body kept the rotation the importer uses to draw the trunk. This
+    file worked around it here by measuring tilt relative to spawn, and the crawl, the verdict and dozens of
+    other readers did not, so every gait found for an imported quadruped was judged CROUCH. The compiler now
+    keeps that rotation off the base body (``gene_compiler._framed_root``), so an absolute reading and a
+    spawn-relative one agree, and both say level."""
     import mujoco
     import numpy as np
 
     from virturoid.services.gene_compiler import compile_gene_to_mjcf, standing_spawn_z
     gene = _imported("unitree_go2", "go2.xml")
+    assert any(abs(v) > 1e-6 for v in gene.root().mount_euler), "premise: the imported trunk is drawn rotated"
     m = mujoco.MjModel.from_xml_string(
         compile_gene_to_mjcf(gene, include_floor=True, spawn_z=standing_spawn_z(gene)))
     d = mujoco.MjData(m)
@@ -145,7 +149,8 @@ def test_tilt_is_relative_to_spawn_not_an_absolute_euler_angle():
     mujoco.mj_forward(m, d)
     w, x, y, z = (float(d.qpos[3]), float(d.qpos[4]), float(d.qpos[5]), float(d.qpos[6]))
     abs_roll = abs(float(np.degrees(np.arctan2(2 * (w * x + y * z), 1 - 2 * (x * x + y * y)))))
-    assert abs_roll > 45.0, "premise gone: the imported root no longer carries a frame rotation"
+    abs_pitch = abs(float(np.degrees(np.arcsin(np.clip(2 * (w * y - z * x), -1.0, 1.0)))))
+    assert abs_roll < 1e-3 and abs_pitch < 1e-3, f"a level Go2 reads roll {abs_roll:.1f} / pitch {abs_pitch:.1f}"
     from virturoid.services.ai_native_tools import _controller_free_facts
     assert _controller_free_facts(gene)["stands_under_gravity"]["stands"] is True
 
