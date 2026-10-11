@@ -120,7 +120,11 @@ def _role_geometry(role: str, size: float, girth: float, aspect: str = "", *, au
         if a in ("round", "bulb", "sac"):
             hw = min(max(0.04, g), 0.95 * L) / 2.0
             h = max(0.04, 1.9 * hw)
-            return loft(hw, h), h, hw
+            # ROUND IN PLAN TOO. ``loft`` stretches the sections to the part's LENGTH front to back, so a round
+            # mantle of size 0.58 / girth 0.13 was drawn as a 0.58 m cigar around the 0.13 m ball its collider
+            # is (see the root's sphere in ``build_from_anatomy``). A sac is as long as it is wide.
+            return _loft([(0.0, hw * 0.74, hw * 0.74), (0.40 * h, hw, hw), (0.82 * h, hw * 0.92, hw * 0.92),
+                          (h, hw * 0.58, hw * 0.58)]), h, hw
         # DEFAULT 'long' robot torso -> a CHASSIS as a multi-feature COMPOUND: a main structural shell PLUS a
         # raised top electronics/sensor deck (a real robot body is a shell with a mounted module bay, not one
         # plain block). The compound is ONE segment (no kinematic cost) but reads as several parts.
@@ -691,6 +695,13 @@ def build_from_anatomy(graph: dict) -> RobotGene:
     # its supporting loft description back into a rectangular proxy.
     if root_shape != "sphere":
         root_shape = proxy_shape
+    else:
+        # ...AND ITS PARTS ROOT ON THAT SPHERE. The anchors used the part's LENGTH as the body's half-length,
+        # which a ball does not have: the offline octopus (mantle 0.58 x 0.13) put its front and rear tentacle
+        # pairs 0.174 m out on a 0.065 m ball, so in the simulated body four tentacles hung from empty space
+        # (measured 2026-10-11, 0.061 m clear of the mantle). The ball's radius is the half-length now.
+        half_len = max(brad, 0.06)
+        trunk_len = 2.0 * half_len
     # The body plan's front/back half-length used to disappear here: every
     # torso compiled as a square vertical post.  A box torso now carries the
     # same x/y envelope that anchors and the geometry program use.
@@ -1314,8 +1325,11 @@ def generic_creature_gene(prompt: str, robot_class: str | None = None, n_legs: i
             n_pairs=n_pairs, center_leg=center_leg, appendage_role="tentacle" if tentacled else "leg",
             body_aspect="round" if tentacled else "",
             leg=round(0.42 * prop["leg"] * ask["leg"] * s, 4),
-            body=round(0.58 * prop["torso"] * ask["torso"] * s, 4),
-            girth=round(0.13 * ((prop["mass"] * size_mass) ** (1.0 / 3.0)) * ask["girth"] * s, 4),
+            # A tentacled body's mantle is a ROUND sac as long as it is wide (0.30 m), not the 0.58 x 0.13 m
+            # walking trunk: with that trunk's numbers "round" could only mean a 0.13 m ball under 0.42 m arms.
+            body=round((0.30 if tentacled else 0.58 * prop["torso"] * ask["torso"]) * s, 4),
+            girth=round((0.30 if tentacled else 0.13 * ((prop["mass"] * size_mass) ** (1.0 / 3.0)) * ask["girth"])
+                        * s, 4),
             leg_girth_mult=ask["thick"],
             # A wide/splayed stance is asked for either by the species prior (gecko, crocodile) or in so many
             # words ("a wide stance"); both reach the same fanned layout.

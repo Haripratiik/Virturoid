@@ -4,8 +4,11 @@ MEASURED 2026-10-11 by composing and grounding 20 prompts and reading the three 
 (engineering, anatomy, structural seams). Fifteen HIGH or MED findings were false, on the bodies the product
 composes most:
 
-* every composed walker (quadruped, tripod, hexapod, octopod) had its head "visibly detached" by 0.037-0.094 m,
-  and the octopus four tentacles by 0.061 m: measured on the bare colliders, while the drawn body mates;
+* every composed walker (quadruped, tripod, hexapod, octopod) had its head "visibly detached" by 0.037-0.094 m:
+  measured on the bare colliders, while the drawn body mates;
+* the octopus four tentacles by 0.061 m, and that one was real in the SIMULATED body: its mantle collider was a
+  0.13 m ball while the anchors and the drawing used a 0.58 m cigar (``anatomy_compiler`` now makes a round
+  mantle round in all three);
 * the quadcopter's four rotors were "detached" by 0.085 m: each sits on a welded arm that never counted;
 * every humanoid and biped "would topple": the support polygon was built from foot CENTRES, and two feet are a
   line;
@@ -161,3 +164,18 @@ def test_a_lopsided_limbed_body_is_still_flagged():
     issues = critique_gene(RobotGene(id="lopsided", species="x", robot_class="legged", base_mount="free",
                                      end_effector_type="none", segments=segs))["issues"]
     assert any(i["check"] == "symmetry" for i in issues), issues
+
+
+def test_a_round_mantle_carries_its_tentacles_in_the_simulated_body_too():
+    from virturoid.services.morphology_composer import compose_robot
+    from virturoid.services.structural_assertions import evaluate_structural_assertions
+    gene = compose_robot("an octopus robot")
+    mantle = gene.root()
+    assert mantle.shape == "sphere"
+    bare = evaluate_structural_assertions(gene, meshed=False)
+    assert bare.ok, _failed(bare)
+    # and it is drawn as round as it is simulated: the loft is as long as it is wide at every section
+    sections = (mantle.geometry or {}).get("sections") or []
+    assert sections and all(abs(float(x) - float(y)) < 1e-9 for _z, y, x in sections), sections
+    anchors = [abs(s.mount_offset[0]) for s in gene.segments if s.parent == mantle.name]
+    assert anchors and max(anchors) <= mantle.radius_m, (anchors, mantle.radius_m)
