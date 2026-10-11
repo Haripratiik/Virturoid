@@ -10,8 +10,9 @@ A credible WALK requires ALL of: survived (didn't fall) + upright at the body's 
 + real foot-lift cadence + genuine stepping support + forward travel + A RATE THAT HOLDS + A COURSE IT HELD. A body
 that stands still scores cadence 0 -> SLIDE; a low unstable body scores low upright_frac -> CROUCH; a body that
 covers ground and then stops scores a decaying travel rate -> DRIFTS THEN STALLS; a body that goes round in a
-circle scores a swung heading / a path much longer than its net displacement -> WALKS IN A CIRCLE; a fall is named
-by its dominant orientation mode.
+circle scores a swung heading / a path much longer than its net displacement -> WALKS IN A CIRCLE; a body that
+went upside down -> FELL by FLIP-OVER, whatever its trunk height; any other fall is named by its dominant
+orientation mode.
 """
 from __future__ import annotations
 
@@ -33,16 +34,30 @@ def orientation_summary(qpos_frames) -> dict:
     SUSTAINED attitude, so the gate reads a sustained statistic and keeps the single worst frame only as an
     absolute ceiling (``_HARD_*`` below). Cross-checked on 10 grounded bodies at 800 and 1500 steps: ZERO
     verdict changes at the horizons already in use, so this is inert everywhere except where the max was wrong.
+
+    TILT IS HERE BECAUSE ROLL AND PITCH STOP MEANING ANYTHING AT 90 DEG, and a body that goes over is exactly the
+    one an engineer reads them for. ``tilt`` is the angle between the base's own up-axis and world up,
+    ``arccos(1 - 2(x^2 + y^2))``: one number, no decomposition, continuous through every attitude. The Euler
+    angles are a decomposition, and theirs breaks where the body's up-axis drops below the horizon: pitch is an
+    ``arcsin`` held to +-90, so a body that rears up and over backwards is re-expressed as roll 180 plus a pitch
+    that comes back DOWN plus a yaw that jumps a half-turn. MEASURED 2026-10-11 on the payload-edited inspection
+    quadruped at its stale fitted op-point (6000 steps): it rears until its front axis points straight up at step
+    4080 and lands on its back; in the Euler terms this function used to report alone that is "roll 180 / pitch
+    59 sustained" and a 156 deg heading swing, for a body that never rolled and never turned. Its tilt reads 139
+    max, and 96 of its 300 recorded frames are past 90 deg. Below 90 deg of tilt the Euler roll is confined to
+    (-90, 90) and these numbers are unchanged; ``inverted_frac`` is the fraction of frames past 90, which is
+    what ``flip_summary`` and ``classify`` read.
     """
     import numpy as np
     if not qpos_frames:
         return {}
-    R: list[float] = []; P: list[float] = []; Y: list[float] = []
+    R: list[float] = []; P: list[float] = []; Y: list[float] = []; T: list[float] = []
     for f in qpos_frames:
         w, x, y, z = (float(f[3]), float(f[4]), float(f[5]), float(f[6]))
         R.append(abs(float(np.degrees(np.arctan2(2 * (w * x + y * z), 1 - 2 * (x * x + y * y))))))
         P.append(abs(float(np.degrees(np.arcsin(np.clip(2 * (w * y - z * x), -1, 1))))))
         Y.append(abs(float(np.degrees(np.arctan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z))))))
+        T.append(_tilt_deg(x, y))
     f = qpos_frames[-1]
     w, x, y, z = (float(f[3]), float(f[4]), float(f[5]), float(f[6]))
     rr = float(np.degrees(np.arctan2(2 * (w * x + y * z), 1 - 2 * (x * x + y * y))))
@@ -52,7 +67,100 @@ def orientation_summary(qpos_frames) -> dict:
             "roll_p95": round(float(np.percentile(R, 95)), 1),
             "pitch_p95": round(float(np.percentile(P, 95)), 1),
             "yaw_p95": round(float(np.percentile(Y, 95)), 1),
-            "roll_final": round(rr, 1), "pitch_final": round(pp, 1), "yaw_final": round(yy, 1)}
+            "roll_final": round(rr, 1), "pitch_final": round(pp, 1), "yaw_final": round(yy, 1),
+            "tilt_max": round(max(T), 1), "tilt_p95": round(float(np.percentile(T, 95)), 1),
+            "tilt_final": round(T[-1], 1),
+            "inverted_frac": round(sum(1 for t in T if t > _INVERTED_TILT) / len(T), 3)}
+
+
+# ---------------------------------------------------------------------------------------------------------
+# FLIP-OVER: did the body go upside down?
+# ---------------------------------------------------------------------------------------------------------
+#: UPSIDE DOWN = the body's own up-axis points below the horizon, i.e. more than 90 deg of tilt. Not a tuned
+#: constant: 90 is where "up" stops being up, the same geometric break-even the course gate's 90 deg heading uses.
+#: Past it the trunk is resting on what was its top (or its side), and no stance, cadence or travel figure taken
+#: from it describes walking. ``survived`` used to be height-only (``morph_policy``: the trunk never dropped below
+#: half its standing height and ended above 0.6 of it), and a body propped on its back by its own payload keeps its
+#: trunk that high: MEASURED, the payload-edited inspection quadruped lay upside down from step 4080 to 6000 at
+#: 0.70 to 0.79 of its standing height and was reported ``survived: true``, ``upright_frac`` 0.636 (the 0.6 bar
+#: allows 40% of a rollout spent any other way).
+_INVERTED_TILT = 90.0
+
+#: How a FLIP-OVER verdict names the way the body went over (see ``flip_direction``; unknown reads "went over").
+_OVER_WORDS = {"backwards": "reared over backwards", "forwards": "pitched over forwards",
+               "sideways": "rolled over sideways"}
+
+
+def _tilt_deg(x: float, y: float) -> float:
+    """Tilt in degrees from the base quaternion's x/y parts: the angle between the body's up-axis and world up."""
+    import math
+    return math.degrees(math.acos(max(-1.0, min(1.0, 1.0 - 2.0 * (x * x + y * y)))))
+
+
+def flip_direction(w: float, x: float, y: float, z: float) -> str | None:
+    """WHICH WAY a body went over, from its base quaternion at the first moment it was past 90 deg of tilt.
+
+    At that moment its up-axis lies near the horizontal plane, so one of its other two axes is standing up: the
+    FORE-AFT axis if it went over end to end, the LATERAL one if it rolled. Reading the world-z component of each
+    (the third row of the rotation matrix) answers the question the Euler angles cannot, because past 90 deg they
+    report an end-over-end fall as roll 180. ``"backwards"`` = its front (+x) end went up and over, ``"forwards"``
+    = its front went down and over, ``"sideways"`` = it rolled. The front is the BODY's +x, which on a composed
+    body is where the head is and on an imported one is the source model's forward; the crawl may walk either
+    way along it (its direction probe), so "backwards" is a statement about the body, not about the walk.
+
+    ``None`` when the sample is closer to fully inverted than to the crossing (more than 135 deg of tilt: the
+    third row is a unit vector, so the two components read here then hold less than half of it). That is a body
+    that started upside down, or a trace too coarse to have seen it go over; a per-physics-step count always
+    catches the crossing itself, two milliseconds past 90 deg."""
+    fx = 2.0 * (x * z - w * y)                        # world-z of the body's +x (fore-aft) axis
+    fy = 2.0 * (y * z + w * x)                        # world-z of the body's +y (lateral) axis
+    if fx * fx + fy * fy < 0.5:
+        return None
+    if abs(fx) >= abs(fy):
+        return "backwards" if fx > 0.0 else "forwards"
+    return "sideways"
+
+
+def flip_summary(r: dict) -> dict | None:
+    """DID THE BODY GO UPSIDE DOWN: when, for what share of the rollout, how far over and which way. ``None`` when
+    it did not, or when the rollout recorded nothing that could say (a metric-only dict from a producer that does
+    not count it); never a guess.
+
+    Prefers the rollout's OWN per-physics-step count (``inverted_at_step``, ``inverted_frac``, ``tilt_max_deg``,
+    ``flipped_over``), which ``crawl_gait_rollout``, ``recipe_rollout_morph`` and the exported-controller rollout
+    emit only for a body that went over, so it is exact and independent of ``frame_every``. Falls back to the
+    recorded ``qpos_frames`` so a banked row's replay, a learned policy's rollout or any legacy dict is judged by
+    the same rule. A trace samples the steps, so it can only miss an inversion shorter than ``frame_every``,
+    never invent one.
+    """
+    if r.get("inverted_at_step") is not None:
+        return {"at_step": int(r["inverted_at_step"]), "frac": float(r.get("inverted_frac") or 0.0),
+                "tilt_max": float(r.get("tilt_max_deg") or _INVERTED_TILT), "over": r.get("flipped_over"),
+                "source": "rollout"}
+    frames = r.get("qpos_frames") or []
+    if not frames:
+        return None
+    T = [_tilt_deg(float(f[4]), float(f[5])) for f in frames]
+    inv = [i for i, t in enumerate(T) if t > _INVERTED_TILT]
+    if not inv:
+        return None
+    f = frames[inv[0]]
+    fe = int(r.get("frame_every") or 0)
+    # frame k is recorded after physics step k * frame_every (every producer appends on `t % frame_every == 0`)
+    return {"at_step": (inv[0] * fe if fe > 0 else None), "frac": len(inv) / len(T), "tilt_max": max(T),
+            "over": flip_direction(float(f[3]), float(f[4]), float(f[5]), float(f[6])), "source": "trace"}
+
+
+def _flip_words(fl: dict) -> str:
+    """The parenthesis of a FLIP-OVER verdict. Deliberately NO roll or pitch figure: past 90 deg of tilt those are
+    the Euler artifact described at ``orientation_summary``, and printing "roll 180" for a body that went over end
+    to end is what sent the last reader to the wrong axis."""
+    how = _OVER_WORDS.get(str(fl.get("over") or ""), "went over")
+    when = f" at step {int(fl['at_step'])}" if fl.get("at_step") is not None else ""
+    pct = 100.0 * float(fl.get("frac") or 0.0)
+    share = f"{pct:.0f}%" if pct >= 1.0 else "under 1%"
+    return (f"{how}{when} and was upside down for {share} of the rollout, tilt up to "
+            f"{float(fl['tilt_max']):.0f} deg")
 
 
 _CLEAN_ROLL_MAX = 35.0     # a trot/tripod rocks side-to-side some; beyond this it's tipping, not walking
@@ -218,6 +326,10 @@ _MIN_PATH_M = 0.05
 _MIN_CADENCE = 1.0
 _MIN_SUPPORT = 0.25
 
+#: Net travel along +x a credible walk needs. Named because it now has a second reader: a body that is up and
+#: stepping and went at least this far the OTHER way reads WALKS BACKWARD rather than "FORWARD BUT SHORT".
+_MIN_FORWARD_M = 0.3
+
 
 def course_summary(r: dict) -> dict | None:
     """WHERE DID IT GO — net displacement, ground actually covered, and how far the heading swung from its start.
@@ -294,8 +406,19 @@ def classify(r: dict) -> str:
     All three extra gates are judged only from what the rollout actually recorded: orientation and course need the
     qpos trace (or, for course, the rollout's own per-step accumulation), settling needs a trace of at least
     ``_SETTLE_MIN_STEPS``. A metric-only call keeps the scalar verdict.
+
+    A BODY THAT WENT UPSIDE DOWN FELL, whatever its trunk height says (see ``flip_summary``). It reads
+    "FELL by FLIP-OVER (...)" ahead of every other diagnosis, and ``survived`` is read as False for it, so the
+    verdict holds even on a dict whose producer still reports height-only survival. A CREDIBLE WALK was already
+    out of reach for such a body whenever its trace was recorded (an inverted frame has an Euler roll past 90, over
+    the 70 deg ceiling), but not on a metric-only dict, and not in its wording: MEASURED 2026-10-11, a quadruped
+    that lay on its back for the last 32% of a 6000-step verify read "LURCHES (pitch 59 / roll 180 deg sustained
+    ...)" with ``survived: true``. The roll was the Euler artifact; it went over backwards.
     """
     survived = bool(r.get("survived"))
+    flip = flip_summary(r)
+    if flip is not None:
+        survived = False
     up = float(r.get("upright_frac", 0.0)); hr = float(r.get("height_ratio", 0.0))
     cad = float(r.get("cadence", 0.0)); sup = float(r.get("support_frac", 0.0))
     fwd = float(r.get("forward", 0.0))
@@ -309,9 +432,14 @@ def classify(r: dict) -> str:
                                 or c["heading_dev_max_deg"] >= _HARD_HEADING_DEV)
     milled = c is not None and c["straightness"] is not None and c["straightness"] < _MIN_STRAIGHTNESS
     on_course = c is None or not (turned or milled)
-    scalars_ok = survived and up >= 0.6 and cad >= _MIN_CADENCE and sup >= _MIN_SUPPORT and fwd >= 0.3
+    scalars_ok = survived and up >= 0.6 and cad >= _MIN_CADENCE and sup >= _MIN_SUPPORT and fwd >= _MIN_FORWARD_M
     if scalars_ok and level and holds and on_course:
         return "CREDIBLE WALK"
+    if flip is not None:
+        # FIRST, because it is the one diagnosis every branch below would get wrong: the Euler-mode naming reads a
+        # backwards flip as ROLL-OVER (or YAW-DRIFT, its yaw jumps a half-turn too) and the lurch branch reads it
+        # as a sustained roll of 180 deg.
+        return f"FELL by FLIP-OVER ({_flip_words(flip)})"
     # not a credible walk: name the DOMINANT fall mode from the orientation trace (if replayable) so the
     # verdict is diagnostic, not just "bad" — a roll-over reads as CROUCH by height alone, which misleads.
     if o:
@@ -343,4 +471,14 @@ def classify(r: dict) -> str:
         return "CROUCH (low/unstable stance)"
     if cad < _MIN_CADENCE or sup < _MIN_SUPPORT:
         return "SLIDE (feet barely lift / no real stepping)"
+    if survived and fwd <= -_MIN_FORWARD_M:
+        # Up, stepping, alive, and it went the WRONG WAY at least as far as a walk must go the right way. This used
+        # to fall through to the line below and read FORWARD for it: MEASURED 2026-10-11, the design schema's
+        # hexapod example through submit_design and a full verify travels -1.9 m in 6000 steps and was reported
+        # "FORWARD BUT SHORT". Still not credible (``forward`` is scored along +x, the heading the verdict and
+        # every bank gate measure), only named for what it did.
+        steps = int(r.get("steps") or 0)
+        over = f" over {steps} steps" if steps > 0 else ""
+        return (f"WALKS BACKWARD ({-fwd:.2f} m backward{over}: up and stepping, the wrong way along the +x a "
+                f"walk is scored on)")
     return "FORWARD BUT SHORT / not a credible walk"

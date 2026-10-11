@@ -132,8 +132,10 @@ def reward_features_from_rollout(r: dict) -> dict:
         # 0.0 after a fall"), NOT the raw step count. The rollout reports `alive` as a STEP COUNT (steps survived
         # before a fall, e.g. 500), so passing it through scaled every `*alive` reward term by ~500x and let a
         # barely-moving body score huge. Derive the flag from `survived` (the honest all-steps-upright signal);
-        # partial survival is already carried by `upright` and `height_ratio`.
-        "alive": 1.0 if r.get("survived") else 0.0,  # real: 0/1 survival flag, never the step count
+        # partial survival is already carried by `upright` and `height_ratio`. Read through the HEIGHT test on a
+        # rollout that went upside down, for the reason ``evaluate_gait`` gives: this feeds a reward that steers the
+        # search, and the honest ``survived`` would move it. The trusted screen (``classify``) still calls it a fall.
+        "alive": 1.0 if r.get("survived_by_height", r.get("survived")) else 0.0,  # real: 0/1, never the step count
 
         "slip": abs(float(r.get("lateral", 0.0))),                 # real proxy (lateral drift = slide cost)
         "foot_clearance": 0.0,   # unavailable from the summary rollout (needs per-step foot z) -> neutral
@@ -191,7 +193,22 @@ def evaluate_gait(gene, params: dict, *, steps: int = 1200, reward_fn=None) -> d
     survived = bool(r.get("survived"))
     verdict = classify(r)
     credible = verdict.startswith("CREDIBLE")
-    if not survived or hr < 0.5:
+    # THE SEARCH STILL RANKS BY THE HEIGHT TEST, deliberately. ``survived`` (reported above and below, and read by
+    # every gate) is False for a body that went upside down; this ranking signal is not a claim about the body, it
+    # steers the CEM, and scoring a flip as a fall instead of a non-credible survivor MOVES THE SEARCH. MEASURED
+    # 2026-10-11 on the defect's own body (the payload-edited inspection quadruped, ``fit_gait_for_body``,
+    # budget off): 41 of the 95 rollouts the fit runs go over while their trunk stays high, and ranking them as
+    # falls takes the fit from a sturdy walk (10.477 m, survives a 0.1 perturbation, second seed attempt) to a
+    # fragile one (5.033 m, 0.001, first attempt); on the Go2 twin (5 such rollouts) and the two create_robot fits
+    # that searched (the inspection quadruped, a hexapod) it was byte-identical either way. Neither outcome is the
+    # flip's doing as such: the old first attempt STOPPED on a credible 0.735 m walk and returned a 5.306 m lurch
+    # as its best (a non-credible survivor scores 0.3 x forward, 1.592 here, and best-tracking compares only that
+    # score), so it adopted nothing until its second attempt. Whether a flip should rank as a fall is a question for
+    # a seeded A/B across bodies, like the robust-search one ``gait_flywheel`` records, not a side effect of
+    # naming the verdict. Nothing a flip can do here reaches a body: adoption and banking need ``credible``, which
+    # a rollout that went over can never be (see ``gait_quality.classify``).
+    held_up = bool(r.get("survived_by_height", survived))
+    if not held_up or hr < 0.5:
         default_fitness = hr - 1.2                            # fell -> negative
     else:
         default_fitness = fwd * (1.0 if credible else 0.3)   # signed forward; non-credible discounted

@@ -851,7 +851,7 @@ def _honest_gait(gene, *, steps: int = 1200, render: bool = False, tag: str = "g
     """
     from virturoid.services.morph_policy import crawl_gait_rollout
     from virturoid.services.gait_flywheel import _DEFAULT_GAIT
-    from virturoid.services.gait_quality import classify, orientation_summary, settling
+    from virturoid.services.gait_quality import classify, flip_summary, orientation_summary, settling
     frame_every = max(5, int(steps) // 300)
     # A LIMBLESS serial spine (a snake) has no legs for the crawl gait — drive it as a land SERPENTINE undulator
     # instead (else it just falls / scores 0). The land analogue of routing a fish to the swim tier.
@@ -974,12 +974,20 @@ def _honest_gait(gene, *, steps: int = 1200, render: bool = False, tag: str = "g
         _record_gait_hint_outcome(gene, r_recalled, r_def, selected_default=better_def, source=src_recalled,
                                   shipped_rollout=r, shipped_source=gait_source)
     o = orientation_summary(r.get("qpos_frames") or [])
+    _flip = flip_summary(r)
     out = {"kind": "legged", "verdict": classify(r), "survived": bool(r.get("survived")),
            "gait_source": gait_source,
            "forward_m": round(float(r.get("forward", 0)), 3),
            "speed_mps": round(float(r.get("speed", 0)), 3), "cadence": round(float(r.get("cadence", 0)), 1),
            "support_frac": round(float(r.get("support_frac", 0)), 2), "height_ratio": r.get("height_ratio"),
-           "roll_max_deg": o.get("roll_max"), "pitch_max_deg": o.get("pitch_max")}
+           "roll_max_deg": o.get("roll_max"), "pitch_max_deg": o.get("pitch_max"),
+           # THE ANGLE THAT STAYS TRUE PAST 90 DEG. roll/pitch above are Euler angles, and on a body that went
+           # over end to end they read roll 180 (gait_quality.orientation_summary): measured on a quadruped that
+           # reared over backwards, "roll 180" sent the reader to the wrong axis. Read off the same count the
+           # verdict was (the rollout's own, per physics step, when it went over; else the trace).
+           "tilt_max_deg": (round(float(_flip["tilt_max"]), 1) if _flip else o.get("tilt_max"))}
+    if _flip:
+        out["inverted_frac"] = round(float(_flip["frac"]), 3)     # share of the rollout it spent upside down
     if gait_provenance is not None and gait_source.startswith("tuned_for_this_body"):
         out["gait_provenance"] = gait_provenance   # which training run produced the controller just measured
     # SAY THAT THE LANDED CONTROLLER WAS RUN AND BEATEN, rather than leaving a generic ``gait_source`` to imply

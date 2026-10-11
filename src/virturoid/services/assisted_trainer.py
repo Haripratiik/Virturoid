@@ -131,8 +131,10 @@ def _measure_travel(gene, policy, *, steps: int = 2400) -> dict:
     from virturoid.services.morph_policy import rollout_deployed_morph_policy
     r = rollout_deployed_morph_policy(gene, policy, steps=steps)
     if r.get("deployment_controller") == "recipe_cpg":
+        # not upright if it went upside down, however high its trunk ended (``morph_policy._Inversion``)
         return {"forward": float(r.get("forward", 0.0)),
-                "upright": bool(r.get("survived", False)) or float(r.get("height_ratio", 0.0)) > 0.6}
+                "upright": ((bool(r.get("survived", False)) or float(r.get("height_ratio", 0.0)) > 0.6)
+                            and r.get("inverted_at_step") is None)}
     return {"forward": float(r.get("forward", 0.0)), "upright": bool(r.get("upright", False))}
 
 

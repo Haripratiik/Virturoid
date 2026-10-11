@@ -950,6 +950,7 @@ def recipe_rollout_morph(gene, policy: MorphPolicy | None = None, *, steps: int 
     foot_h = np.empty((steps + 1, feet.n))                  # row 0 = the state the first step starts from
     foot_h[0] = feet.heights(data)
     up_steps = 0
+    inv = _Inversion()                                      # did it go upside down (measurement only)
     tau_up = upright_height_ratio(feet.n)                   # per-body upright stance-height threshold (WS3)
     # COMMAND-TRACKING (WS8): with a command_schedule = [(vx_cmd, n_steps), ...] measure how well the body's
     # forward SPEED tracks a time-varying commanded speed. A constant "always walk forward" gait can't slow/stop/
@@ -1017,6 +1018,8 @@ def recipe_rollout_morph(gene, policy: MorphPolicy | None = None, *, steps: int 
             qpos_frames.append(data.qpos.copy())
         q = data.qpos[bq + 3:bq + 7]
         upr = 1.0 - 2.0 * (float(q[1]) ** 2 + float(q[2]) ** 2)   # world-up . body-up (orientation)
+        if upr < 0.0:                                             # past 90 deg of tilt: UPSIDE DOWN (_Inversion)
+            inv.note(t, q, upr)
         z = float(data.qpos[bq + 2]); hr = min(1.0, max(0.0, z / z0)); x = float(data.qpos[bq])
         vx = (x - px) / dt; px = x
         if cmd_seq is not None:                                   # accumulate command-tracking error (WS8)
@@ -1048,12 +1051,15 @@ def recipe_rollout_morph(gene, policy: MorphPolicy | None = None, *, steps: int 
     # diagnostic for the interval before termination.
     horizon_speed = forward / max(1, steps) / dt
     active_speed = forward / max(1, alive) / dt
+    _by_height = bool(alive >= steps and hr > 0.6)               # the height test, all `survived` used to be
     out = {"finite": True, "gait": round(R / max(1, steps), 4), "forward": round(forward, 3),
-           "height_ratio": round(hr, 3), "alive": alive, "survived": bool(alive >= steps and hr > 0.6),
+           "height_ratio": round(hr, 3), "alive": alive,
+           "survived": _by_height and inv.at is None,              # upside down is a fall (_Inversion)
            "speed": round(horizon_speed, 3), "active_speed": round(active_speed, 3), "frames": frames or [],
            "cadence": cadence, "upright_frac": upright_frac, "support_frac": support_frac,
            "upright_tau": round(tau_up, 3), "n_feet": int(feet.n),
            "n_tokens": graph.n_tokens, "feature_dim": graph.feature_dim}
+    out.update(inv.disclose(alive, _by_height))                  # {} unless it went upside down
     if record_qpos:
         out["qpos_frames"] = qpos_frames or []
     if record_frames and z0:
@@ -1558,6 +1564,62 @@ class _FootClearance:
         return int(np.sum(down[:-1] & ~down[1:])), int(np.sum((n_down > 0) & (n_down < h.shape[1])))
 
 
+class _Inversion:
+    """DID THE BODY GO UPSIDE DOWN, counted per physics step. The same three rollouts that read their feet off
+    :class:`_FootClearance` (the crawl, the recipe/CPG rollout, the exported-controller harness) feed it, and all
+    three now refuse ``survived`` to a body it saw go over.
+
+    THE DEFECT (measured 2026-10-11, through MCP). All three called a rollout survived when the trunk never fell
+    below half its standing height and ended above 0.6 of it. That is a height test, and a body lying on its back
+    can pass it: the composed inspection quadruped, given a 2 kg payload box on its top by ``edit_robot`` and run at
+    the gait fitted before the edit, rears over backwards at step 4080 of 6000 and lies there, propped on the box at
+    0.70 to 0.79 of its standing height. Verify printed ``survived: true`` and "LURCHES (pitch 59 / roll 180 deg
+    sustained ...)". Everything that reads ``survived`` without the trace believed it, and several gate on it and
+    height alone: the certificate's frozen-policy DR sweep and budget probe (MEASURED: a draw of the design
+    schema's quadruped that went over its front at step 421 of 500 counted as a credible pass), the stance repair,
+    the task evaluator's crawl fallback (MEASURED: it scored the customer-ingest test fixture 1.81 m of walking for
+    a crawl that spent 11% of its 1200 steps upside down, so the ingest withheld the template offer), the
+    demonstration amplifier.
+
+    Upside down = ``upr`` (the cosine of the tilt, which every one of these loops already computes for its upright
+    count) below zero; see ``gait_quality._INVERTED_TILT``. MEASUREMENT ONLY: nothing here reaches the controller or
+    ends the episode, so every trajectory and every other number is byte-identical (measured on 400 crawl and 96
+    recipe rollouts, each run under the old and the new code: the same trace, byte for byte). The run is NOT cut at
+    the flip, unlike a height fall, so the recorded trace still shows the body on its back and ``classify`` can say
+    for how long. A body that never goes over pays one float comparison per step (``note`` runs only on inverted
+    steps) and gets exactly the dict it always got, key for key; one that does gets ``survived: false`` and the
+    five keys of :meth:`disclose`, the last of which is what the height test alone would have said: the gait SEARCH
+    still ranks by that one, see ``gait_search.evaluate_gait`` for the measurement that kept it there."""
+
+    __slots__ = ("at", "n", "upr_min", "over")
+
+    def __init__(self):
+        self.at = None          # the first physics step it was past 90 deg of tilt
+        self.n = 0              # how many steps it spent there
+        self.upr_min = 1.0      # cos of the largest tilt; every step past 90 is noted, so this is the run's maximum
+        self.over = None        # which way it went over, read at the first such step
+
+    def note(self, t: int, q, upr: float) -> None:
+        """One step with ``upr < 0``. ``q`` is the base quaternion (w, x, y, z) at that step."""
+        if self.at is None:
+            from virturoid.services.gait_quality import flip_direction
+            self.at = int(t)
+            self.over = flip_direction(float(q[0]), float(q[1]), float(q[2]), float(q[3]))
+        self.n += 1
+        if upr < self.upr_min:
+            self.upr_min = float(upr)
+
+    def disclose(self, alive: int, survived_by_height: bool) -> dict:
+        """``{}`` unless the body went over; then when, for what share of the ``alive`` steps every other rate in
+        the result is normalised by, how far, which way, and the verdict of the height test alone."""
+        import math
+        if self.at is None:
+            return {}
+        return {"inverted_at_step": self.at, "inverted_frac": round(min(1.0, self.n / max(1, alive)), 3),
+                "tilt_max_deg": round(math.degrees(math.acos(max(-1.0, min(1.0, self.upr_min)))), 1),
+                "flipped_over": self.over, "survived_by_height": bool(survived_by_height)}
+
+
 def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float | None = None, hip_amp: float | None = None,
                        knee_amp: float | None = None, duty: float = 0.25, kp: float | None = None,
                        kd: float | None = None, record_qpos: bool = False, frame_every: int = 5,
@@ -1616,7 +1678,11 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float | None = None, hi
       * ``direction_probe`` — the wave-REVERSAL arm of the direction/frequency probe was degenerate on this
         body, so it ran once and the freed rollouts went to a wider frequency ladder. Present on bipeds and on
         hexapods; absent on quadrupeds and octopods.
-    A body that triggers neither gets exactly the dict it always got, key for key."""
+    A body that triggers neither gets exactly the dict it always got, key for key.
+
+    ``survived`` IS FALSE FOR A BODY THAT WENT UPSIDE DOWN, and only then do ``inverted_at_step``,
+    ``inverted_frac``, ``tilt_max_deg`` and ``flipped_over`` appear (see :class:`_Inversion`). It used to be
+    height-only, and a body propped on its back by its own payload kept its trunk high enough to pass."""
     import math as _math
 
     import mujoco
@@ -1790,6 +1856,7 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float | None = None, hi
         foot_h = np.empty((nsteps + 1, feet.n))                # row 0 = the state the first step starts from
         foot_h[0] = feet.heights(d)
         up_steps = 0
+        inv = _Inversion()                                     # did it go upside down (measurement only)
         for t in range(nsteps):
             ph = freq_ * t * dt; tgt = _qref.copy()
             # closed-loop steering: a follower's steer_fn reads the live pose and returns the turn_bias that
@@ -1833,6 +1900,8 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float | None = None, hi
             _devs.append(abs(_ydev))
             z = float(d.qpos[bq + 2]); hr = min(1.0, max(0.0, z / _z0))
             q = d.qpos[bq + 3:bq + 7]; upr = 1.0 - 2.0 * (float(q[1]) ** 2 + float(q[2]) ** 2)
+            if upr < 0.0:                                     # past 90 deg of tilt: UPSIDE DOWN (see _Inversion)
+                inv.note(t, q, upr)
             if z < 0.5 * _z0:
                 alive = t; break
             if z > 0.7 * _z0 and upr > 0.6:
@@ -1851,8 +1920,11 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float | None = None, hi
         yaw_change = float(_ydev)
         _net = float(((float(d.qpos[bq]) - x0) ** 2 + (float(d.qpos[bq + 1]) - y0) ** 2) ** 0.5)
         _T = max(1, alive) * dt
+        _by_height = bool(alive >= nsteps and hr > 0.6)       # the height test, all `survived` used to be
         res = {"finite": True, "forward": round(forward, 3), "height_ratio": round(hr, 3), "alive": alive,
-               "survived": bool(alive >= nsteps and hr > 0.6), "speed": round(forward / max(1, alive) / dt, 3),
+               # a body that went UPSIDE DOWN did not survive, however high its trunk ended (see _Inversion)
+               "survived": _by_height and inv.at is None,
+               "speed": round(forward / max(1, alive) / dt, 3),
                "cadence": round(lifts / _T, 2), "upright_frac": round(up_steps / max(1, alive), 3),
                "support_frac": round(support_steps / max(1, alive), 3), "n_feet": int(feet.n),
                "yaw_change": round(yaw_change, 3), "lateral": round(float(d.qpos[bq + 1] - y0), 3),
@@ -1870,6 +1942,7 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float | None = None, hi
                # from a drift-before-falling and every verdict is implicitly a claim about a horizon nobody
                # recorded (task #267). `alive` is NOT a substitute: it equals `steps` for every survivor.
                "steps": int(nsteps), "frame_every": int(frame_every) if record else 0}
+        res.update(inv.disclose(alive, _by_height))           # {} unless it went upside down: then when / how long
         if _gain_mode:                                        # disclosure, only when the opt-in flag is on, so
             res["gain_mode"] = _gain_mode                     # the default result dict is unchanged key for key
             res["kp_span"] = [round(min(kp_of), 3), round(max(kp_of), 3)]

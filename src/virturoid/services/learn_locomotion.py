@@ -94,7 +94,10 @@ def learn_locomotion(robot, *, generations: int = 8, pop: int = 12, steps: int =
         # Reward FORWARD DISTANCE (so a stand-still can't win) AND SURVIVAL (so a fast fall-forward that topples
         # can't out-score a slower STABLE upright walk — the demo must look like walking, not a face-plant).
         forward = max(0.0, float(r.get("forward", 0.0)))
-        survived = bool(r.get("survived")) or float(r.get("height_ratio", 0.0)) > 0.6
+        # ...and a body that went UPSIDE DOWN is a face-plant too, however high its trunk ended: the height clause
+        # alone paid a policy lying on its back the full survival bonus (``morph_policy._Inversion``).
+        survived = ((bool(r.get("survived")) or float(r.get("height_ratio", 0.0)) > 0.6)
+                    and r.get("inverted_at_step") is None)
         return float(r.get("gait", 0.0)) + 0.6 * forward + (0.8 if survived else 0.0)
 
     if progress:
@@ -216,7 +219,9 @@ def locomotion_episode(gene, *, horizon: int = 2400, models_dir: str = "models",
         if recipe:
             from virturoid.services.morph_policy import recipe_rollout_morph
             r = recipe_rollout_morph(gene, policy, steps=steps_h)
-            upright = bool(r.get("survived", False)) or float(r.get("height_ratio", 0.0)) > 0.6
+            # height alone called a body lying on its back "upright"; the rollout now says when it went over
+            upright = ((bool(r.get("survived", False)) or float(r.get("height_ratio", 0.0)) > 0.6)
+                       and r.get("inverted_at_step") is None)
         else:
             from virturoid.services.morph_policy import rollout_morph
             r = rollout_morph(gene, policy, steps=steps_h)

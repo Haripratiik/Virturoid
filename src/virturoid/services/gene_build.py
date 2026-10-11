@@ -1504,8 +1504,8 @@ def _run_exported_controller(gene, program: dict, controller_source: str, *, ste
     from virturoid.services.appendage_map import build_appendage_map
     from virturoid.services.gait_quality import classify
     from virturoid.services.morph_graph import encode_robot
-    from virturoid.services.morph_policy import (_FootClearance, _reset_to_rest, compiled_model, robot_mjcf,
-                                                 upright_height_ratio)
+    from virturoid.services.morph_policy import (_FootClearance, _Inversion, _reset_to_rest, compiled_model,
+                                                 robot_mjcf, upright_height_ratio)
 
     ns: dict = {}
     exec(compile(controller_source, "<exported software/gait_controller.py>", "exec"), ns)   # noqa: S102
@@ -1552,6 +1552,7 @@ def _run_exported_controller(gene, program: dict, controller_source: str, *, ste
     foot_h = np.empty((int(steps) + 1, feet.n))                  # row 0 = the state the first step starts from
     foot_h[0] = feet.heights(data)
     up_steps = 0
+    inv = _Inversion()                                           # did it go upside down (measurement only)
     alive = int(steps); hr = 1.0; qpos_frames = []; tgt = None
     for t in range(int(steps)):
         if t % dec == 0:
@@ -1569,6 +1570,8 @@ def _run_exported_controller(gene, program: dict, controller_source: str, *, ste
             qpos_frames.append(data.qpos.copy())
         q = data.qpos[bq + 3:bq + 7]
         upr = 1.0 - 2.0 * (float(q[1]) ** 2 + float(q[2]) ** 2)
+        if upr < 0.0:                                            # past 90 deg of tilt: UPSIDE DOWN, the crawl's rule
+            inv.note(t, q, upr)
         z = float(data.qpos[bq + 2]); hr = min(1.0, max(0.0, z / z0))
         if z < 0.5 * z0:                                         # FALLEN -> terminate (same bar as the recipe rollout)
             alive = t; break
@@ -1577,14 +1580,16 @@ def _run_exported_controller(gene, program: dict, controller_source: str, *, ste
         foot_h[t + 1] = feet.heights(data)
     lifts, support_steps = feet.count(foot_h[:alive + 1])
     forward = float(data.qpos[bq] - x0)                          # SIGNED: backward travel is not forward travel
+    _by_height = bool(alive >= int(steps) and hr > 0.6)          # the height test, all `survived` used to be
     r = {"finite": True, "forward": round(forward, 3), "height_ratio": round(hr, 3), "alive": alive,
-         "survived": bool(alive >= int(steps) and hr > 0.6),
+         "survived": _by_height and inv.at is None,              # upside down is a fall (morph_policy._Inversion)
          "speed": round(forward / max(1, int(steps)) / dt, 3),
          "cadence": round(lifts / max(1e-9, max(1, alive) * dt), 2),
          "upright_frac": round(up_steps / max(1, alive), 3),
          "support_frac": round(support_steps / max(1, alive), 3),
          "n_feet": int(feet.n), "steps": int(steps), "frame_every": frame_every,
          "qpos_frames": qpos_frames}
+    r.update(inv.disclose(alive, _by_height))                    # {} unless it went upside down
     r["verdict"] = classify(r)
     r["measured_by"] = {
         "what_was_driven": "software/gait_controller.py (GaitController.infer) on software/control_program.json",
