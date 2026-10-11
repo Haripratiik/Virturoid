@@ -1553,8 +1553,33 @@ def run_task(args: dict) -> dict:
                            "(no aerospace / teleportation / phase-through capability) — rephrase as a "
                            "ground locomotion, navigation, or manipulation task"]}
     r = evaluate_task(str(goal), gene, llm="auto")             # llm None under NO_INTERNAL_LLM -> heuristic plan
+    issues = list(r.get("issues") or [])
+    # A DESTINATION THE RUN NEVER SIMULATED. MEASURED 2026-10-11 through the MCP server: "walk to the far end of the
+    # warehouse aisle" on a composed quadruped returned success 1.0 after 1.07 m on open ground. The locomote skill
+    # has no goal position and establishes reached_goal by 0.3 m of upright travel, and run_task takes no scene, so
+    # a goal that names a place is scored as a walk. Say so beside the success it produced.
+    walked = [s for s in (r.get("steps") or []) if s.get("skill") == "locomote" and s.get("success")]
+    if walked and _names_a_destination(str(goal)):
+        issues.append(f"the goal names a destination ('{goal}') that this run did not simulate: there is no scene "
+                      f"or goal position on this path, so the locomote step counts as reaching it once the robot "
+                      f"walks 0.3 m forward upright on open ground. success here says the robot walks, not that "
+                      f"it can reach that place")
     return {"ok": True, "goal": goal, "feasible": bool(r.get("feasible")), **_task_outcome_for_agent(r),
-            "task": r.get("task"), "planned_skills": r.get("steps_planned"), "issues": r.get("issues") or []}
+            "task": r.get("task"), "planned_skills": r.get("steps_planned"), "issues": issues}
+
+
+_DESTINATION = None
+
+
+def _names_a_destination(goal: str) -> bool:
+    """Does ``goal`` ask the robot to get somewhere ("walk to the far end", "go to the door", "reach the shelf"),
+    rather than just to move ("walk forward", "walk 2 m")? Phrasing only; nothing here knows where that place is."""
+    import re
+    global _DESTINATION
+    if _DESTINATION is None:
+        _DESTINATION = re.compile(r"\b(?:to|toward|towards|reach|reaches|arrive at|get to|into)\s+(?:the|a|an|its|their)\b",
+                                  re.IGNORECASE)
+    return bool(_DESTINATION.search(goal or ""))
 
 
 def submit_task(args: dict) -> dict:

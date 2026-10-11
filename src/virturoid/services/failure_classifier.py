@@ -21,8 +21,25 @@ FEATURE_KEYS = ("forward", "height_ratio", "survived", "cadence", "contacts", "l
 LABELS = ("fell_over", "upright_but_slow", "no_contact", "gripped_no_lift", "lifted_then_dropped", "success")
 
 
+#: The same quantities under the names other tools in this product report them. ``verify_robot`` says
+#: ``forward_m``, and a classifier that read only ``forward`` scored a verify result as no travel at all: MEASURED
+#: 2026-10-11 through the MCP server, a 10.5 m CREDIBLE WALK passed straight from verify_robot came back
+#: "upright_but_slow" at confidence 1.0, with a speed curriculum prescribed for it.
+_ALIASES = {"forward_m": "forward"}
+
+
+def _canonical(metrics: dict) -> dict:
+    """``metrics`` with every alias in :data:`_ALIASES` filled in under the name this module reads."""
+    out = dict(metrics or {})
+    for alias, key in _ALIASES.items():
+        if key not in out and alias in out:
+            out[key] = out[alias]
+    return out
+
+
 def features_from_metrics(metrics: dict) -> list[float]:
     """Extract the fixed FEATURE_KEYS vector from an episode-metrics dict (booleans -> 0/1, missing -> 0.0)."""
+    metrics = _canonical(metrics)
     out: list[float] = []
     for key in FEATURE_KEYS:
         val = metrics.get(key, 0.0)
@@ -39,6 +56,7 @@ def rule_failure_label(metrics: dict, *, domain: str = "auto", forward_gate: flo
     ``domain`` 'legged'|'manipulator'|'auto'. In 'auto' the presence of ``contacts``/``lifted`` implies a
     manipulation episode. Returns one of :data:`LABELS` ('success' when no failure mode is detected).
     """
+    metrics = _canonical(metrics)
     survived = bool(metrics.get("survived", True))
     hr = float(metrics.get("height_ratio", 1.0) or 1.0)
     forward = float(metrics.get("forward", 0.0) or 0.0)
@@ -55,7 +73,14 @@ def rule_failure_label(metrics: dict, *, domain: str = "auto", forward_gate: flo
             return "gripped_no_lift"
         return "lifted_then_dropped"
 
-    # legged / locomotion
+    # legged / locomotion. The product's OWN verdict, when the caller passes it, outranks these thresholds:
+    # ``gait_quality.classify`` judged the whole rollout, and a label that contradicted it would be a second opinion
+    # from less evidence.
+    verdict = str(metrics.get("verdict") or "")
+    if verdict.startswith("CREDIBLE"):
+        return "success"
+    if verdict.startswith("FELL"):
+        return "fell_over"
     if not survived or hr < 0.5:
         return "fell_over"
     if hr >= 0.6 and forward < forward_gate:

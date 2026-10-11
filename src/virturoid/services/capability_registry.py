@@ -123,6 +123,11 @@ def _run_locomote(gene, params):
         est.add(PredicateOp.UPRIGHT)
     if forward >= need and upright:
         est |= {PredicateOp.TRAVELED, PredicateOp.REACHED_GOAL}
+    # WHAT THIS STEP CHECKED, in words, because REACHED_GOAL above is established by the same forward travel as
+    # TRAVELED: there is no goal position anywhere on this path. An agent reading "reached_goal" must be able to
+    # see that it means "walked at least this far, upright, on open ground", not "arrived where the goal said".
+    r = {**r, "checked": (f"moved at least {need:g} m forward while upright, on open ground with no goal position "
+                          f"or scene (it went {forward:.2f} m)")}
     view = xml = None
     if params.get("record"):
         try:                                              # replay the banked gait (recipe-aware) for the viewport
