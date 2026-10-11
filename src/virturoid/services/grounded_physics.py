@@ -95,15 +95,118 @@ def _leg_branches(gene) -> list:
     return out
 
 
+#: Classes that DECLARE a two-legged body. Read only when the body cannot be measured (see ``_stands_on``).
+_TWO_LEGGED_CLASSES = frozenset({"humanoid", "biped", "bipedal"})
+
+_STANDING_CACHE: dict = {}
+_STANDING_CACHE_MAX = 512
+
+
+def _stands_on(gene) -> frozenset | None:
+    """The root branches the COMPILED body stands on at rest, or ``None`` when it cannot be measured.
+
+    ``_leg_branches`` cannot tell a leg from an arm. It counts a root branch as a leg when the branch holds two
+    revolute joints and ends in a welded leaf, and a humanoid's arm is exactly that: shoulder, elbow, a welded
+    hand. So two legs plus two arms read as four legs, and every humanoid this product builds was handed the
+    QUADRUPED envelope. Measured on this checkout: the composed humanoid ("a humanoid robot", "a biped robot",
+    "a bipedal walking robot", 50.089 kg) and an authored one submitted through the MCP server (torso 0.5, two
+    0.55 m arms, two 0.8 m legs) all resolved ``legged.quadruped``, and critique_design told the agent the
+    authored body's 22.9 kg was "outside the plausible humanoid band (12.0-15.0 kg)": a quadruped's band,
+    printed under a humanoid's name. It sized the body too, not just the message: see
+    ``_required_joint_loads``.
+
+    This is the bug ``robot_import._infer_class`` already had and already fixed ("limbs >= 4 -> quadruped
+    caught every HUMANOID"), and the fix is the same one: count the chains that REACH THE GROUND the body
+    stands on, so arms stop voting. The segment tree cannot do that (an arm and a front leg are the same shape
+    of chain); the compiled body can. So this is ``body_kind.measured_appendages``' own measurement (the same
+    compile at the same standing spawn, the same ``appendage_map``) read per chain instead of as a count: each
+    chain the map finds GROUNDED is traced back to the root branch it hangs from. Grounded, not "leg": the map
+    files a grounded chain whose hinges have no limits under WHEEL, and a hand-built quadruped that never set
+    joint limits stands on its four chains all the same (the question is what carries the body, not how it
+    moves). On the humanoids above the arm tips hang 36% of the body's height off the floor and the map reads
+    2 legs + 2 arms. On every four-branch quadruped in the probe set (the composed dog, cat, horse, giraffe,
+    cheetah, lizard, elephant, gorilla, monkey, dinosaur, the large/small/plain quadruped, the schema's worked
+    example, an authored dog and the walkable template) it reads 4 legs, and across 42 composed, authored and
+    archetype bodies the humanoids are the only ones whose prior moves.
+
+    Callers only ever INTERSECT this with ``_leg_branches``: a branch the tree did not count is never promoted
+    to a leg, so a body can lose a leg reading here but never gain one. What that can still catch that it
+    should not: a declared quadruped whose rest pose holds a leg pair more than 0.10 m (the map's ground
+    tolerance) above the floor reads as two legs and two arms. Measured: front legs of 0.22 m on a 0.42 m
+    legged body do, front legs of 0.30 m do not.
+
+    Memoised on ``body_kind``'s topology key (masses are not in it, so grounding the same body again is free).
+    """
+    try:
+        from virturoid.services.body_kind import _topology_key
+        key = _topology_key(gene)
+    except Exception:  # noqa: BLE001 - an unhashable oddity just skips the memo
+        key = None
+    if key is not None and key in _STANDING_CACHE:
+        return _STANDING_CACHE[key]
+    found = None
+    try:
+        import mujoco
+
+        from virturoid.services.appendage_map import build_appendage_map
+        from virturoid.services.gene_compiler import compile_gene_to_mjcf, standing_spawn_z
+        from virturoid.services.morph_graph import encode_robot
+        model = mujoco.MjModel.from_xml_string(
+            compile_gene_to_mjcf(gene, include_floor=True, spawn_z=standing_spawn_z(gene)))
+        amap = build_appendage_map(model)
+        act_u = encode_robot(model).act_u
+        root = gene.root().name
+        parent = {s.name: s.parent for s in gene.segments}
+        chains = [*amap.legs, *amap.wheels, *amap.arms, *amap.others] + ([amap.spine] if amap.spine else [])
+        names = set()
+        for chain in (c for c in chains if c.grounded and c.tokens):
+            jid = int(model.actuator_trnid[act_u[chain.tokens[0]], 0])
+            name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, int(model.jnt_bodyid[jid]))
+            while name is not None and parent.get(name) not in (root, None):
+                name = parent.get(name)
+            if name is not None and parent.get(name) == root:
+                names.add(name)
+        found = frozenset(names)
+    except Exception:  # noqa: BLE001 - no MuJoCo / a body that will not compile -> the caller's fallback
+        found = None
+    if key is not None:
+        if len(_STANDING_CACHE) >= _STANDING_CACHE_MAX:
+            _STANDING_CACHE.clear()
+        _STANDING_CACHE[key] = found
+    return found
+
+
+def _carrying_branches(gene) -> list:
+    """``_leg_branches`` minus the branches the body does not stand on: the limbs that CARRY it.
+
+    Without a measurement every candidate is kept, which is exactly the rule this replaced."""
+    branches = _leg_branches(gene)
+    standing = _stands_on(gene) if branches else None
+    if standing is None:
+        return branches
+    return [s for s in branches if s.name in standing]
+
+
+def _stands_on_four(gene, branches) -> bool:
+    """Is a body with four leg-shaped branches really standing on all four? Measured when it can be (see
+    ``_stands_on``); otherwise the DECLARED class decides, so a body that says it is a humanoid or a biped is
+    never given a quadruped's envelope even where nothing can be compiled."""
+    standing = _stands_on(gene)
+    if standing is None:
+        return (getattr(gene, "robot_class", "") or "").strip().lower() not in _TWO_LEGGED_CLASSES
+    return all(s.name in standing for s in branches)
+
+
 def physical_prior_for(gene) -> PhysicalPrior | None:
     """Resolve an extensible evidence prior from structure; unknown morphologies remain unforced."""
     wheels = [s for s in gene.segments if s.shape == "cylinder" and s.joint_type == "revolute"]
     arm_joints = [s for s in gene.segments if s.joint_type == "revolute" and s not in wheels]
-    if len(_leg_branches(gene)) == 4:
+    branches = _leg_branches(gene)
+    if len(branches) == 4 and _stands_on_four(gene, branches):
         return _QUADRUPED_PRIOR
     if len(wheels) >= 4 and len(_leg_branches(gene)) == 0:
         return _AMR_PRIOR
-    if len(arm_joints) in (6, 7) and len(_leg_branches(gene)) == 0:
+    if len(arm_joints) in (6, 7) and len(branches) == 0:
         return _COBOT_PRIOR
     return None
 
@@ -115,13 +218,14 @@ def _required_joint_loads(gene, structural_mass: dict[str, float], *, total_mass
     sized against a lighter machine than the one that will stand on it. The hint is the class band's midpoint
     when a prior applies and ``sum(structural_mass)`` otherwise — neither contains the motors, and since
     :func:`embody_component_masses` neither contains the battery, the compute or the sensors either. On this
-    checkout, sized-against vs finished:
+    checkout, sized-against vs finished (in brackets, the ratio before components were embodied):
 
-        two-legged robot   13.500 -> 50.089 kg   3.71x   (was 3.43x before components were embodied)
-        six-legged robot    7.273 -> 17.894 kg   2.46x   (2.07x)
-        authored horse     13.500 -> 18.849 kg   1.40x   (1.18x)
-        authored cheetah   13.500 -> 17.872 kg   1.32x   (1.11x)
-        authored dog       13.500 -> 12.791 kg   0.95x   (0.95x)
+        two-legged robot   38.024 -> 64.059 kg   1.68x   (13.500 -> 50.089, 3.71x, while its arms counted as
+                                                          legs and it was sized as a quadruped; see _stands_on)
+        six-legged robot    7.271 -> 17.894 kg   2.46x   (2.07x)
+        authored horse     13.500 -> 18.995 kg   1.41x   (1.18x)
+        authored cheetah   13.500 -> 17.994 kg   1.33x   (1.11x)
+        authored dog       13.500 -> 12.963 kg   0.96x   (0.95x)
 
     This is a BOM FINDING — those actuators are undersized for the machine — and deliberately NOT closed here.
     Making it right means the requirement rises, a bigger motor is selected, the body gets heavier and the
@@ -145,7 +249,15 @@ def _required_joint_loads(gene, structural_mass: dict[str, float], *, total_mass
             stack.extend((child, distance + seg.length_m) for child in children.get(current, []))
         return out
 
-    leg_roots = {s.name for s in _leg_branches(gene)}
+    # THE LIMBS THAT CARRY THE BODY, not every chain shaped like one. With ``_leg_branches`` here a humanoid's
+    # arms took a quarter of the robot's weight each at full arm's reach, and its legs only a quarter instead of
+    # half. The quadruped hint used to hide how wrong that was: once the humanoid stopped being sized against
+    # 13.5 kg (see ``_stands_on``) the composed one's arm joints asked for 139.6 / 77.4 N.m and every one of them
+    # was fitted with the catalog's 520 N.m, 3.8 kg harmonic drive. Measured, composed humanoid: shoulder 13.1 /
+    # elbow 3.4 N.m required now (48 / 10.6 N.m parts), hip 320.5 / knee 160.7 N.m. It inherits ``_stands_on``'s
+    # one known misreading: a leg pair held more than 0.10 m off the floor at rest is sized as carried, not
+    # carrying.
+    leg_roots = {s.name for s in _carrying_branches(gene)}
     total_mass = float(total_mass_hint or sum(structural_mass.values()))
     wheel_count = max(1, sum(1 for s in gene.segments if s.shape == "cylinder" and s.joint_type == "revolute"))
     loads: dict[str, float] = {}
