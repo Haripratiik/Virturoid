@@ -65,6 +65,14 @@ def validate_gene_design(gene, *, material: str = "aluminum", payload_kg: float 
         # and produced a spurious flag, so apply payload only to grasping classes.
         eff_payload = payload_kg if cls in ("manipulator", "humanoid", "biped") else 0.0
         ratios = joint_hold_torques(gene, payload_kg=eff_payload)
+        # GRAVITY CANNOT LOAD A HINGE THAT STAYS VERTICAL. ``joint_hold_torques`` sizes every hinge for the
+        # textbook worst case, its distal chain held out level, which assumes the hinge can be turned until it
+        # carries that moment. A hinge whose axis is vertical at rest, under hinges that all share that axis,
+        # never can: turning about a vertical axis keeps every axis below it vertical, and a weight has no moment
+        # about a vertical axis. Measured 2026-10-11: the composed snake, 16 yaw joints lying on the floor, was
+        # reported "7 joint(s) near/over their static hold torque (worst body_0 at 279% of capacity)".
+        _never_loaded = _gravity_free_hinges(gene)
+        ratios = [t for t in ratios if t["joint"] not in _never_loaded]
         over = [t for t in ratios if t["ratio"] >= TORQUE_RISK_RATIO]
         checks["torque"] = not over
         if over:
@@ -173,6 +181,54 @@ def validate_gene_design(gene, *, material: str = "aluminum", payload_kg: float 
             "bom": bom, "disclaimer": _DISCLAIMER}
 
 
+def _gravity_free_hinges(gene, *, tol_deg: float = 10.0) -> set[str]:
+    """Segments whose hinge gravity cannot load: vertical at rest, and every hinge above it parallel to it.
+
+    Read from the compiled body at its rest pose, so a hinge counts as vertical where it actually points, not
+    where its local axis would point on an unrotated link. A free base is taken to rest level, as the bodies this
+    applies to do (a snake lies on its belly). Empty when MuJoCo is unavailable or the body will not compile, so
+    the check falls back to the textbook worst case for every hinge.
+    """
+    try:
+        import mujoco
+        import numpy as np
+
+        from virturoid.services.gene_compiler import compile_gene_to_mjcf, standing_spawn_z
+        m = mujoco.MjModel.from_xml_string(compile_gene_to_mjcf(gene, spawn_z=standing_spawn_z(gene)))
+        d = mujoco.MjData(m)
+        if m.nkey > 0:
+            mujoco.mj_resetDataKeyframe(m, d, 0)
+        mujoco.mj_forward(m, d)
+    except Exception:  # noqa: BLE001 - unmeasurable -> no exemption
+        return set()
+    cos_tol = float(np.cos(np.radians(tol_deg)))
+    axis: dict[str, np.ndarray] = {}
+    for seg in gene.segments:
+        if seg.joint_type != "revolute":
+            continue
+        jid = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_JOINT, f"{seg.name}_joint")
+        if jid >= 0 and int(m.jnt_type[jid]) == int(mujoco.mjtJoint.mjJNT_HINGE):
+            axis[seg.name] = np.asarray(d.xaxis[jid], float)
+    by_name = {s.name: s for s in gene.segments}
+    free: set[str] = set()
+    for name, a in axis.items():
+        if abs(float(a[2])) < cos_tol:
+            continue
+        node, parallel = by_name[name].parent, True
+        while node is not None and parallel:
+            up = by_name.get(node)
+            if up is None:
+                break
+            # a slide above it only translates the hinge; only another hinge can tilt it
+            if up.joint_type == "revolute" and (up.name not in axis
+                                                or abs(float(np.dot(axis[up.name], a))) < cos_tol):
+                parallel = False
+            node = up.parent
+        if parallel:
+            free.add(name)
+    return free
+
+
 def _mujoco_checks(gene, cls, checks, flag) -> None:
     """Static stability (CoM over support polygon), self-collision at rest, MJCF round-trip — all best-effort."""
     try:
@@ -257,7 +313,8 @@ def _mujoco_checks(gene, cls, checks, flag) -> None:
     contact_geoms = [g for g in body_geoms if int(m.geom_contype[g]) and int(m.geom_conaffinity[g])]
 
     # Static stability (free-base bodies only): whole-body CoM xy must lie inside the support polygon = the
-    # convex hull of the lowest (ground-contacting) geoms. A top-heavy / single-foot body is flagged unstable.
+    # convex hull of what the lowest (ground-contacting) geoms stand on (see _support_points). A top-heavy /
+    # single-foot body is flagged unstable.
     if gene.base_mount == "free" and contact_geoms:
         try:
             com = np.array(d.subtree_com[0][:2], float)
@@ -266,7 +323,7 @@ def _mujoco_checks(gene, cls, checks, flag) -> None:
             bottoms = _geom_bottoms_tight(m, d, contact_geoms, np)
             zmin = float(bottoms.min())
             foot = [contact_geoms[i] for i, b in enumerate(bottoms) if b <= zmin + 0.04]
-            pts = np.array([d.geom_xpos[g, :2] for g in foot], float)
+            pts = _support_points(m, d, foot, np)
             stable = _com_in_support(com, pts)
             checks["stability"] = bool(stable)
             if not stable:
@@ -315,6 +372,45 @@ def _geom_bottoms_tight(mj, data, geoms, np):
         world = data.geom_xpos[g] + corners @ data.geom_xmat[g].reshape(3, 3).T
         bottoms.append(float(world[:, 2].min()))
     return np.array(bottoms, float)
+
+
+def _support_points(mj, data, geoms, np, *, tol: float = 0.005):
+    """World xy of what each support geom STANDS ON: its lowest corners, edge or rim, not its centre.
+
+    A centre is a fair stand-in for a sphere or a vertical leg tip, which meet the floor at one point under
+    it, and a wrong one for anything that stands on a face or an edge. Measured 2026-10-11: the composed
+    humanoid stands on two 0.14 m square foot plates whose centres are a straight line, so every humanoid and
+    biped this product composes was reported "statically unstable (would topple)" at a rest pose verify then
+    held (STANDS). A box gives the corners of its lowest face or edge, a capsule the centre of its lower end
+    (both ends when it lies flat), a cylinder the lowest points of its rims (a standing disc's whole rim, a
+    lying wheel's two contact points), a sphere or ellipsoid its centre, anything else its lowest box corners.
+    ``tol`` is how far above a geom's own lowest point a feature still counts as touching.
+    """
+    import mujoco
+
+    GT = mujoco.mjtGeom
+    ring = np.linspace(0.0, 2.0 * np.pi, 12, endpoint=False)
+    signs = np.array([[sx, sy, sz] for sx in (-1, 1) for sy in (-1, 1) for sz in (-1, 1)], float)
+    out = []
+    for g in geoms:
+        kind, size = int(mj.geom_type[g]), mj.geom_size[g]
+        R, c = data.geom_xmat[g].reshape(3, 3), data.geom_xpos[g]
+        if kind == int(GT.mjGEOM_BOX):
+            local = signs * size[:3]
+        elif kind == int(GT.mjGEOM_CAPSULE):
+            local = np.array([[0.0, 0.0, -size[1]], [0.0, 0.0, size[1]]])
+        elif kind == int(GT.mjGEOM_CYLINDER):
+            local = np.array([[size[0] * np.cos(a), size[0] * np.sin(a), h] for h in (-size[1], size[1])
+                              for a in ring])
+        elif kind in (int(GT.mjGEOM_SPHERE), int(GT.mjGEOM_ELLIPSOID)):
+            local = np.zeros((1, 3))
+        else:
+            box = mj.geom_aabb.reshape(mj.ngeom, 6)[g]
+            local = box[:3] + signs * box[3:]
+        world = c + local @ R.T
+        low = world[:, 2] <= world[:, 2].min() + tol
+        out.extend(world[low, :2].tolist())
+    return np.array(out, float).reshape(-1, 2)
 
 
 def _convex_hull(pts):

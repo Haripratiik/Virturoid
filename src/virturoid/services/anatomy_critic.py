@@ -13,6 +13,9 @@ from __future__ import annotations
 _TIP_RATIO_MAX = 3.0        # a tip may be up to ~3x its limb's median girth (real feet/paws are 1-2x)
 _TIP_RADIUS_FLOOR = 0.05    # tiny tips never flag (a 0.03 pad on a 0.01 leg is fine at any ratio)
 _GROUND_BAND_FRAC = 0.35    # "ground extremity" = tip sits in the bottom 35% of the body height (not a head)
+# Classes whose root is a CHASSIS, HULL or HUB by design: most of the machine is that one part, and its wheels,
+# rotors or fins are not limbs that should rival it. The can-tower rule below is a limbed body's failure.
+_CHASSIS_CLASSES = frozenset({"mobile_base", "mobile_manipulator", "aerial", "aquatic"})
 
 
 def _oversized_ground_extremities(gene, m, d, z_floor: float, height: float):
@@ -143,15 +146,21 @@ def critique_gene(gene, *, expected: str | None = None) -> dict:
     big_frac = big_v / body_vol
     measures["biggest_part_frac"] = round(max(root_frac, big_frac), 3)
     measures["root_volume_frac"] = round(root_frac, 3)
-    if root_frac > 0.75:
+    # NOT FOR A CHASSIS. Measured 2026-10-11: "a six-wheeled rover" (deck 79% of the volume, which is what a
+    # wheeled base looks like) was told its wheels were "vestigial stubs on a monolith" at high severity, and an
+    # agent acting on that would shrink a sound deck or grow its wheels for nothing.
+    if root_frac > 0.75 and kind not in _CHASSIS_CLASSES:
         add("part_balance", "high", f"the root body is {root_frac:.0%} of the total volume — the limbs are "
             f"vestigial stubs on a monolith; grow the appendages or shrink the torso", root_frac)
     if big_frac > 0.55:
         add("part_balance", "high", f"appendage '{big_name}' is {big_frac:.0%} of the body volume — one part "
             f"dominates the silhouette; shrink it relative to the body", big_frac)
 
-    # 2) bilateral symmetry in y (limbed bodies should be left/right symmetric)
-    if kind in ("humanoid", "biped", "quadruped", "legged"):
+    # 2) bilateral symmetry in y (limbed bodies should be left/right symmetric). A body that never branches has
+    # no left and right to compare: a snake is one serial spine, and the S it rests in put its centroid 0.314 m
+    # to one side (measured 2026-10-11), which is a pose, not a lopsided design.
+    _branched = any(len(gene.children_of(s.name)) > 1 for s in gene.segments)
+    if kind in ("humanoid", "biped", "quadruped", "legged") and _branched:
         ys = P[:, 1]
         asym = abs(float(ys.mean()))
         measures["y_centroid_offset_m"] = round(asym, 3)
