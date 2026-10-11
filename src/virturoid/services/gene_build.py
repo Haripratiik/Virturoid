@@ -105,7 +105,23 @@ def robot_reachable_points(gene: RobotGene, *, z: float = 0.06, ring: int = 24, 
     from virturoid.services.pick_place_controller import plan_joint_targets
 
     model = mujoco.MjModel.from_xml_string(compile_gene_with_scene(gene, []))
-    reach = max(0.05, sum(s.length_m for s in gene.actuated_joints()) + 0.05)
+    # THE RINGS ARE SCALED BY THE REACH THE ARM ACTUALLY HAS (services/arm_reach.py: forward kinematics from its
+    # first joint), not by the sum of every actuated length. That sum counts a gripper's fingers and every
+    # offset link, and on an imported Franka Panda it was 1.708 m for an 855 mm arm: every candidate ring sat at
+    # 0.69-0.89 m, i.e. at 81% of its real reach and beyond, so the "graspable" cap below was defeated, the
+    # contact grasp found no point inside its dexterous zone at all, and 3 of 4 pinned pick-place episodes were
+    # `missed_grasp` on blocks placed at full extension. Measured on the pick-place skill with the scale swapped
+    # and nothing else (pin over 4 scenes, contact over 3): Panda pin 1/4 -> 3/4, and the contact grasp now
+    # runs at all (0/3: our generic script on the Franka Hand); i2rt YAM pin 3/4 -> 3/4; a composed 6-DOF arm
+    # pin 1/4 -> 3/4, contact 2/3 -> 2/3; the composed sorting arm 4/4 and 3/3 unchanged; the tabletop fixture
+    # arm unchanged (its chain is straight, so the two rules agree). The +0.05 tool allowance is kept on top of
+    # the measured number, as it was on top of the sum.
+    try:
+        from virturoid.services.arm_reach import arm_reach
+        _fk = arm_reach(gene)
+    except Exception:  # noqa: BLE001 - an end-effector chain FK cannot read falls back to the old scale
+        _fk = None
+    reach = max(0.05, (_fk["reach_m"] if _fk else sum(s.length_m for s in gene.actuated_joints())) + 0.05)
     inner = 0.36 * grasp_frac / 0.72                      # inner ring proportional to the graspable cap
     arc = math.radians(58)                                # reliable forward half-arc: a top-down grasp needs
     #                                                       the wrist pointing DOWN, which it can't at the far

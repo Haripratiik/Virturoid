@@ -69,9 +69,18 @@ def _end_effector_report(gene) -> dict:
             found.append({"part": name, "kind": kind, "evidence": "named"})
     named = [f for f in found if f["kind"]]
     out = {"end_effector": declared, "end_effectors_on_body": found}
+    # JAWS ARE A PART THAT IDENTIFIES AS A GRIPPER, whatever the links are called: an imported Piper's palm is
+    # `link6` and its fingers `link7`/`link8`, and "no part on the body identifies as one" was false about it.
+    # Same detector as the importer and the task verifier (services/gripper_jaws.py).
+    try:
+        from virturoid.services.gripper_jaws import gripper_status
+        _grip = gripper_status(gene)
+    except Exception:  # noqa: BLE001 - a description must not fail on a body the detector cannot read
+        _grip = {"jaws": []}
     if declared not in ("", "none"):
         out["end_effector_source"] = ("declared on the gene" +
                                       (", and a matching part is present" if named else
+                                       f"; {_grip['evidence']}" if _grip.get("jaws") else
                                        ", but no part on the body identifies as one"))
     elif named:
         # Report the truth in the field a caller actually reads, and say where it came from rather than
@@ -1307,17 +1316,33 @@ def _honest_reach(gene, *, steps: int = 500, world_xml: str | None = None) -> di
             pts.append(np.array(data.xpos[ee]))
     pts = np.array(pts)
     span = float(np.linalg.norm(pts.max(0) - pts.min(0))) if len(pts) else 0.0
-    # TRUE kinematic reach = sum of the actuated link lengths (how far the arm extends), not the small sine-sweep
-    # bbox diagonal (which read a misleading ~0.07 m). The sweep now only proves the joints MOVE (liveness).
-    reach_m = round(sum(float(getattr(s, "length_m", 0.0) or 0.0) for s in gene.actuated_joints()), 3)
+    # REACH IS MEASURED BY FORWARD KINEMATICS, not added up. It was the sum of every actuated segment's length,
+    # which counts a gripper's two finger joints and every offset link, and assumes the joint ranges let the
+    # whole chain straighten: an imported Franka Panda (datasheet 855 mm) read "ARTICULATES (reach 1.71 m)" in
+    # this verdict, its spec sheet and its certificate. ``arm_reach`` samples the declared joint ranges and
+    # takes the farthest the end effector's origin gets from the arm's first joint (Panda 0.858, UR5e 0.927,
+    # Gen3 0.968 against 0.855 / 0.850 / 0.902). Measured on the robot alone, never on a composed scene: the
+    # scene is for the sweep above, and an obstacle does not change how long the arm is. The sine sweep above
+    # still only proves the joints MOVE (liveness); its bounding box is not a reach either (it read ~0.07 m).
+    from virturoid.services.arm_reach import arm_reach
+    fk = arm_reach(gene, model=None if world_xml else model)
+    reach_m = fk["reach_m"] if fk else None          # no jointed chain under the end effector: no reach to state
     moves = span > 0.02
     if not moves:
         verdict = "STUCK (end-effector barely moves)"
+    elif reach_m is None:
+        verdict = "ARTICULATES (reach not measured: no jointed chain leads to the end effector)"
     else:
         verdict = f"ARTICULATES (reach {reach_m:.2f} m)"
-    return {"kind": "manipulator", "verdict": verdict, "survived": True, "reach_m": reach_m,
-            "reach_span_m": round(span, 3), "n_actuators": int(model.nu),
-            "note": "reach = kinematic link length; grasp/pick-place capability via evaluate_held / run_task"}
+    out = {"kind": "manipulator", "verdict": verdict, "survived": True, "reach_m": reach_m,
+           "reach_span_m": round(span, 3), "n_actuators": int(model.nu),
+           "note": ("reach = the farthest the end effector's origin gets from the arm's first joint, by forward "
+                    "kinematics over joint configurations sampled inside the limits your model declares (no "
+                    "controller, no tool or finger length); grasp/pick-place capability via evaluate_held / "
+                    "run_task")}
+    if fk:
+        out["reach_from"] = {k: fk[k] for k in ("from_joint", "to_body", "samples")}
+    return out
 
 
 def _honest_grasp(gene) -> dict | None:
@@ -1330,6 +1355,18 @@ def _honest_grasp(gene) -> dict | None:
     except Exception:  # noqa: BLE001 - not a grippered arm / grasp path unavailable -> reach verdict stands alone
         return None
     verdict = "PICKS UP (real friction grasp + lift)" if sr >= 0.5 else f"GRASP WEAK (success {sr:.0%})"
+    # A GRASP THAT COULD NOT BE ATTEMPTED IS NOT A WEAK GRASP. Every attempt reports ``no_grasp_site`` when
+    # the end effector carries no sliding jaws, and "GRASP WEAK (success 0%)" then reads as a gripper that
+    # slipped on a body that has none. Which of the two it is comes from the same detector the importer and
+    # the task verifier read (``gripper_jaws.gripper_status``), so this verdict cannot disagree with them.
+    reasons = {str(a.get("reason") or "") for a in (r.get("attempts") or []) if isinstance(a, dict)}
+    if reasons and reasons <= {"no_grasp_site"}:
+        from virturoid.services.gripper_jaws import gripper_status
+        grip = gripper_status(gene)
+        verdict = ("NO GRASP VERDICT (our grasp script cannot close this gripper)" if grip["grips"]
+                   else "NO GRIPPER (nothing on the end effector can grasp)")
+        return {"verdict": verdict, "success_rate": round(sr, 3), "detail": r,
+                "gripper": {k: grip[k] for k in ("grips", "closable", "palm", "jaws", "declared", "evidence")}}
     return {"verdict": verdict, "success_rate": round(sr, 3), "detail": r}
 
 
@@ -2493,12 +2530,24 @@ def _reframe_for_imported_body(res: dict, gene, kind: str) -> None:
         g = res["grasp"]
         det = (g.get("detail") or {}) if isinstance(g.get("detail"), dict) else {}
         reasons = {str(a.get("reason") or "") for a in (det.get("attempts") or []) if isinstance(a, dict)}
-        no_gripper = bool(reasons) and reasons <= {"no_grasp_site"}
+        no_site = bool(reasons) and reasons <= {"no_grasp_site"}
+        # "NO GRIPPER" is a claim about the customer's machine, so it is made from the SAME structural detector
+        # the importer declared ``end_effector_type`` with and the task verifier gates grasping skills on, not
+        # from the absence of OUR grasp site alone: a model whose gripper has revolute jaws (named, e.g. an
+        # SO-101's) has no grasp site either, and telling that customer there is nothing to grasp with was false.
+        from virturoid.services.gripper_jaws import gripper_status
+        grip = gripper_status(gene)
+        g["gripper"] = {k: grip[k] for k in ("grips", "closable", "palm", "jaws", "declared", "evidence")}
         reach = original.split(";")[0].strip()                   # ARTICULATES/STUCK — kinematics, controller-free
-        if no_gripper:
+        if no_site and not grip["grips"]:
             res["verdict"] = f"{reach}; NO GRIPPER in your model — there is nothing here to grasp with"
-            g["means"] = ("your model ships no gripper site, so no grasp was attempted. This is a structural "
-                          "fact about the file you gave us, not a capability judgement.")
+            g["means"] = (f"no grasp was attempted: {grip['evidence']}. This is a structural fact about the "
+                          f"file you gave us, not a capability judgement.")
+        elif no_site:
+            res["verdict"] = f"{reach}; NO GRASP VERDICT: our grasp script cannot close your gripper"
+            g["means"] = (f"your model carries a gripper ({grip['evidence']}), but our generic grasp script only "
+                          f"closes sliding (prismatic) jaws mounted on the end effector, so no grasp was "
+                          f"attempted. That is a limit of our script, not a finding about your gripper.")
         else:
             res["verdict"] = f"{reach}; NO GRASP VERDICT — we do not have your gripper's controller"
             g["means"] = ("this is a measurement of OUR generic grasp-and-lift script on YOUR gripper. It was "
@@ -2507,9 +2556,10 @@ def _reframe_for_imported_body(res: dict, gene, kind: str) -> None:
         g["under"] = "our generic grasp-and-lift script"
         res["grasp_verdict_scope"] = "our script on your gripper"
     elif kind == "manipulator":
-        # QUICK mode on an arm: the only thing measured is REACH, and reach is kinematics — link lengths and
-        # joint ranges, no controller anywhere in it. Attaching "under our controller, not yours" to a ruler
-        # would be a caveat with nothing behind it, so the verdict stands and only the provenance block is added.
+        # QUICK mode on an arm: the only thing measured is REACH, and reach is kinematics: forward kinematics
+        # over the joint ranges the model declares, no controller anywhere in it. Attaching "under our
+        # controller, not yours" to a ruler would be a caveat with nothing behind it, so the verdict stands and
+        # only the provenance block is added.
         pass
     elif original:
         # mobile / aerial / aquatic / anything else: those verdicts DO come out of a controller of ours (the

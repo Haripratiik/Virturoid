@@ -13,12 +13,70 @@ from __future__ import annotations
 
 from virturoid.services.capability_registry import REGISTRY
 
+#: The grasp model a skill reports when it did NOT simulate the grasp: the scripted pick-place controller
+#: welds the block to the end effector the moment they touch (``task_runtime.evaluate_gene_on_task``).
+IDEALIZED_GRASP = "idealized_pin"
+
+#: Bounds on what a step's ``detail`` may carry out of the executor. A skill's own report holds whole episodes
+#: (per-scene metrics, grasp attempts with their frames, rollout traces); the step keeps its scalars and short
+#: strings and a count of everything else, so a tool response stays a few hundred bytes per step.
+_DETAIL_MAX_KEYS = 16
+_DETAIL_MAX_STR = 200
+
+
+def _compact_detail(detail) -> dict:
+    """The scalars and short strings of a skill's ``detail`` report, never its frames or arrays.
+
+    ``run_task`` used to drop ``detail`` altogether, and with it every number a skill measured about itself:
+    the placement rate, the blocks placed out of the blocks tried, the grasp model, the reason an attempt
+    failed. A list of per-episode or per-attempt records is kept as a count plus a tally of the outcome labels
+    the records carry (``failure_label`` / ``reason`` / ``status``), because "3 of 4 missed the grasp" is what an
+    agent needs from them and the records themselves are not. Non-finite numbers become ``None`` so the result
+    stays strict JSON."""
+    import math
+    import numbers
+    from collections import Counter
+
+    out: dict = {}
+    if not isinstance(detail, dict):
+        return out
+    for key, val in detail.items():
+        if len(out) >= _DETAIL_MAX_KEYS:
+            break
+        key = str(key)
+        if getattr(val, "shape", None) == () and hasattr(val, "item"):     # a numpy scalar
+            val = val.item()
+        if val is None or isinstance(val, bool):
+            out[key] = val
+        elif isinstance(val, numbers.Real):
+            num = float(val)
+            out[key] = (None if not math.isfinite(num) else
+                        int(val) if isinstance(val, numbers.Integral) else round(num, 4))
+        elif isinstance(val, str):
+            out[key] = val if len(val) <= _DETAIL_MAX_STR else val[:_DETAIL_MAX_STR - 3] + "..."
+        elif isinstance(val, (list, tuple)) and val and all(isinstance(v, dict) for v in val):
+            out[f"{key}_n"] = len(val)
+            tally = Counter(str(v.get("failure_label") or v.get("reason") or v.get("status") or "")
+                            for v in val)
+            tally.pop("", None)
+            if tally:
+                out[f"{key}_outcomes"] = ", ".join(f"{label}: {n}" for label, n in tally.most_common(4))
+        # anything else (frames, arrays, nested reports) stays with the skill
+    return out
+
 
 def run_task(spec, gene, *, verify: bool = True, record: bool = False) -> dict:
     """Execute ``spec`` on ``gene``. Returns ``{feasible, success, score, goal_met, goal_total, steps,
     issues}``. If ``verify`` and the spec is infeasible, it is NOT run — the gaps are returned instead.
     ``record`` asks each skill to capture a replayable episode; the result then carries ``view`` + ``model_xml``
-    so the UI can show the REAL run of whatever skill was dispatched (general — no per-task UI code)."""
+    so the UI can show the REAL run of whatever skill was dispatched (general: no per-task UI code).
+
+    ``success``/``score``/``goal_met`` are the GOAL PREDICATES, scored under whatever physics each skill ran,
+    and that includes a skill that idealized its grasp. Two fields keep that from passing unnoticed:
+    ``idealized_grasp`` is true when any step pinned the object instead of grasping it, and
+    ``goal_met_without_idealized_grasp`` counts only the goal predicates some NON-idealized step established.
+    The agent-facing tools (``agent_design_tools.run_task``/``submit_task``) score success on the latter; each
+    step carries its own ``metric``, a compact ``detail`` (see :func:`_compact_detail`) and its ``grasp_model``."""
     if verify:
         from virturoid.services.task_verifier import verify_task
         v = verify_task(spec, gene)
@@ -28,6 +86,7 @@ def run_task(spec, gene, *, verify: bool = True, record: bool = False) -> dict:
                     "view": None, "model_xml": None}
 
     established = set()
+    established_for_real = set()                        # facts a step established WITHOUT pinning the object
     step_results = []
     view = model_xml = grasp_model = grasp_success_rate = None
     for step in spec.steps:
@@ -41,20 +100,28 @@ def run_task(spec, gene, *, verify: bool = True, record: bool = False) -> dict:
         if getattr(outcome, "view", None) is not None:   # keep the recorded episode of the visible task step
             view, model_xml = outcome.view, outcome.model_xml
         gm = (getattr(outcome, "detail", None) or {}).get("grasp_model")
-        if gm:                                            # surface the grasp disclosure (contact vs idealized pin)
+        if gm != IDEALIZED_GRASP:
+            established_for_real |= set(outcome.established)
+        # surface the grasp disclosure (contact vs idealized pin). An idealized step's disclosure is never
+        # overwritten by a later step's: one pinned grasp anywhere in the plan is what the run has to admit to.
+        if gm and grasp_model != IDEALIZED_GRASP:
             grasp_model = gm
             grasp_success_rate = round(float(outcome.metric), 3)   # the REAL placement rate behind the disclosure,
             #                                                        so the UI never lets a lenient goal-predicate
             #                                                        score (1.0 at >=0.5 placed) overstate the truth
-        step_results.append({"step_id": step.step_id, "skill": step.skill,
-                             "success": bool(outcome.success), "metric": round(float(outcome.metric), 3)})
+        row = {"step_id": step.step_id, "skill": step.skill, "success": bool(outcome.success),
+               "metric": round(float(outcome.metric), 3), "detail": _compact_detail(getattr(outcome, "detail", None))}
+        if gm:
+            row["grasp_model"] = gm
+        step_results.append(row)
 
     goal_met = sum(1 for g in spec.goal if g.op in established)
     total = max(1, len(spec.goal))
     return {"feasible": True, "success": goal_met == len(spec.goal),
             "score": round(goal_met / total, 3), "goal_met": goal_met, "goal_total": len(spec.goal),
             "steps": step_results, "issues": [], "view": view, "model_xml": model_xml, "grasp_model": grasp_model,
-            "grasp_success_rate": grasp_success_rate}
+            "grasp_success_rate": grasp_success_rate, "idealized_grasp": grasp_model == IDEALIZED_GRASP,
+            "goal_met_without_idealized_grasp": sum(1 for g in spec.goal if g.op in established_for_real)}
 
 
 def evaluate_task(prompt: str, gene, *, llm="auto", record: bool = False, memory_dir=None) -> dict:

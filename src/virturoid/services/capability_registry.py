@@ -37,6 +37,10 @@ class SkillSignature:
     morphologies: tuple = ()              # robot_kind values that can run it: legged|mobile|manipulator|spray
     runner: Callable = None               # (gene, params) -> SkillOutcome
     summary: str = ""
+    # The skill has to HOLD an object, so the body needs something to hold it with (``gripper_jaws.
+    # gripper_status``). A morphology is not enough: a UR5e is a manipulator with nothing on its flange, and
+    # pick_place used to read FEASIBLE on it and run with the object pinned to the bare wrist.
+    needs_grasp: bool = False
 
 
 # ---- runners: thin adapters over the existing skill primitives -------------------------------------
@@ -159,6 +163,9 @@ def _run_grasp_lift(gene, params):
     except Exception:  # noqa: BLE001 - the learned path is best-effort; never block the scripted grasp
         pass
     ok = r["success_rate"] >= 0.5
+    # the fingers close and hold the object by friction (scripted or learned residual alike): say so in the
+    # executor's own vocabulary, so a lift reports its grasp model the way a pick-place step does
+    r["grasp_model"] = "contact"
     return SkillOutcome("grasp_lift", ok, {PredicateOp.OBJECT_LIFTED} if ok else set(),
                         r["success_rate"], r)
 
@@ -241,19 +248,37 @@ def _run_pick_place(gene, params):
         generate_task_scenes,
         select_task_spec,
     )
+    from virturoid.services.gripper_jaws import gripper_status
     spec = select_task_spec(params.get("prompt", "sort blocks into bins"))
     # REAL contact grasp for a gripper/hand arm — single-object pick-place AND the multi-object sort (the per-block
     # APPROACH fix in run_contact_pick_place_episode lifted the sort 0/8 -> 6/8). The visible task now runs the real
     # friction grasp; only a degenerate gripper (no graspable scene) falls back to the idealized pin.
-    if str(getattr(gene, "end_effector_type", "") or "").lower() in ("gripper", "hand"):
+    #
+    # "Gripper/hand arm" is read off the STRUCTURE as well as the declaration (``gripper_status``): the jaws the
+    # grasp site is built from count even when the gene still says "none", which an imported Panda did until the
+    # importer learned to see them, so a robot held from before that fix is not sent straight to the pin.
+    grip = gripper_status(gene)
+    contact = None
+    if grip["closable"] or grip["declared"] in ("gripper", "hand"):
         contact = _run_contact_pick_place(gene, spec, params)
         if contact is not None and contact.metric > 0:
             return contact
+    # WHY THE PIN RAN is part of its disclosure: "no gripper", "no graspable layout" and "the real grasp placed
+    # nothing" are three different findings, and the third is the one an agent must never read as a pass.
+    if contact is not None:
+        pin_because = (f"the real contact grasp ran first and placed {contact.detail.get('blocks_placed', 0)} of "
+                       f"{contact.detail.get('blocks_total', 0)} blocks")
+    elif grip["closable"] or grip["declared"] in ("gripper", "hand"):
+        pin_because = ("the real contact grasp found no layout inside this arm's top-down graspable zone, so it "
+                       "could not be run")
+    else:
+        pin_because = f"nothing on this robot can close on the object ({grip['evidence']})"
     scenes = generate_task_scenes(gene, spec, count=int(params.get("scenes", 4)))
     # firm gains + a fuller descent: the grasp engages reliably (pick_place 0.38 -> 1.00); see
     # pick_place_controller.DEFAULT_CONTROLLER_PARAMS for the root cause (soft gains under-reached the block).
     cp = {"kp": 14.0, "kd": 2.0, "phase_steps": 500, "engage_radius": 0.15, "grasp_z": 0.05}
     r = evaluate_gene_on_task(gene, spec, scenes, params=cp)
+    r["pin_because"] = pin_because
     ok = r["success_rate"] >= 0.5
     view = xml = None
     if params.get("record") and scenes:                  # record ONE representative scene for the viewport
@@ -333,9 +358,11 @@ REGISTRY: dict = {
     "locomote": SkillSignature("locomote", (), (PredicateOp.TRAVELED, PredicateOp.UPRIGHT, PredicateOp.REACHED_GOAL),
                                ("legged",), _run_locomote, "walk a legged body forward"),
     "grasp_lift": SkillSignature("grasp_lift", (), (PredicateOp.OBJECT_LIFTED,),
-                                 ("manipulator",), _run_grasp_lift, "grasp + lift an object by friction"),
+                                 ("manipulator",), _run_grasp_lift, "grasp + lift an object by friction",
+                                 needs_grasp=True),
     "pick_place": SkillSignature("pick_place", (), (PredicateOp.OBJECTS_PLACED,),
-                                 ("manipulator",), _run_pick_place, "pick objects and place them into targets"),
+                                 ("manipulator",), _run_pick_place, "pick objects and place them into targets",
+                                 needs_grasp=True),
     "spray_coverage": SkillSignature("spray_coverage", (), (PredicateOp.SURFACE_COVERED,),
                                      ("spray",), _run_spray, "sweep a nozzle to coat a surface"),
     "fly": SkillSignature("fly", (), (PredicateOp.REACHED_GOAL, PredicateOp.UPRIGHT),
@@ -348,6 +375,7 @@ REGISTRY: dict = {
 def skill_menu() -> str:
     """A compact, LLM-facing description of the available skills (name + effect + morphology)."""
     return "\n".join(
-        f"- {s.skill}: {s.summary} | needs morphology {list(s.morphologies)} | "
-        f"establishes {[o.value for o in s.establishes]}"
+        f"- {s.skill}: {s.summary} | needs morphology {list(s.morphologies)}"
+        + (" and a gripper" if s.needs_grasp else "")
+        + f" | establishes {[o.value for o in s.establishes]}"
         for s in REGISTRY.values())

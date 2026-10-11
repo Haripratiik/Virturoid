@@ -1136,6 +1136,19 @@ def build_bom(gene: RobotGene, *, capabilities=None, task: str = "", pins: dict 
         for jn, part in (actuator_map or {}).items():
             _joints_for.setdefault(str(part), []).append(str(jn))
         for ln in lines:
+            if ln.category == "gripper":
+                # THE SAME RULE FOR THE HAND AT THE END OF THE ARM. The end-effector line is picked from the
+                # gene's declared ``end_effector_type``, and the importer now declares "gripper" for a Panda
+                # (it reads the sliding jaws, see services/gripper_jaws.py), which, left alone, would have billed
+                # a $5,500 Robotiq 2F-85 into the price of a 17.5 kg arm whose own Franka Hand is already in its
+                # link masses. Kept as a part number, never as a purchase or a second hand's worth of mass.
+                ln.in_mass_total = False
+                ln.in_price_total = False
+                ln.detail += (" - EQUIVALENT for the gripper already on your robot; its mass is already inside "
+                              "your model's link masses and is not added again, and it is NOT billed in "
+                              "totals.price_usd; its catalog price is quoted in totals.already_fitted_usd as a "
+                              "replacement option you have not asked for")
+                continue
             if ln.category != "actuator":
                 continue
             ln.in_mass_total = False
@@ -1204,7 +1217,8 @@ def build_bom(gene: RobotGene, *, capabilities=None, task: str = "", pins: dict 
                  "balance of system folded into the link masses are billed on their own lines)")
     if preserved:
         mass_note = ("your robot's own per-link masses, plus the parts this list proposes ADDING. The actuator "
-                     "lines are catalog equivalents for motors already fitted and are not counted again")
+                     "lines (and a gripper line, if any) are catalog equivalents for hardware already fitted and "
+                     "are not counted again")
     elif not _embodied:
         mass_note += ("; the simulated body does NOT yet carry the sensors, compute or power below — call "
                       "grounded_physics.embody_component_masses to bolt them on")

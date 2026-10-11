@@ -1208,6 +1208,35 @@ def _import_robot_uncached(source: str, *, robot_id: str | None = None, species:
     # are on it from the start and `validate()` below rules on them like any other field.
     loop_closures, coupled_joints = _source_equalities(
         mj, mujoco, body_name, _rot_by_id, segments, warnings, eff_body=eff_body, eff_parent=eff_parent)
+    # A GRIPPER ENDS AT ITS PALM, NOT AT ONE OF ITS FINGERS. The rules above take the last leaf when nothing is
+    # named, and on a parallel-jaw arm the last leaves ARE the fingers: the Menagerie Piper and ARX L5 flagged
+    # `link8`, one jaw, and a jaw has nothing under it, so the grasp site was never emitted and verify_robot
+    # told those customers "NO GRIPPER in your model". `palm_and_jaws` walks from wherever the flag landed to
+    # the segment that carries the jaws (services/gripper_jaws.py lists the cases it accepts). It runs after
+    # the class is inferred and the couplings are read: neither reads the flag, and a Robotiq-style linkage is
+    # only recognisable by the 1:1 coupling of its two drivers.
+    from virturoid.services.gripper_jaws import palm_and_jaws
+    _palm, _jaws = palm_and_jaws(segments, ee_name, coupled_joints) if ee_name is not None else (None, [])
+    if _jaws and _palm != ee_name:
+        for s in segments:
+            s.is_end_effector = (s.name == _palm)
+        warnings.append(f"the end effector is {_palm!r}, the palm carrying the jaws "
+                        f"({', '.join(j.name for j in _jaws)}), not {ee_name!r}: a jaw is not where the arm ends")
+        ee_name = _palm
+    # WHETHER IT CARRIES A GRIPPER IS READ OFF THE STRUCTURE FIRST. This used to be `"grip" in` any segment name,
+    # which made a Franka Panda (`hand`, `left_finger`, `right_finger`: two sliding jaws) import as "none":
+    # run_task then never tried the real contact grasp on it and pinned the block instead, in the same session
+    # in which verify_robot (which reads the grasp site, i.e. the sliding jaws) had attempted a grasp with it.
+    # Jaws found by `palm_and_jaws` now declare the gripper, and for sliding jaws that IS the grasp-site rule, so
+    # this declaration and the detector verify_robot runs can no longer disagree. The NAME is kept as a second,
+    # weaker form of evidence, because it is the only evidence for the grippers no structural rule here can
+    # see: an uncoupled revolute jaw (an SO-101's, a low-cost arm's, a Z1's), which nothing structural
+    # separates from a wrist joint or a hand's fingers. Dropping it would turn those robots' "gripper" into
+    # "none" and make pick_place infeasible on bodies that have one. "jaw" joins "grip" for the same reason: it
+    # is how the SO-ARM100 names its two jaws (Fixed_Jaw / Moving_Jaw), and across the 79 importable Menagerie
+    # models no segment outside the two SO-ARM grippers contains it.
+    _jawed = bool(_jaws)
+    _named = any(h in s.name.lower() for s in segments for h in ("grip", "jaw"))
     gene = RobotGene(
         id=robot_id or "imported_robot",
         species=species or f"{robot_class}.imported",
@@ -1221,7 +1250,7 @@ def _import_robot_uncached(source: str, *, robot_id: str | None = None, species:
         # the private copy that used to sit here was missing "legged"/"biped"/"aerial"/"aquatic", so a body in
         # one of those families was bolted to a table on the way in and then judged for not walking.
         base_mount="free" if robot_class in FLOATING_BASE_CLASSES else "table",
-        end_effector_type="gripper" if any("grip" in (s.name.lower()) for s in segments) else "none",
+        end_effector_type="gripper" if (_jawed or _named) else "none",
         # ``mass_source`` marks these per-link masses as AUTHORITATIVE: they are the manufacturer's own
         # ``body_mass`` read straight off the customer's model, not our estimate. Grounding must size actuators
         # around them, never replace them -- re-deriving from primitive volume x density turned a Menagerie

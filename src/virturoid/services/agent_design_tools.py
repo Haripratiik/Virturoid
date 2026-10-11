@@ -1466,10 +1466,68 @@ def list_skills(_args: dict) -> dict:
     from virturoid.schemas.task_spec import PredicateOp
     from virturoid.services.capability_registry import REGISTRY
     skills = [{"skill": s.skill, "summary": s.summary, "morphologies": list(s.morphologies),
-               "establishes": [o.value for o in s.establishes]} for s in REGISTRY.values()]
+               "needs_gripper": bool(s.needs_grasp), "establishes": [o.value for o in s.establishes]}
+              for s in REGISTRY.values()]
     return {"ok": True, "skills": skills, "predicate_ops": [op.value for op in PredicateOp],
             "note": "run_task {robot_id, goal} to plan+verify+run from a goal; submit_task to author the "
                     "skill sequence yourself"}
+
+
+def _task_outcome_for_agent(r: dict) -> dict:
+    """The executor's result as an agent reads it: per-step metric and detail, and the grasp model up front.
+
+    MEASURED through the MCP server on an ingested Franka Panda ("pick up the cube in front of you and place it
+    20 cm to the left"): the executor knew the run had used the IDEALIZED pin (the block welded to the hand the
+    moment they touched) and that 1 block in 4 was placed even so, and the agent saw ``success: false`` and a
+    step reading ``detail: null``. Every number came from a dict this function's predecessor rebuilt as
+    ``{skill, success, detail}`` and never filled. At 2 blocks in 4 the same agent would have read a plain
+    ``success: true`` for a grasp that was never simulated.
+
+    SUCCESS IS NOT THE PREDICATE RESULT WHEN THE GRASP WAS PINNED. ``success``/``score``/``goal_met`` count only
+    the goal predicates a step established without idealizing its grasp
+    (``task_executor``'s ``goal_met_without_idealized_grasp``), and what the pinned run would claim moves to
+    ``with_idealized_grasp``. The product already rules this way everywhere else a pin can surface: the
+    readiness ledger reads an ``idealized_pin`` report as BELOW_GATE ("real physics ran ... but the grasp is
+    IDEALIZED"), and ``verify_robot`` declines to rule on a grasp it did not physically run. A ``success: true``
+    from the same pin, in the same session, would contradict both."""
+    idealized = bool(r.get("idealized_grasp"))
+    total = int(r.get("goal_total") or 0)
+    steps = []
+    for s in r.get("steps") or []:
+        row = {"skill": s.get("skill"), "success": bool(s.get("success")), "metric": s.get("metric"),
+               "detail": s.get("detail") or {}}
+        if s.get("error"):
+            row["error"] = s["error"]
+        if s.get("grasp_model"):
+            row["grasp_model"] = s["grasp_model"]
+            if s["grasp_model"] == "idealized_pin":
+                row["success_with_idealized_grasp"] = row["success"]
+                row["success"] = False
+        steps.append(row)
+    out = {"success": bool(r.get("success")), "score": round(float(r.get("score", 0.0)), 3),
+           "goal_met": r.get("goal_met"), "goal_total": r.get("goal_total"), "steps": steps,
+           "grasp_model": r.get("grasp_model"), "grasp_success_rate": r.get("grasp_success_rate")}
+    gm = r.get("grasp_model")
+    if gm:
+        held = next((s for s in steps if s.get("grasp_model") == gm), None) or {}
+        det = held.get("detail") or {}
+        out["grasp"] = {"model": gm, "simulated": gm != "idealized_pin",
+                        "success_rate": r.get("grasp_success_rate"),
+                        **{k: det[k] for k in ("blocks_placed", "blocks_total") if k in det}}
+    if idealized:
+        met = int(r.get("goal_met_without_idealized_grasp") or 0)
+        out["with_idealized_grasp"] = {"success": out["success"], "score": out["score"],
+                                       "goal_met": out["goal_met"]}
+        out.update(success=(met == total), score=round(met / max(1, total), 3), goal_met=met)
+        out["grasp"]["why_pinned"] = det.get("pin_because")
+        out["grasp"]["means"] = (
+            "THE GRASP WAS NOT SIMULATED. The object was pinned to the end effector the moment they touched: no "
+            "finger closed on it and nothing held it by friction, so a placement here says the arm can REACH and "
+            "CARRY to the target, not that this robot can pick the object up. success, score and goal_met count "
+            "only what real contact physics established; with_idealized_grasp is what the pinned run would claim")
+        out["warning"] = ("IDEALIZED GRASP: the object was pinned to the end effector on contact, not grasped. "
+                          "Read grasp.means before reading any number in this result")
+    return out
 
 
 def run_task(args: dict) -> dict:
@@ -1495,11 +1553,8 @@ def run_task(args: dict) -> dict:
                            "(no aerospace / teleportation / phase-through capability) — rephrase as a "
                            "ground locomotion, navigation, or manipulation task"]}
     r = evaluate_task(str(goal), gene, llm="auto")             # llm None under NO_INTERNAL_LLM -> heuristic plan
-    return {"ok": True, "goal": goal, "feasible": bool(r.get("feasible")), "success": bool(r.get("success")),
-            "score": round(float(r.get("score", 0.0)), 3), "goal_met": r.get("goal_met"),
-            "goal_total": r.get("goal_total"), "task": r.get("task"), "planned_skills": r.get("steps_planned"),
-            "steps": [{"skill": s.get("skill"), "success": s.get("success"), "detail": s.get("detail")}
-                      for s in (r.get("steps") or [])], "issues": r.get("issues") or []}
+    return {"ok": True, "goal": goal, "feasible": bool(r.get("feasible")), **_task_outcome_for_agent(r),
+            "task": r.get("task"), "planned_skills": r.get("steps_planned"), "issues": r.get("issues") or []}
 
 
 def submit_task(args: dict) -> dict:
@@ -1531,10 +1586,7 @@ def submit_task(args: dict) -> dict:
         return {"ok": False, "feasible": False, "error": "task INFEASIBLE for this morphology: "
                 + "; ".join(v.get("issues", [])[:4]), "issues": v.get("issues")}
     r = _run(spec, gene)
-    return {"ok": True, "feasible": True, "success": bool(r.get("success")),
-            "score": round(float(r.get("score", 0.0)), 3), "goal_met": r.get("goal_met"),
-            "goal_total": r.get("goal_total"), "steps": [{"skill": s.get("skill"), "success": s.get("success")}
-                                                          for s in (r.get("steps") or [])]}
+    return {"ok": True, "feasible": True, **_task_outcome_for_agent(r)}
 
 
 def llm_spend(_args: dict) -> dict:
@@ -1642,8 +1694,11 @@ AGENT_DESIGN_TOOLS: dict[str, dict] = {
                     "goal scores. Call before run_task/submit_task. No args.", "heavy": False,
                     "handler": list_skills, "parameters": {"type": "object", "properties": {}}},
     "run_task": {"description": "Give the HELD robot a GOAL in plain language: the substrate proposes a skill "
-                 "sequence, VERIFIES it against the morphology (honest infeasible on a mismatch), runs the real "
-                 "skills, and scores the goal — the general 'any task' capability (real physics).", "heavy": True,
+                 "sequence, VERIFIES it against the morphology (honest infeasible on a mismatch, and a skill that "
+                 "holds an object needs a gripper), runs the real skills, and scores the goal: the general 'any "
+                 "task' capability (real physics). Each step returns its metric and detail; grasp_model says "
+                 "whether the grasp was simulated ('contact') or the object was pinned on contact "
+                 "('idealized_pin'), and a pinned grasp never counts toward success.", "heavy": True,
                  "handler": run_task, "parameters": {"type": "object", "required": ["robot_id"], "properties": {
                      "robot_id": {"type": "string"}, "goal": {"type": "string", "description": "plain-language task"}}}},
     "submit_task": {"description": "AUTHOR the task yourself: an explicit skill sequence + goal predicates "

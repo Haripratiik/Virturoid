@@ -185,8 +185,9 @@ def test_an_arm_with_no_gripper_is_told_so_not_scored_zero_at_grasping():
 
 
 def test_reach_is_kinematics_so_it_carries_no_controller_caveat():
-    """A quick verify on an arm measures REACH — link lengths and joint ranges, no controller anywhere in it.
-    Bolting "under our controller, not yours" onto a ruler would be a caveat with nothing behind it."""
+    """A quick verify on an arm measures REACH: forward kinematics over the joint ranges the model declares, no
+    controller anywhere in it. Bolting "under our controller, not yours" onto a ruler would be a caveat with
+    nothing behind it."""
     res = _verify(_imported("universal_robots_ur5e", "ur5e.xml"), "ur5e quick", mode="quick")
     assert str(res["verdict"]).startswith("ARTICULATES"), res["verdict"]
     assert "not yours" not in str(res["verdict"])

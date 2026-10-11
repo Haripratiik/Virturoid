@@ -244,11 +244,23 @@ def validate_morphology(gene) -> MorphReport:
         lo, hi = ARM_BANDS["dof"]
         if not (lo <= len(act) <= hi):
             issues.append(f"{len(act)} actuated joints outside [{lo},{hi}] for an arm")
-        reach = sum(float(s.length_m) for s in act)
-        measured["reach_m"] = round(reach, 3)
-        lo, hi = ARM_BANDS["reach_m"]
-        if not (lo <= reach <= hi):
-            issues.append(f"reach {reach:.2f} m outside [{lo},{hi}] (UR5e-class = 0.85 m)")
+        # The band is quoted against a DATASHEET reach (UR5e 0.85 m), so the arm is measured the way a datasheet
+        # measures it: forward kinematics from the first joint to the end effector (services/arm_reach.py).
+        # The sum of every actuated length that used to stand here counts a gripper's fingers and every offset
+        # link, and read a real UR5e at 1.274 m: 1.5x the reach the band itself cites for it.
+        try:
+            from virturoid.services.arm_reach import arm_reach
+            fk = arm_reach(gene)
+        except Exception:  # noqa: BLE001 - no MuJoCo / an uncompilable body: say so, never guess a length
+            fk = None
+        if fk is None:
+            warns.append("reach not measured: the arm's end-effector chain did not compile for forward kinematics")
+        else:
+            reach = float(fk["reach_m"])
+            measured["reach_m"] = round(reach, 3)
+            lo, hi = ARM_BANDS["reach_m"]
+            if not (lo <= reach <= hi):
+                issues.append(f"reach {reach:.2f} m outside [{lo},{hi}] (UR5e-class = 0.85 m)")
     elif cls in ("mobile_base", "mobile_manipulator"):
         wheels = _seg_by(gene, lambda s: "wheel" in s.name.lower())
         measured["n_wheels"] = len(wheels)
