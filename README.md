@@ -8,15 +8,17 @@ It runs as a native desktop studio with a live 3D viewport, is scriptable from t
 
 ![Virturoid pipeline: from a prompt to a trained, buildable robot](assets/architecture.svg)
 
-Every body below was generated from a one-line prompt by the same pipeline — no per-species templates:
+Every body below was generated offline from a one-line prompt by the same pipeline, with no per-species templates.
+The prompts, and the script that draws both pictures in this README, are in
+[`scripts/render_readme_images.py`](scripts/render_readme_images.py):
 
-![Robots generated from prompts: a manipulator, quadruped, hexapod, mobile base, humanoid, and octopod](assets/robot_gallery.png)
+![Robots generated from prompts: a manipulator, quadruped, hexapod, mobile base, humanoid, and octopus](assets/robot_gallery.png)
 
 ## At a glance
 
 |  |  |
 |---|---|
-| **Scale** | ~160k lines of Python; 391 source modules, 388 test modules |
+| **Scale** | ~168k lines of Python across source and tests; 393 source modules, 409 test modules |
 | **Tested against real robots** | Descriptions from the [MuJoCo Menagerie](https://github.com/google-deepmind/mujoco_menagerie) — Unitree Go2 / G1 / H1 / A1, Boston Dynamics Spot, ANYmal C, Franka Panda, UR5e, PAL Talos, Agility Cassie, ALOHA — rather than fixtures, because fixtures have lied here before |
 | **Agent surface** | 75 tools over MCP (stdio JSON-RPC). Your agent, your keys; `llm_spend` reports our own per-role call count so zero-spend is measurable rather than promised |
 | **Physics** | MuJoCo on CPU; MJX on GPU behind an enforced CPU↔GPU parity gate |
@@ -165,7 +167,7 @@ Each build is checked stage by stage against the artifacts actually on disk. Evi
 
 One stage is not evidence-gated, and you should know which: the **exported controller** is currently checked for presence, not for performance. Its own measured verdict travels separately inside the exported control program as `verified_walk` — that is the field to read if you want to know whether the controller in your package actually walks.
 
-**How often does the generation path succeed?** On a 20-prompt battery of deliberately hard and novel prompts, the live lane returned an answer for 10: **one** earned a credible verdict, five built bodies that do not move, and four were honest refusals. That is a hard novel-prompt battery, not the quadruped and arm prompts the demo runs, and the number to hold in mind when reading anything above. The deterministic offline figure (0.55) is a regression tripwire on the compiler and physics, **not** a capability number, and `correct@1` — which counts a correct refusal as correct — must not be read as one either.
+**How often does the generation path succeed?** On a 20-prompt battery of deliberately hard and novel prompts, the live lane returned an answer for 10: **one** earned a credible verdict, five built bodies that do not move, and four were honest refusals. That is a hard novel-prompt battery, not the quadruped and arm prompts the demo runs, and the number to hold in mind when reading anything above. The deterministic offline figure (0.50) is a regression tripwire on the compiler and physics, **not** a capability number, and `correct@1`, which counts a correct refusal as correct, must not be read as one either. It was 0.55: since the crawl's swing fix the elephant walks 3.79 m over the judging horizon but starts too slowly for the bench's 800-step screen, and it is recorded as known debt rather than as a lower floor.
 
 ## Project structure
 
@@ -437,6 +439,40 @@ floor instead of lifting it. Each leg's lift direction is now measured, as its s
 The product's search on the native Go2 went from 2.4 m to between 5.9 and 19.1 m over three seeds, and the
 design schema's hexapod from 2.5 m backwards to walking forwards. Fitting their own operating points, the
 offline dog, cat and horse reach credible walks of 6.0 to 7.1 m.
+
+**An exported package runs the robot that was verified.** Export re-tuned its own gait and ignored the
+body's, so a trained robot shipped a fallback trot that crouched and went 0.25 m backwards, and it re-derived a
+payload mass the user had stated (2 kg became 3.925 kg). The export now ships the operating point that was
+measured and its certificate checks it, so what is deployed is what was measured.
+
+**A robot that flips over has fallen.** A body upside down for 32% of its run read LURCHES and counted as
+surviving: survival was judged by trunk height, and roll read at gimbal lock. Tilting past 90° is now a fall by
+flip-over in every rollout path.
+
+**The design critique stopped flagging defects that are not there.** A 20-prompt sweep raised 15 false alarms:
+seams measured on bare colliders instead of the drawn body, welded parts missed, a support polygon built from
+foot centres (so every biped "would topple"), and vertical yaw hinges asked to lift the body. The sweep is now
+clean apart from one real finding, the giraffe's mass.
+
+**Reach is measured from the shoulder's axis.** Over the 14 Menagerie arms with a published reach, measuring
+from the base anchor was off by a median 6% but by up to +44%, always long. From the first joint's axis the
+median is 9%, the worst 16%, and the error no longer leans one way.
+
+**Bodies look like what was asked for.** Heads were capped at half the torso's height rather than its length,
+which shrank them about twofold; a humanoid's four limbs read as four legs and it was sized as a quadruped; and
+the octopus collided as a 0.13 m sphere under a 0.58 m drawn mantle. The gallery above is the result.
+
+**A small rover is a small rover.** "A six-wheeled rover", a 0.36 m deck on 6 cm wheels, weighed 70 kg: any
+four-wheeled body took a warehouse robot's mass envelope and filled it with estimated wiring, and its parts list
+bought every wheel motor twice plus a caster it does not have. It now weighs what its parts do, 7 kg, and its
+parts list fell from $4,644 to $1,116. Its motors are certified on the navigation drive the package ships, which
+no longer commands a motor's last 20%, and "a warehouse robot" now composes a wheeled base instead of a
+20-segment quadruped.
+
+**Scenes keep their objects and their floor.** Drawing the pictures above found two defects. A scene's home
+keyframe covered only the robot's joints, so resetting a sorting scene to it dropped both blocks into the arm's
+base. And the navigation course's walls had been widened while its floor had not, leaving 0.7 m of void inside
+each long wall, where the planner was free to route. Both are fixed and tested.
 
 **Amending keeps what you brought.** Adding a limb adds that limb's mass and nothing else
 (`n_existing_links_remassed: 0`), mounts where the request says, and names any finding it refuses on.
