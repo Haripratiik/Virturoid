@@ -400,6 +400,20 @@ def test_every_verdict_after_an_applied_fit_names_it(held_arm, synthetic):
         "a reverted calibration must leave nothing for the verdict to name")
 
 
+@pytest.mark.parametrize("step", ["measure_sim_to_real_gap", "fit_actuators"])
+def test_a_missing_log_names_the_logs_this_robot_already_has(held_arm, synthetic, step):
+    """The journey's next step after simulate_bench_log is this one, and an agent that forgot the path it was
+    handed must be told where its log already is (measured through MCP: it was told only "provide log_path").
+    Named, never used unasked: the newest log can be a simulated stand-in."""
+    env = _call(step, {"robot_id": held_arm, "out_dir": "sysid_tests"})
+    r = env["result"]
+    assert env["ok"] is False and r["ok"] is False, r
+    assert synthetic["log_path"] in r["logs_on_disk_for_this_robot"], r
+    assert "pass log_path" in r["error"] and "SIMULATED stand-in" in r["error"], r["error"]
+    assert _call(step, {"robot_id": held_arm, "out_dir": "sysid_tests", "log_path": "no/such/log.json"})[
+        "result"].get("logs_on_disk_for_this_robot") is None, "a refusal about a GIVEN log stays about that log"
+
+
 @pytest.mark.skipif(not _MUJOCO, reason="needs MuJoCo")
 def test_the_fit_is_not_applied_unless_it_is_asked_for(held_arm, synthetic):
     """`apply` defaults to false, and the assertion is on the MODEL rather than on whether a record exists: a

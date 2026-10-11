@@ -244,6 +244,29 @@ def _load_csv(path, *, measured_on=None) -> tuple:
     return _normalize_log(log, measured_on=measured_on, source=str(path))
 
 
+def _naming_the_logs_on_disk(refusal: dict, rid: str, args: dict) -> dict:
+    """A refusal for a MISSING log names the logs this robot already has on disk, newest first.
+
+    MEASURED 2026-10-10 through the MCP server: an agent following the journey called simulate_bench_log, which
+    wrote a log and returned its path, then called the next step without it and was told only to "provide
+    log_path", with nothing saying that one was already in this robot's own directory. Naming it costs a
+    directory listing. Using it unasked would not be safe, since the log could be a simulated stand-in, so the
+    path is named and the choice stays with the caller."""
+    if args.get("log_path") or args.get("log") is not None:
+        return refusal                                   # a log was given, and the refusal is about that log
+    try:
+        logs = sorted(_artifact_dir(rid, args.get("out_dir")).glob("bench_log_*.json"),
+                      key=lambda p: p.stat().st_mtime, reverse=True)
+    except Exception:  # noqa: BLE001 - naming a convenience must never replace the refusal it decorates
+        return refusal
+    if not logs:
+        return refusal
+    return {**refusal, "logs_on_disk_for_this_robot": [str(p) for p in logs],
+            "error": (f"{refusal.get('error')}. This robot already has {len(logs)} bench log(s) on disk, newest "
+                      f"first under logs_on_disk_for_this_robot; to use the newest, pass log_path: '{logs[0]}'. "
+                      f"A name starting bench_log_synthetic is a SIMULATED stand-in, not your machine")}
+
+
 def _read_log(log_path=None, inline=None, *, measured_on=None) -> tuple:
     """``(log, None)`` or ``(None, refusal)``. Accepts an inline object, a .json bundle, or a wide .csv."""
     import json
@@ -598,7 +621,7 @@ def measure_sim_to_real_gap(args: dict) -> dict:
     rid = str(args["robot_id"])
     log, bad = _read_log(args.get("log_path"), args.get("log"), measured_on=args.get("measured_on"))
     if bad:
-        return bad
+        return _naming_the_logs_on_disk(bad, rid, args)
     plan, plan_note = _load_plan(gene, args.get("plan_path"), robot_id=rid, log=log)
     try:
         from virturoid.services.sysid.gap_report import measure_gap
@@ -669,7 +692,7 @@ def fit_actuators(args: dict) -> dict:
     rid = str(args["robot_id"])
     log, bad = _read_log(args.get("log_path"), args.get("log"), measured_on=args.get("measured_on"))
     if bad:
-        return bad
+        return _naming_the_logs_on_disk(bad, rid, args)
     plan, plan_note = _load_plan(gene, args.get("plan_path"), robot_id=rid, log=log)
     apply_it = bool(args.get("apply", False))
     provisional = bool(args.get("allow_provisional", False))
