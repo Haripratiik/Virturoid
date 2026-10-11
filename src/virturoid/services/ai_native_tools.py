@@ -962,9 +962,13 @@ def _honest_gait(gene, *, steps: int = 1200, render: bool = False, tag: str = "g
                 r_alt = crawl_gait_rollout(gene, steps=steps, record_qpos=True, frame_every=frame_every, **_alt)
                 cred_now = classify(r).startswith("CREDIBLE")
                 cred_alt = classify(r_alt).startswith("CREDIBLE")
+                # SIGNED, like the default arm above, and for the same reason: with ``abs`` a hint that walked
+                # BACKWARD out-ranked the controller this body carries. Measured 2026-10-11 on the composed
+                # hexapod (its own fitted gait walks 7.9 m at the judging horizon): an 800-step verify swapped in
+                # the mined hint at -0.132 m and printed that as the robot's verdict.
                 if (cred_alt and not cred_now) or (
                         cred_alt == cred_now
-                        and abs(float(r_alt.get("forward", 0))) > abs(float(r.get("forward", 0)))):
+                        and float(r_alt.get("forward", 0)) > float(r.get("forward", 0))):
                     r, gait_source = r_alt, "flywheel_hint"
                     deployed_params = dict(_alt)
         # RECORDED AFTER THE SELECTION IS FINAL, so ``shipped_forward_m`` is what the robot walked away with.
