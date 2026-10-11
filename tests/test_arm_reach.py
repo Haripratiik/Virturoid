@@ -6,7 +6,7 @@ verification certificate. Franka's datasheet says 855 mm. The number was the sum
 length, the two finger joints and every offset link included, at full length, as if the joint ranges let the
 whole chain lie straight. The same rule read a UR5e (850 mm) at 1.274 m and a Kinova Gen3 (902 mm) at 1.045 m.
 
-``services.arm_reach`` measures the farthest the end effector's origin gets from the arm's first joint over
+``services.arm_reach`` measures the farthest the end effector's origin gets from the arm's first joint axis over
 joint configurations sampled inside the declared limits. These tests pin that it lands near the datasheets on
 the real arms (when the Menagerie is cached; otherwise those skip), that the verdict and every surface that
 carries it report that number, and the properties that make it a measurement rather than a guess: it cannot
@@ -48,7 +48,8 @@ def _composed_arm():
 
 @pytest.mark.parametrize("pkg,model,datasheet", _DATASHEET)
 def test_a_real_arm_reads_within_ten_percent_of_its_datasheet(pkg, model, datasheet):
-    """Measured 0.858 / 0.927 / 0.968 for 0.855 / 0.850 / 0.902. The link sum read 1.708 / 1.274 / 1.045."""
+    """Measured 0.856 / 0.925 / 0.841 for 0.855 / 0.850 / 0.902 (from the first joint's axis; from its anchor point
+    they read 0.858 / 0.927 / 0.968). The link sum read 1.708 / 1.274 / 1.045."""
     from virturoid.services.arm_reach import arm_reach
     gene = _imported(pkg, model)
     r = arm_reach(gene)
@@ -99,8 +100,9 @@ def test_reach_does_not_move_when_the_arm_is_mounted_higher():
 
 
 def test_reach_is_stable_across_seeds():
-    """6000 samples: the max moves by under a percent from seed to seed. Measured over seeds 0-4: this composed
-    arm 0.745-0.751, the Panda 0.857-0.858, the UR5e 0.926-0.927, the Gen3 0.968-0.969."""
+    """6000 samples: the max moves by under a percent from seed to seed. Measured over seeds 0-4 (2026-10-11, from
+    the first joint's axis): this composed arm 0.696-0.701, the Panda 0.856-0.857, the UR5e 0.921-0.925, the Gen3
+    0.839-0.841."""
     from virturoid.services.arm_reach import arm_reach
     gene = _composed_arm()
     vals = [arm_reach(gene, seed=s)["reach_m"] for s in range(4)]

@@ -7,18 +7,22 @@ Measured on the Menagerie arms against their datasheets, that rule read a Franka
 a UR5e (850 mm) at 1.274 m and a Kinova Gen3 (902 mm) at 1.045 m: the Panda at twice its real reach, in the
 headline verdict, in the spec sheet and on the verification certificate.
 
-What is measured instead is the question a reach answers: how far from its own first joint can the end
+What is measured instead is the question a reach answers: how far from its own first joint's AXIS can the end
 effector get? Over 6000 joint configurations sampled inside the limits the model declares, the largest
-distance from the first joint's anchor on the end effector's chain to the end-effector body's origin:
+perpendicular distance from the first joint's axis line on the end effector's chain to the end-effector body's
+origin. For an arm standing on a table with a vertical first joint that is its horizontal reach, the radius of
+the work envelope datasheets quote; for a wall- or ceiling-mounted arm it is the same radius about its own first
+axis, so the number does not depend on where the arm is bolted down. The end-effector ORIGIN is where the arm's
+own flange or palm starts, so a tool or finger length is not in the number. A first joint that SLIDES has no axis
+to be distant from, and its reach is measured from that joint's anchor point instead.
 
-    Panda (datasheet 0.855)   0.858      UR5e (0.850)   0.927      Gen3 (0.902)   0.968
-
-Within 9% of all three, and independent of where the arm is bolted down, because the distance starts at the
-arm's own first joint rather than at the world or the base link. (The horizontal radius to the end effector,
-measured alongside it, read 0.857 / 0.923 / 0.839 and is as close on these three; it was not chosen because
-"horizontal" assumes an arm standing upright on a table, and a wall- or ceiling-mounted arm is neither.) The
-end-effector ORIGIN is where the arm's own flange or palm starts, so a tool or finger length is not in the
-number.
+WHY THE AXIS AND NOT THE FIRST JOINT'S ANCHOR POINT, which the first version measured from. Over the 14 Menagerie
+arms with a published reach (2026-10-11, same samples): from the anchor, median error 6% but worst +44% and a +7%
+bias, because a source that anchors a vertical first joint well below the shoulder adds that offset whenever the
+arm points straight up (a KUKA iiwa 14 read 1.102 m for its 0.820 m, a Flexiv Rizon 4 1.126 m for its 0.780 m,
+and a composed arm with a base yaw under a column 1.14 m for about 0.85 m of horizontal reach); from the axis,
+median 9%, worst 16% and no bias (Panda 0.856 for 0.855, UR5e 0.925 for 0.850, Gen3 0.841 for 0.902, KUKA 0.900,
+Flexiv 0.903). A headline number that is sometimes 44% too long is the wrong trade for a slightly better median.
 
 It is kinematics only: no controller, no dynamics, no gravity. Three limits are worth knowing when reading it:
 
@@ -28,10 +32,8 @@ It is kinematics only: no controller, no dynamics, no gravity. Three limits are 
 * every joint is sampled INDEPENDENTLY inside its own range. A linkage the source closes with an equality
   constraint (a four-bar, a coupled finger, a parallelogram elbow) is sampled as if it were open, so a
   configuration the constraint forbids can be counted and such an arm can read a little LONG;
-* it starts at the first joint's anchor POINT, and a source that anchors a vertical first joint well below the
-  shoulder adds that offset when the arm points straight up. Across the 14 Menagerie arms with a published
-  reach the median error is 6%, and the two outliers are exactly this: a KUKA iiwa 14 reads 1.102 m for its
-  0.820 m and a Flexiv Rizon 4 1.126 m for its 0.780 m (the link sum read them 1.147 and 1.202).
+* datasheets do not agree on where reach is measured to (wrist centre, flange, tool point), so the residual
+  error is partly convention: across the 14 arms it runs from -14% (Sawyer) to +16% (Flexiv).
 """
 from __future__ import annotations
 
@@ -72,11 +74,12 @@ def end_effector_body(model, gene) -> int | None:
 def arm_reach(gene, *, model=None, samples: int = REACH_SAMPLES, seed: int = REACH_SEED) -> dict | None:
     """The arm's reach by forward kinematics, or ``None`` when the body has no articulated end-effector chain.
 
-    ``{"reach_m", "from_joint", "to_body", "samples", "seed", "method"}``: ``reach_m`` is the largest distance
-    from ``from_joint``'s anchor (the first hinge or slide on the end effector's chain) to ``to_body``'s origin
-    over ``samples`` configurations drawn uniformly inside each chain joint's declared range. An unlimited hinge
-    is drawn over a full turn; an unlimited slide is held at its zero, since its travel is not in the model.
-    ``model`` may be passed when the caller already compiled the gene's own MJCF.
+    ``{"reach_m", "from_joint", "measured_from", "to_body", "samples", "seed", "method"}``: ``reach_m`` is the
+    largest perpendicular distance from ``from_joint``'s axis line (the first hinge on the end effector's chain;
+    ``measured_from`` "axis") to ``to_body``'s origin over ``samples`` configurations drawn uniformly inside each
+    chain joint's declared range, or the distance from that joint's anchor when it slides (``measured_from``
+    "anchor"). An unlimited hinge is drawn over a full turn; an unlimited slide is held at its zero, since its
+    travel is not in the model. ``model`` may be passed when the caller already compiled the gene's own MJCF.
     """
     import mujoco
     import numpy as np
@@ -101,14 +104,21 @@ def arm_reach(gene, *, model=None, samples: int = REACH_SAMPLES, seed: int = REA
     qadr = np.array([int(model.jnt_qposadr[j]) for j in chain])
     draws = np.random.default_rng(int(seed)).uniform(lo, hi, size=(int(samples), len(chain)))
     data = mujoco.MjData(model)
+    about_axis = int(model.jnt_type[first]) == int(mujoco.mjtJoint.mjJNT_HINGE)
     best = 0.0
     for row in draws:
         data.qpos[qadr] = row
         mujoco.mj_kinematics(model, data)
-        best = max(best, float(np.linalg.norm(data.xpos[ee] - data.xanchor[first])))
+        v = data.xpos[ee] - data.xanchor[first]
+        if about_axis:                                          # drop the component along the first joint's axis
+            a = data.xaxis[first] / (float(np.linalg.norm(data.xaxis[first])) or 1.0)
+            v = v - a * float(v @ a)
+        best = max(best, float(np.linalg.norm(v)))
     return {"reach_m": round(best, 3),
             "from_joint": mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, first) or f"joint {first}",
+            "measured_from": "axis" if about_axis else "anchor",
             "to_body": mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, ee) or f"body {ee}",
             "samples": int(samples), "seed": int(seed),
-            "method": ("forward kinematics: the farthest the end-effector origin gets from the first joint on "
-                       "its chain, over joint configurations sampled inside the declared limits")}
+            "method": ("forward kinematics: the farthest the end-effector origin gets from the first joint's "
+                       + ("axis" if about_axis else "anchor") + " on its chain, over joint configurations sampled "
+                       "inside the declared limits")}
