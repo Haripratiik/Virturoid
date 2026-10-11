@@ -219,7 +219,8 @@ MATERIALS: tuple[Material, ...] = (
              (0.85, 0.85, 0.88, 1.0), 0.25),
     Material("TPU (rubber)", 1210.0, 35.0, "soft grippy pads (feet / fingertips)", "grip-soft", "low",
              (0.13, 0.13, 0.15, 1.0), 0.2),
-    Material("Hardened steel (gripper)", 7850.0, 9.0, "wear-resistant metal hands/jaws", "contact-metal",
+    Material("Hardened steel", 7850.0, 9.0, "wear-resistant contact metal: hands, jaws, feet, wheel hubs",
+             "contact-metal",
              "high", (0.46, 0.48, 0.52, 1.0), 0.8),
 )
 

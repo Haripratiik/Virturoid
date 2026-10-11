@@ -120,7 +120,11 @@ def _role_geometry(role: str, size: float, girth: float, aspect: str = "", *, au
         if a in ("round", "bulb", "sac"):
             hw = min(max(0.04, g), 0.95 * L) / 2.0
             h = max(0.04, 1.9 * hw)
-            return loft(hw, h), h, hw
+            # ROUND IN PLAN TOO. ``loft`` stretches the sections to the part's LENGTH front to back, so a round
+            # mantle of size 0.58 / girth 0.13 was drawn as a 0.58 m cigar around the 0.13 m ball its collider
+            # is (see the root's sphere in ``build_from_anatomy``). A sac is as long as it is wide.
+            return _loft([(0.0, hw * 0.74, hw * 0.74), (0.40 * h, hw, hw), (0.82 * h, hw * 0.92, hw * 0.92),
+                          (h, hw * 0.58, hw * 0.58)]), h, hw
         # DEFAULT 'long' robot torso -> a CHASSIS as a multi-feature COMPOUND: a main structural shell PLUS a
         # raised top electronics/sensor deck (a real robot body is a shell with a mounted module bay, not one
         # plain block). The compound is ONE segment (no kinematic cost) but reads as several parts.
@@ -676,6 +680,11 @@ def build_from_anatomy(graph: dict) -> RobotGene:
     # authored girth here (the old bug) floated appendages off a capped body — the detach fragility every exotic
     # creature hit in the stress test.
     half_len, half_w, height = b_size / 2.0, brad, blen
+    # THE TRUNK'S LENGTH, NAMED, because ``blen`` is not it. For the root body ``_role_geometry`` returns
+    # (geometry, HEIGHT, half_width): the torso is extruded along +z = height with its front-back extent in the
+    # profile, so ``blen`` is how TALL the trunk is. The front-back envelope every anchor, mount bound and box
+    # collider uses is ``2 * half_len``, and that is what a proportion rule written "vs the trunk length" means.
+    trunk_len = 2.0 * half_len
     rname = root.get("name") or "body"
     root_aspect = str(root.get("aspect") or "").lower()
     # A round mantle/abdomen must be round in the model that physics and the
@@ -686,6 +695,13 @@ def build_from_anatomy(graph: dict) -> RobotGene:
     # its supporting loft description back into a rectangular proxy.
     if root_shape != "sphere":
         root_shape = proxy_shape
+    else:
+        # ...AND ITS PARTS ROOT ON THAT SPHERE. The anchors used the part's LENGTH as the body's half-length,
+        # which a ball does not have: the offline octopus (mantle 0.58 x 0.13) put its front and rear tentacle
+        # pairs 0.174 m out on a 0.065 m ball, so in the simulated body four tentacles hung from empty space
+        # (measured 2026-10-11, 0.061 m clear of the mantle). The ball's radius is the half-length now.
+        half_len = max(brad, 0.06)
+        trunk_len = 2.0 * half_len
     # The body plan's front/back half-length used to disappear here: every
     # torso compiled as a square vertical post.  A box torso now carries the
     # same x/y envelope that anchors and the geometry program use.
@@ -738,13 +754,27 @@ def build_from_anatomy(graph: dict) -> RobotGene:
         girth = float(part.get("girth") or 0) or 0.18 * size
         girth *= max(0.3, min(3.0, float(part.get("thickness") or 1.0)))   # per-part THICKNESS knob (load-bearing)
         n = max(1, min(8, int(part.get("segments") or 1)))
-        # PROPORTION caps vs the REALIZED torso (blen = trunk length, brad = trunk half-width): the fidelity
+        # PROPORTION caps vs the REALIZED torso (trunk_len = trunk length, brad = trunk half-width): the fidelity
         # render — once the styling pass removed the palette noise — showed a head capsule rivaling the whole
         # trunk (a "second body") and connective parts as fat as a limb. Those are the LLM's free sizing running
         # past what reads as a real machine. Code owns these bands (like the leg-slenderness cap); the LLM sizes
         # WITHIN them. Caps only ever shrink (min), so a well-proportioned part is untouched.
+        #
+        # THE LENGTH CAP READ THE TORSO'S HEIGHT. It was written ``0.50 * blen`` under a comment calling blen the
+        # trunk length, and blen is the trunk's HEIGHT (see ``trunk_len`` above), so every head was held to half
+        # of how tall the torso is. Measured through the MCP server on an authored quadruped (torso 0.45 / girth
+        # 0.10, head 0.12 / girth 0.05 at front_top): the head compiled 0.057 m long, mounted 0.184 m forward
+        # inside a 0.45 m torso box, so 1.7 cm of it showed, and render_view (visual and collision, default
+        # camera) drew no head at all; only a close-up side view finds the nub. The composer's own graphs hit the
+        # same rule: the offline dog asks for a 0.139 m head and got 0.075 m. A head is now held to half the
+        # trunk's LENGTH, which is what this rule always said (the authored head now shows 0.080 m past the trunk).
+        #
+        # The girth cap was checked against the same question and is like for like: a head's ``girth`` becomes its
+        # half-width (``_role_geometry`` builds the sensor head at 0.92 x girth) and ``brad`` is the trunk's
+        # realized half-width, so a capped head is at most about half as wide as the trunk: "narrower", as
+        # written. It is unchanged.
         if role in ("head", "sensor_head", "snout", "muzzle", "skull", "face"):
-            size = min(size, 0.50 * blen)     # a head must be clearly shorter than the trunk
+            size = min(size, 0.50 * trunk_len)   # a head must be clearly shorter than the trunk
             girth = min(girth, 0.55 * brad)   # ...and narrower — reads as a sensor head, not a second body
         elif role in ("neck", "tail", "antenna", "ear", "mast", "horn"):
             girth = min(girth, 0.45 * brad)   # slim connective appendages, never torso-fat
@@ -1295,8 +1325,11 @@ def generic_creature_gene(prompt: str, robot_class: str | None = None, n_legs: i
             n_pairs=n_pairs, center_leg=center_leg, appendage_role="tentacle" if tentacled else "leg",
             body_aspect="round" if tentacled else "",
             leg=round(0.42 * prop["leg"] * ask["leg"] * s, 4),
-            body=round(0.58 * prop["torso"] * ask["torso"] * s, 4),
-            girth=round(0.13 * ((prop["mass"] * size_mass) ** (1.0 / 3.0)) * ask["girth"] * s, 4),
+            # A tentacled body's mantle is a ROUND sac as long as it is wide (0.30 m), not the 0.58 x 0.13 m
+            # walking trunk: with that trunk's numbers "round" could only mean a 0.13 m ball under 0.42 m arms.
+            body=round((0.30 if tentacled else 0.58 * prop["torso"] * ask["torso"]) * s, 4),
+            girth=round((0.30 if tentacled else 0.13 * ((prop["mass"] * size_mass) ** (1.0 / 3.0)) * ask["girth"])
+                        * s, 4),
             leg_girth_mult=ask["thick"],
             # A wide/splayed stance is asked for either by the species prior (gecko, crocodile) or in so many
             # words ("a wide stance"); both reach the same fanned layout.

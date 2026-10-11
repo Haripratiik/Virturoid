@@ -105,7 +105,23 @@ def robot_reachable_points(gene: RobotGene, *, z: float = 0.06, ring: int = 24, 
     from virturoid.services.pick_place_controller import plan_joint_targets
 
     model = mujoco.MjModel.from_xml_string(compile_gene_with_scene(gene, []))
-    reach = max(0.05, sum(s.length_m for s in gene.actuated_joints()) + 0.05)
+    # THE RINGS ARE SCALED BY THE REACH THE ARM ACTUALLY HAS (services/arm_reach.py: forward kinematics from its
+    # first joint), not by the sum of every actuated length. That sum counts a gripper's fingers and every
+    # offset link, and on an imported Franka Panda it was 1.708 m for an 855 mm arm: every candidate ring sat at
+    # 0.69-0.89 m, i.e. at 81% of its real reach and beyond, so the "graspable" cap below was defeated, the
+    # contact grasp found no point inside its dexterous zone at all, and 3 of 4 pinned pick-place episodes were
+    # `missed_grasp` on blocks placed at full extension. Measured on the pick-place skill with the scale swapped
+    # and nothing else (pin over 4 scenes, contact over 3): Panda pin 1/4 -> 3/4, and the contact grasp now
+    # runs at all (0/3: our generic script on the Franka Hand); i2rt YAM pin 3/4 -> 3/4; a composed 6-DOF arm
+    # pin 1/4 -> 3/4, contact 2/3 -> 2/3; the composed sorting arm 4/4 and 3/3 unchanged; the tabletop fixture
+    # arm unchanged (its chain is straight, so the two rules agree). The +0.05 tool allowance is kept on top of
+    # the measured number, as it was on top of the sum.
+    try:
+        from virturoid.services.arm_reach import arm_reach
+        _fk = arm_reach(gene)
+    except Exception:  # noqa: BLE001 - an end-effector chain FK cannot read falls back to the old scale
+        _fk = None
+    reach = max(0.05, (_fk["reach_m"] if _fk else sum(s.length_m for s in gene.actuated_joints())) + 0.05)
     inner = 0.36 * grasp_frac / 0.72                      # inner ring proportional to the graspable cap
     arc = math.radians(58)                                # reliable forward half-arc: a top-down grasp needs
     #                                                       the wrist pointing DOWN, which it can't at the far
@@ -315,10 +331,19 @@ def ground_and_repair(gene: RobotGene, *, task: str = "") -> dict:
     _g = grounding_config(gene)
     _mat, _fill, _keep = _g["material"], _g["fill"], _g["preserve_mass"]
     _hold_shape = bool(_g["preserve_geometry"])
+    # A STATED MASS IS NOT OURS TO RE-DERIVE, on the way out any more than on the way in. ``set_payload`` records
+    # the load it put on the robot (``metadata['embodied_mass']['payload_kg']``) and every amend protects it, but
+    # these calls did not: they re-derived the payload link from its volume x density like any structural link.
+    # MEASURED 2026-10-11 through the MCP server: a composed quadruped given a 2 kg payload was verified and
+    # trained at 36.98 kg, then exported with that payload at 3.925 kg (38.905 kg). The trained crawl gait no
+    # longer walked the heavier body, so the package shipped the fallback trot controller, which crouched
+    # backwards, and the certificate said DEPLOY != MEASURE.
+    _stated = {str(n) for n in ((((getattr(gene, "metadata", None) or {}).get("embodied_mass") or {})
+                                 .get("payload_kg")) or {})}
     _findings: dict = {}
     try:
         from virturoid.services.grounded_physics import ground_gene
-        report = ground_gene(gene, material=_mat, fill=_fill, preserve_mass=_keep)
+        report = ground_gene(gene, material=_mat, fill=_fill, preserve_mass=_keep, preserve_mass_links=_stated)
         from virturoid.services.structural_validation import validate_structure
         for _ in range(3):
             _st = validate_structure(gene)
@@ -341,7 +366,7 @@ def ground_and_repair(gene: RobotGene, *, task: str = "") -> dict:
                         and float(_s.length_m) > 0):
                     _r = min(_r, float(_s.length_m) / 4.5)
                 _s.radius_m = round(max(float(_s.radius_m), _r), 5)
-            report = ground_gene(gene, material=_mat, fill=_fill, preserve_mass=_keep)
+            report = ground_gene(gene, material=_mat, fill=_fill, preserve_mass=_keep, preserve_mass_links=_stated)
         # A LINK MUST BE BIG ENOUGH TO HOUSE THE MOTOR THAT DRIVES IT (visual-fidelity defect T1). Actuator
         # housings are drawn at their true datasheet envelope, which is right -- but nothing forced the LIMB to
         # be able to carry that part, so the compiler emitted a 5.6 mm rod mounting a 98 mm-diameter T-Motor
@@ -382,7 +407,7 @@ def ground_and_repair(gene: RobotGene, *, task: str = "") -> dict:
             if _over:
                 _findings["housing_over_limb"] = _over[:12]
             if _grew:
-                report = ground_gene(gene, material=_mat, fill=_fill, preserve_mass=_keep)
+                report = ground_gene(gene, material=_mat, fill=_fill, preserve_mass=_keep, preserve_mass_links=_stated)
         except Exception:  # noqa: BLE001 - housing fit is a fidelity pass, never a build blocker
             pass
     except Exception as _ge:  # noqa: BLE001
@@ -435,6 +460,18 @@ _LOCOMOTION_ONLY_ARTIFACTS = ("simulation/locomotion_qpos.json", "software/gait_
                               "software/control_program.json", "simulation/robot_visual.xml",
                               "simulation/viewer_mesh_index.json")
 
+#: Evidence for the OTHER contract-less package this repo can produce: ``mvp.write_mvp_robot_arm_project``
+#: writes 140 files and NO ``robot_package_contract.json`` at all, so the contract branch above sees
+#: nothing and every build was let through. MEASURED: 98 of those files are manipulator-specific and not
+#: one is in ``_BRAIN_ARTIFACTS``, so a legged build into that directory keeps the lot -- including a
+#: synthetic training dataset for a WRIST RGBD CAMERA, on a robot that has no wrist.
+#:
+#: ``reports/mvp_summary.md`` is NOT in this list and must not be added: a gene package writes it too, so
+#: using it as evidence would refuse every ordinary rebuild. Each entry below was checked against a freshly
+#: built gene locomotion AND gene manipulation package and appears in neither.
+_MANIPULATOR_TRAINING_ARTIFACTS = ("reports/mvp_evaluation_report.json", "training/training_run_config.json",
+                                   "training/training_manifest.json", "datasets/synthetic_observations")
+
 #: What a rebuild on a different path leaves behind pointing at the WRONG robot. Listed in the refusal so the
 #: message is actionable rather than an abstract objection.
 _BRAIN_ARTIFACTS = _LOCOMOTION_ONLY_ARTIFACTS + (
@@ -475,6 +512,10 @@ def _existing_package_path(output_dir: Path) -> tuple:
     if present:
         return "locomotion", ("this directory carries " + ", ".join(present)
                               + ", which only a locomotion build writes")
+    present = [rel for rel in _MANIPULATOR_TRAINING_ARTIFACTS if (Path(output_dir) / rel).exists()]
+    if present:
+        return "manipulation", ("this directory carries " + ", ".join(present)
+                                + ", which only the MVP manipulator training build writes")
     return None, "this directory carries no package of ours"
 
 
@@ -570,9 +611,13 @@ def build_gene_package(gene: RobotGene, prompt: str, output_dir: Path, scene_cou
         _rep_dir = output_dir / "reports"
         _rep_dir.mkdir(parents=True, exist_ok=True)
         (_rep_dir / "grounding_report.json").write_text(_json.dumps(_ground_report, indent=2), encoding="utf-8")
-        from virturoid.services.bom_certificate import certify_policy_on_bom
-        certify_policy_on_bom(gene, None, steps=250, n_seeds=1,
-                              out_path=str(_rep_dir / "bom_certificate.json"))
+        from virturoid.services.bom_certificate import (certify_drive_on_bom, certify_policy_on_bom,
+                                                        drives_on_wheels)
+        if drives_on_wheels(gene):                         # a wheeled base: graded under its own navigation drive
+            certify_drive_on_bom(gene, out_path=str(_rep_dir / "bom_certificate.json"))
+        else:
+            certify_policy_on_bom(gene, None, steps=250, n_seeds=1,
+                                  out_path=str(_rep_dir / "bom_certificate.json"))
     except Exception:  # noqa: BLE001 - the certificate is a report, never a build blocker
         pass
     try:                                                   # G6: design-time morphology gate (report, ledger-visible)
@@ -1338,7 +1383,7 @@ class GaitController:
                 lift = 0.0
                 stride = math.cos(math.pi * (u - self.lift_duty) / max(1e-3, 1.0 - self.lift_duty))
             knee = int(leg["knee_index"]); hip = int(leg["hip_index"])
-            target[knee] = self.default_pose[knee] + self.knee_amp * lift
+            target[knee] = self.default_pose[knee] + self.knee_amp * float(leg.get("lift_sign", 1.0)) * lift
             target[hip] = self.default_pose[hip] + self.hip_amp * float(leg["hip_sign"]) * stride
         return {name: max(limit[0], min(limit[1], value))
                 for name, value, limit in zip(self.joint_names, target, self.limits)}
@@ -1398,6 +1443,7 @@ def _stamp_exported_controller(gene, program: dict | None) -> None:
                 "program_fingerprint": program.get("program_fingerprint"),
                 "control_frequency_hz": program.get("control_frequency_hz"),
                 "pd_gains": program.get("pd_gains"),
+                "operating_point": program.get("operating_point"),
                 "verified_walk": program.get("verified_walk"),
                 "sim_forward_m": program.get("sim_forward_m"),
                 "sim_verdict": program.get("sim_verdict"),
@@ -1459,10 +1505,11 @@ def _run_exported_controller(gene, program: dict, controller_source: str, *, ste
     import mujoco
     import numpy as np
 
+    from virturoid.services.appendage_map import build_appendage_map
     from virturoid.services.gait_quality import classify
     from virturoid.services.morph_graph import encode_robot
-    from virturoid.services.morph_policy import (_reset_to_rest, compiled_model, robot_mjcf,
-                                                 upright_height_ratio)
+    from virturoid.services.morph_policy import (_FootClearance, _Inversion, _reset_to_rest, compiled_model,
+                                                 robot_mjcf, upright_height_ratio)
 
     ns: dict = {}
     exec(compile(controller_source, "<exported software/gait_controller.py>", "exec"), ns)   # noqa: S102
@@ -1500,20 +1547,16 @@ def _run_exported_controller(gene, program: dict, controller_source: str, *, ste
     bq = graph.base_qadr
     x0 = float(data.qpos[bq]); z0 = float(data.qpos[bq + 2]) or 1.0
     frame_every = max(5, int(steps) // 300)
-    tau_up = None
-    # foot set + cadence/support bookkeeping, mirroring recipe_rollout_morph so `classify` reads the same signals
-    gz0 = np.asarray(data.geom_xpos[:, 2], dtype=float)
-    body_g = [gi for gi in range(model.ngeom) if int(model.geom_bodyid[gi]) != 0]
-    if body_g:
-        zmin = min(float(gz0[gi]) for gi in body_g)
-        feet = [gi for gi in body_g if float(gz0[gi]) < zmin + 0.05] or body_g
-    else:
-        feet = []
-    feet_idx = np.asarray(feet, dtype=int)
-    fz0 = gz0[feet_idx] if len(feet_idx) else np.zeros(0)
-    c_prev = (np.asarray(data.geom_xpos[feet_idx, 2]) < fz0 + 0.02) if len(feet_idx) else np.zeros(0, bool)
-    tau_up = upright_height_ratio(len(feet_idx))
-    lifts = up_steps = support_steps = 0
+    # FEET AS FOOT CLEARANCE, by the crawl's own rule (morph_policy._FootClearance): the program this runs is a
+    # frozen crawl or trot, and it must be judged by the measurement the rollout that produced it was judged by. The
+    # geom-centre rule this replaces counted a composed quadruped's visual collars and boots as feet, and the upright
+    # bar below read that count: 12 "feet" held a quadruped to the octopod's 0.50 instead of its own 0.70.
+    feet = _FootClearance(model, data, build_appendage_map(model).legs, act_u)
+    tau_up = upright_height_ratio(feet.n)
+    foot_h = np.empty((int(steps) + 1, feet.n))                  # row 0 = the state the first step starts from
+    foot_h[0] = feet.heights(data)
+    up_steps = 0
+    inv = _Inversion()                                           # did it go upside down (measurement only)
     alive = int(steps); hr = 1.0; qpos_frames = []; tgt = None
     for t in range(int(steps)):
         if t % dec == 0:
@@ -1531,26 +1574,26 @@ def _run_exported_controller(gene, program: dict, controller_source: str, *, ste
             qpos_frames.append(data.qpos.copy())
         q = data.qpos[bq + 3:bq + 7]
         upr = 1.0 - 2.0 * (float(q[1]) ** 2 + float(q[2]) ** 2)
+        if upr < 0.0:                                            # past 90 deg of tilt: UPSIDE DOWN, the crawl's rule
+            inv.note(t, q, upr)
         z = float(data.qpos[bq + 2]); hr = min(1.0, max(0.0, z / z0))
         if z < 0.5 * z0:                                         # FALLEN -> terminate (same bar as the recipe rollout)
             alive = t; break
         if z > tau_up * z0 and upr > 0.6:
             up_steps += 1
-        if len(feet_idx):
-            c_now = np.asarray(data.geom_xpos[feet_idx, 2]) < fz0 + 0.02
-            lifts += int(np.sum(c_prev & ~c_now))
-            ng = int(np.sum(c_now))
-            support_steps += int(0 < ng < len(feet_idx))
-            c_prev = c_now
+        foot_h[t + 1] = feet.heights(data)
+    lifts, support_steps = feet.count(foot_h[:alive + 1])
     forward = float(data.qpos[bq] - x0)                          # SIGNED: backward travel is not forward travel
+    _by_height = bool(alive >= int(steps) and hr > 0.6)          # the height test, all `survived` used to be
     r = {"finite": True, "forward": round(forward, 3), "height_ratio": round(hr, 3), "alive": alive,
-         "survived": bool(alive >= int(steps) and hr > 0.6),
+         "survived": _by_height and inv.at is None,              # upside down is a fall (morph_policy._Inversion)
          "speed": round(forward / max(1, int(steps)) / dt, 3),
          "cadence": round(lifts / max(1e-9, max(1, alive) * dt), 2),
          "upright_frac": round(up_steps / max(1, alive), 3),
          "support_frac": round(support_steps / max(1, alive), 3),
-         "n_feet": int(len(feet_idx)), "steps": int(steps), "frame_every": frame_every,
+         "n_feet": int(feet.n), "steps": int(steps), "frame_every": frame_every,
          "qpos_frames": qpos_frames}
+    r.update(inv.disclose(alive, _by_height))                    # {} unless it went upside down
     r["verdict"] = classify(r)
     r["measured_by"] = {
         "what_was_driven": "software/gait_controller.py (GaitController.infer) on software/control_program.json",

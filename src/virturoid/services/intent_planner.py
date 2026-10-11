@@ -197,6 +197,11 @@ def _kw(word: str, text: str) -> bool:
     return re.search(rf"\b{re.escape(word)}", text) is not None
 
 
+#: Sites whose robots are wheeled bases, read only when a prompt names no class and no task (see the fallback).
+_FACILITY_WORDS = ("warehouse", "logistics", "fulfillment", "fulfilment", "distribution center",
+                   "distribution centre", "intralogistics")
+
+
 def _heuristic_plan(prompt: str) -> BuildPlan:
     p = (prompt or "").lower()
     # robot class: first matching family by priority (legged/mobile/humanoid before generic manipulator)
@@ -224,6 +229,12 @@ def _heuristic_plan(prompt: str) -> BuildPlan:
         if task in ("spray_coverage", "pick_place_sort", "grasp_lift", "place_to_target"):
             robot_class = "manipulator"
         elif task == "navigation":
+            robot_class = "mobile_base"
+        elif any(_kw(w, p) for w in _FACILITY_WORDS):
+            # A FACILITY NAMED AND NOTHING ELSE. "a warehouse robot" and "a large heavy-duty warehouse robot"
+            # carried no class or task word and fell through to the creature default: measured 2026-10-11, both
+            # composed a 20-segment quadruped. A robot described only by the logistics site it works in is, by a
+            # wide margin, a wheeled base. Only this fallback reads it, so "a warehouse arm" stays an arm.
             robot_class = "mobile_base"
         else:
             robot_class = "quadruped"

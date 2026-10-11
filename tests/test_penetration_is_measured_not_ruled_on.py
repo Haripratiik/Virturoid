@@ -7,6 +7,19 @@ now rejected. All 63 packages were driven through ``agent_tools.call_tool('inges
 rejections, and the tightest of the 59 that reach the check sits 385x under its own budget. The measurement
 that ruled the obvious fix out is preserved below, because it is the argument for the rule that did ship.
 
+RE-MEASURED 2026-10-10, after the twin began carrying each link's source inertial and contact model, sizing
+each link's collider from its collision geometry rather than its visual mesh, and drawing the trunk from the
+source's own trunk geoms. The colliders moved, so every number this file ASSERTS was re-run with its own probe
+(correct / re-broken): aloha 0.05464 / 0.14172, trossen_wxai 0.00836 / 0.07474, shadow_dexee 0.01352 /
+0.05752, apptronik_apollo 0.06140 / 0.23964. All four re-broken twins are still rejected on placement, each
+11.9x to 48x over its budget. Across the 79 twins built from the 86 top-level models in the cached corpus, 41
+penetrate zero, p75 0.02527, p90 0.03748, p95 0.05582, and the deepest correct twin is pal_talos at 0.06612.
+Three correct twins (apptronik_apollo 0.06140, iit_softfoot 0.06378, pal_talos 0.06612) now out-penetrate the
+shallowest broken one, so NO global threshold exists even on raw depth: the case below against a penetration
+rule got stronger, not weaker. Apollo's deepest overlap is now its two hip links, 2 hops apart, rather than a
+wrist 13 hops from a hip. The percentile and hop tables below were NOT re-run; they describe the twins of
+2026-08-07.
+
 
 --------------------------------------------------------------------------- WHAT THE GATE WAS, AND WHY
 
@@ -103,24 +116,24 @@ pytestmark = pytest.mark.skipif(not _MUJOCO, reason="importing a robot needs MuJ
 _MEN = Path(os.path.expanduser("~/.cache/robot_descriptions/mujoco_menagerie"))
 
 # The four packages that declare more than one body under <worldbody>, and the penetration each one's twin
-# reaches when correct / when re-broken. Measured 2026-08-07; quoted in the asserts so a drift is legible.
+# reaches when correct / when re-broken. Measured 2026-08-07 and re-measured 2026-10-10 (see the module
+# docstring); quoted in the asserts so a drift is legible.
 # apptronik_apollo's re-broken figure was written here as 0.09959 and IS NOT REPRODUCIBLE on this checkout; the
 # assert below caught it and it is corrected to the measured 0.23964. Apollo is the one of the four that is NOT
 # multi-root once its empty `world_link` datum is folded away (see test_multiroot_twin_is_simulable), so it keeps
 # its OWN `base_link` as the gene root and `_collapse_roots` flattens five real children onto it -- both torso
 # cameras, the torso roll and both hips -- rather than the two mounting frames the multi-root bug moved. That is
 # a harsher break than the bug, and it makes the "no threshold separates them" conclusion STRONGER, not weaker:
-# the broken population moves further from the correct one. Nothing else in this file rests on it (the window is
-# set by shadow_dexee at 0.07468, which reproduces exactly).
+# the broken population moves further from the correct one.
 MULTI_ROOT = [
     ("aloha", "aloha/aloha.xml", 0.05464, 0.14172),
-    ("trossen_wxai", "trossen_wxai/trossen_ai_bimanual.xml", 0.03132, 0.10000),
-    ("shadow_dexee", "shadow_dexee/shadow_dexee.xml", 0.04894, 0.07468),
-    ("apptronik_apollo", "apptronik_apollo/apptronik_apollo.xml", 0.06844, 0.23964),
+    ("trossen_wxai", "trossen_wxai/trossen_ai_bimanual.xml", 0.00836, 0.07474),
+    ("shadow_dexee", "shadow_dexee/shadow_dexee.xml", 0.01352, 0.05752),
+    ("apptronik_apollo", "apptronik_apollo/apptronik_apollo.xml", 0.06140, 0.23964),
 ]
 
-WORST_CORRECT_M = 0.06844      # apptronik_apollo, the deepest self-penetration in any of the 62 correct twins
-WEAKEST_BROKEN_M = 0.07468     # shadow_dexee re-broken, the shallowest of the four genuine defects
+APOLLO_CORRECT_M = 0.06140     # apptronik_apollo's correct twin: its two hip links overlap this deep
+WEAKEST_BROKEN_M = 0.05752     # shadow_dexee re-broken, the shallowest of the four genuine defects
 
 
 def _import(rel: str, prefix: str):
@@ -243,29 +256,29 @@ def test_the_rule_must_not_reject_the_correct_twin_of_the_same_robot(pkg, rel, o
 
 
 def test_no_global_penetration_threshold_separates_the_two_populations():
-    """The window, as an executable fact. A threshold must reject shadow_dexee's stacked twin (0.07468) and
-    accept Apollo's correct one (0.06844) -- 9.1% apart, one observation at each edge."""
+    """The populations overlap, as an executable fact. Until 2026-10-10 a threshold could still be squeezed into
+    a 9.1% window between Apollo's correct twin (0.06844) and shadow_dexee's stacked one (0.07468). With colliders
+    that follow the source, Apollo's CORRECT twin (0.06140) out-penetrates dexee's BROKEN one (0.05752), so no
+    threshold separates them in either direction."""
     from virturoid.services.robot_import import _simulability_probe
 
     apollo = _import("apptronik_apollo/apptronik_apollo.xml", "window")
     dexee = _import("shadow_dexee/shadow_dexee.xml", "window")
     assert apollo["gene"] is not None and dexee["gene"] is not None
 
-    worst_correct = _simulability_probe(apollo["gene"])["max_self_penetration_m"]
+    correct = _simulability_probe(apollo["gene"])["max_self_penetration_m"]
     weakest_broken = _simulability_probe(_collapse_roots(dexee["gene"]))["max_self_penetration_m"]
-    assert worst_correct == pytest.approx(WORST_CORRECT_M, abs=5e-4)
+    assert correct == pytest.approx(APOLLO_CORRECT_M, abs=5e-4)
     assert weakest_broken == pytest.approx(WEAKEST_BROKEN_M, abs=5e-4)
-    assert weakest_broken > worst_correct, (
-        f"a correct twin now out-penetrates a broken one ({worst_correct} vs {weakest_broken}); NO global "
-        f"threshold exists at all, and the module docstring's conclusion is now stronger, not weaker")
-    assert weakest_broken / worst_correct < 1.10, (
-        f"the whole margin available to a global threshold is {weakest_broken / worst_correct:.3f}x. If this "
-        f"ever exceeds 1.10 the corpus has changed and the 'not defensible' claim should be re-argued.")
+    assert weakest_broken < correct, (
+        f"a broken twin ({weakest_broken}) out-penetrates every correct one again ({correct}), so a threshold "
+        f"window has reopened. The colliders changed: re-measure before re-arguing for a penetration rule.")
 
 
 def test_the_repos_only_penetration_budget_would_reject_real_robots():
     """``structural_hygiene.DEFAULT_PENETRATION_BUDGET_M`` is 0.02 m and has no production callers. Wiring it
-    into the import path is the obvious fix and it is wrong: 22 of the 62 correct Menagerie twins exceed it."""
+    into the import path is the obvious fix and it is wrong: 22 of the 79 correct Menagerie twins exceed it
+    (22 of 62 in the 2026-08-07 sweep)."""
     from virturoid.services.robot_import import _simulability_probe
     from virturoid.services.structural_hygiene import DEFAULT_PENETRATION_BUDGET_M
 
@@ -279,7 +292,9 @@ def test_the_repos_only_penetration_budget_would_reject_real_robots():
 def test_every_penetration_a_twin_reports_is_already_cross_branch():
     """Why "penetration between bodies that share no kinematic path" cannot be the rule: it is the only kind
     there is. The compiler excludes every ancestor/descendant pair, so a lineal overlap is unobservable, and
-    the deepest contact in a CORRECT humanoid twin is a wrist 13 hops from the hip it sits inside."""
+    the deepest contact in a CORRECT humanoid twin is its left hip inside its right one: two limbs inside each
+    other by any structural definition, on a twin that is right. (Until 2026-10-10 it was a wrist 13 hops from
+    the hip it sat inside; the leaf colliders now follow the source's collision geometry.)"""
     import mujoco
 
     out = _import("apptronik_apollo/apptronik_apollo.xml", "branch")
@@ -314,10 +329,11 @@ def test_every_penetration_a_twin_reports_is_already_cross_branch():
             worst, worst_hops = float(-c.dist), hops
             worst_pair = (mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_BODY, b1),
                           mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_BODY, b2))
-    assert worst == pytest.approx(WORST_CORRECT_M, abs=5e-4), (worst, worst_pair)
-    assert worst_hops >= 6, (
+    assert worst == pytest.approx(APOLLO_CORRECT_M, abs=5e-4), (worst, worst_pair)
+    assert worst_hops >= 2, (
         f"the deepest overlap in a CORRECT twin is {worst_hops} hops apart ({worst_pair}) -- the measured case "
-        f"is 13. A structural 'they share no kinematic path' filter would flag it exactly like a real defect.")
+        f"is the two hip links, 2 hops apart through base_link. They share no kinematic path, so a structural "
+        f"'they share no kinematic path' filter would flag it exactly like a real defect.")
 
 
 # --------------------------------------------------------------------------- what a fix should measure instead

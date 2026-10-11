@@ -185,7 +185,8 @@ def structural_diagnosis(gene: RobotGene) -> dict:
     Grounded, unambiguous facts an agent can reason over to understand what the body *is* and its structural
     limits (DOF, reach, end effector, limb count) — the cheap "understand this robot" tool. Not a physics
     evaluation: it makes no claim about whether the body will actually succeed at a task (that needs the
-    simulator); every observation here is read straight off the gene.
+    simulator); every observation here is read straight off the gene, except a manipulator's reach, which is
+    forward kinematics over its joint ranges (no dynamics, no controller) because a chain length overstates it.
     """
     stats = robot_stats(gene)
     by_name = {s.name: s for s in gene.segments}
@@ -200,11 +201,33 @@ def structural_diagnosis(gene: RobotGene) -> dict:
 
     root = gene.root()
     reach = _chain_len(root.name) if root else sum(s.length_m for s in gene.segments)
+    reach_how = "along the longest kinematic chain"
+    # AN ARM'S REACH IS NOT A CHAIN LENGTH. The longest root-to-leaf chain counts the base, the fingers and
+    # every link at full length as if the joint ranges let it straighten. That is the rule verify_robot used to
+    # print a Franka Panda's 855 mm reach as 1.71 m with. For a manipulator, report what ``verify_robot`` now
+    # reports: forward kinematics from the arm's first joint to its end effector (services/arm_reach.py).
+    # Every other body keeps the chain length, which is what it says it is.
+    kind = None
+    try:
+        from virturoid.services.task_matched_eval import robot_kind
+        kind = robot_kind(gene)
+        if kind == "manipulator":
+            from virturoid.services.arm_reach import arm_reach
+            fk = arm_reach(gene)
+            if fk:
+                reach = fk["reach_m"]
+                reach_how = (f"from the first joint ({fk['from_joint']}) to the end effector, by forward "
+                             f"kinematics within the joint limits")
+    except Exception:  # noqa: BLE001 - no MuJoCo / an uncompilable body: the structural chain length stands
+        pass
 
     obs: list[str] = [f"{stats['dof']} actuated DOF"
                       + (" - low articulation (<3 DOF), limited dexterity" if stats["dof"] < 3 else "")]
-    obs.append(f"reach ~{reach:.2f} m along the longest kinematic chain")
-    if stats["end_effector_type"] in (None, "none"):
+    obs.append(f"reach ~{reach:.2f} m {reach_how}")
+    if stats["end_effector_type"] in (None, "none") and kind == "manipulator":
+        # an ARM with nothing on its flange is still an arm (a UR5e as shipped); it just cannot hold anything
+        obs.append("no gripper on the end effector - it can reach and push, but nothing on it can hold an object")
+    elif stats["end_effector_type"] in (None, "none"):
         obs.append("no end effector - a locomotion/mobility body, not a manipulator")
     else:
         obs.append(f"end effector: {stats['end_effector_type']} (link '{stats['end_effector_link']}')")

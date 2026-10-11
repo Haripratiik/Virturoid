@@ -18,6 +18,7 @@ def verify_task(spec, gene) -> dict:
     kind = robot_kind(gene)
     caps = robot_capabilities(gene)                      # a composite satisfies MORE than its single primary kind
     established = set()                                  # facts available as we walk the steps in order
+    grip = None                                          # gripper_jaws.gripper_status, read once when first needed
 
     for step in spec.steps:
         sig = REGISTRY.get(step.skill)
@@ -30,6 +31,18 @@ def verify_task(spec, gene) -> dict:
         if sig.morphologies and not (set(sig.morphologies) & caps):
             issues.append(f"step {step.step_id!r}: skill {step.skill!r} needs morphology "
                           f"{list(sig.morphologies)}, but this robot has {sorted(caps)}")
+        # 2b. tool gate: a skill that HOLDS an object needs something to hold it with. Being a manipulator is
+        # not that: measured through the MCP server, an imported UR5e (nothing on its flange; verify_robot says
+        # "NO GRIPPER in your model") read pick_place FEASIBLE and ran it with the block pinned to the bare
+        # wrist. Same detector verify_robot and the importer use, so the three cannot disagree about one body.
+        elif getattr(sig, "needs_grasp", False):
+            if grip is None:
+                from virturoid.services.gripper_jaws import gripper_status
+                grip = gripper_status(gene)
+            if not grip["grips"]:
+                issues.append(f"step {step.step_id!r}: skill {step.skill!r} has to hold the object, but this robot "
+                              f"has no gripper: {grip['evidence']}. Run anyway, the object would only be pinned "
+                              f"to the end effector, which is not a grasp")
         # 3. causal chain — preconditions satisfied by a prior step's effects (most v1 skills need none)
         for need in sig.requires:
             if need not in established:

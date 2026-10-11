@@ -279,7 +279,7 @@ def test_walkable_template_decline_names_its_reason():
 
 @pytest.mark.skipif(
     not os.path.exists(os.path.join(os.path.expanduser("~"), ".cache", "robot_descriptions", "mujoco_menagerie",
-                                    "unitree_go2", "go2.xml")),
+                                    "anybotics_anymal_c", "anymal_c.xml")),
     reason="needs the MuJoCo Menagerie cache (a real robot, not a fixture)")
 def test_walkable_template_helps_a_real_menagerie_go2():
     """The same question as the fixture test, asked of a REAL robot -- fixtures have lied in this repo.
@@ -294,12 +294,17 @@ def test_walkable_template_helps_a_real_menagerie_go2():
 
     The opt-in works on a real customer robot -- and costs that customer all 13 of their links, which the mass
     ledger and ``composition_notes`` both state.
+
+    THE GO2 NO LONGER NEEDS IT. Since the crawl's swing lifts each foot the way that leg lifts it (2026-10-11),
+    our gait walks the imported Go2 0.96 m here (5.66 m at the 6000-step horizon), so the premise below moved to
+    the ANYmal C, which our gait still cannot walk: measured 0.0 m CROUCH before, 2.774 m CREDIBLE WALK after
+    adopting the template, 44.97 -> 9.95 kg. The test keeps its name so its history stays readable.
     """
     from virturoid.services.edit_operators import adopt_walkable_template
     from virturoid.services.robot_import import import_robot
 
     p = os.path.join(os.path.expanduser("~"), ".cache", "robot_descriptions", "mujoco_menagerie",
-                     "unitree_go2", "go2.xml")
+                     "anybotics_anymal_c", "anymal_c.xml")
     gene = import_robot(p)["gene"]
     before_names = [s.name for s in gene.segments]
     before_m, before_verdict = _verdict(gene)

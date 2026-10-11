@@ -60,6 +60,8 @@ from __future__ import annotations
 import importlib.util
 import os
 
+from pathlib import Path
+
 import pytest
 
 os.environ.setdefault("VIRTUROID_NO_LOCAL_ENV", "1")
@@ -120,6 +122,21 @@ _CAT_BAND = [
 #: cannot be expressed through it and the harness builds the plant itself. k=30 is the largest ``explains_x``
 #: measured anywhere in the correct population (2.228); k=45 is the largest ``rival_improvement_x`` (3.679).
 _CAT_PROPORTIONAL = [("armature +30 x R_a", 30.0), ("armature +45 x R_a", 45.0)]
+
+
+#: THE DOG THESE MEASUREMENTS WERE TAKEN ON, frozen. ``compose_robot("a four legged robot dog")`` changed under them
+#: on 2026-10-11, when the anatomy compiler stopped capping a head at half the torso's HEIGHT: the dog's head grew
+#: 0.075 -> 0.139 m and its rotational-inertia span 1.547x -> 2.48x, which moved the adversarial cases this suite
+#: is built on (a x1.2 torque error now scores 1.481x and is caught by the first gate instead of breaching it).
+#: The method's claims are about this body, so this body is the fixture.
+_REFERENCE_DOG = Path(__file__).resolve().parent / "fixtures" / "sysid_reference_dog_v1.json"
+
+
+def _reference_dog():
+    import json
+
+    from virturoid.schemas.gene import RobotGene
+    return RobotGene.from_dict(json.loads(_REFERENCE_DOG.read_text(encoding="utf-8")))
 
 
 def _fit(gene, plan, perturbation):
@@ -202,7 +219,7 @@ def _fit_proportional_armature(gene, plan, k):
 def dog_band():
     from virturoid.services.morphology_composer import compose_robot
     from virturoid.services.sysid import build_excitation
-    g = compose_robot("a four legged robot dog", llm=None)
+    g = _reference_dog()
     p = build_excitation(g, budget_s=BUDGET_S)
     return {label: _fit(g, p, pert) for label, pert in _DOG_BAND}
 
@@ -397,7 +414,7 @@ def test_a_real_link_inertia_error_in_the_same_band_is_still_refused():
     from virturoid.services.sysid.fit import LINK_INERTIA_RIVAL_IMPROVEMENT_X
     from virturoid.services.sysid.synthetic_hardware import synthetic_hardware_log
 
-    g = compose_robot("a four legged robot dog", llm=None)
+    g = _reference_dog()
     p = build_excitation(g, budget_s=BUDGET_S)
     _, lg = synthetic_hardware_log(g, perturbation={}, delay_ticks=0, plan=p, inertia_scale=20.0)
     fit = fit_parameters(g, lg, plan=p, n_boot=64, measure_delay=False)
@@ -431,8 +448,8 @@ def test_the_mechanism_claim_matches_the_measured_span_everywhere_it_appears():
     from virturoid.services.sysid import fit as fit_module
     from virturoid.services.sysid.bench_rig import bench_model, joint_dof_map, start_pose
 
-    for prompt, expected in (("a four legged robot dog", 1.547), ("a six legged walking robot", 1.528)):
-        gene = compose_robot(prompt, llm=None)
+    for prompt, expected in (("the reference dog", 1.547), ("a six legged walking robot", 1.528)):
+        gene = _reference_dog() if prompt == "the reference dog" else compose_robot(prompt, llm=None)
         model, _ = bench_model(gene)
         dofs = joint_dof_map(model, gene)
         q0 = start_pose(model, gene)
@@ -472,7 +489,7 @@ def test_the_mechanism_claim_matches_the_measured_span_everywhere_it_appears():
             f"explicit retraction.")
 
     # ...and it must never reach the CUSTOMER at all. The shipped dict is not a place for a retraction.
-    g = compose_robot("a four legged robot dog", llm=None)
+    g = _reference_dog()
     m, _ = bench_model(g)
     d = joint_dof_map(m, g)
     joints = {n: {"parameters": {"armature": {"delta": 0.002}}} for n in d}
@@ -542,7 +559,7 @@ def test_no_source_or_output_predicts_that_a_wider_span_makes_this_check_sharper
             f"MEASURED: the cat (span 2.63) separates WORSE than the horse (4.04) and the humanoid (14.66). It "
             f"may appear only inside an explicit retraction.")
 
-    g = compose_robot("a four legged robot dog", llm=None)
+    g = _reference_dog()
     m, _ = bench_model(g)
     d = joint_dof_map(m, g)
     joints = {n: {"parameters": {"armature": {"delta": 0.002}}} for n in d}

@@ -19,6 +19,8 @@ from __future__ import annotations
 import importlib.util
 import os
 
+from pathlib import Path
+
 import pytest
 
 os.environ.setdefault("VIRTUROID_NO_LOCAL_ENV", "1")
@@ -33,10 +35,24 @@ DELAY_TICKS = 2
 BUDGET_S = 35.0
 
 
+#: THE DOG THESE MEASUREMENTS WERE TAKEN ON, frozen. ``compose_robot("a four legged robot dog")`` changed under them
+#: on 2026-10-11, when the anatomy compiler stopped capping a head at half the torso's HEIGHT: the dog's head grew
+#: 0.075 -> 0.139 m and its rotational-inertia span 1.547x -> 2.48x, which moved the adversarial cases this suite
+#: is built on (a x1.2 torque error now scores 1.481x and is caught by the first gate instead of breaching it).
+#: The method's claims are about this body, so this body is the fixture.
+_REFERENCE_DOG = Path(__file__).resolve().parent / "fixtures" / "sysid_reference_dog_v1.json"
+
+
+def _reference_dog():
+    import json
+
+    from virturoid.schemas.gene import RobotGene
+    return RobotGene.from_dict(json.loads(_REFERENCE_DOG.read_text(encoding="utf-8")))
+
+
 @pytest.fixture(scope="module")
 def dog():
-    from virturoid.services.morphology_composer import compose_robot
-    return compose_robot("a four legged robot dog", llm=None)
+    return _reference_dog()
 
 
 @pytest.fixture(scope="module")
@@ -1288,7 +1304,18 @@ def test_a_sim2sim_fit_does_not_earn_the_bench_identified_rung(calibrated):
     act = actuator_fidelity_level(calibrated)
     assert act["level"] == 1, "a sim2sim fit was promoted to L2"
     assert act["bench_identified"]["n_joints"] > 0, "the fit is invisible on the certificate"
-    assert "BENCH-IDENTIFIED" in act["note"], "the certificate does not say what the fit bought"
+    # NAMED FOR WHAT IT IS. This asserted "BENCH-IDENTIFIED" until 2026-10-10: the certificate calling a fit to
+    # a simulated stand-in a bench identification, the over-claim this test's own docstring rules out. The line
+    # that gets quoted now says what the values were fitted to, and keeps the word for a log off a bench.
+    assert "FITTED on" in act["note"] and "NOT measured on hardware" in act["note"], act["note"]
+    assert "BENCH-IDENTIFIED" not in act["note"], act["note"]
+    assert act["bench_identified"]["log_measured_on"] == "sim2sim"
+
+    from dataclasses import replace
+    rec = calibrated.metadata["calibration"]
+    on_a_bench = replace(calibrated, metadata={**calibrated.metadata, "calibration": {
+        **rec, "provenance": {**(rec.get("provenance") or {}), "class": "hardware"}}})
+    assert "BENCH-IDENTIFIED" in actuator_fidelity_level(on_a_bench)["note"], "the same fit off a bench lost its word"
 
 
 def test_the_two_requirements_we_cannot_meet_are_named_as_ours(calibrated):

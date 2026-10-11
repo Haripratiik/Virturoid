@@ -22,6 +22,14 @@ GOAL_RADIUS_M = 0.35
 WAYPOINT_RADIUS_M = 0.12
 OBSTACLE_CLEARANCE_M = 0.17
 REPULSE_RADIUS_M = 0.45                   # emergency near-field correction; global waypoints do the routing
+#: The share of each drive motor's peak torque the navigator will command. It used to command all of it: the turn
+#: term's 16 N.m floor and the forward term's 5.6 N.m saturate any motor smaller than an AMR's, so a small base ran
+#: its wheels pinned at peak from a standstill with nothing in reserve. Measured 2026-10-11 on the composed indoor
+#: delivery base (6.9 kg on four 1.5 N.m Dynamixel XC430-W150-T): the torque its motors produced reached 1.45 N.m,
+#: a 1.04x margin against the 1.15x the BOM certificate asks of a selected part. Capped at 80% it peaks at 1.07 N.m
+#: (1.41x), clears all six datasheet gates, and still reaches the four goals it is scored on, in 710 to 2728 steps
+#: instead of 588 to 1617.
+DRIVE_RESERVE = 0.8
 
 
 def _corridor_waypoints(goal_xy, obstacle_xy: list, *, side_lane_m: float = 0.45, forward_offset_m: float = 0.2):
@@ -190,8 +198,12 @@ def _visibility_waypoints(model, start_xy, goal_xy, obstacle_xy: list, robot_rad
     return simplified[1:]
 
 
-def run_navigation_episode(model, goal_xy, obstacle_xy: list, horizon: int = 1500, record_frames=None, frame_every: int = 25) -> dict:
-    """Drive the base toward the goal with waypoint heading control + obstacle avoidance."""
+def run_navigation_episode(model, goal_xy, obstacle_xy: list, horizon: int = 1500, record_frames=None, frame_every: int = 25,
+                           record_actuation: list | None = None) -> dict:
+    """Drive the base toward the goal with waypoint heading control + obstacle avoidance.
+
+    ``record_actuation``, when a list, receives ``(actuator_force, qvel)`` after every step of the drive (not the
+    sign calibration before it), so ``bom_certificate.certify_drive_on_bom`` grades the motion this drive makes."""
     import mujoco
     import numpy as np
 
@@ -354,10 +366,14 @@ def run_navigation_episode(model, goal_xy, obstacle_xy: list, horizon: int = 150
         left = forward - turn
         right = forward + turn
         for u in left_act:
-            data.ctrl[u] = float(np.clip(left, -model.actuator_forcerange[u, 1], model.actuator_forcerange[u, 1]))
+            cap = DRIVE_RESERVE * float(model.actuator_forcerange[u, 1])
+            data.ctrl[u] = float(np.clip(left, -cap, cap))
         for u in right_act:
-            data.ctrl[u] = float(np.clip(right, -model.actuator_forcerange[u, 1], model.actuator_forcerange[u, 1]))
+            cap = DRIVE_RESERVE * float(model.actuator_forcerange[u, 1])
+            data.ctrl[u] = float(np.clip(right, -cap, cap))
         mujoco.mj_step(model, data)
+        if record_actuation is not None:
+            record_actuation.append((data.actuator_force.copy(), data.qvel.copy()))
         if not np.all(np.isfinite(data.qpos)):
             status = "instability"
             break

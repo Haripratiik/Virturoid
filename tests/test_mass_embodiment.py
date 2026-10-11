@@ -289,10 +289,18 @@ class LedgerIsNotSharedWithACopyTests(unittest.TestCase):
         # Sized to land UNDER the quadruped band (12-15 kg) on its own structure + motors -- that is the case
         # in which the balance-of-system estimate is drawn at all, and therefore the case that has a ledger
         # entry to lose. Measured on this fixture: 12.043 kg total, 3.011 kg of it estimated.
+        #
+        # The legs HANG from the torso's underside. They used to mount at its tip with no rotation, i.e. point
+        # straight UP, and the quadruped band is now given only to a body that measurably stands on four legs
+        # (``grounded_physics._stands_on``): with its legs in the air this fixture read as standing on nothing,
+        # drew no estimate, and the ledger it exists to exercise was empty. Lengths and masses are unchanged,
+        # so the sizing and the 12.043 / 3.011 kg above are too.
         segs = [GeneSegment(name="torso", parent=None, shape="box", length_m=0.4, radius_m=0.05, mass_kg=1.0)]
         for i, leg in enumerate(("fl", "fr", "bl", "br")):
+            sx, sy = (1.0 if leg[0] == "f" else -1.0), (1.0 if leg[1] == "l" else -1.0)
             segs.append(GeneSegment(name=f"{leg}_hip", parent="torso", shape="capsule", length_m=0.16,
-                                    radius_m=0.02, mass_kg=0.3, joint_type="revolute", joint_axis=(0, 1, 0)))
+                                    radius_m=0.02, mass_kg=0.3, joint_type="revolute", joint_axis=(0, 1, 0),
+                                    mount_offset=(0.04 * sx, 0.04 * sy, -0.4), mount_euler=(3.14159, 0.0, 0.0)))
             segs.append(GeneSegment(name=f"{leg}_shin", parent=f"{leg}_hip", shape="capsule", length_m=0.18,
                                     radius_m=0.02, mass_kg=0.3, joint_type="revolute", joint_axis=(0, 1, 0)))
             # a WELDED leaf: `_leg_branches` only counts a chain as a leg when it ends in a foot, which is

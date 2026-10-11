@@ -228,7 +228,13 @@ def test_a_steered_body_that_merely_curves_keeps_its_credible_walk():
 
 @pytest.mark.skipif(not _MUJOCO, reason="the course gate's calibration is a claim about real rollouts")
 def test_the_offline_lynx_circle_no_longer_reports_a_credible_walk():
-    """THE REGRESSION TEST. This exact operating point, on this exact body, reported CREDIBLE WALK 1.582 m."""
+    """THE REGRESSION TEST. This exact operating point, on this exact body, reported CREDIBLE WALK 1.582 m.
+
+    The circle itself was the crawl's own doing. Its swing pressed this body's feet into the floor instead of
+    lifting them (``morph_policy.lift_sign_for_leg``), and once the swing lifts, the same point walks STRAIGHT
+    (measured 2026-10-11: CREDIBLE WALK 4.78 m, straightness 0.975, heading within 18 deg). So the lynx is now
+    steered round at that point, which is the episode the gate exists for: the same body, the same gait, going
+    round (186 deg of heading) must not read as a walk."""
     from pathlib import Path
 
     from virturoid.services.design_cassette import DesignCassette
@@ -240,7 +246,9 @@ def test_the_offline_lynx_circle_no_longer_reports_a_credible_walk():
         pytest.skip("offline design cassette not in this checkout")
     g = DesignCassette(cass).get_gene("lynx__appearance")
     ground_and_repair(g)
-    r = crawl_gait_rollout(g, steps=6000, record_qpos=True, frame_every=20, **_CIRCLE_OP_POINT)
+    straight = crawl_gait_rollout(g, steps=6000, record_qpos=True, frame_every=20, **_CIRCLE_OP_POINT)
+    assert classify(straight) == "CREDIBLE WALK", course_summary(straight)
+    r = crawl_gait_rollout(g, steps=6000, record_qpos=True, frame_every=20, turn_bias=0.9, **_CIRCLE_OP_POINT)
     c = course_summary(r)
     v = classify(r)
     assert not v.startswith("CREDIBLE"), f"the circle is credible again: {v} / {c}"

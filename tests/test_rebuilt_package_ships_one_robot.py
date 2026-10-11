@@ -737,3 +737,91 @@ def test_a_same_robot_rebuild_does_not_adopt_the_customers_edit(tmp_path):
     assert victim.name in (set(out.get("left_modified") or []) | set(out.get("left_not_ours") or [])), (
         "a file we declined to remove must be reported, or the customer cannot tell it was left behind")
     assert out.get("removed_stale"), "the prune must still clear the genuinely stale meshes of the old body"
+
+
+# ------------------------------------------------- 11. the ledger's leading dot is what keeps it off the robot
+
+def test_the_staging_ledger_never_ships_inside_the_ros2_package():
+    """A REVIEW FLAGGED THIS AS A DEFECT AND IT IS NOT ONE -- but only because of a single character.
+
+    The generated ROS 2 package installs its geometry with ``glob("meshes/*")`` (the setup.py template in
+    ``ros2_exporter``), which is deliberately wholesale: an orphaned mesh left in that directory really would be
+    installed, which is why the prune exists. Our own bookkeeping lives in that same directory, so the obvious
+    reading is that it ships too.
+
+    It does not, because ``glob`` does not match a leading dot. That makes the dot in
+    ``.virturoid_staged.json`` load-bearing rather than cosmetic, and nothing said so -- a rename to
+    ``virturoid_staged.json``, which reads like tidying, would start installing our ledger onto a robot beside
+    its meshes. This asserts the mechanism (glob's behaviour, on a real directory) rather than just the string,
+    so it fails whichever way the property is broken: renaming the ledger, or changing the install glob to
+    something that does match dotfiles.
+    """
+    import glob as globmod
+    import os
+    import tempfile
+
+    from virturoid.services.gene_compiler import STAGE_LEDGER_NAME
+
+    assert STAGE_LEDGER_NAME.startswith("."), (
+        f"{STAGE_LEDGER_NAME!r} must begin with a dot or the ROS 2 package installs it with the meshes")
+
+    d = Path(tempfile.mkdtemp(prefix="ledger_glob_"))
+    (d / "meshes").mkdir()
+    (d / "meshes" / "base.stl").write_text("solid\n", encoding="utf-8")
+    (d / "meshes" / STAGE_LEDGER_NAME).write_text("{}", encoding="utf-8")
+    cwd = os.getcwd()
+    try:
+        os.chdir(d)
+        installed = sorted(globmod.glob("meshes/*"))     # verbatim the pattern setup.py ships
+    finally:
+        os.chdir(cwd)
+
+    assert any(x.endswith("base.stl") for x in installed), "precondition: the glob does install real meshes"
+    assert not any(STAGE_LEDGER_NAME in x for x in installed), (
+        f"the staging ledger would be installed onto the robot: {installed}")
+
+
+# ------------------------------------------- 12. the guard could not see a package that writes no contract
+
+@pytest.mark.skipif(not _MUJOCO, reason="a real package build needs MuJoCo")
+def test_a_legacy_package_that_writes_no_contract_is_still_a_package(tmp_path):
+    """THE GUARD READ A CONTRACT, AND ONE OF OUR OWN WRITERS DOES NOT WRITE ONE.
+
+    ``mvp.write_mvp_robot_arm_project`` produces 140 files and no
+    ``reports/robot_package_contract.json``, so ``_existing_package_path`` returned "no package of ours" and a
+    legged build was let straight in. MEASURED: 98 of those files are manipulator-specific and NOT ONE is in
+    ``_BRAIN_ARTIFACTS``, so the legged build kept all of them -- including
+    ``datasets/synthetic_observations/.../wrist_rgbd_camera/`` on a robot with no wrist.
+
+    The evidence list had to be chosen against the false-refusal direction, which is the expensive mistake here:
+    ``reports/mvp_summary.md`` looks like a marker and is written by GENE packages too, so using it would have
+    refused every ordinary rebuild. Hence the two negative cases below -- they are the half of this that can
+    actually break someone's workflow.
+    """
+    from virturoid.mvp import write_mvp_robot_arm_project
+    from virturoid.services.gene_build import (MixedRobotPackageError, _existing_package_path,
+                                               build_gene_package, ground_and_repair)
+    from virturoid.services.morphology_composer import _compose_robot_impl
+
+    legacy = tmp_path / "legacy"
+    write_mvp_robot_arm_project(legacy)
+    assert not (legacy / "reports" / "robot_package_contract.json").exists(), (
+        "precondition: this writer ships no contract, which is why evidence is needed at all")
+    assert _existing_package_path(legacy)[0] == "manipulation"
+
+    quad = _compose_robot_impl("a quadruped walking robot", llm=None)
+    ground_and_repair(quad)
+    with pytest.raises(MixedRobotPackageError):
+        build_gene_package(quad, "a quadruped walking robot", legacy)
+
+    # NEGATIVE 1: the same build path is not a conflict -- a gene arm belongs in a manipulator directory.
+    legacy2 = tmp_path / "legacy2"
+    write_mvp_robot_arm_project(legacy2)
+    arm = _compose_robot_impl("a 6-dof robotic arm", llm=None)
+    ground_and_repair(arm)
+    build_gene_package(arm, "a 6-dof robotic arm", legacy2)      # must not raise
+
+    # NEGATIVE 2: an ordinary same-class rebuild, which is what autonomous_build does after a redesign.
+    fresh = tmp_path / "fresh"
+    build_gene_package(quad, "a quadruped walking robot", fresh)
+    build_gene_package(quad, "a quadruped walking robot", fresh)  # must not raise

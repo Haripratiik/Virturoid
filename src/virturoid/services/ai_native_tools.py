@@ -69,9 +69,18 @@ def _end_effector_report(gene) -> dict:
             found.append({"part": name, "kind": kind, "evidence": "named"})
     named = [f for f in found if f["kind"]]
     out = {"end_effector": declared, "end_effectors_on_body": found}
+    # JAWS ARE A PART THAT IDENTIFIES AS A GRIPPER, whatever the links are called: an imported Piper's palm is
+    # `link6` and its fingers `link7`/`link8`, and "no part on the body identifies as one" was false about it.
+    # Same detector as the importer and the task verifier (services/gripper_jaws.py).
+    try:
+        from virturoid.services.gripper_jaws import gripper_status
+        _grip = gripper_status(gene)
+    except Exception:  # noqa: BLE001 - a description must not fail on a body the detector cannot read
+        _grip = {"jaws": []}
     if declared not in ("", "none"):
         out["end_effector_source"] = ("declared on the gene" +
                                       (", and a matching part is present" if named else
+                                       f"; {_grip['evidence']}" if _grip.get("jaws") else
                                        ", but no part on the body identifies as one"))
     elif named:
         # Report the truth in the field a caller actually reads, and say where it came from rather than
@@ -525,6 +534,20 @@ def _fit_margin_for(gene, params: dict) -> dict | None:
             "steps": fit.get("horizon_steps"), "per_param_rel": fit.get("robustness_per_param")}
 
 
+def _same_controller(a, b) -> bool:
+    """True when ``a`` and ``b`` are the same crawl operating point, bit for bit on all five parameters.
+
+    The identity ``_fit_margin_for`` applies, for evidence that does not live on ``metadata['gait_fit']``. Anything
+    missing or malformed is not the same controller, so no margin is attached on a guess."""
+    from virturoid.services.gait_flywheel import _FIT_PARAMS
+    if not (isinstance(a, dict) and isinstance(b, dict)):
+        return False
+    try:
+        return all(float(a[k]) == float(b[k]) for k in _FIT_PARAMS)
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
 #: Why the ordinary build path banks without an error bar, recorded ON the row (``bank_gate_reason``) so a later
 #: mining run can exclude it by fact rather than by inference. Measuring here is not a rounding error: the
 #: fragility ladder is 4-12 rollouts at the settling horizon (~10-60 s), on EVERY verify_robot call.
@@ -828,7 +851,7 @@ def _honest_gait(gene, *, steps: int = 1200, render: bool = False, tag: str = "g
     """
     from virturoid.services.morph_policy import crawl_gait_rollout
     from virturoid.services.gait_flywheel import _DEFAULT_GAIT
-    from virturoid.services.gait_quality import classify, orientation_summary, settling
+    from virturoid.services.gait_quality import classify, flip_summary, orientation_summary, settling
     frame_every = max(5, int(steps) // 300)
     # A LIMBLESS serial spine (a snake) has no legs for the crawl gait — drive it as a land SERPENTINE undulator
     # instead (else it just falls / scores 0). The land analogue of routing a fish to the swim tier.
@@ -939,9 +962,13 @@ def _honest_gait(gene, *, steps: int = 1200, render: bool = False, tag: str = "g
                 r_alt = crawl_gait_rollout(gene, steps=steps, record_qpos=True, frame_every=frame_every, **_alt)
                 cred_now = classify(r).startswith("CREDIBLE")
                 cred_alt = classify(r_alt).startswith("CREDIBLE")
+                # SIGNED, like the default arm above, and for the same reason: with ``abs`` a hint that walked
+                # BACKWARD out-ranked the controller this body carries. Measured 2026-10-11 on the composed
+                # hexapod (its own fitted gait walks 7.9 m at the judging horizon): an 800-step verify swapped in
+                # the mined hint at -0.132 m and printed that as the robot's verdict.
                 if (cred_alt and not cred_now) or (
                         cred_alt == cred_now
-                        and abs(float(r_alt.get("forward", 0))) > abs(float(r.get("forward", 0)))):
+                        and float(r_alt.get("forward", 0)) > float(r.get("forward", 0))):
                     r, gait_source = r_alt, "flywheel_hint"
                     deployed_params = dict(_alt)
         # RECORDED AFTER THE SELECTION IS FINAL, so ``shipped_forward_m`` is what the robot walked away with.
@@ -951,12 +978,20 @@ def _honest_gait(gene, *, steps: int = 1200, render: bool = False, tag: str = "g
         _record_gait_hint_outcome(gene, r_recalled, r_def, selected_default=better_def, source=src_recalled,
                                   shipped_rollout=r, shipped_source=gait_source)
     o = orientation_summary(r.get("qpos_frames") or [])
+    _flip = flip_summary(r)
     out = {"kind": "legged", "verdict": classify(r), "survived": bool(r.get("survived")),
            "gait_source": gait_source,
            "forward_m": round(float(r.get("forward", 0)), 3),
            "speed_mps": round(float(r.get("speed", 0)), 3), "cadence": round(float(r.get("cadence", 0)), 1),
            "support_frac": round(float(r.get("support_frac", 0)), 2), "height_ratio": r.get("height_ratio"),
-           "roll_max_deg": o.get("roll_max"), "pitch_max_deg": o.get("pitch_max")}
+           "roll_max_deg": o.get("roll_max"), "pitch_max_deg": o.get("pitch_max"),
+           # THE ANGLE THAT STAYS TRUE PAST 90 DEG. roll/pitch above are Euler angles, and on a body that went
+           # over end to end they read roll 180 (gait_quality.orientation_summary): measured on a quadruped that
+           # reared over backwards, "roll 180" sent the reader to the wrong axis. Read off the same count the
+           # verdict was (the rollout's own, per physics step, when it went over; else the trace).
+           "tilt_max_deg": (round(float(_flip["tilt_max"]), 1) if _flip else o.get("tilt_max"))}
+    if _flip:
+        out["inverted_frac"] = round(float(_flip["frac"]), 3)     # share of the rollout it spent upside down
     if gait_provenance is not None and gait_source.startswith("tuned_for_this_body"):
         out["gait_provenance"] = gait_provenance   # which training run produced the controller just measured
     # SAY THAT THE LANDED CONTROLLER WAS RUN AND BEATEN, rather than leaving a generic ``gait_source`` to imply
@@ -1051,9 +1086,20 @@ def _honest_gait(gene, *, steps: int = 1200, render: bool = False, tag: str = "g
     if _s is not None:
         out["travel_rate_m_per_1000"] = {int(k): round(v, 3) for k, v in _s["rates"].items()}
         out["holds_rate"] = bool(_s["holds_rate"])
+    # WHOSE ERROR BAR. A margin describes one operating point, to the last bit of its floats (see
+    # ``_fit_margin_for``). This used to quote ``metadata['gait_fit']`` whenever the verdict ran a tuned controller,
+    # and a training door that lands over a body create_robot already fitted leaves that record in place.
+    # MEASURED 2026-10-10: a controller landed through train_held, whose own margin was 0.001, verified beside the
+    # earlier fit's 0.1 and that fit's note, an error bar a hundred times wider than the one measured for what was
+    # run. So the fit's margin is quoted only when the fit measured exactly these parameters, the landing's own
+    # margin when the door that landed exactly these parameters measured one, and otherwise the verdict says that
+    # no margin was measured for this controller rather than borrowing one.
     _fit = (getattr(gene, "metadata", None) or {}).get("gait_fit") or {}
-    if str(out.get("gait_source") or "").startswith("tuned_for_this_body") and "robustness_rel" in _fit:
+    _tuned = str(out.get("gait_source") or "").startswith("tuned_for_this_body")
+    _landing = gait_provenance if isinstance(gait_provenance, dict) else {}
+    if _tuned and "robustness_rel" in _fit and _fit_margin_for(gene, deployed_params) is not None:
         out["robustness_rel"] = _fit["robustness_rel"]
+        out["robustness_measured_by"] = "gait_fit"
         out["robustness_probes"] = _fit.get("robustness_probes")
         # PER PARAMETER, because that is the half a reader can act on. The joint scalar says "how far can
         # everything move at once" and averages the axes together; measured (task #267) the grounded authored
@@ -1072,6 +1118,21 @@ def _honest_gait(gene, *, steps: int = 1200, render: bool = False, tag: str = "g
             out["robustness_note"] = ("FRAGILE operating point: no perturbed copy of it survives even a "
                                       "0.001 relative change, so this verdict is not reproducible on hardware "
                                       "and the gait is not banked for reuse")
+    elif _tuned and _same_controller(_landing.get("params"), deployed_params) and (
+            "robustness_rel" in _landing or _landing.get("fragile")):
+        # The door that landed these parameters measured them (train_held's per-body fit does), and
+        # ``trained_controller`` records which parameters that evidence describes, so it is read only for them.
+        out["robustness_rel"] = _landing.get("robustness_rel")
+        out["robustness_measured_by"] = str(_landing.get("door") or "")
+        if _landing.get("robustness_note"):
+            out["robustness_note"] = _landing["robustness_note"]
+        if _landing.get("fragile"):
+            out["robustness_note"] = ("FRAGILE operating point: no perturbed copy of it survives even a "
+                                      "0.001 relative change, so this verdict is not reproducible on hardware")
+    elif _tuned and "robustness_rel" in _fit:
+        out["robustness_note"] = ("no robustness margin was measured for this controller: the per-body fit on "
+                                  "record measured a different operating point, so its margin does not describe "
+                                  "the one run here")
     if render and r.get("qpos_frames"):
         gif = _render_gait_gif(gene, r["qpos_frames"], tag)
         if gif:
@@ -1184,15 +1245,37 @@ def _honest_drive(gene, *, steps: int = 800, world_xml: str | None = None) -> di
     hi, lo = model.actuator_ctrlrange[:, 1], model.actuator_ctrlrange[:, 0]
     frc = model.actuator_forcerange[:, 1]
     drive = np.where(hi > lo, 0.85 * hi, np.where(frc > 0, 0.7 * frc, 2.0))
+    # DRIVE THE WHEELS, HOLD THE REST. Every actuator used to get the same constant command, so a mobile
+    # manipulator's ARM was torqued out of the stowed pose this function resets to while its wheels turned.
+    # Measured 2026-10-11 on "a mobile manipulator": TIPPED at 70 kg and SPINS IN PLACE at 13 kg, either way
+    # with the arm swinging; held where it ships, it drives. A non-wheel actuator now holds its joint at the rest
+    # pose (PD to the keyframe, saturating at its own limit); a body whose actuators are all wheels is unchanged.
+    # Wheel SPIN is read on the wheels too, not averaged with joints that are only holding a pose.
+    _wheel_bodies = {int(model.geom_bodyid[g]) for g in wheel_geoms}
+    is_wheel = np.array([int(model.jnt_bodyid[int(model.actuator_trnid[u, 0])]) in _wheel_bodies
+                         for u in range(model.nu)], bool)
+    if not is_wheel.any():
+        is_wheel[:] = True                                          # no named wheels: drive everything, as before
+    qadr = [int(model.jnt_qposadr[int(model.actuator_trnid[u, 0])]) for u in range(model.nu)]
+    q_hold = np.array([float(data.qpos[a]) for a in qadr])
+    lim = np.where(frc > 0, frc, np.where(hi > lo, np.maximum(np.abs(hi), np.abs(lo)), 2.0))
+    kp_hold, kd_hold = lim / 0.1, lim / 2.0                         # full effort at 0.1 rad of droop
+    wheel_dofs = [d for d, w in zip(dofs, is_wheel) if w]
     contact_steps, spins = 0, []
     for _ in range(steps):
-        data.ctrl[:] = drive
+        if is_wheel.all():
+            data.ctrl[:] = drive
+        else:
+            q = np.array([float(data.qpos[a]) for a in qadr])
+            qd = np.array([float(data.qvel[d]) for d in dofs])
+            hold = np.clip(kp_hold * (q_hold - q) - kd_hold * qd, -lim, lim)
+            data.ctrl[:] = np.where(is_wheel, drive, hold)
         mujoco.mj_step(model, data)
         up_min = min(up_min, float(data.xmat[bid].reshape(3, 3)[2, 2]))
         touching = any((c.geom1 in wheel_geoms and c.geom2 in floor_geoms) or
                        (c.geom2 in wheel_geoms and c.geom1 in floor_geoms) for c in data.contact[:data.ncon])
         contact_steps += int(touching)
-        spins.append(float(np.mean(np.abs([data.qvel[j] for j in dofs]))))
+        spins.append(float(np.mean(np.abs([data.qvel[j] for j in wheel_dofs]))))
     p1 = np.array(data.xpos[bid])
     fwd = float(np.hypot(p1[0] - p0[0], p1[1] - p0[1]))
     dz = float(p1[2] - z0)
@@ -1267,17 +1350,33 @@ def _honest_reach(gene, *, steps: int = 500, world_xml: str | None = None) -> di
             pts.append(np.array(data.xpos[ee]))
     pts = np.array(pts)
     span = float(np.linalg.norm(pts.max(0) - pts.min(0))) if len(pts) else 0.0
-    # TRUE kinematic reach = sum of the actuated link lengths (how far the arm extends), not the small sine-sweep
-    # bbox diagonal (which read a misleading ~0.07 m). The sweep now only proves the joints MOVE (liveness).
-    reach_m = round(sum(float(getattr(s, "length_m", 0.0) or 0.0) for s in gene.actuated_joints()), 3)
+    # REACH IS MEASURED BY FORWARD KINEMATICS, not added up. It was the sum of every actuated segment's length,
+    # which counts a gripper's two finger joints and every offset link, and assumes the joint ranges let the
+    # whole chain straighten: an imported Franka Panda (datasheet 855 mm) read "ARTICULATES (reach 1.71 m)" in
+    # this verdict, its spec sheet and its certificate. ``arm_reach`` samples the declared joint ranges and
+    # takes the farthest the end effector's origin gets from the arm's first joint (Panda 0.858, UR5e 0.927,
+    # Gen3 0.968 against 0.855 / 0.850 / 0.902). Measured on the robot alone, never on a composed scene: the
+    # scene is for the sweep above, and an obstacle does not change how long the arm is. The sine sweep above
+    # still only proves the joints MOVE (liveness); its bounding box is not a reach either (it read ~0.07 m).
+    from virturoid.services.arm_reach import arm_reach
+    fk = arm_reach(gene, model=None if world_xml else model)
+    reach_m = fk["reach_m"] if fk else None          # no jointed chain under the end effector: no reach to state
     moves = span > 0.02
     if not moves:
         verdict = "STUCK (end-effector barely moves)"
+    elif reach_m is None:
+        verdict = "ARTICULATES (reach not measured: no jointed chain leads to the end effector)"
     else:
         verdict = f"ARTICULATES (reach {reach_m:.2f} m)"
-    return {"kind": "manipulator", "verdict": verdict, "survived": True, "reach_m": reach_m,
-            "reach_span_m": round(span, 3), "n_actuators": int(model.nu),
-            "note": "reach = kinematic link length; grasp/pick-place capability via evaluate_held / run_task"}
+    out = {"kind": "manipulator", "verdict": verdict, "survived": True, "reach_m": reach_m,
+           "reach_span_m": round(span, 3), "n_actuators": int(model.nu),
+           "note": ("reach = the farthest the end effector's origin gets from the arm's first joint, by forward "
+                    "kinematics over joint configurations sampled inside the limits your model declares (no "
+                    "controller, no tool or finger length); grasp/pick-place capability via evaluate_held / "
+                    "run_task")}
+    if fk:
+        out["reach_from"] = {k: fk[k] for k in ("from_joint", "to_body", "samples")}
+    return out
 
 
 def _honest_grasp(gene) -> dict | None:
@@ -1290,6 +1389,18 @@ def _honest_grasp(gene) -> dict | None:
     except Exception:  # noqa: BLE001 - not a grippered arm / grasp path unavailable -> reach verdict stands alone
         return None
     verdict = "PICKS UP (real friction grasp + lift)" if sr >= 0.5 else f"GRASP WEAK (success {sr:.0%})"
+    # A GRASP THAT COULD NOT BE ATTEMPTED IS NOT A WEAK GRASP. Every attempt reports ``no_grasp_site`` when
+    # the end effector carries no sliding jaws, and "GRASP WEAK (success 0%)" then reads as a gripper that
+    # slipped on a body that has none. Which of the two it is comes from the same detector the importer and
+    # the task verifier read (``gripper_jaws.gripper_status``), so this verdict cannot disagree with them.
+    reasons = {str(a.get("reason") or "") for a in (r.get("attempts") or []) if isinstance(a, dict)}
+    if reasons and reasons <= {"no_grasp_site"}:
+        from virturoid.services.gripper_jaws import gripper_status
+        grip = gripper_status(gene)
+        verdict = ("NO GRASP VERDICT (our grasp script cannot close this gripper)" if grip["grips"]
+                   else "NO GRIPPER (nothing on the end effector can grasp)")
+        return {"verdict": verdict, "success_rate": round(sr, 3), "detail": r,
+                "gripper": {k: grip[k] for k in ("grips", "closable", "palm", "jaws", "declared", "evidence")}}
     return {"verdict": verdict, "success_rate": round(sr, 3), "detail": r}
 
 
@@ -2438,6 +2549,12 @@ def _reframe_for_imported_body(res: dict, gene, kind: str) -> None:
             head = _lead
         res["locomotion_verdict"] = None
         res["verdict"] = head
+        # THE CLAIM GOES WITH THE HEADLINE. ``credible_walk`` was set from the generic gait's verdict before this
+        # rewrite and was left standing, which never showed while our crawl could not walk an import: once the
+        # crawl's swing lifted the feet (2026-10-11) the Go2 walked 5.66 m under it and verify returned NO
+        # LOCOMOTION VERDICT beside credible_walk: true. The walk is reported below, as a fact about our gait;
+        # train_held lands it as a controller for this body, and then it is a verdict.
+        res["credible_walk"] = False
         res["measured_without_your_controller"] = facts
         res["under_our_generic_gait"] = {
             "verdict": original,                                 # gait_quality.classify(), byte-identical
@@ -2453,12 +2570,24 @@ def _reframe_for_imported_body(res: dict, gene, kind: str) -> None:
         g = res["grasp"]
         det = (g.get("detail") or {}) if isinstance(g.get("detail"), dict) else {}
         reasons = {str(a.get("reason") or "") for a in (det.get("attempts") or []) if isinstance(a, dict)}
-        no_gripper = bool(reasons) and reasons <= {"no_grasp_site"}
+        no_site = bool(reasons) and reasons <= {"no_grasp_site"}
+        # "NO GRIPPER" is a claim about the customer's machine, so it is made from the SAME structural detector
+        # the importer declared ``end_effector_type`` with and the task verifier gates grasping skills on, not
+        # from the absence of OUR grasp site alone: a model whose gripper has revolute jaws (named, e.g. an
+        # SO-101's) has no grasp site either, and telling that customer there is nothing to grasp with was false.
+        from virturoid.services.gripper_jaws import gripper_status
+        grip = gripper_status(gene)
+        g["gripper"] = {k: grip[k] for k in ("grips", "closable", "palm", "jaws", "declared", "evidence")}
         reach = original.split(";")[0].strip()                   # ARTICULATES/STUCK — kinematics, controller-free
-        if no_gripper:
+        if no_site and not grip["grips"]:
             res["verdict"] = f"{reach}; NO GRIPPER in your model — there is nothing here to grasp with"
-            g["means"] = ("your model ships no gripper site, so no grasp was attempted. This is a structural "
-                          "fact about the file you gave us, not a capability judgement.")
+            g["means"] = (f"no grasp was attempted: {grip['evidence']}. This is a structural fact about the "
+                          f"file you gave us, not a capability judgement.")
+        elif no_site:
+            res["verdict"] = f"{reach}; NO GRASP VERDICT: our grasp script cannot close your gripper"
+            g["means"] = (f"your model carries a gripper ({grip['evidence']}), but our generic grasp script only "
+                          f"closes sliding (prismatic) jaws mounted on the end effector, so no grasp was "
+                          f"attempted. That is a limit of our script, not a finding about your gripper.")
         else:
             res["verdict"] = f"{reach}; NO GRASP VERDICT — we do not have your gripper's controller"
             g["means"] = ("this is a measurement of OUR generic grasp-and-lift script on YOUR gripper. It was "
@@ -2467,9 +2596,10 @@ def _reframe_for_imported_body(res: dict, gene, kind: str) -> None:
         g["under"] = "our generic grasp-and-lift script"
         res["grasp_verdict_scope"] = "our script on your gripper"
     elif kind == "manipulator":
-        # QUICK mode on an arm: the only thing measured is REACH, and reach is kinematics — link lengths and
-        # joint ranges, no controller anywhere in it. Attaching "under our controller, not yours" to a ruler
-        # would be a caveat with nothing behind it, so the verdict stands and only the provenance block is added.
+        # QUICK mode on an arm: the only thing measured is REACH, and reach is kinematics: forward kinematics
+        # over the joint ranges the model declares, no controller anywhere in it. Attaching "under our
+        # controller, not yours" to a ruler would be a caveat with nothing behind it, so the verdict stands and
+        # only the provenance block is added.
         pass
     elif original:
         # mobile / aerial / aquatic / anything else: those verdicts DO come out of a controller of ours (the
@@ -2529,9 +2659,14 @@ def _reframe_for_imported_body(res: dict, gene, kind: str) -> None:
                "dimensions, limits) — but neither deploys it: we cannot read the observation layout, joint "
                "order or action convention off the file, so re-verifying afterwards still measures OUR "
                "controller. Their `deployment` block names what to do instead"},
+        # train_held's CPU mode is the product's full per-body fit since 2026-10-10 (measured on an imported
+        # Menagerie Go2, a body this route is printed for: CREDIBLE WALK +1.542 m at 6000 steps, landed, after
+        # about a minute of fitting), so it leads; adapt_gait is the short warm-started search and says so.
         {"if": "you want US to produce one for this body",
-         "do": "adapt_gait fits an operating point to this specific gene, and train_held learns a policy on it. "
-               "Either makes the verdict a claim about a controller measured on YOUR robot"},
+         "do": "train_held fits an operating point to this specific gene with the per-body fit the build path "
+               "uses, judged over the 6000-step horizon (mode 'gpu_rl' learns a policy instead), and "
+               "adapt_gait runs a shorter fit warm-started from the corpus's mined hints. Either makes the "
+               "verdict a claim about a controller measured on YOUR robot"},
         {"if": "you only need the structural facts",
          "do": "probe_robot (mass / torque margins / clearance / self-collision through the joint ranges) and "
                "render_view(view='collision') — none of those need a controller at all"},
@@ -2547,6 +2682,39 @@ def simulate_gait(args: dict) -> dict:
     res = _honest_gait(gene, steps=int(args.get("steps", 1200)), render=bool(args.get("render", False)),
                        tag=f"{args['robot_id']}_gait")
     return {"ok": True, **res}
+
+
+def _calibration_disclosure(gene, rid: str) -> dict | None:
+    """The actuator calibration a verdict on ``gene`` ran on, when one is applied to the model, or ``None``.
+
+    ``fit_actuators`` (apply: true) rewrites each identified joint's damping, reflected inertia and dry friction,
+    and every verdict afterwards runs on those values. MEASURED 2026-10-10 through the MCP server on an ingested
+    Go2: following the calibration journey's no-hardware path, a fit to ``simulate_bench_log``'s SIMULATED
+    stand-in (perturbed by the tool itself) was applied, the default crawl's travel went from 0.482 m to 0.003 m,
+    and verify_robot said nothing about why. So the verdict names the calibration, says whether its log was
+    measured on hardware, and gives the one call that takes it back out."""
+    try:
+        from virturoid.services.sysid.calibration import calibration_of
+        rec = calibration_of(gene)
+    except Exception:  # noqa: BLE001 - a disclosure must never cost the verdict it rides on
+        return None
+    if not rec or not rec.get("applied_to_model"):
+        return None
+    prov = rec.get("provenance") if isinstance(rec.get("provenance"), dict) else {}
+    cls = str(prov.get("class") or "unstated")
+    joints = rec.get("joints") if isinstance(rec.get("joints"), dict) else {}
+    out = {"applied_to_model": True, "log_measured_on": cls, "fitted_at": rec.get("fitted_at"),
+           "n_parameters_changed": sum(len(v) for v in joints.values() if isinstance(v, dict)),
+           "undo": f"calibration_status {{robot_id:'{rid}', revert:true}}"}
+    if cls == "hardware":
+        out["note"] = ("this verdict ran on joint damping, reflected inertia and dry friction fitted to a log "
+                       "measured on your hardware")
+    else:
+        out["note"] = ("this verdict ran on joint damping, reflected inertia and dry friction fitted to a log that "
+                       f"was NOT measured on your robot ({prov.get('why') or 'its provenance is not stated'}). "
+                       "What was simulated here is that log's dynamics, not your machine's; revert the "
+                       "calibration to verify the robot as it was before")
+    return out
 
 
 def verify_robot(args: dict) -> dict:
@@ -2632,6 +2800,9 @@ def verify_robot(args: dict) -> dict:
         except Exception:  # noqa: BLE001 - the reframe is a disclosure; never let it swallow a measured verdict
             pass
         _flag_physics_envelope(res, (S.robot_meta(args["robot_id"]) or {}).get("prompt", ""), kind)
+        _calib = _calibration_disclosure(gene, args["robot_id"])
+        if _calib:
+            res["calibration"] = _calib
         # a camera-equipped robot's ONBOARD camera + CV is exercised here (not just the rangefinder): render its
         # own functional robot_cam (FOV + resolution from the real camera part) at a target and report what it SEES.
         if not quick:

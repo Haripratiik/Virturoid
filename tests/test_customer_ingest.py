@@ -153,6 +153,19 @@ class IngestAndAdoptE2ETests(unittest.TestCase):
         # that `undo` restores the original body, and never asserts the adopt changed anything, so it passes
         # whether or not the template was ever applied. Closing that needs a fixture quadruped that fails the
         # gait gate, which this file does not have.
+        #
+        # RE-ANCHORED AGAIN 2026-10-11, ON A MEASUREMENT, BECAUSE THE PREMISE ABOVE HAD STOPPED BEING TRUE. This
+        # fixture does NOT walk under our gait. At the shipped operating point the ingest measures it with, its
+        # crawl pitches over forwards at step 910 of 1200 and spends 11% of the rollout upside down (tilt up to
+        # 110 deg); its trot ends CROUCH at 0.0 m. It read "walks, 1.81 m" only because ``survived`` was a height
+        # test and the trunk stayed high while it was on its back, and that same rollout's own verdict was already
+        # not a walk (LURCHES, pitch 73 / roll 126, with its trace; TURNS OFF COURSE, heading 163 deg, without it:
+        # both the Euler artifact of the flip). The 1.604 m CREDIBLE reading above predates the foot-clearance step
+        # counter. So the assertions that stood here ("a template must not be offered to a body that already walks"
+        # and "the adopt must leave it unchanged") were pinning the flip defect, not B2: the adopt kept the body
+        # only because it compared the template's 1.547 m against 1.81 m of falling over. B2 itself is unchanged
+        # and still asserted in full: the ingest swaps nothing, OFFERS the template, and only the customer's own
+        # explicit opt-in applies it, undoably. And this file now has the fixture the gap above asked for.
         from virturoid.services import session_state as S
         from virturoid.services.agent_tools import call_tool
         from virturoid.services.input_training_tools import _ingest_project
@@ -179,15 +192,22 @@ class IngestAndAdoptE2ETests(unittest.TestCase):
         self.assertIsNone(v.get("locomotion_verdict"),
                           "verify_robot must still withhold a locomotion verdict without the customer's controller")
 
-        # this body already walks credibly under our gait, so no template is offered...
-        self.assertIsNone((r.get("walkable_template_offer") or {}).get("available"),
-                          "a template must not be offered to a body that already walks")
-        # ...and opting in anyway must NOT cost the customer their geometry.
+        # this body does not walk under our gait (it goes over; see above), and the ingest says so...
+        self.assertFalse(iv["walks_under_our_scripted_gait"],
+                         f"a body that falls over under our gait was reported as walking {iv.get('distance_m')} m")
+        # ...so the template is OFFERED, quantified, and not applied: the held body above is still the customer's
+        offer = r.get("walkable_template_offer") or {}
+        self.assertTrue(offer.get("available"), f"no template was offered to a body that does not walk: {offer}")
+        self.assertGreater(float(offer.get("template_distance_m") or 0.0), float(iv.get("distance_m") or 0.0))
+        # ...and only the customer's own explicit opt-in applies it, which it now does, and undo hands their
+        # geometry back byte-identical.
         before = [s.name for s in S.get_robot(r["robot_id"]).segments]
         call_tool("edit_robot", {"robot_id": r["robot_id"], "ops": [{"op": "adopt_walkable_template"}]})
         after = [s.name for s in S.get_robot(r["robot_id"]).segments]
-        self.assertEqual(before, after,
-                         "adopt_walkable_template replaced a body that already walks -- that is the B2 defect")
+        self.assertNotEqual(before, after, "the explicit opt-in changed nothing on a body that does not walk")
+        call_tool("edit_robot", {"robot_id": r["robot_id"], "ops": [{"op": "undo"}]})
+        self.assertEqual([s.name for s in S.get_robot(r["robot_id"]).segments], before,
+                         "undo did not hand the customer's original body back")
 
     def test_adopt_control_script_utilises_and_improves(self):
         # the user's controller RUNS in our sim and the sim tunes it -> credible walk that beats it (on a body our

@@ -172,8 +172,9 @@ def test_the_plantar_rod_is_HELD_to_the_foot_when_the_model_is_STEPPED():
     """THE measurement. Drop Cassie under gravity and watch the loop close or not close.
 
     MEASURED on this checkout, worst separation between the two anchor points after 2000 steps:
-    loops OFF (HEAD) 701.70 mm, loops ON 29.59 mm. The residual is not zero because ``connect`` is a soft
-    constraint solved with the rest of the system — expressiveness and stiffness are different questions.
+    loops OFF 495.9 mm, loops ON 16.7 mm (701.70 / 29.59 before the twin carried each link's source inertial
+    and contact model). The residual is not zero because ``connect`` is a soft constraint solved with the rest
+    of the system: expressiveness and stiffness are different questions.
     """
     import mujoco
     import numpy as np

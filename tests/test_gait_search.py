@@ -177,8 +177,10 @@ class GaitSearchTests(unittest.TestCase):
         # because its parameters look aggressive.
         upright = evaluate_gait(g, {"freq": 1.4, "hip_amp": 0.9, "knee_amp": 0.9, "duty": 0.13,
                                     "kp": 110.0, "kd": 10.0}, steps=800)
-        toppled = evaluate_gait(g, {"freq": 0.8, "hip_amp": 1.5, "knee_amp": 1.5, "duty": 0.12,
-                                    "kp": 24.0, "kd": 1.0}, steps=800)
+        # The lurch this used (0.8 Hz, amplitude 1.5, kp 24) is a credible walk since the crawl's swing lifts
+        # the feet (2026-10-11), as were three other aggressive points tried; this one survives and slides.
+        toppled = evaluate_gait(g, {"freq": 2.5, "hip_amp": 1.6, "knee_amp": 1.6, "duty": 0.12,
+                                    "kp": 300.0, "kd": 1.0}, steps=800)
         # the upright gait survives and walks; a measured lurch cannot
         # out-score it even when the lurch covers forward distance.
         self.assertTrue(upright["survived"])

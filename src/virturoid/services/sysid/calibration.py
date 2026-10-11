@@ -514,6 +514,8 @@ def l2_requirements(gene) -> dict:
         "bench_identified": {
             "parameters": sorted({p for row in moved.values() for p in row}),
             "n_joints": n_moved,
+            # WHAT THE LOG WAS, beside the values fitted to it, because the note below is what gets quoted.
+            "log_measured_on": str(prov.get("class") or "none"),
             # "bench-identified" is the certificate's word and it is not free. If these values reached the model
             # over a FAILED tracking gate, the note says so here rather than leaving the reader to notice a
             # blocked requirement further up: the certificate note is what gets quoted.
@@ -522,6 +524,14 @@ def l2_requirements(gene) -> dict:
                       f"({gate.get('improvement_x')}x against {gate.get('threshold_x')}x) by an explicit "
                       "opt-in. They are a hypothesis written into the model, not a bench identification"
                       if (rec or {}).get("applied_over_the_gate") else
+                      # NOR IS A FIT TO A LOG NOBODY MEASURED ON A MACHINE. This said "bench-identified" for
+                      # any applied fit until 2026-10-10, including one fitted to simulate_bench_log's
+                      # SIMULATED stand-in, which the no-hardware path applies on request.
+                      ("these values were fitted to a log that was NOT measured on hardware "
+                       f"({prov.get('class') or 'none'}), so they describe that log rather than this machine; on "
+                       "the no-hardware path it is a simulated stand-in perturbed by the tool itself, not a "
+                       "bench identification")
+                      if prov.get("class") != "hardware" else
                       "joint dissipation and reflected inertia are bench-identified on the joints listed; the "
                       "torque-speed envelope and the actuation delay are not, which is why the level does not "
                       "move") if moved else "nothing is bench-identified on this robot"),

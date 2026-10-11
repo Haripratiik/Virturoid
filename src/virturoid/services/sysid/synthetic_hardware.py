@@ -44,6 +44,15 @@ WHAT_SIM2SIM_DOES_NOT_PROVE = (
 #: leaves less to remove and the ratio falls -- at 40 ms it went 1.484x -> 1.121x, which reads as a regression
 #: and is not one. Anyone re-sizing this dict should size it as a FRACTION of each joint's declared value, and
 #: re-measure ``tests/test_sysid_delay_wedge.py`` when they do; it is the file that notices.
+#:
+#: AND THE TWIN MOVED AGAIN (2026-10-10): it now carries each link's source inertial too. Same offset, same
+#: drivetrain, and prior-replay-vs-log RMS across 0-40 ms on the full plan is 0.0033 -> 0.0472 rad. At 40 ms the
+#: correct fit now reads 1.569x on the full plan and 2.499x on two joints and CLEARS the tracking gate (it is
+#: refused anyway, by the global-scale rival naming a gear error this dict does not contain; see
+#: ``fit.MIN_TRACKING_IMPROVEMENT_X``); at 20 ms it reads 73.66x. The ratio this dict produces moved again with
+#: the dict untouched, this time through the mass distribution (the hip's bench gain floor fell from 9.1x to
+#: 7.6x its inertia-scaled value) rather than the drivetrain, which is the other half of the warning above:
+#: re-measure the wedge file whenever the twin moves, not only when this dict does.
 DEFAULT_PERTURBATION = {"frictionloss": 0.08, "damping": 0.6, "armature": 0.03}
 DEFAULT_DELAY_TICKS = 2
 

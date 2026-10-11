@@ -40,7 +40,12 @@ def test_an_amended_longer_arm_still_articulates():
         longer = longer[0]
     r = _reach(longer)
     assert r["verdict"].startswith("ARTICULATES"), f"amended arm read {r['verdict']!r} (the #220 dishonest STUCK)"
-    assert r["reach_m"] >= 0.87                               # the longer arm reaches at least as far
+    # The longer arm reaches FARTHER than the arm it was amended from, by about the factor its links grew. This
+    # used to be `reach_m >= 0.87`, a constant from when reach was the sum of every actuated length (fingers
+    # included); reach is now measured by forward kinematics, and the honest claim is the RELATIVE one. Measured
+    # 2026-10-11: 0.751 m -> 1.126 m (x1.499) for the 1.5x amendment.
+    base = _reach(g)
+    assert r["reach_m"] >= 1.4 * base["reach_m"], (base["reach_m"], r["reach_m"])
 
 
 def test_a_payload_loaded_arm_still_articulates():

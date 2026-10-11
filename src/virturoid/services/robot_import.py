@@ -123,18 +123,174 @@ def _link_vector(mj, body_id: int, children: dict, pos_of: dict | None = None):
     if kids:
         best = max(kids, key=lambda c: float(np.linalg.norm(_pos(c))))
         return _pos(best)
-    far, best_n = np.zeros(3), 0.0
-    for g in range(mj.ngeom):
-        if int(mj.geom_bodyid[g]) != body_id:
-            continue
+    return _leaf_reach(mj, body_id)[0]
+
+
+def _leaf_reach(mj, body_id: int):
+    """A LEAF link's axis and length: origin -> the farthest SURFACE of its collision geometry.
+
+    The scan reads only the link's collision geoms whenever it has any. It used to read every geom, and a leaf's
+    visual mesh is the same hull that over-reads a thigh (see the span note in ``import_robot``): on a
+    Menagerie Go2 it made the calf 0.284 m against a real 0.213 m to the foot and aimed it at the mesh's centroid
+    rather than at the foot, which put every foot 6.6 cm forward of where the source plants it. A link with no
+    collision geometry at all keeps the old all-geom scan, so a visual-only leaf still gets a length.
+
+    The reach runs to the geom's far SURFACE, its rounding included, so the caller can end the drawn capsule
+    with its own cap on that surface instead of one radius past it. The old reach stopped at a sphere's centre
+    and at a capsule's segment end, which was right only when the drawn radius happened to equal the source's.
+
+    Returns ``(vector, geom)``: ``geom`` is the collision geom the reach ends on (a foot, on a leg), or ``None``
+    when the link has no collision geometry and the scan fell back to every geom.
+    """
+    import numpy as np
+
+    own = [g for g in range(mj.ngeom) if int(mj.geom_bodyid[g]) == body_id]
+    solid = [g for g in own if int(mj.geom_contype[g]) or int(mj.geom_conaffinity[g])]
+    far, best_n, best_g = np.zeros(3), 0.0, None
+    for g in (solid or own):
         sz = mj.geom_size[g]
-        ext = float(sz[2] if int(mj.geom_type[g]) in (6, 7) else sz[max(0, len(sz) - 2)])
+        t = int(mj.geom_type[g])
+        if t == 2:                                   # sphere: its radius
+            ext = float(sz[0])
+        elif t == 3:                                 # capsule: half-length plus the rounded cap
+            ext = float(sz[1]) + float(sz[0])
+        elif t in (4, 6, 7):                         # ellipsoid / box / mesh: the z half-extent
+            ext = float(sz[2])
+        else:                                        # cylinder and anything else: the half-length
+            ext = float(sz[max(0, len(sz) - 2)])
         p = np.asarray(mj.geom_pos[g], dtype=float)
         nrm = float(np.linalg.norm(p))
         reach = nrm + abs(ext)
         if reach > best_n:
             best_n, far = reach, (p * (reach / nrm) if nrm > 1e-9 else np.array([0.0, 0.0, reach]))
-    return far
+            best_g = g if solid else None
+    return far, best_g
+
+
+def _collision_girth(mj, g: int, S) -> tuple[float, float]:
+    """``(across, along)``: collision geom ``g``'s half-thickness ACROSS a link and its half-extent ALONG it.
+
+    The link axis is the segment's local +z, and ``S`` maps segment to body frame as everywhere in this module, so
+    the geom is first turned into the segment frame. ``across`` is read off the geom's own cross-section: the plane
+    through its centre perpendicular to the link axis, and the larger of that section's two half-extents. Where the
+    geom sits is deliberately not part of it. The collider is one capsule centred on the link axis, and a geom
+    standing off that axis (the Go2's shank tubes run up to 2 cm forward of it) would otherwise read its offset as
+    girth and fatten the capsule on the side where the source has nothing.
+
+    Exact per primitive. A sphere is its radius. A capsule or cylinder running along the link is its radius, and its
+    section widens with its tilt, up to the full half-length of one laid crosswise (plus the cap on a capsule). An
+    ellipsoid gives the larger semi-axis of its central section, and a box is sliced through its centre. A mesh, a
+    height field or an SDF is taken as the box of its own-frame AABB, the half-extent convention ``_primary_geom``
+    already reads a mesh with. ``along`` is what ``_collision_radius`` ranks the link's geoms by.
+    """
+    import math
+
+    import numpy as np
+
+    t = int(mj.geom_type[g])
+    sz = np.asarray(mj.geom_size[g], dtype=float)
+    R = S.T @ _quat_mat(mj.geom_quat[g])                    # geom frame -> segment frame
+    if t == 2:                                              # sphere
+        return float(sz[0]), float(sz[0])
+    if t in (3, 5):                                         # capsule / cylinder: (radius, half-length)
+        r, h = float(sz[0]), float(sz[1])
+        c = min(1.0, abs(float(R[2, 2])))                   # cosine of its tilt against the link axis
+        s = math.sqrt(max(0.0, 1.0 - c * c))
+        if t == 5:                                          # an ellipse r/c long, cut short by the end faces
+            return (max(r, min(r / c if c > 1e-9 else math.inf, h / s if s > 1e-9 else math.inf)),
+                    h * c + r * s)
+        if c > 1e-9 and r * s <= h * c:                     # the section stays within the capsule's tube
+            return r / c, h * c + r
+        return h * s + math.sqrt(max(0.0, r * r - (h * c) ** 2)), h * c + r    # it runs out into an end cap
+    if t == 4:                                              # ellipsoid
+        a = np.maximum(np.abs(sz[:3]), 1e-12)
+        A = R @ np.diag(1.0 / a ** 2) @ R.T
+        across = 1.0 / math.sqrt(max(float(np.linalg.eigvalsh(A[:2, :2])[0]), 1e-18))
+        return float(across), float(math.sqrt(sum((a[j] * float(R[2, j])) ** 2 for j in range(3))))
+    half = np.abs(sz[:3]) if t == 6 else np.abs(np.asarray(mj.geom_aabb[g][3:6], dtype=float))
+    corners = np.array([[x, y, z] for x in (-1.0, 1.0) for y in (-1.0, 1.0) for z in (-1.0, 1.0)]) * half
+    P = corners @ R.T                                       # the box's corners about its centre, segment frame
+    section = []                                            # where its edges cross the plane through its centre
+    for i in range(8):
+        for j in range(i + 1, 8):
+            if int(np.count_nonzero(corners[i] != corners[j])) != 1:
+                continue                                    # not an edge
+            zi, zj = float(P[i, 2]), float(P[j, 2])
+            if abs(zi) < 1e-12:
+                section.append(P[i])
+            elif zi * zj < 0.0:
+                section.append(P[i] + (zi / (zi - zj)) * (P[j] - P[i]))
+    k = int(np.argmax(np.abs(R[2, :])))                     # the box axis that runs most along the link
+    across = 0.0
+    for m in (n for n in range(3) if n != k):               # half-extent of the section along each other axis
+        u = np.array([R[0, m], R[1, m], 0.0])
+        nu = float(np.linalg.norm(u))
+        if nu > 1e-9 and section:
+            across = max(across, max(abs(float(p @ u)) for p in section) / nu)
+    return float(across), float(sum(half[j] * abs(float(R[2, j])) for j in range(3)))
+
+
+def _collision_radius(mj, body_id: int, S, leaf: bool) -> float | None:
+    """A link's collider radius read off its own COLLISION geometry, or ``None`` when it has none.
+
+    The radius used to come from ``_primary_geom``: the largest geom the link owns, which on a real robot is its
+    visual mesh, measured by the mesh's bounding box. That is the same visual hull that over-read the thigh's
+    LENGTH (see the span note in ``import_robot``), and it over-reads girth just as badly. On a Menagerie Go2 it
+    made the thigh capsule r 0.051 m around a source thigh whose collision box is 0.012 x 0.017 m in half-width,
+    the calf r 0.029 m on a foot sphere of r 0.022 m, and the trunk r 0.098 m on a trunk box 0.057 m in half-height,
+    so the twin's belly sat 4 cm below the source's. A link with no collision geometry keeps that rule, since a
+    mesh hull is then the only size the file gives.
+
+    WHICH GEOM, and in neither case the widest one. A leaf takes the geom its length runs to (``_leaf_reach``): the
+    capsule's far cap is drawn ending on that geom's far surface, so with that geom's own girth the cap IS that
+    geom, and on a leg it is the foot. The widest would have given an ANYmal C's shank its 0.060 m knee drive as a
+    foot, against the 0.030 m foot sphere it stands on. Any other link takes the collision geom that runs furthest
+    along its axis, the member that spans it. A joint housing laid ACROSS a link is wide only where it sits, and
+    the widest-geom rule put the UR5e forearm at r 0.110 m (its bound) around a 0.038 m tube for its elbow.
+
+    MEASURED on that Go2 under the product's crawl gait, 6000 steps. Replaying the 11 gaits the search found for
+    the source, this twin reproduces it (the same verdict on all 11, travel within a median 0.000 m and at most
+    0.25 m) once it also starts at the source's home height and uses the source's impratio. With hull-sized
+    colliders and those same two settings it agrees on 10 and misses the travel by a median 0.55 m. Without them
+    these colliders alone do not change how often the search finds a walk: 12 of 18 seeds before, 13 after,
+    against 16 for the source.
+    """
+    solid = [g for g in range(mj.ngeom)
+             if int(mj.geom_bodyid[g]) == body_id and int(mj.geom_type[g]) != 0
+             and (int(mj.geom_contype[g]) or int(mj.geom_conaffinity[g]))]
+    if not solid:
+        return None
+    if leaf:
+        far = _leaf_reach(mj, body_id)[1]
+        if far is not None and int(mj.geom_type[far]) != 0:
+            return _collision_girth(mj, far, S)[0]
+    return max((_collision_girth(mj, g, S) for g in solid), key=lambda ga: ga[1])[0]
+
+
+def _contact_geom(mj, body_id: int, leaf: bool) -> int | None:
+    """The source collision geom whose contact model a segment's single collider should carry, or ``None``.
+
+    A leaf takes the geom its length runs to (``_leaf_reach``): on a leg that is the foot, the only surface that
+    meets the ground. Any other link takes its largest collision geom. A link with no collision geometry has no
+    contact model to carry.
+    """
+    solid = [g for g in range(mj.ngeom)
+             if int(mj.geom_bodyid[g]) == body_id and (int(mj.geom_contype[g]) or int(mj.geom_conaffinity[g]))]
+    if not solid:
+        return None
+    if leaf:
+        return _leaf_reach(mj, body_id)[1]
+    return max(solid, key=lambda g: float(mj.geom_rbound[g]))
+
+
+def _source_contact(mj, g: int) -> dict:
+    """Geom ``g``'s contact model as the customer's model compiles it: what MuJoCo solves its contacts with."""
+    return {"friction": [round(float(v), 6) for v in mj.geom_friction[g]],
+            "condim": int(mj.geom_condim[g]), "priority": int(mj.geom_priority[g]),
+            "solref": [round(float(v), 6) for v in mj.geom_solref[g]],
+            "solimp": [round(float(v), 6) for v in mj.geom_solimp[g]],
+            "solmix": round(float(mj.geom_solmix[g]), 6),
+            "margin": round(float(mj.geom_margin[g]), 6), "gap": round(float(mj.geom_gap[g]), 6)}
 
 
 def _urdf_world_fused_links(text: str) -> tuple[dict[str, float], float]:
@@ -284,32 +440,44 @@ def _root_own_span(mj, body_id: int):
     return span if span >= 0.02 else None
 
 
-def _import_mesh_key(source: str, robot_id: str | None) -> str:
-    """Directory name under ``build/_importmesh`` for THIS import's baked link meshes.
+#: Bump whenever an importer change moves a baked link mesh relative to its segment frame. 2: a leaf link's axis
+#: now runs to its collision geometry (``_leaf_reach``) rather than to its visual hull.
+_MESH_BAKE_VERSION = 2
 
-    The key used to be the caller's ``robot_id`` or, when that was absent, the model's BASENAME — and the
-    product's own ingest path passes no robot_id, so every customer who ever drops a ``go2.xml``, a
-    ``robot.urdf`` or a ``scene.xml`` wrote into one shared directory. Two imports of different robots then
-    overwrite each other's STLs link by link, and an import running while another reads produces a
-    partially-written file: measured, that surfaced as ``decoder failed for mesh file ... has wrong size;
-    perhaps this is an ASCII file?`` and MuJoCo refuses to compile the model AT ALL, so a name collision does
-    not degrade one link's appearance, it takes the whole robot down.
 
-    The basename is kept as a readable prefix (these directories get inspected by hand) and disambiguated with a
-    digest of the model's ABSOLUTE path, so the same file re-imported reuses its own directory — the cache still
-    works — while two different files never share one.
+def _import_mesh_key(source: str) -> str:
+    """Directory name under ``build/_importmesh`` for this model's baked link meshes.
+
+    KEYED BY THE MODEL, NEVER BY THE CALLER. Until 2026-10-10 a caller's ``robot_id`` took precedence, so every
+    import that named its robot got a directory of its own, even when it imported the same file as the last one.
+    MEASURED on this checkout: 1,892 directories holding 81 distinct robots, 16.85 GB of which 13.47 GB was
+    duplicates. The Menagerie Go2 alone had been baked into 73 directories (``abl_unitree_go2``,
+    ``advfinA_unitree_go2``, ...), one per probe or test that happened to pick a fresh id. Nothing the bake
+    produces depends on that id: the meshes are a function of the model, and ``import_robot``'s only other
+    input is a species label.
+
+    So the key is ``_source_identity``, the same definition of "the same model" the import cache uses. Two
+    different models never share a directory, so the collision an earlier key was written against cannot come
+    back: two ``go2.xml`` files overwriting each other's links, where one half-written STL made MuJoCo refuse
+    the whole robot. Two imports of the SAME model now share one, which is safe for reasons checked rather than
+    assumed: ``_bake_source_mesh`` writes a per-process ``.part`` file and ``os.replace``s it, so a reader never
+    sees a partial mesh, and every import re-bakes every link, so a shared directory never serves a stale one.
+    An edited model gets a new digest and so a new directory, which keeps a saved robot's meshes the ones it was
+    imported with. ``_MESH_BAKE_VERSION`` does the same for an edited IMPORTER: a saved robot points at its
+    meshes by absolute path, so a change that bakes a link in a different frame must not overwrite the files an
+    older robot still reads.
+
+    The basename stays as a readable prefix because these directories get inspected by hand. Inline XML has no
+    basename worth keeping, so it is labelled ``inline`` rather than whatever text follows its last slash.
     """
     import hashlib
 
-    if robot_id:
-        return _slug_name(robot_id)
     src = str(source or "")
-    stem = os.path.basename(src) or "import"
-    try:
-        ident = str(Path(src).resolve()) if (len(src) < 512 and Path(src).exists()) else src[:4096]
-    except OSError:
-        ident = src[:4096]
-    return f"{_slug_name(stem)}_{hashlib.md5(ident.encode('utf-8', 'replace')).hexdigest()[:10]}"
+    is_path = len(src) < 512 and "<" not in src
+    stem = (os.path.basename(src) if is_path else "") or "inline"
+    ident = _source_identity(src) or ("unreadable", src[:4096])
+    digest = hashlib.sha256(repr((_MESH_BAKE_VERSION, ident)).encode("utf-8", "replace")).hexdigest()[:10]
+    return f"{_slug_name(stem)[:48]}_{digest}"
 
 
 def _link_mesh_stem(body_name: str, claimed: dict[str, str]) -> str:
@@ -510,20 +678,24 @@ def _dir_fingerprint(root: Path) -> tuple:
 _HASH_MODEL_MAX_BYTES = 4 * 1024 * 1024
 
 
-def _import_cache_key(source: str, robot_id: str | None, species: str | None):
-    """The identity of THIS import, or ``None`` when it must not be cached.
+def _source_identity(source: str) -> tuple | None:
+    """What makes two imports THE SAME MODEL, independent of who asked or what they named the robot.
 
-    The MODEL FILE ITSELF is keyed by CONTENT DIGEST, not by mtime. Mtime alone is not safe here: a test that
-    writes a fixture URDF, imports it, rewrites it and imports again is an ordinary thing to do, and Windows
-    file timestamps are not guaranteed to resolve two writes milliseconds apart -- so an mtime key can hand back
-    the previous robot for the new file. A digest cannot. It costs microseconds on the tens-of-KB XML a robot
-    description actually is, and files past ``_HASH_MODEL_MAX_BYTES`` fall back to size+mtime.
+    A file is its content digest plus a fingerprint of the directory its meshes and ``<include>``s live in, so a
+    mesh edited beside an unchanged XML still counts as a different model. Inline XML is the digest of its text.
+    ``None`` when the file cannot be read.
+
+    The model file is keyed by CONTENT, not mtime. Mtime alone is not safe: a test that writes a fixture URDF,
+    imports it, rewrites it and imports again is an ordinary thing to do, and Windows timestamps are not
+    guaranteed to resolve two writes milliseconds apart, so an mtime key can hand back the previous robot for the
+    new file. A digest cannot. It costs microseconds on the tens-of-KB XML a robot description actually is, and
+    files past ``_HASH_MODEL_MAX_BYTES`` fall back to size and mtime.
+
+    Shared by the import cache and the baked-mesh directory, so the two cannot disagree about what "the same
+    model" means. They used to: the cache keyed on content while the mesh directory keyed on the caller's id.
     """
     import hashlib
 
-    if os.environ.get("VIRTUROID_IMPORT_CACHE") != "1":
-        return None
-    opts = (robot_id, species)
     try:
         p = Path(source)
         if len(source) < 512 and p.is_file():
@@ -533,10 +705,23 @@ def _import_cache_key(source: str, robot_id: str | None, species: str | None):
                     body = ("sha256", hashlib.sha256(fh.read()).hexdigest())
             else:
                 body = ("stat", int(st.st_size), int(st.st_mtime_ns))
-            return ("file", str(p.resolve()), body, _dir_fingerprint(p.parent), opts)
+            return ("file", str(p.resolve()), body, _dir_fingerprint(p.parent))
     except OSError:
         return None
-    return ("text", hashlib.sha256(source.encode("utf-8", "replace")).hexdigest(), opts)
+    return ("text", hashlib.sha256(source.encode("utf-8", "replace")).hexdigest())
+
+
+def _import_cache_key(source: str, robot_id: str | None, species: str | None):
+    """The identity of THIS import, or ``None`` when it must not be cached.
+
+    The model's identity is ``_source_identity``. The caller's ``robot_id`` and ``species`` are added here and
+    only here, because they change what the import RETURNS (the gene carries both) even though they change
+    nothing about the geometry, which is why the baked-mesh directory leaves them out.
+    """
+    if os.environ.get("VIRTUROID_IMPORT_CACHE") != "1":
+        return None
+    ident = _source_identity(source)
+    return None if ident is None else (*ident, (robot_id, species))
 
 
 def clear_import_cache() -> None:
@@ -744,8 +929,12 @@ def _import_robot_uncached(source: str, *, robot_id: str | None = None, species:
     seg_len_by_name: dict[str, float] = {}      # a child's mount z is measured from its parent's TIP
     _rot_by_id: dict[int, object] = {}          # body id -> S_i, the body-frame -> LINK-frame rotation
     try:                                        # per-link STLs of the customer's own meshes (visual only)
-        from pathlib import Path as _P
-        _mesh_dir = _P("build/_importmesh") / _import_mesh_key(source, robot_id)
+        from virturoid.services.install_paths import anchored
+        # ANCHORED, not ``Path("build/_importmesh")``. A relative path resolves against whatever directory the
+        # process happened to start in, so launching from anywhere else baked a second, parallel mesh tree
+        # there: the same duplication the content key above removes, reintroduced by location instead of by id.
+        # ``build/_viewmesh`` next door was already anchored this way.
+        _mesh_dir = anchored("build/_importmesh") / _import_mesh_key(source)
         _mesh_dir.mkdir(parents=True, exist_ok=True)
     except Exception:  # noqa: BLE001 - baking source meshes is a fidelity aid, never an import blocker
         _mesh_dir = None
@@ -759,6 +948,8 @@ def _import_robot_uncached(source: str, *, robot_id: str | None = None, species:
     src_dyn_undeclared: dict[str, list[str]] = {}
     src_not_carried: dict[str, dict] = {}
     src_actuator_kv: dict[str, float] = {}
+    src_inertials: dict[str, dict] = {}
+    src_contacts: dict[str, dict] = {}
     undeclared_torque: list[str] = []
     for i in range(1, mj.nbody):
         if i in _frames:                     # a pose, not a part — folded into its children above
@@ -807,13 +998,35 @@ def _import_robot_uncached(source: str, *, robot_id: str | None = None, species:
                 _span = _own
                 _v = _v * (_own / max(float(_np.linalg.norm(_v)), 1e-9)) if float(_np.linalg.norm(_v)) > 1e-9 \
                     else _np.array([_own, 0.0, 0.0])
-        if _span >= 0.02:
-            length_m = float(min(1.5, _span))
-            shape = "capsule" if shape != "box" or length_m > 2.5 * radius_m else shape
-            radius_m = float(min(max(radius_m, 0.015), 0.12, max(0.015, _span * 0.28)))
         # S_i rotates the segment so its local +z runs along the REAL link axis (see _link_vector).
         _S = _rot_z_to(_v) if _span >= 1e-6 else _np.eye(3)
+        if _span >= 0.02:
+            length_m = float(min(1.5, _span))
+            # GIRTH FROM THE COLLISION GEOMETRY, measured across this axis, wherever the link has any (see
+            # `_collision_radius`). The bounds below still apply to it.
+            try:
+                _girth = _collision_radius(mj, i, _S, i in leaves)
+            except Exception as _exc:  # noqa: BLE001 - a girth estimate may not fail an import, nor fail quietly
+                _girth = None
+                warnings.append(f"could not read link {bname!r}'s girth from its collision geometry "
+                                f"({type(_exc).__name__}: {_exc}); its collider keeps the radius of its "
+                                f"largest geom's bounding box, which over-reads a visual mesh.")
+            if _girth is not None:
+                radius_m = _girth
+            shape = "capsule" if shape != "box" or length_m > 2.5 * radius_m else shape
+            radius_m = float(min(max(radius_m, 0.015), 0.12, max(0.015, _span * 0.28)))
+            if i in leaves and shape == "capsule":
+                # A leaf's span ends ON its collision surface (`_leaf_reach`), and a capsule drawn to that
+                # length would overshoot it by its own cap. On a foot that is the contact point itself. The
+                # radius is that same geom's girth, so on a spherical foot the cap lands on the source's foot.
+                length_m = float(max(0.5 * radius_m, length_m - radius_m))
         _rot_by_id[i] = _S
+        _inertial = _source_inertial(mj, mujoco, i, _S)
+        if _inertial is not None:
+            src_inertials[bname] = _inertial
+        _cg = _contact_geom(mj, i, i in leaves)
+        if _cg is not None:
+            src_contacts[bname] = _source_contact(mj, _cg)
 
         joint_type, axis, lo, hi, torque, jid = _joint_for_body(mj, i, jnts_of, jnt_force, bname, warnings)
         axis = tuple(float(a) for a in (_S.T @ _np.asarray(axis, dtype=float)))   # axis into the segment frame
@@ -904,9 +1117,11 @@ def _import_robot_uncached(source: str, *, robot_id: str | None = None, species:
     # joints, e.g. the shoulder pan). Round-trips our own compiled genes too (whose welded root is
     # likewise merged into the world on reload).
     root_segs = [s for s in segments if s.parent is None]
+    _root_synthesized = False
     if len(root_segs) != 1 or any(r.joint_type not in (None, "fixed") for r in root_segs):
         import numpy as _np
 
+        _root_synthesized = True
         base_name = next((n for n in ("base_link", "imported_base", "base_mount")
                           if not any(s.name == n for s in segments)), "imported_base")
         _BASE_LEN = 0.05
@@ -993,6 +1208,35 @@ def _import_robot_uncached(source: str, *, robot_id: str | None = None, species:
     # are on it from the start and `validate()` below rules on them like any other field.
     loop_closures, coupled_joints = _source_equalities(
         mj, mujoco, body_name, _rot_by_id, segments, warnings, eff_body=eff_body, eff_parent=eff_parent)
+    # A GRIPPER ENDS AT ITS PALM, NOT AT ONE OF ITS FINGERS. The rules above take the last leaf when nothing is
+    # named, and on a parallel-jaw arm the last leaves ARE the fingers: the Menagerie Piper and ARX L5 flagged
+    # `link8`, one jaw, and a jaw has nothing under it, so the grasp site was never emitted and verify_robot
+    # told those customers "NO GRIPPER in your model". `palm_and_jaws` walks from wherever the flag landed to
+    # the segment that carries the jaws (services/gripper_jaws.py lists the cases it accepts). It runs after
+    # the class is inferred and the couplings are read: neither reads the flag, and a Robotiq-style linkage is
+    # only recognisable by the 1:1 coupling of its two drivers.
+    from virturoid.services.gripper_jaws import palm_and_jaws
+    _palm, _jaws = palm_and_jaws(segments, ee_name, coupled_joints) if ee_name is not None else (None, [])
+    if _jaws and _palm != ee_name:
+        for s in segments:
+            s.is_end_effector = (s.name == _palm)
+        warnings.append(f"the end effector is {_palm!r}, the palm carrying the jaws "
+                        f"({', '.join(j.name for j in _jaws)}), not {ee_name!r}: a jaw is not where the arm ends")
+        ee_name = _palm
+    # WHETHER IT CARRIES A GRIPPER IS READ OFF THE STRUCTURE FIRST. This used to be `"grip" in` any segment name,
+    # which made a Franka Panda (`hand`, `left_finger`, `right_finger`: two sliding jaws) import as "none":
+    # run_task then never tried the real contact grasp on it and pinned the block instead, in the same session
+    # in which verify_robot (which reads the grasp site, i.e. the sliding jaws) had attempted a grasp with it.
+    # Jaws found by `palm_and_jaws` now declare the gripper, and for sliding jaws that IS the grasp-site rule, so
+    # this declaration and the detector verify_robot runs can no longer disagree. The NAME is kept as a second,
+    # weaker form of evidence, because it is the only evidence for the grippers no structural rule here can
+    # see: an uncoupled revolute jaw (an SO-101's, a low-cost arm's, a Z1's), which nothing structural
+    # separates from a wrist joint or a hand's fingers. Dropping it would turn those robots' "gripper" into
+    # "none" and make pick_place infeasible on bodies that have one. "jaw" joins "grip" for the same reason: it
+    # is how the SO-ARM100 names its two jaws (Fixed_Jaw / Moving_Jaw), and across the 79 importable Menagerie
+    # models no segment outside the two SO-ARM grippers contains it.
+    _jawed = bool(_jaws)
+    _named = any(h in s.name.lower() for s in segments for h in ("grip", "jaw"))
     gene = RobotGene(
         id=robot_id or "imported_robot",
         species=species or f"{robot_class}.imported",
@@ -1006,7 +1250,7 @@ def _import_robot_uncached(source: str, *, robot_id: str | None = None, species:
         # the private copy that used to sit here was missing "legged"/"biped"/"aerial"/"aquatic", so a body in
         # one of those families was bolted to a table on the way in and then judged for not walking.
         base_mount="free" if robot_class in FLOATING_BASE_CLASSES else "table",
-        end_effector_type="gripper" if any("grip" in (s.name.lower()) for s in segments) else "none",
+        end_effector_type="gripper" if (_jawed or _named) else "none",
         # ``mass_source`` marks these per-link masses as AUTHORITATIVE: they are the manufacturer's own
         # ``body_mass`` read straight off the customer's model, not our estimate. Grounding must size actuators
         # around them, never replace them -- re-deriving from primitive volume x density turned a Menagerie
@@ -1056,7 +1300,7 @@ def _import_robot_uncached(source: str, *, robot_id: str | None = None, species:
     # iiwa_14, kinova_gen3, tiago, tiago_dual, stretch, tidybot, wxai, z1, leap_hand, allegro) -- so adopting
     # it would be MuJoCo's default applied where the source said nothing. See
     # ``gene_compiler._declared_joint_dynamics``. Carrying damping+frictionloss alone moves the numbers on all
-    # 59 packages and costs simulability on ONE (pal_tiago_dual, handled by the disclosed fallback below).
+    # 59 packages, and the few twins that cannot step what was declared take the disclosed fallback below.
     if src_dynamics:
         _carried = ("damping", "frictionloss")
         gene.metadata["joint_dynamics_source"] = "source_model"
@@ -1184,6 +1428,73 @@ def _import_robot_uncached(source: str, *, robot_id: str | None = None, species:
     _placement = _source_link_placement(mj, mujoco, body_name, segments)
     if _placement:
         gene.metadata["source_link_placement"] = _placement
+    # EACH LINK'S OWN MASS DISTRIBUTION, keyed like the placement record and expiring the same way: the
+    # compiler uses a row only while the segment still has the mass and the length and radius it was imported
+    # with (``gene_compiler._declared_inertial``), so resizing or regrounding a link falls back to the
+    # geometry-derived inertia instead of keeping a centre of mass for a link that no longer exists.
+    _inert_rows = {s.name: {**src_inertials[s.name],
+                            "link_dims_m": [round(float(s.length_m), 6), round(float(s.radius_m), 6)]}
+                   for s in segments if s.name in src_inertials
+                   and abs(float(s.mass_kg) - float(src_inertials[s.name]["mass"])) <= 1e-9}
+    if _inert_rows:
+        gene.metadata["source_inertials"] = _inert_rows
+        gene.metadata["source_inertials_provenance"] = (
+            "read from the customer's compiled model (body_ipos / body_iquat / body_inertia) at import and "
+            "rotated into each segment's frame. The emitted model carries them as <inertial>, so a link's centre "
+            "of mass and inertia are the source's rather than those of the primitive collider drawn for it")
+    # EACH LINK'S CONTACT MODEL. A gait lives or dies at the foot, and the compiler's own contact defaults are not
+    # the customer's: the Go2 declares its feet condim 6, priority 1, friction 0.8 0.02 0.01 and a soft solimp
+    # of 0.015 1 0.022. Under one fixed controller its twin travelled 0.750 m against the source's 2.353 m with
+    # our defaults on the feet, and 2.347 m with the source's. Kept regardless of link size: these describe what
+    # the surface is made of, which resizing a link does not change.
+    _contact_rows = {s.name: src_contacts[s.name] for s in segments if s.name in src_contacts}
+    if _contact_rows:
+        gene.metadata["source_contacts"] = _contact_rows
+        gene.metadata["source_contacts_provenance"] = (
+            "read from the customer's compiled model at import: per link, the contact parameters of the collision "
+            "geom that carries its contact (a leaf's far end, which on a leg is the foot; otherwise its largest "
+            "collision geom). The emitted collider carries them, so contacts are solved with the source's model")
+
+    # ...AND THE RATIO IT SOLVES FRICTION WITH. ``impratio`` is a property of the model's contact solve, not of any
+    # one geom, so the rows above cannot carry it: under an elliptic cone it sets how stiff friction is relative
+    # to the normal force, i.e. how much a planted foot slips. The Go2 declares 100 and every compiled body got
+    # MuJoCo's 1. The docstring of ``_collision_radius`` already records the twin reproducing its source "once it
+    # also ... uses the source's impratio", but the twin was never given it. MEASURED 2026-10-11 at the gait the
+    # product's search found for the source: source +2.997 m, twin +2.293 m, twin with the source's impratio
+    # +3.032 m. Only a non-default value under an elliptic cone is recorded (it means nothing on a pyramidal one).
+    if (int(mj.opt.cone) == int(mujoco.mjtCone.mjCONE_ELLIPTIC)
+            and abs(float(mj.opt.impratio) - 1.0) > 1e-9):
+        gene.metadata["source_impratio"] = round(float(mj.opt.impratio), 6)
+
+    # THE ROOT'S OWN COLLISION GEOMETRY. A segment's collider runs from its origin along its local +z, which fits a
+    # limb (origin at the joint, link toward the next one) and does not fit a trunk, whose origin sits at its
+    # centre. The Go2's trunk was drawn as a capsule from its origin to the front-left hip, 0.376 m long and
+    # 0.098 m in radius: 0.12 m past the source's nose, 0.14 m past its left side, and 0.09 m short of its tail.
+    # Its inertia is carried separately, so this mattered only on contact, and the search found that contact: the
+    # gait the twin's seed-0 search ended on rested the trunk on the floor for 1475 of 6000 steps, every contact
+    # on that overhang, 7 cm ahead of the source's nose. See `_source_root_collision`. Expires like the inertial
+    # rows: only while the root keeps the length, radius and frame it was recorded with.
+    if not _root_synthesized:
+        _root_seg = next((s for s in segments if s.parent is None), None)
+        _root_id = next((i for i in range(1, mj.nbody) if i not in _frames and _root_seg is not None
+                         and body_name[i] == _root_seg.name), None)
+        if _root_id is not None:
+            import numpy as _np
+
+            try:
+                _coll = _source_root_collision(mj, mujoco, _root_id, _rot_by_id.get(_root_id, _np.eye(3)))
+            except Exception:  # noqa: BLE001 - a fidelity record may never be the reason an import fails
+                _coll = None
+            if _coll is not None:
+                gene.metadata["source_root_collision"] = {
+                    **_coll, "segment": _root_seg.name,
+                    "link_dims_m": [round(float(_root_seg.length_m), 6), round(float(_root_seg.radius_m), 6)],
+                    "mount_euler": [float(v) for v in (_root_seg.mount_euler or (0.0, 0.0, 0.0))]}
+                gene.metadata["source_root_collision_provenance"] = (
+                    "read from the customer's compiled model at import: the root link's own collision geoms, "
+                    "each with its own contact parameters, rotated into the segment frame (a mesh is carried as "
+                    "the box of its own bounding hull). The emitted model draws the root's collider from these "
+                    "instead of a capsule from the link origin toward its farthest child")
 
     gene_issues = gene.validate()
     warnings.extend(f"gene validation: {iss}" for iss in gene_issues)
@@ -1196,18 +1507,30 @@ def _import_robot_uncached(source: str, *, robot_id: str | None = None, species:
     # steps perfectly well and is not the customer's robot. Rule on both before anyone else does.
     sim = _simulability_probe(gene) if not gene_issues else {
         "ok": False, "checked": False, "reason": "gene failed schema validation; not simulated"}
-    # THE ONE CASE WHERE THE CUSTOMER'S OWN NUMBERS CANNOT BE CARRIED, and the only honest way to not carry
-    # them. Their drivetrain is declared against THEIR link inertias; our twin's are primitive approximations,
-    # and the two can be incompatible at our timestep.
+    # THE CASE WHERE THE CUSTOMER'S OWN NUMBERS CANNOT BE CARRIED, and the only honest way to not carry them.
+    # Their drivetrain is declared against THEIR model as a whole (its actuators, its timestep, its solver),
+    # and our twin drives it with its own torque motors at a fixed 2 ms step, which can be incompatible with it.
     #
     # SWEPT, because both earlier estimates of the blast radius were wrong, in both directions. Across the 59
     # cached Menagerie packages that yield a drivetrain record, carrying damping+frictionloss moves the numbers
-    # on ALL 59 -- the substitution was universal, not occasional -- and costs simulability on ONE:
-    # pal_tiago_dual (non-finite at t=1.052 s under excitation). An eight-package spot check had found one of
-    # what it then believed were five, which is exactly the sampling error this fallback must not be sized
-    # against; the five turned out to be four packages that the ARMATURE carry broke (hello_robot_stretch,
-    # kinova_gen3, pal_tiago, pndbotics_adam_lite -- all steppable again once armature stays ours) plus this
-    # one. The other 58 carry the full declaration.
+    # on ALL 59: the substitution was universal, not occasional. While the twin's link inertias were
+    # primitives it cost simulability on ONE: pal_tiago_dual (non-finite at t=1.052 s under excitation). An
+    # eight-package spot check had found one of what it then believed were five, which is exactly the sampling
+    # error this fallback must not be sized against; the five turned out to be four packages that the ARMATURE
+    # carry broke (hello_robot_stretch, kinova_gen3, pal_tiago, pndbotics_adam_lite, all steppable again once
+    # armature stays ours) plus TIAGo++.
+    #
+    # RE-SWEPT 2026-10-10, once the twin carried each link's source inertial and contact model. TIAGo++ now
+    # steps its own declaration. Two others now cannot, and in both the cause is the three together (drop any
+    # one of declared drivetrain, source inertials or source contacts and the twin steps): unitree_g1, which
+    # declares zero damping on 29 joints that its own model drives through position servos and ours drives
+    # open-loop through torque motors, and agility_cassie, whose own model runs at 0.5 ms against our 2 ms.
+    # Both sources survive the probe's excitation as written. The lighter, truer inertias stopped masking our
+    # actuator and timestep simplifications, which is the right direction to have found that from.
+    #
+    # RE-SWEPT AGAIN once each collider took its girth from the source's collision geometry instead of its visual
+    # hull (`_collision_radius`): both of those now step their own declaration, and none of the 79 twins built
+    # from the cached Menagerie's top-level models takes this fallback. It stays for the twin that needs it.
     #
     # The two alternatives were both worse. Silently keeping our prior is the defect this whole change exists
     # to remove. Shipping a NON-SIMULABLE twin costs the customer every downstream number (verdict, BOM, spec
@@ -1234,8 +1557,9 @@ def _import_robot_uncached(source: str, *, robot_id: str | None = None, species:
                 f"the twin unsteppable "
                 f"({sim.get('reason')}); removing it and changing nothing else made it steppable again, which "
                 f"is how we know the declaration is the cause. That is OUR limitation, not a defect in your "
-                f"file: your drivetrain is declared against your link inertias and this twin rebuilds them as "
-                f"primitives. Your numbers are still recorded verbatim under "
+                f"file: your drivetrain is declared against your model as a whole, and this twin drives it "
+                f"differently, with our own torque motors at our own 2 ms step where your model may use position "
+                f"servos or a finer step. Your numbers are still recorded verbatim under "
                 f"'source_joint_dynamics'. THE CONSEQUENCE: a sim-to-real gap measured on this twin is partly "
                 f"a measurement of our default, not of your hardware — do not quote it. Use the faithful "
                 f"native lane, which runs your model as-is."))
@@ -1675,7 +1999,10 @@ def _load_model(source: str, mujoco, warnings: list[str]):
 
 
 def _primary_geom(mj, body_id: int, GEOM, name_of, warnings: list[str]):
-    """Pick the body's representative geom -> (shape, length_m, radius_m). Approximate, with warnings."""
+    """Pick the body's representative geom -> (shape, length_m, radius_m). Approximate, with warnings.
+
+    Its radius survives only where nothing better exists: a link long enough to be rebuilt along its axis takes
+    its girth from its collision geometry instead whenever it has any (``_collision_radius``)."""
     gids = [g for g in range(mj.ngeom) if int(mj.geom_bodyid[g]) == body_id]
     if not gids:
         return "box", 0.05, 0.02   # massless/visual-only link; tiny default (gene needs positive dims)
@@ -1789,6 +2116,118 @@ def _source_joint_dynamics(mj, j: int) -> dict | None:
     return {"armature": round(float(mj.dof_armature[adr]), 6),
             "damping": round(float(mj.dof_damping[adr]), 6),
             "frictionloss": round(float(mj.dof_frictionloss[adr]), 6)}
+
+
+def _source_inertial(mj, mujoco, body_id: int, S) -> dict | None:
+    """Link ``body_id``'s own inertial frame, rotated into its SEGMENT frame: ``{pos, quat, mass, diaginertia}``.
+
+    A segment's collider is a primitive we draw, and without this the compiler also derives the link's mass
+    distribution from that drawing, so every link's centre of mass sat at the middle of its capsule. Measured
+    on a Menagerie Go2 at its rest pose: the trunk capsule runs from the trunk origin to its farthest hip, which
+    put the trunk's 6.92 kg 0.188 m forward of where the source has it and moved the whole robot's centre of
+    mass 5.7 cm forward and 2 cm left. The source walks under the product's own gait search (CREDIBLE WALK,
+    +2.36 m at 6000 steps) and that twin did not, on any of three seeds.
+
+    Rotation only, by the same ``S`` the meshes are baked with: a segment's origin IS its source body's origin
+    (``mount_offset`` places it there), so no translation applies. ``None`` for a link whose inertia the source
+    does not give in full, which then keeps the geometry-derived mass distribution it always had.
+    """
+    import math
+
+    import numpy as np
+
+    mass = float(mj.body_mass[body_id])
+    inertia = [float(v) for v in mj.body_inertia[body_id]]
+    if not (math.isfinite(mass) and mass > 0.0) or not all(math.isfinite(v) and v > 0.0 for v in inertia):
+        return None
+    r_src = np.zeros(9)
+    mujoco.mju_quat2Mat(r_src, np.asarray(mj.body_iquat[body_id], dtype=float))
+    pos = S.T @ np.asarray(mj.body_ipos[body_id], dtype=float)
+    quat = np.zeros(4)
+    mujoco.mju_mat2Quat(quat, (S.T @ r_src.reshape(3, 3)).reshape(9))
+    return {"pos": [round(float(v), 7) for v in pos], "quat": [round(float(v), 7) for v in quat],
+            "mass": float(mass), "diaginertia": [float(v) for v in inertia]}
+
+
+#: The most collision geoms a root carries one for one. Past this the whole set is drawn as the one box that
+#: encloses it. In the cached Menagerie that is two roots, google_robot (28 pieces) and the Crazyflie (32); every
+#: other single-root model carries at most 12.
+ROOT_COLLISION_MAX_GEOMS = 16
+
+_ROOT_PRIMITIVES = {2: "sphere", 3: "capsule", 4: "ellipsoid", 5: "cylinder", 6: "box"}
+
+
+def _source_root_collision(mj, mujoco, body_id: int, S) -> dict | None:
+    """The root link's own COLLISION geometry, in its SEGMENT frame: ``{geoms: [...], n_source_geoms, ...}``.
+
+    Each entry is ``{type, pos, quat, size, contact}``: a primitive exactly as the source declares it, and a mesh
+    (or SDF) as the box of its own bounding hull, which MuJoCo aligns with the mesh's principal axes. A plane or
+    height field is skipped; it is scenery, not part of a link. Largest volume first, so the main structural geom
+    is the one the compiler names after the segment. Past ``ROOT_COLLISION_MAX_GEOMS`` the set is carried as the
+    single box enclosing all of it, aligned with the source body's own axes. ``None`` for a root with no collision
+    geometry, which then keeps the compiler's own primitive.
+
+    Rotation only, by the same ``S`` the inertial and the meshes use: the segment's origin IS the body's origin.
+
+    Swept over the cached Menagerie (91 models import): 64 roots carry a record, 34 of them with a mesh drawn as
+    its box. On the 27 floating bases among them, the bounds of the root's collision volume sat a median 173 mm
+    (worst 1.33 m, Stretch) from the source's and now sit within 2.1 mm (the Crazyflie's enclosing box), while no
+    model changed its simulability, its validity, its self-penetration or whether its drivetrain is carried.
+    """
+    import numpy as np
+
+    from virturoid.services.gene_compiler import primitive_volume
+
+    solid = [g for g in range(mj.ngeom) if int(mj.geom_bodyid[g]) == body_id
+             and (int(mj.geom_contype[g]) or int(mj.geom_conaffinity[g]))]
+    rows, approximated = [], []
+    for g in solid:
+        t = int(mj.geom_type[g])
+        R = _quat_mat(mj.geom_quat[g])
+        p = np.asarray(mj.geom_pos[g], dtype=float)
+        s = np.asarray(mj.geom_size[g], dtype=float)
+        if t in _ROOT_PRIMITIVES:
+            kind = _ROOT_PRIMITIVES[t]
+            size = s[:{"sphere": 1, "capsule": 2, "cylinder": 2}.get(kind, 3)]
+        elif t in (7, 8):                                    # mesh / sdf: the box of its own hull
+            a = np.asarray(mj.geom_aabb[g], dtype=float)
+            kind, p, size = "box", p + R @ a[:3], a[3:]
+            approximated.append(g)
+        else:                                                # plane / hfield
+            continue
+        if not np.all(np.isfinite(size)) or float(np.min(size)) <= 0.0:
+            continue
+        rows.append((g, kind, p, R, [float(v) for v in size]))
+    if not rows:
+        return None
+    n_source = len(rows)
+    enclosed = n_source > ROOT_COLLISION_MAX_GEOMS
+    if enclosed:
+        # ONE box around all of it, in the BODY frame so it follows the source's own axes rather than the link
+        # axis S happens to point along.
+        signs = np.array([[a, b, c] for a in (-1, 1) for b in (-1, 1) for c in (-1, 1)], dtype=float)
+        lo, hi = np.full(3, np.inf), np.full(3, -np.inf)
+        for g, _k, p, R, _s in rows:
+            a = np.asarray(mj.geom_aabb[g], dtype=float)
+            pts = p + (a[:3] + signs * a[3:]) @ R.T
+            lo, hi = np.minimum(lo, pts.min(axis=0)), np.maximum(hi, pts.max(axis=0))
+        main = max(rows, key=lambda r: float(mj.geom_rbound[r[0]]))[0]
+        rows = [(main, "box", (lo + hi) / 2.0, np.eye(3), [float(v) for v in np.maximum((hi - lo) / 2.0, 1e-4)])]
+    rows.sort(key=lambda r: -primitive_volume(r[1], r[4]))
+    out = []
+    for g, kind, p, R, size in rows:
+        q = np.zeros(4)
+        mujoco.mju_mat2Quat(q, (S.T @ R).reshape(9))
+        out.append({"type": kind, "pos": [round(float(v), 7) for v in S.T @ p],
+                    "quat": [round(float(v), 7) for v in q], "size": [round(float(v), 7) for v in size],
+                    "contact": _source_contact(mj, g)})
+    rec = {"geoms": out, "n_source_geoms": n_source}
+    if enclosed:
+        rec["enclosed"] = (f"{n_source} collision geoms are carried as the one box that encloses them "
+                           f"(over the {ROOT_COLLISION_MAX_GEOMS}-geom limit)")
+    elif approximated:
+        rec["approximated"] = f"{len(approximated)} mesh collision geom(s) carried as the box of their own hull"
+    return rec
 
 
 def _source_actuator_velocity_feedback(mj, j: int) -> float:

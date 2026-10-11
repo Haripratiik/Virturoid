@@ -32,6 +32,26 @@ class RuleLabelTests(unittest.TestCase):
         self.assertEqual(rule_failure_label({"contacts": 2, "lifted": 0.12, "success": True}), "success")
 
 
+class VerifyOutputTests(unittest.TestCase):
+    """An agent hands classify_failure what verify_robot returned, so verify's own field names must be read.
+
+    MEASURED through the MCP server: a 10.5 m CREDIBLE WALK passed from verify_robot came back "upright_but_slow"
+    at confidence 1.0, because verify says ``forward_m`` and this module read only ``forward``."""
+
+    def test_verify_spelling_of_forward_is_read(self):
+        walk = {"survived": True, "height_ratio": 0.9, "forward_m": 10.5}
+        self.assertEqual(rule_failure_label(walk, domain="legged"), "success")
+        self.assertEqual(repairs_for_metrics(walk, domain="legged")["repairs"], [])
+        self.assertEqual(rule_failure_label({**walk, "forward_m": 0.01}, domain="legged"), "upright_but_slow")
+
+    def test_the_products_own_verdict_outranks_the_thresholds(self):
+        self.assertEqual(rule_failure_label({"verdict": "CREDIBLE WALK", "forward_m": 0.4}, domain="legged"),
+                         "success")
+        self.assertEqual(rule_failure_label({"verdict": "FELL by ROLL-OVER (roll 92 deg max)", "survived": True,
+                                             "height_ratio": 0.9, "forward_m": 2.0}, domain="legged"),
+                         "fell_over")
+
+
 class RepairLoopTests(unittest.TestCase):
     def test_metrics_to_repairs(self):
         out = repairs_for_metrics({"survived": False, "height_ratio": 0.2})

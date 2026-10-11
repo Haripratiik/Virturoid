@@ -244,7 +244,11 @@ def test_the_cats_reported_walk_is_a_fall_and_the_verdict_now_says_so(grounded_c
     assert not classify(r).startswith("CREDIBLE"), classify(r)
     s = settling(r)
     assert s["holds_rate"] is False
-    assert s["rate_full"] < 0.35 * s["rate_early"], f"the 1/t decay is the signature: {s['rates']}"
+    # The rate decays, which is what the settling gate reads. It used to decay as 1/t (a drift-before-fall from
+    # the first steps); since the crawl's swing lifts the cat's feet instead of pressing them (see
+    # ``morph_policy.lift_sign_for_leg``) it walks for half the run before it goes over, so measured 2026-10-11
+    # the rates are 1.28 / 1.13 / 0.57 m per 1000 steps at 1500 / 3000 / 6000 steps.
+    assert s["rate_full"] < 0.6 * s["rate_early"], f"the rate must decay: {s['rates']}"
 
 
 @pytest.mark.skipif(not _MUJOCO, reason="needs MuJoCo")

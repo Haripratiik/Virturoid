@@ -936,19 +936,22 @@ def recipe_rollout_morph(gene, policy: MorphPolicy | None = None, *, steps: int 
         capture = _capture_geom_frame
     # foot-contact CADENCE + sustained-upright tracking, so the locomotion gate can tell a real WALK (feet lift and
     # alternate, trunk held high) from an upright SLIDE (feet never leave the floor -> 0 cadence) — the anti-Goodhart
-    # signal the gameable raw-displacement KPI lacked.
-    _gz0 = np.asarray(data.geom_xpos[:, 2], dtype=float)
-    _body_g = [gi for gi in range(model.ngeom) if int(model.geom_bodyid[gi]) != 0]
-    if _body_g:
-        _zmin = min(float(_gz0[gi]) for gi in _body_g)
-        feet = [gi for gi in _body_g if float(_gz0[gi]) < _zmin + 0.05] or _body_g
-    else:
-        feet = []
-    feet_idx = np.asarray(feet, dtype=int)
-    fz0 = _gz0[feet_idx] if len(feet_idx) else np.zeros(0)
-    c_prev = (np.asarray(data.geom_xpos[feet_idx, 2]) < fz0 + 0.02) if len(feet_idx) else np.zeros(0, bool)
-    lifts = 0; up_steps = 0; support_steps = 0
-    tau_up = upright_height_ratio(len(feet_idx))            # per-body upright stance-height threshold (WS3)
+    # signal the gameable raw-displacement KPI lacked. FEET AS FOOT CLEARANCE, by the crawl's own rule
+    # (_FootClearance): one foot per leg, its lowest point, measured from where it stands, so the two verdict paths
+    # count the same feet. The upright bar below follows the LEG count now, as upright_height_ratio intends; it was
+    # fed a geom count (12 to 18 on the composed bodies), which held every composed quadruped to the octopod's 0.50.
+    # MEASURED 2026-10-11, 108 rollouts (9 composed bodies x zero / random seed-0 residual x CPG on / off x 900,
+    # 1500, 6000 steps): forward byte-identical; the same 19 CREDIBLE before and after; 10 change class without
+    # touching credibility (a dog and a cat standing still under a random residual, FORWARD BUT SHORT -> SLIDE, their
+    # 1.3 to 2.2 lifts/s were collars; the hexapod under the CPG, SLIDE -> SHORT / MILLS, its 18 "feet" read support
+    # 0.003 to 0.05 and its 6 read 0.43 to 0.73); upright_frac falls by at most 0.141, on a giraffe that falls anyway.
+    from virturoid.services.appendage_map import build_appendage_map
+    feet = _FootClearance(model, data, build_appendage_map(model).legs, act_u)
+    foot_h = np.empty((steps + 1, feet.n))                  # row 0 = the state the first step starts from
+    foot_h[0] = feet.heights(data)
+    up_steps = 0
+    inv = _Inversion()                                      # did it go upside down (measurement only)
+    tau_up = upright_height_ratio(feet.n)                   # per-body upright stance-height threshold (WS3)
     # COMMAND-TRACKING (WS8): with a command_schedule = [(vx_cmd, n_steps), ...] measure how well the body's
     # forward SPEED tracks a time-varying commanded speed. A constant "always walk forward" gait can't slow/stop/
     # reverse -> high error -> low track_score. L6_command_track is scored on tracking, so a constant gait FAILS.
@@ -1015,6 +1018,8 @@ def recipe_rollout_morph(gene, policy: MorphPolicy | None = None, *, steps: int 
             qpos_frames.append(data.qpos.copy())
         q = data.qpos[bq + 3:bq + 7]
         upr = 1.0 - 2.0 * (float(q[1]) ** 2 + float(q[2]) ** 2)   # world-up . body-up (orientation)
+        if upr < 0.0:                                             # past 90 deg of tilt: UPSIDE DOWN (_Inversion)
+            inv.note(t, q, upr)
         z = float(data.qpos[bq + 2]); hr = min(1.0, max(0.0, z / z0)); x = float(data.qpos[bq])
         vx = (x - px) / dt; px = x
         if cmd_seq is not None:                                   # accumulate command-tracking error (WS8)
@@ -1031,12 +1036,10 @@ def recipe_rollout_morph(gene, policy: MorphPolicy | None = None, *, steps: int 
         if z > tau_up * z0 and upr > 0.6:                         # sustained-upright fraction at the body's MORPHOLOGY
             up_steps += 1                                        #   stance height (tau_up: quad/biped 0.7, hex 0.55,
         #   octopod+ 0.5 -- WS3 per-body upright; a low tripod is upright FOR A HEXAPOD, cite arXiv:2511.03167)
-        if len(feet_idx):                                         # foot LIFTOFF count -> cadence (a slide never lifts)
-            c_now = np.asarray(data.geom_xpos[feet_idx, 2]) < fz0 + 0.02
-            lifts += int(np.sum(c_prev & ~c_now))
-            ng = int(np.sum(c_now))                              # TRIPOD-SUPPORT companion (WS3): a genuine stepping
-            support_steps += int(0 < ng < len(feet_idx))        #   step has SOME feet down (support) AND some up
-            c_prev = c_now                                       #   (swing) -- a flat slide plants ALL feet every step
+        foot_h[t + 1] = feet.heights(data)                       # foot LIFTOFF count -> cadence (a slide never lifts)
+    # TRIPOD-SUPPORT companion (WS3): a genuine stepping step has SOME feet down (support) AND some up (swing); a
+    # flat slide plants ALL feet every step. Both are read once the rollout is over (see _FootClearance.count).
+    lifts, support_steps = feet.count(foot_h[:alive + 1])
     forward = float(data.qpos[bq] - x0)
     _T = max(1, alive) * dt
     cadence = round(lifts / _T, 2)                                # foot liftoffs per second (0 for a stiff slide)
@@ -1048,12 +1051,15 @@ def recipe_rollout_morph(gene, policy: MorphPolicy | None = None, *, steps: int 
     # diagnostic for the interval before termination.
     horizon_speed = forward / max(1, steps) / dt
     active_speed = forward / max(1, alive) / dt
+    _by_height = bool(alive >= steps and hr > 0.6)               # the height test, all `survived` used to be
     out = {"finite": True, "gait": round(R / max(1, steps), 4), "forward": round(forward, 3),
-           "height_ratio": round(hr, 3), "alive": alive, "survived": bool(alive >= steps and hr > 0.6),
+           "height_ratio": round(hr, 3), "alive": alive,
+           "survived": _by_height and inv.at is None,              # upside down is a fall (_Inversion)
            "speed": round(horizon_speed, 3), "active_speed": round(active_speed, 3), "frames": frames or [],
            "cadence": cadence, "upright_frac": upright_frac, "support_frac": support_frac,
-           "upright_tau": round(tau_up, 3), "n_feet": int(len(feet_idx)),
+           "upright_tau": round(tau_up, 3), "n_feet": int(feet.n),
            "n_tokens": graph.n_tokens, "feature_dim": graph.feature_dim}
+    out.update(inv.disclose(alive, _by_height))                  # {} unless it went upside down
     if record_qpos:
         out["qpos_frames"] = qpos_frames or []
     if record_frames and z0:
@@ -1334,6 +1340,286 @@ def lift_joint_for_leg(model, data, qadr, act_u, leg, hip_tok: int, *, delta: fl
     return pick, disclosure
 
 
+
+def lift_sign_for_leg(model, data, qadr, leg, lift_tok: int, *, delta: float = 0.3) -> float:
+    """WHICH WAY THIS LEG'S LIFT JOINT TURNS TO RAISE THE FOOT: ``+1.0`` or ``-1.0``, measured.
+
+    THE DEFECT. During swing the crawl added ``+knee_amp`` to the lift joint on every body and never asked which
+    way that turns the leg. The stride already had its sign measured (``hip_sign``: "+stride swings the foot
+    FORWARD on some bodies, BACK on others"); the lift's was assumed, and the assumption holds on one family only,
+    the composed walkers, whose knees fold the foot up for a positive angle. MEASURED 2026-10-11 at the rest pose,
+    foot height for +-0.3 rad on the lift joint: on every anatomy-compiled walker tried (the offline dog, cat,
+    horse, crab and ant, the design schema's quadruped and hexapod) and on every Menagerie quadruped tried (Go2,
+    Go1, A1, Spot, Barkour vB) a positive angle LOWERS the foot by 2 to 4 cm, and ANYmal C, whose knees point
+    opposite ways front and rear, lowers two feet and raises two. On those bodies "swing" pressed the foot into
+    the floor while it strode forward, so the leg meant to be in the air was the one pushing, and backwards: the
+    quadrupeds found their way forward only because the probe could reverse the leg wave, and the hexapod, whose
+    wave reversal is the identity (see the direction probe below), walked backwards (the schema's: -2.5 m).
+
+    THE RULE. Perturb the lift joint by +-``delta`` off the rest pose and keep the direction that raises the
+    foot's lowest point more. Unclamped by joint limits, for the reason ``lift_joint_for_leg`` gives. Where +
+    already lifts (every composed walker), this returns 1.0 and the gait is unchanged.
+    """
+    import mujoco
+
+    fg = _foot_geom_id(model, data, int(leg.tip_body))
+
+    def _foot_z() -> float:
+        return float(data.geom_xpos[fg][2]) if fg is not None else float(data.xpos[int(leg.tip_body)][2])
+
+    qa = int(qadr[lift_tok]); q0 = float(data.qpos[qa]); z0 = _foot_z()
+    rise = []
+    for step in (delta, -delta):
+        data.qpos[qa] = q0 + step; mujoco.mj_forward(model, data)
+        rise.append(_foot_z() - z0)
+    data.qpos[qa] = q0; mujoco.mj_forward(model, data)
+    return 1.0 if rise[0] >= rise[1] else -1.0
+
+#: A foot has LEFT THE GROUND once its lowest point is this far above the level it stands at. The crawl's original
+#: 2 cm bar, kept on evidence rather than habit (2026-10-11: 332 traced crawl rollouts judged against CONTACT ground
+#: truth, see ``gait_quality._MIN_SUPPORT``). On the 74 rollouts the step gate alone decides, 1.5 cm and 5% of the
+#: leg's hip-to-tip-body length each accept the one genuinely stepping rollout 2 cm refuses (a deliberately softened
+#: hexapod whose flights mostly peak between 1 and 2 cm) and nothing else 2 cm refuses; 2.5 cm refuses five genuine
+#: steppers. A scale-relative bar would have nothing to correct: the clearance a genuinely stepping foot reaches does
+#: not grow with leg length (median flight peak: the composed mouse, 0.12 m legs, 2.2 cm; the canonical template
+#: 1.5 cm; the Menagerie quadrupeds 2.0 to 7.3 cm), and the smallest composed body that walks reads support 0.84
+#: against the 0.25 gate at this bar.
+_FOOT_CLEARANCE_M = 0.02
+#: The level a foot stands at: this percentile of its own lowest-point height over the rollout, never above the
+#: floor. See :class:`_FootClearance` for why it is not simply the floor.
+_STANCE_PERCENTILE = 5.0
+
+
+def _lowest_point_plan(model, idx):
+    """Group geom indices ``idx`` by how their lowest point is computed and copy out everything static, once, so
+    the per-step read is a handful of vector operations (it runs every physics step of every rollout that counts
+    steps). Returns ``[(kind, positions into idx, geom ids, sizes, aabb), ...]``, where ``aabb`` is ``(centres or
+    None, half-sizes)`` of the local bounding boxes for the box kind and None for the others."""
+    import mujoco
+    import numpy as np
+
+    G = mujoco.mjtGeom
+    idx = np.asarray(idx, dtype=int)
+    kind_of = {int(G.mjGEOM_SPHERE): "sphere", int(G.mjGEOM_CAPSULE): "capsule",
+               int(G.mjGEOM_CYLINDER): "cylinder", int(G.mjGEOM_ELLIPSOID): "ellipsoid"}
+    kinds = np.array([kind_of.get(int(model.geom_type[g]), "box") for g in idx], dtype=object)
+    plan = []
+    for k in ("sphere", "capsule", "cylinder", "ellipsoid", "box"):
+        pos = np.flatnonzero(kinds == k)
+        if len(pos):
+            g = idx[pos]
+            aabb = np.array(model.geom_aabb[g], dtype=float) if k == "box" else None
+            if aabb is not None:                             # a box's own frame centres it: skip adding zeros
+                aabb = (aabb[:, :3] if np.any(aabb[:, :3]) else None, aabb[:, 3:])
+            plan.append((k, pos, g, np.array(model.geom_size[g], dtype=float), aabb))
+    return plan
+
+
+def _lowest_points(model, data, idx, plan):
+    """World z of the LOWEST SURFACE POINT of each geom in ``idx`` at the current pose: exact for spheres,
+    capsules, cylinders, ellipsoids and boxes at any tilt; a mesh (or any other type) uses its tight local bounding
+    box, whose lowest corner can only sit at or below the real surface. ``plan`` is ``_lowest_point_plan(model,
+    idx)``. Row 2 of a geom's rotation (``geom_xmat[:, 6:9]``) is the world z component of its local x, y, z axes,
+    so the downward reach along local axis k is ``|R[2, k]|`` times the extent along it."""
+    import numpy as np
+
+    low = np.empty(len(idx))
+    for kind, pos, g, s, aabb in plan:
+        z = data.geom_xpos[g, 2]
+        if kind == "sphere":
+            v = z - s[:, 0]
+        elif kind == "capsule":                              # segment along local z, half-length s1, radius s0
+            v = z - np.abs(data.geom_xmat[g, 8]) * s[:, 1] - s[:, 0]
+        elif kind == "cylinder":                             # the lowest point is on the rim of the lower disc
+            c = data.geom_xmat[g, 8]
+            v = z - np.abs(c) * s[:, 1] - s[:, 0] * np.sqrt(np.clip(1.0 - c * c, 0.0, 1.0))
+        elif kind == "ellipsoid":
+            v = z - np.sqrt(np.sum((data.geom_xmat[g, 6:9] * s) ** 2, axis=1))
+        else:                                                # box (exact), mesh and the rest (local AABB)
+            r = data.geom_xmat[g, 6:9]
+            centre, half = aabb
+            if centre is None:
+                v = z - np.sum(np.abs(r) * half, axis=1)
+            else:                                            # a mesh's box need not be centred on its frame
+                v = z + np.sum(r * centre, axis=1) - np.sum(np.abs(r) * half, axis=1)
+        low[pos] = v
+    return low
+
+
+class _FootClearance:
+    """WHERE EACH FOOT IS, AS FOOT CLEARANCE: one foot per leg, its lowest point, measured from where it stands.
+    The step counter (``cadence``) and its stepping-support companion (``support_frac``) of every rollout that
+    ``gait_quality.classify`` judges are read off this: the crawl, the recipe/CPG rollout, and the harness that
+    verifies an exported control program (``gene_build._run_exported_controller``).
+
+    THE DEFECT THIS REPLACES (measured 2026-10-10/11). A "foot" was any geom whose CENTRE sat within 5 cm of the
+    lowest geom centre at the SPAWN pose, and it was lifted once that centre rose 2 cm above its spawn height.
+      * DECORATION. On a composed quadruped that set was three geoms per leg, two of them visual-only (a shin
+        collar and a foot boot): 8 of the canonical template's 12 "feet". Collars ride up whenever a knee bends,
+        so the template driven with its knees LOCKED read CREDIBLE WALK at 6000 steps on 13.42 lifts/s while, by
+        its floor contacts, its flights barely cleared the floor (median peak 0.3 to 0.6 cm).
+      * CENTRES. An imported twin draws each link as one capsule from joint to tip, so its foot geom is the whole
+        shank and the centre sits mid-shin. The A1 twin at its native's operating point read SLIDE (0.08 lifts/s,
+        support 0.003) while every one of its legs stepped, its flights carrying 63 to 93% of the body's travel.
+      * THE SPAWN REFERENCE. A body dropped from higher needed a bigger lift: the native Go2 spawned 32.2 mm
+        higher, same controller, went from 20.33 to 8.75 lifts/s and support 0.843 to 0.366.
+    The recipe rollout also set its upright bar from this count (``upright_height_ratio``), so a composed
+    quadruped with 12 to 16 "feet" was held to the octopod's 0.50 instead of a quadruped's 0.70.
+
+    THE MEASUREMENT.
+      * ONE FOOT PER LEG, over the appendage map's legs: the lowest point of that leg's geoms that can touch the
+        floor. A long shank capsule's far end counts; a visual-only geom never does.
+      * THE LOWEST POINT, not the centre: see :func:`_lowest_points`.
+      * FROM WHERE THE FOOT STANDS, not where it spawned: the lower of the floor and the foot's own
+        ``_STANCE_PERCENTILE`` height over the rollout. Not the floor alone, because a soft contact lets a loaded
+        foot sink: the Menagerie quadrupeds' feet stand 1.2 to 2.2 cm INTO the floor while they walk (the composed
+        bodies' 0.3 to 0.8 cm), so measured from the floor plane their feet had to rise 3.2 to 4.2 cm to count.
+        The cap at the floor keeps a foot that never comes down (a leg held up, a body on its belly) reading as up
+        rather than as standing in the air. Judged against contact ground truth on the 74 rollouts the step gate
+        alone decides, the three references refuse 1 (this one), 3 (the floor) and 8 (the spawn pose) of the 23
+        rollouts in which every leg genuinely steps.
+    A foot is DOWN while it is within ``_FOOT_CLEARANCE_M`` of that level.
+
+    WHAT IT DOES NOT MEASURE IS PROGRESS. A foot that clears 2 cm and comes back down where it took off has
+    stepped by this measure. The same ground truth found gaits the product's search calls credible whose feet hop
+    while the body slides forward on them (the native Go2 at the point its seed-101 search found: every leg's
+    flights carry its foot backwards), and no clearance threshold tried, 0.5 to 4 cm or 2.5 to 10% of leg length,
+    separates those from walks. See ``gait_quality._MIN_SUPPORT``.
+
+    A body with no legs in the map keeps one foot per floor-touching geom within 5 cm of its lowest point, which
+    is the old rule's shape on the new measurement."""
+
+    def __init__(self, model, data, legs, act_u):
+        import mujoco
+        import numpy as np
+
+        n = int(model.ngeom)
+        body = [int(model.geom_bodyid[g]) for g in range(n)]
+        planes = [g for g in range(n) if body[g] == 0 and int(model.geom_type[g]) == int(mujoco.mjtGeom.mjGEOM_PLANE)
+                  and float(data.geom_xmat[g][8]) > 0.99]     # upward-facing world planes
+
+        def touches_floor(g):
+            ct, ca = int(model.geom_contype[g]), int(model.geom_conaffinity[g])
+            if not planes:
+                return bool(ct or ca)
+            return any((ct & int(model.geom_conaffinity[p])) or (ca & int(model.geom_contype[p])) for p in planes)
+
+        cand = {g for g in range(n) if body[g] != 0 and touches_floor(g)}
+        for i in range(int(model.npair)):                      # an explicit <pair> with the floor counts too
+            g1, g2 = int(model.pair_geom1[i]), int(model.pair_geom2[i])
+            for a, b in ((g1, g2), (g2, g1)):
+                if a in planes and body[b] != 0:
+                    cand.add(b)
+        cand = sorted(cand)
+        groups = []
+        for lg in legs:
+            root = int(model.jnt_bodyid[int(model.actuator_trnid[int(act_u[lg.tokens[0]]), 0])])
+            sub = {root}
+            for b in range(root + 1, int(model.nbody)):        # MuJoCo numbers every body after its parent
+                if int(model.body_parentid[b]) in sub:
+                    sub.add(b)
+            gs = [g for g in cand if body[g] in sub]
+            if gs:
+                groups.append(gs)
+        if not groups:
+            pool = np.asarray(cand or [g for g in range(n) if body[g] != 0], dtype=int)
+            if len(pool):
+                low0 = _lowest_points(model, data, pool, _lowest_point_plan(model, pool))
+                groups = [[int(g)] for g, z in zip(pool, low0) if z < float(low0.min()) + 0.05]
+        self.n = len(groups)
+        self._idx = np.asarray([g for gs in groups for g in gs], dtype=int)
+        self._starts = np.cumsum([0] + [len(gs) for gs in groups[:-1]]).astype(int)
+        self._plan = _lowest_point_plan(model, self._idx)
+        self._model = model
+        # THE FLOOR it stands on: the highest upward-facing world plane not above its feet at rest (5 cm of slack
+        # for a keyframe that spawns its feet in the floor).
+        rest = float(self.heights(data).min()) if self.n else 0.0
+        under = [float(data.geom_xpos[p][2]) for p in planes if float(data.geom_xpos[p][2]) <= rest + 0.05]
+        self.floor = max(under) if under else None
+
+    def heights(self, data):
+        """Per foot, the world z of its lowest point now."""
+        import numpy as np
+        if not self.n:
+            return np.zeros(0)
+        return np.minimum.reduceat(_lowest_points(self._model, data, self._idx, self._plan), self._starts)
+
+    def levels(self, h):
+        """Per foot, the level it stands at over the per-step heights ``h`` (rows = steps)."""
+        import numpy as np
+        level = np.percentile(h, _STANCE_PERCENTILE, axis=0)
+        if self.floor is not None:
+            level = np.minimum(level, self.floor)
+        return level
+
+    def count(self, h):
+        """``(lifts, support_steps)`` from per-step foot heights ``h`` (rows = steps, row 0 = the state the first
+        step starts from). A lift is a foot going from down to up; a support step is one with SOME feet down and
+        SOME up, counted on rows 1.. as the rollouts always counted them."""
+        import numpy as np
+        if h.ndim != 2 or h.shape[1] == 0 or len(h) < 2:
+            return 0, 0
+        down = h < self.levels(h) + _FOOT_CLEARANCE_M
+        n_down = down[1:].sum(axis=1)
+        return int(np.sum(down[:-1] & ~down[1:])), int(np.sum((n_down > 0) & (n_down < h.shape[1])))
+
+
+class _Inversion:
+    """DID THE BODY GO UPSIDE DOWN, counted per physics step. The same three rollouts that read their feet off
+    :class:`_FootClearance` (the crawl, the recipe/CPG rollout, the exported-controller harness) feed it, and all
+    three now refuse ``survived`` to a body it saw go over.
+
+    THE DEFECT (measured 2026-10-11, through MCP). All three called a rollout survived when the trunk never fell
+    below half its standing height and ended above 0.6 of it. That is a height test, and a body lying on its back
+    can pass it: the composed inspection quadruped, given a 2 kg payload box on its top by ``edit_robot`` and run at
+    the gait fitted before the edit, rears over backwards at step 4080 of 6000 and lies there, propped on the box at
+    0.70 to 0.79 of its standing height. Verify printed ``survived: true`` and "LURCHES (pitch 59 / roll 180 deg
+    sustained ...)". Everything that reads ``survived`` without the trace believed it, and several gate on it and
+    height alone: the certificate's frozen-policy DR sweep and budget probe (MEASURED: a draw of the design
+    schema's quadruped that went over its front at step 421 of 500 counted as a credible pass), the stance repair,
+    the task evaluator's crawl fallback (MEASURED: it scored the customer-ingest test fixture 1.81 m of walking for
+    a crawl that spent 11% of its 1200 steps upside down, so the ingest withheld the template offer), the
+    demonstration amplifier.
+
+    Upside down = ``upr`` (the cosine of the tilt, which every one of these loops already computes for its upright
+    count) below zero; see ``gait_quality._INVERTED_TILT``. MEASUREMENT ONLY: nothing here reaches the controller or
+    ends the episode, so every trajectory and every other number is byte-identical (measured on 400 crawl and 96
+    recipe rollouts, each run under the old and the new code: the same trace, byte for byte). The run is NOT cut at
+    the flip, unlike a height fall, so the recorded trace still shows the body on its back and ``classify`` can say
+    for how long. A body that never goes over pays one float comparison per step (``note`` runs only on inverted
+    steps) and gets exactly the dict it always got, key for key; one that does gets ``survived: false`` and the
+    five keys of :meth:`disclose`, the last of which is what the height test alone would have said: the gait SEARCH
+    still ranks by that one, see ``gait_search.evaluate_gait`` for the measurement that kept it there."""
+
+    __slots__ = ("at", "n", "upr_min", "over")
+
+    def __init__(self):
+        self.at = None          # the first physics step it was past 90 deg of tilt
+        self.n = 0              # how many steps it spent there
+        self.upr_min = 1.0      # cos of the largest tilt; every step past 90 is noted, so this is the run's maximum
+        self.over = None        # which way it went over, read at the first such step
+
+    def note(self, t: int, q, upr: float) -> None:
+        """One step with ``upr < 0``. ``q`` is the base quaternion (w, x, y, z) at that step."""
+        if self.at is None:
+            from virturoid.services.gait_quality import flip_direction
+            self.at = int(t)
+            self.over = flip_direction(float(q[0]), float(q[1]), float(q[2]), float(q[3]))
+        self.n += 1
+        if upr < self.upr_min:
+            self.upr_min = float(upr)
+
+    def disclose(self, alive: int, survived_by_height: bool) -> dict:
+        """``{}`` unless the body went over; then when, for what share of the ``alive`` steps every other rate in
+        the result is normalised by, how far, which way, and the verdict of the height test alone."""
+        import math
+        if self.at is None:
+            return {}
+        return {"inverted_at_step": self.at, "inverted_frac": round(min(1.0, self.n / max(1, alive)), 3),
+                "tilt_max_deg": round(math.degrees(math.acos(max(-1.0, min(1.0, self.upr_min)))), 1),
+                "flipped_over": self.over, "survived_by_height": bool(survived_by_height)}
+
+
 def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float | None = None, hip_amp: float | None = None,
                        knee_amp: float | None = None, duty: float = 0.25, kp: float | None = None,
                        kd: float | None = None, record_qpos: bool = False, frame_every: int = 5,
@@ -1374,6 +1660,12 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float | None = None, hi
     that happens to point part of itself down +x, and measured, one did not: a fitted operating point that walked
     a 2.2 m circle back past its own start line reported ``forward 1.582 m`` and was called a CREDIBLE WALK.
 
+    ``cadence``, ``support_frac`` and ``n_feet`` are FOOT CLEARANCE, one foot per leg: a lift is a leg's lowest
+    point rising 2 cm above the level that foot stands at (see :class:`_FootClearance`). They used to be geom
+    CENTRES measured from the SPAWN pose, which counted a composed body's visual collars as feet and read an
+    imported twin's shank capsule as a foot that never lifts. The fanned crawl's ``support_frac 0.84`` above was
+    read that way; counted one foot per leg it is 0.36 (measured 2026-10-11 at 1200 steps).
+
     ``live_duty`` — make the ``duty`` argument actually reach the controller (see the note at the parameter
       defaults below: it is INERT today). ON, ``duty`` replaces the structurally-derived swing fraction. The
       >=10-leg stability cap still applies afterwards as a ``min``, so a centipede's duty is still bounded.
@@ -1386,7 +1678,11 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float | None = None, hi
       * ``direction_probe`` — the wave-REVERSAL arm of the direction/frequency probe was degenerate on this
         body, so it ran once and the freed rollouts went to a wider frequency ladder. Present on bipeds and on
         hexapods; absent on quadrupeds and octopods.
-    A body that triggers neither gets exactly the dict it always got, key for key."""
+    A body that triggers neither gets exactly the dict it always got, key for key.
+
+    ``survived`` IS FALSE FOR A BODY THAT WENT UPSIDE DOWN, and only then do ``inverted_at_step``,
+    ``inverted_frac``, ``tilt_max_deg`` and ``flipped_over`` appear (see :class:`_Inversion`). It used to be
+    height-only, and a body propped on its back by its own payload kept its trunk high enough to pass."""
     import math as _math
 
     import mujoco
@@ -1454,6 +1750,7 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float | None = None, hi
     xs = sorted({round(lg.tip_xy[0], 2) for lg in legs_list})
     rank_of = {x: i for i, x in enumerate(xs)}
     hip_k: dict = {}; knee_k: dict = {}; seg_of: dict = {}; is_right: dict = {}; hip_sign: dict = {}
+    lift_sign: dict = {}
     lift_choice: dict = {}
     max_seg = max((rank_of[round(lg.tip_xy[0], 2)] for lg in legs_list), default=0)
     for i, lg in enumerate(legs_list):
@@ -1467,6 +1764,7 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float | None = None, hi
         # two-link animal leg and the ANKLE PITCH on a three-joint humanoid leg, leaving the knee frozen.
         # Identical to the old pick whenever the leg offers only one candidate, which is every quadruped.
         knee_k[i], _disc = lift_joint_for_leg(model, data, qadr, act_u, lg, hip_k[i])
+        lift_sign[i] = lift_sign_for_leg(model, data, qadr, lg, knee_k[i])
         if _disc is not None and _disc["changed"]:
             lift_choice[i] = _disc
         # PROPULSION SIGN (general, MEASURED): +stride swings the foot FORWARD (+x) on some bodies, BACK on
@@ -1527,11 +1825,9 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float | None = None, hi
             _kpv = np.maximum(_kpv, 160.0); _kdv = np.maximum(_kdv, 7.0)
         kp_of = [float(v) for v in _kpv]; kd_of = [float(v) for v in _kdv]
     dt = float(model.opt.timestep)
-    _gz0 = np.asarray(data.geom_xpos[:, 2]); body_g = [gi for gi in range(model.ngeom) if int(model.geom_bodyid[gi]) != 0]
-    feet = []
-    if body_g:
-        zmin = min(float(_gz0[gi]) for gi in body_g); feet = [gi for gi in body_g if float(_gz0[gi]) < zmin + 0.05]
-    feet_idx = np.asarray(feet or body_g, int); fz0 = _gz0[feet_idx] if len(feet_idx) else np.zeros(0)
+    # FEET, AS FOOT CLEARANCE: one per leg, its lowest point, measured from where it stands (see _FootClearance).
+    # Measurement only: nothing here reaches the controller, so every trajectory is byte-identical to before.
+    feet = _FootClearance(model, data, legs_list, act_u)
 
     def _yaw_of(d):
         q = d.qpos[bq + 3:bq + 7]
@@ -1557,8 +1853,10 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float | None = None, hi
         _px, _py, _yprev, _ydev, _path = x0, y0, yaw0, 0.0, 0.0
         _devs: list[float] = []                                # |unwrapped heading deviation from yaw0|, per step
         frames = [] if record else None
-        c_prev = (np.asarray(d.geom_xpos[feet_idx, 2]) < fz0 + 0.02) if len(feet_idx) else np.zeros(0, bool)
-        lifts = up_steps = support_steps = 0
+        foot_h = np.empty((nsteps + 1, feet.n))                # row 0 = the state the first step starts from
+        foot_h[0] = feet.heights(d)
+        up_steps = 0
+        inv = _Inversion()                                     # did it go upside down (measurement only)
         for t in range(nsteps):
             ph = freq_ * t * dt; tgt = _qref.copy()
             # closed-loop steering: a follower's steer_fn reads the live pose and returns the turn_bias that
@@ -1576,7 +1874,7 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float | None = None, hi
                     lift = 0.5 * (1 - np.cos(2 * np.pi * u / lift_duty)); s = -np.cos(np.pi * u / lift_duty)
                 else:
                     lift = 0.0; s = np.cos(np.pi * (u - lift_duty) / max(1e-3, 1.0 - lift_duty))
-                tgt[knee_k[key]] = _qref[knee_k[key]] + knee_amp * lift
+                tgt[knee_k[key]] = _qref[knee_k[key]] + knee_amp * lift_sign[key] * lift
                 # DIFFERENTIAL-STRIDE STEERING (like a diff-drive rover, but with legs): amplify the LEFT legs'
                 # stride and shrink the RIGHT (or vice-versa) so one side pushes harder -> the body YAWS. turn_bias
                 # 0 = straight; the follower sets it from the heading error to steer along a path.
@@ -1602,14 +1900,16 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float | None = None, hi
             _devs.append(abs(_ydev))
             z = float(d.qpos[bq + 2]); hr = min(1.0, max(0.0, z / _z0))
             q = d.qpos[bq + 3:bq + 7]; upr = 1.0 - 2.0 * (float(q[1]) ** 2 + float(q[2]) ** 2)
+            if upr < 0.0:                                     # past 90 deg of tilt: UPSIDE DOWN (see _Inversion)
+                inv.note(t, q, upr)
             if z < 0.5 * _z0:
                 alive = t; break
             if z > 0.7 * _z0 and upr > 0.6:
                 up_steps += 1
-            if len(feet_idx):
-                c_now = np.asarray(d.geom_xpos[feet_idx, 2]) < fz0 + 0.02
-                lifts += int(np.sum(c_prev & ~c_now)); ng = int(np.sum(c_now))
-                support_steps += int(0 < ng < len(feet_idx)); c_prev = c_now
+            foot_h[t + 1] = feet.heights(d)
+        # Lifts and support are read once the rollout is over, because "where a foot stands" is a property of the
+        # whole rollout (see _FootClearance.count). Rows 0..alive are exactly the states the old per-step count saw.
+        lifts, support_steps = feet.count(foot_h[:alive + 1])
         forward = float(d.qpos[bq] - x0)                      # + = the walk direction the dir_sign probe selected
         # UNWRAPPED. This used to be `atan2(sin(yaw-yaw0), cos(yaw-yaw0))`, which is the yaw MODULO a full turn:
         # a body that turned 190 deg reported -170 (the wrong WAY round), and one that turned a full 360 reported
@@ -1620,10 +1920,13 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float | None = None, hi
         yaw_change = float(_ydev)
         _net = float(((float(d.qpos[bq]) - x0) ** 2 + (float(d.qpos[bq + 1]) - y0) ** 2) ** 0.5)
         _T = max(1, alive) * dt
+        _by_height = bool(alive >= nsteps and hr > 0.6)       # the height test, all `survived` used to be
         res = {"finite": True, "forward": round(forward, 3), "height_ratio": round(hr, 3), "alive": alive,
-               "survived": bool(alive >= nsteps and hr > 0.6), "speed": round(forward / max(1, alive) / dt, 3),
+               # a body that went UPSIDE DOWN did not survive, however high its trunk ended (see _Inversion)
+               "survived": _by_height and inv.at is None,
+               "speed": round(forward / max(1, alive) / dt, 3),
                "cadence": round(lifts / _T, 2), "upright_frac": round(up_steps / max(1, alive), 3),
-               "support_frac": round(support_steps / max(1, alive), 3), "n_feet": int(len(feet_idx)),
+               "support_frac": round(support_steps / max(1, alive), 3), "n_feet": int(feet.n),
                "yaw_change": round(yaw_change, 3), "lateral": round(float(d.qpos[bq + 1] - y0), 3),
                # THE COURSE IT ACTUALLY HELD, so a LOOP cannot present as a straight line. `forward` alone is two
                # endpoints; these are the path between them. `gait_quality.course_summary` gates on them and
@@ -1639,6 +1942,7 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float | None = None, hi
                # from a drift-before-falling and every verdict is implicitly a claim about a horizon nobody
                # recorded (task #267). `alive` is NOT a substitute: it equals `steps` for every survivor.
                "steps": int(nsteps), "frame_every": int(frame_every) if record else 0}
+        res.update(inv.disclose(alive, _by_height))           # {} unless it went upside down: then when / how long
         if _gain_mode:                                        # disclosure, only when the opt-in flag is on, so
             res["gain_mode"] = _gain_mode                     # the default result dict is unchanged key for key
             res["kp_span"] = [round(min(kp_of), 3), round(max(kp_of), 3)]
@@ -1745,7 +2049,8 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float | None = None, hi
             "kp": float(kp),
             "kd": float(kd),
             "legs": [{"hip_index": int(hip_k[key]), "knee_index": int(knee_k[key]),
-                      "phase": float(best_phd[key]), "hip_sign": float(hip_sign[key])}
+                      "phase": float(best_phd[key]), "hip_sign": float(hip_sign[key]),
+                      "lift_sign": float(lift_sign[key])}
                      for key in sorted(hip_k)],
         }
         if _gain_mode:
@@ -1763,25 +2068,48 @@ def extract_crawl_gait_params(gene, *, tune_steps: int = 500, verify_steps: int 
     token map, and return it only when the same controller clears the shared
     credibility gate.  A non-credible crawl is intentionally not exported.
     """
+    import math
+
     from virturoid.services.gait_quality import classify
 
-    tuned = tune_crawl_gait(gene, steps=tune_steps, cache=True)
-    result = crawl_gait_rollout(
-        gene, steps=verify_steps, freq=tuned["freq"], hip_amp=tuned["hip_amp"],
-        knee_amp=tuned["knee_amp"], return_control_plan=True,
-    )
-    plan = result.get("control_plan") or {}
-    verdict = classify(result)
-    if not plan.get("exportable") or not verdict.startswith("CREDIBLE"):
-        return None
-    return {
-        **plan,
-        "verified_walk": True,
-        "sim_forward_m": round(float(result.get("forward", 0.0)), 3),
-        "sim_verdict": verdict,
-        "sim_cadence_hz": round(float(result.get("cadence", 0.0)), 3),
-        "sim_upright_frac": round(float(result.get("upright_frac", 0.0)), 3),
-    }
+    # THE BODY'S OWN OPERATING POINT FIRST. This used to run its own ``tune_crawl_gait`` grid at export time and
+    # ignore the operating point the body carries, so a body fitted by create_robot or trained by a training door
+    # shipped a controller nobody had verified: the grid's freq/amplitudes, with ``crawl_gait_rollout`` reading
+    # kp/kd off ``metadata['gait_params']``. ``verdict_certificate`` has measured and disclosed the mismatch since
+    # (freq 2.056 / hip 0.746 / knee 0.770 deployed, 2.55 / 0.9 / 1.0 shipped). MEASURED 2026-10-11 through the
+    # MCP server on a composed quadruped that train_held had fitted to a 10.5 m CREDIBLE WALK: the export grid
+    # found no credible crawl, so the package fell back to the trot starter, which crouched backwards (-0.254 m).
+    # So the body's own point is frozen and checked here, and the grid runs only for a body that has none, or
+    # whose own point no longer walks (an amend can outdate it), where it remains an honest starting point.
+    own = {k: float(v) for k, v in (((getattr(gene, "metadata", None) or {}).get("gait_params")) or {}).items()
+           if k in ("freq", "hip_amp", "knee_amp", "kp", "kd") and isinstance(v, (int, float))
+           and not isinstance(v, bool) and math.isfinite(float(v))}
+    attempts = ([("held", own)] if own else []) + [("export_tune", None)]
+    for source, params in attempts:
+        if params is None:
+            tuned = tune_crawl_gait(gene, steps=tune_steps, cache=True)
+            params = {"freq": tuned["freq"], "hip_amp": tuned["hip_amp"], "knee_amp": tuned["knee_amp"]}
+        result = crawl_gait_rollout(gene, steps=verify_steps, return_control_plan=True, **params)
+        plan = result.get("control_plan") or {}
+        verdict = classify(result)
+        if plan.get("exportable") and verdict.startswith("CREDIBLE"):
+            return {
+                **plan,
+                "verified_walk": True,
+                "operating_point_source": source,
+                # THE POINT THE PROGRAM WAS FROZEN FROM, which ``frequency_hz`` above is not: the crawl probes a
+                # frequency ladder (freq / 1.7, freq, freq x 1.7, ...) and freezes the one that travels furthest, so
+                # a 2.49 Hz operating point ships a 4.23 Hz wave. The certificate compares THIS with the point the
+                # verdict ran, and could only answer "cannot tell" while the program recorded the derived number.
+                "operating_point": {"freq": float(params["freq"]), "hip_amp": float(params["hip_amp"]),
+                                    "knee_amp": float(params["knee_amp"]), "kp": float(plan["kp"]),
+                                    "kd": float(plan["kd"])},
+                "sim_forward_m": round(float(result.get("forward", 0.0)), 3),
+                "sim_verdict": verdict,
+                "sim_cadence_hz": round(float(result.get("cadence", 0.0)), 3),
+                "sim_upright_frac": round(float(result.get("upright_frac", 0.0)), 3),
+            }
+    return None
 
 
 def legged_steer_to_goal(gene, goal_xy, *, steps: int = 4000, gain: float = 1.6, cap: float = 0.75,
@@ -1796,16 +2124,25 @@ def legged_steer_to_goal(gene, goal_xy, *, steps: int = 4000, gain: float = 1.6,
 
     import numpy as np
     gx, gy = float(goal_xy[0]), float(goal_xy[1])
+    # THE CLOSEST APPROACH, not only where the run ended. "Reached" read the final position alone, so a body
+    # that walked THROUGH the goal and kept going failed: measured 2026-10-11, once the crawl's swing lifted
+    # the feet the template passed (2.2, 0) and stopped 0.61 m beyond it. The run does not stop at the goal.
+    seen = {"origin": None, "closest": float("inf")}
 
     def _steer(x, y, yaw):
+        if seen["origin"] is None:
+            seen["origin"] = (x, y)
+        ox, oy = seen["origin"]
+        seen["closest"] = min(seen["closest"], math.hypot((x - ox) - gx, (y - oy) - gy))
         err = math.atan2(math.sin(math.atan2(gy - y, gx - x) - yaw), math.cos(math.atan2(gy - y, gx - x) - yaw))
         return float(np.clip(-gain * err, -cap, cap))          # -err: negative turn_bias -> +yaw (turn left)
 
     r = crawl_gait_rollout(gene, steps=steps, steer_fn=_steer)
     fx, fy = float(r.get("forward", 0.0)), float(r.get("lateral", 0.0))   # net world displacement from the origin
     dist = float(math.hypot(fx - gx, fy - gy))
+    closest = min(dist, seen["closest"])
     r.update({"goal_xy": [gx, gy], "final_xy": [round(fx, 3), round(fy, 3)], "goal_dist": round(dist, 3),
-              "reached_goal": bool(dist < reach_radius)})
+              "closest_m": round(closest, 3), "reached_goal": bool(closest < reach_radius)})
     return r
 
 

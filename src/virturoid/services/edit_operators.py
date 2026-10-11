@@ -536,13 +536,19 @@ def _parent_frame(gene, host_name: str):
     along the trunk axis, which would mount a 'front' limb 70 mm in front of the robot). What is left is the
     body the physics and the verdict are computed on, which is the right thing to bolt onto.
 
+    Both are returned in the parent SEGMENT's frame, because that is the frame a child's ``mount_offset`` and
+    ``mount_euler`` are written in. For every body but one that is the compiled body's own frame. A free root
+    that carries a rotation is compiled as an unrotated body with its contents in a ``<frame>``
+    (``gene_compiler._framed_root``), so its segment frame is the body frame turned by that rotation, and reading
+    the body frame alone grew an arm meant for the top of an imported Go2 straight out of its nose.
+
     ``None`` if the body cannot be compiled/measured.
     """
     try:
         import mujoco
         import numpy as np
 
-        from virturoid.services.gene_compiler import compile_gene_to_mjcf
+        from virturoid.services.gene_compiler import _euler_xyz_to_quat, _framed_root, compile_gene_to_mjcf
         mj = mujoco.MjModel.from_xml_string(compile_gene_to_mjcf(gene, include_floor=False, spawn_z=0.5))
         d = mujoco.MjData(mj)
         mujoco.mj_forward(mj, d)
@@ -551,6 +557,13 @@ def _parent_frame(gene, host_name: str):
         rid = mujoco.mj_name2id(mj, mujoco.mjtObj.mjOBJ_BODY, root.name) if root is not None else -1
         if bid < 0:
             return None
+        host = gene.segment(host_name)
+        framed = _framed_root(gene, host) if host is not None else None
+        seg_from_body = np.eye(3)                  # rotation taking segment-frame vectors into the body frame
+        if framed is not None:
+            fm = np.zeros(9)
+            mujoco.mju_quat2Mat(fm, np.asarray(_euler_xyz_to_quat(*framed), dtype=float))
+            seg_from_body = fm.reshape(3, 3)
         aabb = mj.geom_aabb.reshape(mj.ngeom, 6)
         corners = np.array([[x, y, z] for x in (-1, 1) for y in (-1, 1) for z in (-1, 1)], float)
 
@@ -564,6 +577,7 @@ def _parent_frame(gene, host_name: str):
                 rot = np.zeros(9)
                 mujoco.mju_quat2Mat(rot, mj.geom_quat[gi])
                 pts = mj.geom_pos[gi] + (aabb[gi, :3] + corners * aabb[gi, 3:]) @ rot.reshape(3, 3).T
+                pts = pts @ seg_from_body                  # body frame -> segment frame
                 lo, hi = np.minimum(lo, pts.min(axis=0)), np.maximum(hi, pts.max(axis=0))
             return (lo, hi) if (np.isfinite(lo).all() and np.isfinite(hi).all()) else None
 
@@ -571,7 +585,7 @@ def _parent_frame(gene, host_name: str):
         if box is None:
             return None
         lo, hi = box
-        return (d.xmat[bid].reshape(3, 3).copy(), lo, hi, d.xpos[bid].copy(),
+        return (d.xmat[bid].reshape(3, 3) @ seg_from_body, lo, hi, d.xpos[bid].copy(),
                 (d.xpos[rid].copy() if rid >= 0 else d.xpos[bid].copy()))
     except Exception:  # noqa: BLE001 - measurement aid; the primitive fallback below still places the limb
         return None

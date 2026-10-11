@@ -39,6 +39,15 @@ win for the wrong answer. Replacing RMS with a normalised cross-correlation was 
 because incoherent ringing decorrelates just as fast as it de-superposes. The trajectory sweep is kept as
 ``_delay_search``, reported beside the others, and it is NOT allowed to claim a delay it merely won on.
 
+RE-MEASURED 2026-10-10, on the twin that carries the Go2's declared drivetrain AND its own link inertials (two
+joints, 12 s, the plan ``tests/test_sysid_delay_wedge.py`` runs). At 40 ms injected the oracle sweep reads
+0.0274 / 0.0273 / 0.0273 / 0.0279 / **0.0000** / 0.0483 across 0-50 ms, and the prior sweep 0.0277 /
+**0.0276** / 0.0333 / 0.0729 / 0.0987 / 0.1262: a 0.27% win for 10 ms. The figures above were taken on a twin
+carrying 40% of the declared damping and no source inertials. The defect did not go away, it changed shape: the
+prior sweep now answers 10 ms to EVERY injection from 10 to 40 ms, because what ends its shelf is where the
+PRIOR model starts ringing on its own (handed two ticks it departs 0.020 rad from its own zero-delay replay,
+the injected hardware 0.0024), and nothing in the log moves that.
+
 A log with no torque channel at all is no longer handed to that sweep. ``_delay_from_motion`` reads the applied
 torque out of the MOTION instead -- inverse dynamics evaluated POINTWISE on the logged trajectory rather than
 forward-simulated, so a model error stays local, with reflected inertia / damping / dry friction / offset free
@@ -122,11 +131,16 @@ MOTION_MODEL_CAVEAT = (
     "this estimate reads the applied torque out of the MOTION, through our own inverse dynamics, so unlike the "
     "tau_meas estimate it DOES depend on the dynamics model -- the three parameters this package fits "
     "(frictionloss / damping / armature) are left free at every candidate lag, but an error outside that set "
-    "is not absorbed. MEASURED on the Go2 with +30% link mass and inertia -- an error no fitted parameter can "
-    "express -- the lag is still recovered exactly at 0 and 20 ms (margins 0.89 and 0.72) and at 40 ms the "
-    "margin collapses to 0.00 and it REFUSES. It also needs the log sampled at or above the control rate: at "
-    "500 / 250 / 100 Hz against a 100 Hz loop it is exact (margins 0.66-0.93), and at 50 Hz -- below the loop "
-    "-- it is wrong by a tick and the margin falls to 0.03-0.19, so the gate refuses. Prefer a log with "
+    "is not absorbed: it costs confidence. MEASURED on a Unitree Go2 twin carrying the robot's own declared "
+    "drivetrain and link inertials (re-measured 2026-10-10), with +30% link mass and inertia, an error no "
+    "fitted parameter can express, the lag is still recovered exactly at 0, 20 and 40 ms, but the margin over "
+    "the next-best tick falls to 0.20 at 20 ms and 0.43 at 40 ms against a refusal floor of 0.15, where an "
+    "error the free parameters CAN express leaves it at 0.91 and 0.81. Over link errors from +15% to +200% "
+    "at 0 / 20 / 40 ms it returned the injected tick 15 times out of 15 (margins 0.19-0.94). (This used to "
+    "say that at 40 ms the margin collapses to 0.00 and it refuses; that was a twin carrying 40% of the Go2's "
+    "declared damping.) It also needs the log sampled at or above the control rate: at 500 / 250 / 100 Hz "
+    "against a 100 Hz loop it is exact at 0 / 20 / 40 ms (margins 0.60-0.91), and a log sampled below the "
+    "loop, 50 Hz say, is refused outright, because one control tick is not in the data. Prefer a log with "
     "tau_meas or motor current; that estimate has no plant in it at all."
 )
 
@@ -625,6 +639,16 @@ def _merge_latency(cmd: dict, traj: dict, lag_note: str, motion: dict | None = N
          saturates while over-shooting does not. Measured on the Go2 at 20 ms injected: the prior-model sweep
          puts 0 ms 49% ahead of the runner-up -- a confident, wrong answer -- so it is never allowed to promote
          itself on a margin. It keeps its original, stricter rule and is reported alongside.
+
+         That 49% was taken on a twin carrying 40% of the Go2's declared damping, and it has been re-measured
+         twice since. On the declared drivetrain it is 0.75% (2026-08-12). On the twin that also carries the
+         Go2's own link inertials (2026-10-10, two joints, 12 s) the sweep answers 10 ms to every injection from
+         10 to 40 ms, with margins of 0.27-3.34%, so it is right at 10 ms only because the truth sat on the tick
+         it always answers. The same experiment with the old substituted damping put back still gives 0 ms at
+         59.1% and 55.5% ahead at 10 and 20 ms. The rule above survives both re-measurements, and the reason it
+         survives is now stated more strongly than the 49% ever did it: the sweep's margin tracks how hard the
+         body rings, not whether the answer is right, so it is not evidence. Contract:
+         ``tests/test_sysid_delay_wedge.py``.
     """
     out = {
         "delay_ms": traj.get("delay_ms"), "delay_ticks": traj.get("delay_ticks"),

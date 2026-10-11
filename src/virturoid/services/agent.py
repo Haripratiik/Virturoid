@@ -69,10 +69,34 @@ class VirturoidAgent:
         self.prompt: str | None = None
         self.reach_m: float | None = None
         self.last: dict = {}
+        self._project_dir: Path = self.workspace / "project"
 
     @property
     def project_dir(self) -> Path:
-        return self.workspace / "project"
+        """The directory of the robot this agent is working on RIGHT NOW.
+
+        This used to be a constant, ``workspace/project``, so every robot the agent ever built landed on top of
+        the last one. That was survivable while a package was only overwritten; it stopped being survivable when
+        ``build_gene_package`` learned to REFUSE a directory that already holds a different class of robot,
+        because the artifacts do not all get rewritten -- a manipulator build leaves the quadruped's
+        ``policy_type: trot_cpg_gait`` and its controller.py in place, since those writers only run on the
+        locomotion path. MEASURED: "build a quadruped" then "build an arm" raised MixedRobotPackageError and the
+        second request returned an error instead of a robot.
+
+        The refusal is right about the package and wrong about this flow, so the flow moved: a build whose class
+        differs from what the current directory holds opens a NEW one. The first robot still lands in
+        ``workspace/project`` so nothing that knew that path breaks, and a REBUILD of the same robot
+        (``_do_adjust_and_rebuild``, and every same-class build) keeps its directory, which is what
+        ``autonomous_build`` needs to iterate a design in place.
+        """
+        return self._project_dir
+
+    def _fresh_project_dir(self) -> Path:
+        """The next unused sibling of ``workspace/project``. Named plainly; the package inside says what it is."""
+        n = 2
+        while (self.workspace / f"project_{n}" / "robot" / "robot_genome.json").exists():
+            n += 1
+        return self.workspace / f"project_{n}"
 
     def handle(self, message: str) -> AgentResponse:
         intent, params = parse_intent(message)
@@ -88,12 +112,30 @@ class VirturoidAgent:
     def _build(self, reach_m=None):
         from virturoid.services.autonomous_build import autonomous_build
 
-        report = autonomous_build(
-            self.prompt,
-            self.project_dir,
-            target_success_rate=self.target_success,
-            memory_dir=self.workspace / "memory",
-        )
+        from virturoid.services.gene_build import MixedRobotPackageError
+
+        def _run(where):
+            return autonomous_build(self.prompt, where, target_success_rate=self.target_success,
+                                    memory_dir=self.workspace / "memory")
+
+        try:
+            report = _run(self.project_dir)
+        except MixedRobotPackageError:
+            # ASK THE BUILD, DO NOT PREDICT. Only the builder knows which of its four paths a prompt lands on --
+            # it classifies the composed GENE, not the words -- so the honest way to find out whether this robot
+            # belongs in the current directory is to try, and to move if it says no. The guard runs as its first
+            # statement, before anything is written, so the previous robot's package is untouched by the attempt.
+            stale_dir = self._project_dir
+            self._project_dir = self._fresh_project_dir()
+            report = _run(self.project_dir)
+            # The refused attempt wrote a conflict note into the OLD package. We resolved it by building
+            # elsewhere, so that package is once again a correct, single-robot package and must not keep
+            # a file saying otherwise. (A conflict nobody resolved keeps its note -- that is the guard's.)
+            for rel in ("PACKAGE_CONFLICT.md", "reports/package_conflict.json"):
+                try:
+                    (stale_dir / rel).unlink(missing_ok=True)
+                except OSError:
+                    pass
         self.last = {
             "succeeded": report.succeeded,
             "final_success_rate": report.final_success_rate,

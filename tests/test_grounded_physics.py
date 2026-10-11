@@ -71,14 +71,31 @@ class GroundedPhysicsTests(unittest.TestCase):
         from virturoid.services.grounded_physics import ground_gene
         from virturoid.services.morphology_composer import compose_robot
         cases = [("a robot dog", (12.0, 15.0)),
-                 ("a 6-axis collaborative robot arm", (17.0, 21.0)),
-                 ("a four-wheeled warehouse rover", (70.0, 150.0))]
+                 ("a 6-axis collaborative robot arm", (17.0, 21.0))]
         for prompt, band in cases:
             gene = compose_robot(prompt, llm=None, ensure_walkable=False)
             report = ground_gene(gene, fill=0.25)
             self.assertGreaterEqual(report["total_mass_kg"], band[0], prompt)
             self.assertLessEqual(report["total_mass_kg"], band[1], prompt)
             self.assertIsNotNone(report["physical_prior"])
+
+    def test_the_warehouse_envelope_is_for_a_warehouse_sized_base(self):
+        """The AMR band (70-150 kg) describes 0.8-0.9 m machines. The composed rover is a 0.36 m deck, and the
+        band used to lift it to 70 kg with 57 kg of estimated wiring; it now keeps its own itemised mass. The same
+        body widened to an AMR's footprint still lands in the band."""
+        from virturoid.services.grounded_physics import ground_gene, physical_prior_for
+        from virturoid.services.morphology_composer import compose_robot
+        small = compose_robot("a four-wheeled warehouse rover", llm=None, ensure_walkable=False)
+        self.assertIsNone(physical_prior_for(small))
+        report = ground_gene(small, fill=0.25)
+        self.assertLess(report["total_mass_kg"], 70.0)
+        self.assertEqual(report["balance_of_system_mass_kg"], 0.0)
+        big = compose_robot("a four-wheeled warehouse rover", llm=None, ensure_walkable=False)
+        big.root().cross_section = (0.40, 0.29)                  # an 0.80 x 0.58 m deck
+        self.assertEqual(getattr(physical_prior_for(big), "id", None), "mobile.amr")
+        report = ground_gene(big, fill=0.25)
+        self.assertGreaterEqual(report["total_mass_kg"], 70.0)
+        self.assertLessEqual(report["total_mass_kg"], 150.0)
 
     def test_physics_derived_torque_decreases_down_a_leg(self):
         from virturoid.services.grounded_physics import ground_gene

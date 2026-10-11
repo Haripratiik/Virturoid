@@ -80,6 +80,68 @@ def certify_policy_on_bom(gene, policy=None, *, steps: int = 900, n_seeds: int =
     return cert
 
 
+def drives_on_wheels(gene) -> bool:
+    """A free base whose every actuated joint is a wheel: the body the navigation drive moves."""
+    acts = gene.actuated_joints()
+    return (getattr(gene, "base_mount", "free") == "free" and bool(acts)
+            and all(s.shape == "cylinder" and s.joint_type == "revolute" for s in acts))
+
+
+def certify_drive_on_bom(gene, *, horizon: int = 3000, margin: float = 1.3, knee_frac: float = 0.5,
+                         envelope_tol: float = 0.02, out_path: str | None = None) -> dict:
+    """Grade a WHEELED base's motors under the drive it ships: the navigation controller, driven to the goals its
+    package is scored on (``task_matched_eval.NAVIGATION_GOALS``). Same six gates, same parts list.
+
+    A wheeled base used to be certified under the LEGGED recipe, position PD to its rest pose plus a random
+    residual, which holds a wheel still and wiggles it: a motion the product never commands of a wheel. It passed
+    while a 70 kg estimate put large motors on the wheels, and failed (headroom 1.00x, the PD pinned at the clamp)
+    once the composed indoor base weighed what its parts do, 6.9 kg on four 1.5 N.m servos (2026-10-11).
+
+    THE TORQUE GRADED IS THE MOTOR'S OWN: the command less the back-EMF loss the compiler models on a sized wheel
+    as joint damping (peak torque over no-load speed, ``gene_compiler._joint_dynamics``). A motor at speed cannot
+    deliver its full command and the simulation already takes the difference away, so grading the raw command
+    charges the motor for torque it never produced: measured on the same rollout, G4 58% and G2 1.45x on the
+    command against 0.0% and 0.82x on the motor's torque. A wheel with no sized motor keeps passive damping, and
+    its command is graded as it is.
+    """
+    import mujoco
+
+    from virturoid.services.gene_compiler import compile_gene_to_mjcf
+    from virturoid.services.navigation_controller import run_navigation_episode
+    from virturoid.services.task_matched_eval import NAVIGATION_GOALS
+
+    model = mujoco.MjModel.from_xml_string(compile_gene_to_mjcf(gene))
+    joints = [int(model.actuator_trnid[u, 0]) for u in range(model.nu)]
+    dofs = [int(model.jnt_dofadr[j]) for j in joints]
+    names = [mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, int(model.jnt_bodyid[j])) for j in joints]
+    sized = set((getattr(gene, "metadata", None) or {}).get("wheel_motor_speed_radps") or {})
+    back_emf = np.array([float(model.dof_damping[d]) if n in sized else 0.0 for d, n in zip(dofs, names)])
+    taus, qvs, statuses = [], [], []
+    for goal in NAVIGATION_GOALS:
+        trace: list = []
+        statuses.append(run_navigation_episode(model, goal, [], horizon=horizon, record_actuation=trace)["status"])
+        if trace:
+            qv = np.array([[float(v[d]) for d in dofs] for _, v in trace])
+            taus.append(np.array([f for f, _ in trace], dtype=float) - back_emf * qv)
+            qvs.append(qv)
+    if not taus:
+        cert = {"pass": False, "gates": [], "joints": [], "bom": [],
+                "summary": "UNCERTIFIABLE: the navigation drive produced no actuation trace."}
+    else:
+        tau = np.concatenate(taus, axis=0)
+        cert = grade_actuation(tau, np.concatenate(qvs, axis=0), clamps=model.actuator_forcerange[:, 1],
+                               parts=_ordered_parts(gene, names, model.nu), margin=margin, knee_frac=knee_frac,
+                               envelope_tol=envelope_tol, survived_all=all(s != "instability" for s in statuses),
+                               steps=int(tau.shape[0]), n_seeds=len(taus))
+    cert["rollout"] = {"controller": "navigation_controller.run_navigation_episode",
+                       "goals": [list(g) for g in NAVIGATION_GOALS],
+                       "reached": sum(s == "reached" for s in statuses),
+                       "torque_graded": "motor torque: command less the modelled back-EMF loss"}
+    if out_path:
+        _write(out_path, cert)
+    return cert
+
+
 def _ordered_parts(gene, segs, n_joints: int) -> list[str] | None:
     """Per joint column, THE PART bom.json ORDERS for it -- or None when the parts list cannot be built.
 

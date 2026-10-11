@@ -53,6 +53,16 @@ def _world_frames(gene) -> dict:
             nm = mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_BODY, b)
             if nm:
                 out[nm] = np.array(d.xmat[b]).reshape(3, 3)
+        # A free root that carries a rotation compiles as an unrotated body around a <frame> (see
+        # gene_compiler._framed_root), and the sensor geoms placed on it are written inside that frame, so the
+        # rotation they need is the segment's: the body's, turned by the frame's.
+        from virturoid.services.gene_compiler import _euler_xyz_to_quat, _framed_root
+        root = gene.root()
+        framed = _framed_root(gene, root) if root is not None else None
+        if framed is not None and root.name in out:
+            fm = np.zeros(9)
+            mujoco.mju_quat2Mat(fm, np.asarray(_euler_xyz_to_quat(*framed), dtype=float))
+            out[root.name] = out[root.name] @ fm.reshape(3, 3)
         return out
     except Exception:  # noqa: BLE001
         return {}

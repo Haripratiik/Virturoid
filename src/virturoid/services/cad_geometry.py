@@ -583,20 +583,43 @@ def _generator_rev() -> str:
 
 
 def _src_mesh_fp(out, s, src):
-    """Destination for an IMPORTED link's own mesh inside ``out``.
+    """Destination for an IMPORTED link's own mesh inside ``out``, keyed by the mesh's CONTENT.
 
-    Keyed by the source file's identity (path + size + mtime) and NOT by the kit-bash/synth/actuator flags that
-    ``_seg_mesh_fp`` hashes: the customer's geometry is the same file whichever way we would have drawn a link of
-    ours, so one copy serves every render mode instead of one per flag combination (a 30-link G1 carries ~60 MB).
-    Re-baking the import writes a new mtime and therefore a new name, so a re-imported robot never reads a stale
-    copy. The segment name is sanitized because link names come from the customer's file, not from us."""
+    Not by the kit-bash/synth/actuator flags that ``_seg_mesh_fp`` hashes: the customer's geometry is the same
+    file whichever way we would have drawn a link of ours, so one copy serves every render mode instead of one
+    per flag combination (a 30-link G1 carries ~60 MB). The segment name is sanitized because link names come
+    from the customer's file, not from us.
+
+    THE KEY WAS ``path | size | mtime`` AND THAT COST 134 GB. The reasoning was sound in isolation: re-baking
+    an import writes a new mtime and therefore a new name, so a re-imported robot could never read a stale copy.
+    What it missed is upstream: ``robot_import`` re-materialises link meshes into ``build/_importmesh`` on every
+    import, so the source mtime changes on every run and the key never repeated. MEASURED 2026-09-09 on this
+    checkout: ``build/_viewmesh`` held 132,555 STL files totalling 134.92 GB, of which 1,449 were distinct
+    meshes, 1.02 GB of real content against 133.89 GB of duplicates, 99.2% waste. ``FR_hip_src`` alone had 1,648
+    copies; ``base_src`` had 1,589, worth 4.88 GB of one part. 128.5 GB of it landed in a single month.
+
+    Hashing the bytes fixes both halves at once. Identical content maps to one name, so a re-import HITS the
+    cache instead of minting a new copy; different content maps to a different name, so a stale copy is
+    unreachable by construction rather than by hoping mtime moved. That is the identity test ``stage_mesh``
+    already uses next door (``filecmp.cmp(shallow=False)``), so the codebase now answers "is this the same
+    mesh?" the same way in both places.
+
+    Read in chunks: these are real robot meshes and the largest here is 9.5 MB, which is not worth holding in
+    memory to hash. An unreadable source falls back to the old path/size signature rather than failing an
+    import. A cache miss is a wasted copy; refusing to render a link the customer shipped is worse."""
     import hashlib
     import re
 
-    st = src.stat()
-    sig = f"{src.resolve()}|{st.st_size}|{int(st.st_mtime)}"
+    h = hashlib.md5()
+    try:
+        with open(src, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+    except OSError:
+        st = src.stat()
+        h.update(f"{src.resolve()}|{st.st_size}".encode())
     stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(s.name or "link")).strip("_") or "link"
-    return out / f"{stem}_src_{hashlib.md5(sig.encode()).hexdigest()[:10]}.stl"
+    return out / f"{stem}_src_{h.hexdigest()[:10]}.stl"
 
 
 def _seg_mesh_fp(out, s, *, kitbash: bool, synth: bool, actuator_in_mesh: bool = True):

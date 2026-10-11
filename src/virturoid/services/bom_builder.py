@@ -102,7 +102,7 @@ class BomLine:
 _MATERIAL_KEY_TO_CATALOG = {
     "shell": "Polycarbonate shell", "aluminum": "Aluminum 6061-T6", "skeleton": "Aluminum 7075-T6",
     "frame": "Aluminum 6061-T6", "steel": "Steel 4140", "carbon_fiber": "Carbon-fiber composite",
-    "titanium": "Titanium Ti-6Al-4V", "metal": "Hardened steel (gripper)", "rubber": "TPU (rubber)",
+    "titanium": "Titanium Ti-6Al-4V", "metal": "Hardened steel", "rubber": "TPU (rubber)",
 }
 # TASK -> the load-bearing SKELETON material. Heavy work wants steel; flight/agility wants carbon-fibre;
 # precision/medical wants titanium; otherwise aircraft-grade aluminium. (The outer shell, contact metal, etc.
@@ -664,13 +664,20 @@ def _select_compute_line(robot_class: str, n_actuators: int, task: str, capabili
 
 
 def _mobile_drive(gene: RobotGene) -> list[tuple[str, int, str]]:
-    """Wheels + drive motors for a mobile base (count from the gene's wheel-ish segments, else a 2+caster default)."""
+    """The wheels (tyre + hub) of a mobile base, and a caster only where the body has one.
+
+    NO SECOND MOTOR FOR A WHEEL. A driven wheel is an actuated joint, and section 1 already buys a motor for every
+    actuated joint, so the gearmotor this used to add billed each wheel's drive twice. Measured 2026-10-11:
+    "a six-wheeled rover" shipped 6x T-Motor AK80-9 for its wheel joints AND 6x Pololu 37D gearmotors (1.29 kg the
+    body then carried as well), plus a "passive balance caster" on a body that has six wheels and no caster. The
+    caster is listed for the bodies that have one (the two-wheeled base is composed with a ``caster``).
+    """
     if (gene.robot_class or "").lower() not in ("mobile_base", "mobile", "rover"):
         return []
     wheels = sum(1 for s in gene.segments if "wheel" in s.name.lower()) or 2
-    return [("Pololu 37Dx70L 12V gearmotor + encoder", wheels, "differential drive"),
-            ("100mm rubber drive wheel + hub", wheels, "driven wheels"),
-            ("Caster wheel 2in", 1, "passive balance caster")]
+    casters = sum(1 for s in gene.segments if "caster" in s.name.lower())
+    return ([("100mm rubber drive wheel + hub", wheels, "driven wheels")]
+            + ([("Caster wheel 2in", casters, "passive balance caster")] if casters else []))
 
 
 # --- ACTUATOR SKU POLICY ------------------------------------------------------------------------------------
@@ -1136,6 +1143,19 @@ def build_bom(gene: RobotGene, *, capabilities=None, task: str = "", pins: dict 
         for jn, part in (actuator_map or {}).items():
             _joints_for.setdefault(str(part), []).append(str(jn))
         for ln in lines:
+            if ln.category == "gripper":
+                # THE SAME RULE FOR THE HAND AT THE END OF THE ARM. The end-effector line is picked from the
+                # gene's declared ``end_effector_type``, and the importer now declares "gripper" for a Panda
+                # (it reads the sliding jaws, see services/gripper_jaws.py), which, left alone, would have billed
+                # a $5,500 Robotiq 2F-85 into the price of a 17.5 kg arm whose own Franka Hand is already in its
+                # link masses. Kept as a part number, never as a purchase or a second hand's worth of mass.
+                ln.in_mass_total = False
+                ln.in_price_total = False
+                ln.detail += (" - EQUIVALENT for the gripper already on your robot; its mass is already inside "
+                              "your model's link masses and is not added again, and it is NOT billed in "
+                              "totals.price_usd; its catalog price is quoted in totals.already_fitted_usd as a "
+                              "replacement option you have not asked for")
+                continue
             if ln.category != "actuator":
                 continue
             ln.in_mass_total = False
@@ -1204,7 +1224,8 @@ def build_bom(gene: RobotGene, *, capabilities=None, task: str = "", pins: dict 
                  "balance of system folded into the link masses are billed on their own lines)")
     if preserved:
         mass_note = ("your robot's own per-link masses, plus the parts this list proposes ADDING. The actuator "
-                     "lines are catalog equivalents for motors already fitted and are not counted again")
+                     "lines (and a gripper line, if any) are catalog equivalents for hardware already fitted and "
+                     "are not counted again")
     elif not _embodied:
         mass_note += ("; the simulated body does NOT yet carry the sensors, compute or power below — call "
                       "grounded_physics.embody_component_masses to bolt them on")

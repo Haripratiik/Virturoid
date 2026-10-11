@@ -530,6 +530,20 @@ _PARAM_DOCS: dict[str, dict[str, dict]] = {
     "train_held": {
         "iters": {"type": "integer", "default": 200, "description": "PPO iterations when mode='gpu_rl'"},
         "build_root": {"type": "string", "description": "job workspace, confined under build/"},
+        # The CPU run became the product's per-body fit on 2026-10-10 (agent_design_tools.run_train_gene_job), and
+        # that fit takes as long as the body needs: measured on the Menagerie Go2 it adopts a walk after 64
+        # evaluations. So the WAIT is the agent's to bound, with the same resolution create_robot's gait_budget_s
+        # has (one resolver, gait_flywheel._budget_from_env), and the run reports a stop rather than a decline.
+        "budget_s": {"type": "number", "default": 180,
+                     "description": "seconds of gait SEARCH this run may spend (0 = unbounded). The clock starts "
+                                    "at the first searched candidate, after the shipped default is measured, and "
+                                    "is checked between candidates, never inside a rollout, so the 6000-step "
+                                    "judging horizon is never shortened. A run the clock stops reports "
+                                    "stopped_by_budget and says the search did not finish"},
+        "seed": {"type": "integer", "default": 0,
+                 "description": "search seed of the first attempt (the restarts are decorrelated from it). Set it "
+                                "to reproduce a run, or change it to draw a different search on a body the fit "
+                                "declined"},
     },
     "start_training": {
         "target": {"type": "number", "default": 0.8, "description": "target success rate to build toward"},

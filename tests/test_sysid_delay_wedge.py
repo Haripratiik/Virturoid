@@ -21,9 +21,17 @@ Both are closed, and this file is the contract for how. Four parts:
     is scored with both replays at that delay. 0 / 20 / 40 ms all come back exact.
   * THE CONTROLS -- the gate must not have been opened on the way. A misspecification the estimator cannot
     express is still refused WITH a delay present, and a joint the experiment never moved still reports
-    nothing.
-  * WHAT IS STILL TRUE AND STILL COSTS US -- the one-tick bias a filtered torque channel introduces, and the
-    fact that at 40 ms (double Hwangbo's figure) the gate still refuses on the merits.
+    nothing. (Since 2026-10-10 the first of those holds for link mass and inertia at the VERDICT, not at every
+    gate in it: one rung above the control asserted here, the tracking gate is open and a rival check is what
+    refuses. It does NOT hold for a torque-constant error at the package's default 20 ms with the hip excited:
+    a 1.35x-wrong constant tracks 4.974x and is APPLIED with neither rival claiming it, which
+    ``tests/test_sysid_torque_channel.py`` now pins as a limit beside the refusals that still hold. Both are in
+    the misspecification test's docstring.)
+  * WHAT IS STILL TRUE AND STILL COSTS US: the one-tick bias a filtered torque channel introduces, and what
+    the closure is worth past the package's default delay. This bullet used to end "at 40 ms (double
+    Hwangbo's figure) the gate still refuses on the merits". Since 2026-10-10 the gate still refuses at 30, 40
+    and 50 ms, and only at 50 ms is the refusal on the merits: at 30 and 40 ms the tracking gate passes the
+    correct fit and a rival check refuses it by naming a part that is not wrong.
 
 THE DRIVETRAIN UNDER ALL OF IT MOVED, and six of these tests said so out loud instead of going quiet -- which
 is the only reason this paragraph exists. ``robot_import`` now carries the customer's DECLARED joint damping /
@@ -62,9 +70,58 @@ misspecification the estimator cannot express is still refused. The estimator is
 point is not. Numbers quoted from ``docs/calibration_wedge_under_delay.md`` below predate this and are marked
 where they are now stale.
 
+THE TWIN MOVED AGAIN on 2026-10-10, and two of these tests failed on their own "no longer adversarial"
+asserts, which is the job they were written to do. ``robot_import`` now carries each link's source
+``<inertial>``, along with its contact model, a collider sized from its collision geometry, the trunk's own
+collision geoms and a floating base framed as the robot's own; on this Go2 the centre of mass moved 5.7 cm and
+every foot 6.6 cm. WHAT REACHES THIS FILE IS THE INERTIALS, and that is measured rather than assumed: the
+bench welds the base and drops the floor, its replays make no contact at all (``ncon`` 0 throughout, at 0
+and at 40 ms), and removing just the ``source_inertials`` table from today's gene puts this file's numbers
+back to within 8% of where they were and the sweep's answers back exactly (prior-replay-vs-log RMS 0.0042 to
+0.0662 rad, references 3.479x / 1.784x / 1.009x / 0.995x, sweep 0 / 0 / 10 / 10 ms, 16.283x at 20 ms and
+1.145x at 40 ms refused on the merits; the remainder was not attributed). What the inertials changed is the
+HIP: its gravity load at the bench pose fell from 1.62 to 1.06 N.m, so its static gain floor fell from 91.1
+to 63.2 N.m/rad (9.1x -> 7.6x its inertia-scaled gain) and its closed-loop natural frequency from 36.2 to
+33.1 rad/s. Prior-replay-vs-log RMS across 0-40 ms is now 0.0039 -> 0.0277 rad here and 0.0033 -> 0.0472 on
+the full plan: at 40 ms the delay costs this robot 42% of what it did on this plan and 72% on the full one.
+The ring was the phenomenon, and it shrank again. Every number in this file was re-measured on the new twin,
+and the two failures were decided on evidence rather than on which way the assert points:
+
+  * "the prior-model sweep lands on the truth at 10 ms" is NOT a closure. The sweep answers 10 ms to EVERY
+    injection from 10 to 40 ms, because what pins its argmin now is where the PRIOR model starts ringing on its
+    own, not anything in the log; it is right at 10 ms only because the truth sat on that tick, and by 0.67%.
+    Over nine joint selections it never over-shoots, it is wrong at 30 and 40 ms on all nine, and every right
+    answer is a tie (0.2-2.3%). Restated as the claim that was always being made, that its answer does not
+    follow the delay, and asserted so that a sweep which learned to find the delay would fail.
+  * "40 ms now CLEARS the 1.5x gate at 2.499x" is a closure of the METRIC at this file's operating point, not of
+    the limit and not of the verdict. At the default injection it clears on all nine selections (2.445x and
+    up), at every bootstrap seed and size tried and on an 8 s plan, but by only 4.6% on the full plan (1.569x),
+    and at a quarter or double the injection the tracking gate refuses again (1.053x, 1.158x): a straddle, not
+    a capability. The one-sided limit moved OUT, to 50 ms (1.163-1.193x on all nine selections, refused on the
+    merits). And the VERDICT did not move with the metric: the correct fit is refused at 40 ms by the
+    global-scale rival as a 0.53x torque scale (everywhere a hip was excited, the full plan included) and at
+    30 ms (4.899x) by the link-inertia rival as a 15.9x inertia scale (at this operating point and on the full
+    plan; an 8 s plan or the hip alone is applied), neither of which the harness injected. How often either
+    rival refuses a correct fit was sized on composed bodies at delay 0; these are the first such refusals
+    measured on an imported body. Restated as one test over 30 / 40 / 50 ms.
+
+What moved and still holds, each at its own test with both sets of numbers: the references and the envelope
+(nothing in the family reaches 1.5x at 30 ms, but by 7% on a finer grid where it was by 31%; "nothing reaches
+1.01x at 40 ms" is retracted on this plan at 1.023x and still holds on the full one at 1.006x), the bracket
+(93.6% here, 108.0% on the full plan), the default delay's pass (13.646x here, 73.66x on the full plan), the
+misspecification control (1.390x here and 1.375x on the full plan, refused by the tracking gate with 7-8% to
+spare, while +40% and +50% now clear that gate and are refused only by a rival), the position-only ladder
+(monotone through +30%, not beyond), and the hole-not-basin shelf (weaker, and a property of the hip). What did
+not move at all: the delay is recovered EXACTLY at 0 / 20 / 40 ms through every path on this plan (torque
+channel, position-only, dirty log, filtered channel) and through ``fit_parameters`` on the full one; the oracle
+sweep is exact; a joint the experiment never moved reports nothing.
+
 Cost note: the Go2 at the package's 120 s default budget costs ~45 s per fit. The whole phenomenon survives
 narrowing to two joints and a 12 s excitation, so that is what this file runs; the full-plan numbers are in the
-doc and quoted in the assertions' messages where they differ.
+doc and quoted in the assertions' messages where they differ. RE-TIMED 2026-10-10 only on a machine shared with
+other test suites: full-plan fits took 118-324 s (one outlier at 1293 s) and two-joint ones 20-36 s, so the
+~45 s is neither confirmed nor refuted. This file now runs seven fits where it ran four (the 30 and 50 ms cells
+and the +50% control are new): 29 tests in 370 s on that machine, against 27 in 179 s before.
 
 WE OWN NO HARDWARE. Everything here is sim2sim -- both the "robot" and the "sim" are MuJoCo, so MuJoCo's own
 modelling error cancels exactly and is invisible. See ``WHAT_SIM2SIM_DOES_NOT_PROVE``. The open-loop estimator
@@ -96,6 +153,14 @@ pytestmark = [
 
 #: Two joints and 12 s instead of twelve joints and 72 s. One hip (where the Go2's bench gain is floored at
 #: 7.6x its inertia-scaled value, so the loop is delay-sensitive) and one thigh (where it is not).
+#:
+#: RE-MEASURED 2026-10-10: the hip's floor is 7.6x on today's twin (9.1x on the same gene with its source
+#: inertials removed; the hip's gravity load at the bench pose fell from 1.62 to 1.06 N.m with them), and the
+#: thigh IS floored, at 1.6x, by the 0.2 N.m of dry friction its file declares. "Where it is not" was true of
+#: the substituted drivetrain (frictionloss 0.12, ratio 1.00) and stopped being true when the declared one was
+#: carried (1.3x). The pair still splits the way it was chosen to: excited alone at 40 ms, the thigh's correct
+#: fit is applied (47.3x) and the hip's is refused (by what, and why that is a limit rather than a catch, is in
+#: ``test_past_the_default_delay_the_gate_still_refuses_but_not_always_on_the_merits``).
 ONLY_JOINTS = ["FL_hip", "FL_thigh"]
 BUDGET_S = 12.0
 
@@ -320,6 +385,17 @@ def test_the_delay_objective_is_a_hole_not_a_basin(rig):
     it was the wrong proxy for a claim about the search. The saturation is measured directly instead, and it is
     STRONGER than it was: one tick short costs 10.4x less than one tick long (it was 4.4x), and the plateau,
     read where it is fully developed, is flat to 0.16% across three grid points (it was 0.22%).
+
+    RE-MEASURED AGAIN 2026-10-10, on the twin that carries the source's own link inertials (module docstring).
+    Every assertion below still holds, but "STRONGER than it was" does not: the shelf is now WEAKER than on
+    either earlier body and closer to its bounds than it has been. The two under-shoot entries at 20 ms are
+    0.00244 and 0.00159 rad (35% apart); one tick long costs 3.6x one tick short against a bound of 3.0 (10.4x
+    before the inertials, 4.4x on the substituted drivetrain); two ticks short is 0.43 of one tick long against
+    a bound of 0.5; the 40 ms plateau is flat to 0.38% (0.16% before). It is a property of the HIP, measured on
+    nine joint selections: every hip+thigh pair, the FL hip+calf and the FL hip alone read 3.5-3.9x / 0.36-0.43
+    / 0.18-0.39%, while a selection that excites only the thigh, only the calf, or both, has no shelf at all
+    (1.09x / 1.77 / 45%): those loops do not ring at these delays, so there is nothing to saturate. The file's
+    pair carries a hip, which is why the diagnosis still applies to it. The bounds are not moved.
     """
     from virturoid.services.sysid.gap_report import _delay_search
 
@@ -347,8 +423,9 @@ def test_the_delay_objective_is_a_hole_not_a_basin(rig):
 
     # THE PLATEAU, read at 40 ms where three under-shoot entries exist and saturation is fully developed. Two
     # points can only ever show a tie; three show that the search has nothing to descend. This is the half of
-    # "no basin" the 20 ms grid is too narrow to carry, and it holds on both drivetrains (0.16% now, 0.22%
-    # under the substituted one), which is why it is the assertion that replaced the 5% tie.
+    # "no basin" the 20 ms grid is too narrow to carry, and it holds on every body this file has run on (0.38%
+    # on the twin with source inertials, 0.16% before them, 0.22% under the substituted drivetrain), which is
+    # why it is the assertion that replaced the 5% tie.
     _hw4, log4 = _hardware(rig, 4)
     far = {r["delay_ticks"]: r["trajectory_rms_rad"] for r in _delay_search(
         _hw4, rig["q_cmd"], log4["q"], kp=rig["kp"], kd=rig["kd"], q_start=log4["q"][0].copy(),
@@ -403,36 +480,94 @@ def test_the_trajectory_sweep_is_biased_toward_zero_and_may_not_promote_itself_o
     THE SWEEP'S MARGIN IS NOT EVIDENCE. The same wrong answer carries 0.08% or 79% depending on how hard the
     body rings -- a property of the customer's robot that we do not control and cannot bound in advance. A gate
     keyed on it is a gate keyed on someone else's damping.
+
+    RE-MEASURED AGAIN 2026-10-10, on the twin that carries the source's own link inertials, and this test failed
+    on its own first assert: "the prior-model sweep lands on the truth at 10 ms". IT DID NOT LEARN TO FIND THE
+    DELAY. It now answers 10 ms for EVERY injection: 10, 20, 30 and 40 ms all come back 10 ms, with margins of
+    0.67 / 3.34 / 2.64 / 0.27%. Its argmin is no longer the zero-delay entry; it is the last tick before the
+    PRIOR model's own replay goes bad, and that tick is a property of the prior, not of the log. From 10 to
+    30 ms injected, the entries at two, three and four ticks read 0.0207-0.0215 / 0.0683-0.0684 /
+    0.0961-0.0962 rad whatever was injected. That is the prior's own replay moving: handed two ticks of delay it
+    departs from its own zero-delay trajectory by 0.020 rad, handed four by 0.096 rad, while the injected
+    hardware, which carries the extra damping, moves by 0.0024 and 0.027 rad under the same two delays. The
+    sweep still sits on a shelf; where the shelf ends is now set by where the PRIOR starts ringing, between one
+    and two ticks, and by nothing in the log. So 10 ms is "right" only where the truth happens to sit on that
+    tick, and there by 0.67%, a tie that ``DELAY_MIN_MARGIN`` would refuse from either open-loop estimator.
+    Measured on nine joint selections (each hip+thigh pair, FL hip+calf, FL thigh+calf,
+    and each FL joint alone): 36 of 36 cells at or under the truth, all nine wrong at 30 and 40 ms, two of nine
+    right at 20 ms (the FL thigh alone and the FL thigh+calf, neither of which excites a hip), and every cell
+    that lands on the truth a tie, 0.2-2.3%. The full 12-joint plan does the same: 10 ms to all four
+    injections, margins 1.14 / 3.59 / 2.70 / 0.06%.
+
+    So "wrong at every delay" was the wrong statement of the claim, and it is replaced by the one that was
+    always being made: THE SWEEP'S ANSWER DOES NOT FOLLOW THE DELAY. Asserted below as (a) never above the
+    truth, (b) wrong at the package's default and beyond, (c) four injections spanning 30 ms answered within one
+    tick of each other, and (d) wherever it does coincide with the truth, by less than the margin either
+    open-loop estimator needs before it may claim. A sweep that learned to find the delay fails (c) and (d).
+
+    The trap is still real on the substituted drivetrain: argmin 0 ms at all four injections, 59.1% ahead at
+    10 ms and 55.5% at 20 ms (79.4% and 47.6% before the inertials; 74.9% and 72.5% on the full plan). On every
+    selection that excites a hip it is 54-70% at 10 and 20 ms; on the thigh or calf alone it is under 2%,
+    because those loops do not ring. The floor asserted for it used to be the measured number minus some slack
+    (0.60 against 79.4%), and 59.1% is under it. It is now tied to the gate the trap would fool instead, three
+    times ``DELAY_MIN_MARGIN`` at both delays, because that is the claim: a margin gate set where the open-loop
+    estimators' is set would promote this wrong answer with room to spare. That lowers the 10 ms floor (0.60 ->
+    0.45) and raises the 20 ms one (0.40 -> 0.45), and it is written down here so the first half of that is not
+    mistaken for a tuned pass.
     """
-    # (1) BIASED TOWARD ZERO -- at every delay now, not at one. This half is untouched by the drivetrain.
+    from virturoid.services.sysid.gap_report import DELAY_MIN_MARGIN
+
     declared = {tk: _prior_sweep(rig, tk) for tk in (1, 2, 3, 4)}
+    # (1a) BIASED TOWARD ZERO: the sweep never answers ABOVE the truth. Untouched by either change of body.
     for tk, (got, _margin, grid) in declared.items():
-        assert got != tk, (
-            f"this test is no longer adversarial: the prior-model sweep lands on the truth at "
-            f"{tk * MS_PER_TICK:g} ms, grid {grid}")
-        assert got < tk, (
+        assert got <= tk, (
             f"the bias is meant to be toward ZERO; at {tk * MS_PER_TICK:g} ms the sweep OVER-shot to "
             f"{got * MS_PER_TICK:g} ms, grid {grid}")
+    # (1b) WRONG at the package's own default and at every delay past it.
+    for tk in (2, 3, 4):
+        got, _margin, grid = declared[tk]
+        assert got < tk, (
+            f"this test is no longer adversarial: the prior-model sweep lands on the truth at "
+            f"{tk * MS_PER_TICK:g} ms, grid {grid}. Check (1c) and (1d) before believing it: on 2026-10-10 it "
+            f"'landed' at 10 ms only because it answered 10 ms to everything")
+    # (1c) ITS ANSWER DOES NOT FOLLOW THE DELAY. Four injections 30 ms apart, one answer give or take a tick.
+    answers = sorted({got for got, _m, _g in declared.values()})
+    assert answers[-1] - answers[0] <= 1, (
+        f"this test is no longer adversarial: the prior-model sweep's answer now MOVES with the injected delay "
+        f"(answers {[a * MS_PER_TICK for a in answers]} ms for 10 / 20 / 30 / 40 ms injected). On 2026-10-10 it "
+        f"answered 10 ms to all four. If it is tracking the delay, `_merge_latency`'s refusal to let it claim "
+        f"needs re-justifying on the new numbers. {declared}")
+    # (1d) WHERE IT COINCIDES WITH THE TRUTH, IT IS A TIE: under the margin the open-loop estimators must clear.
+    for tk, (got, margin, grid) in declared.items():
+        if got == tk:
+            assert margin < DELAY_MIN_MARGIN, (
+                f"the sweep is right at {tk * MS_PER_TICK:g} ms with a {margin:.1%} margin, enough to clear the "
+                f"{DELAY_MIN_MARGIN:.0%} gate the open-loop estimators claim on. On 2026-10-10 its only right "
+                f"answer (10 ms) was a 0.67% tie; a convincing right answer is a new capability and has to be "
+                f"checked across the other delays and selections before anything relies on it. grid {grid}")
 
     # (2) ...and on this body the margin it offers is worthless in the safe direction.
     worst = max(margin for _got, margin, _grid in declared.values())
     assert worst < 0.10, (
         f"the Go2 as its author declares it is no longer supposed to show the confident-wrong-answer trap; "
-        f"the largest margin on a wrong answer across 10-40 ms is now {worst:.1%}. If it is back above 10%, "
-        f"the RE-MEASURED note in this docstring is stale and the 48.9% story is live again on this body")
+        f"the largest margin on any answer across 10-40 ms is now {worst:.1%} (3.34% on 2026-10-10). If it is "
+        f"back above 10%, the RE-MEASURED notes in this docstring are stale and the 48.9% story is live again "
+        f"on this body")
 
     # (3) THE TRAP ITSELF, demonstrated on a body that rings -- the one this product shipped until the import
     #     path learned to read the customer's declared drivetrain. A margin gate here promotes a wrong answer.
-    for tk, floor in ((1, 0.60), (2, 0.40)):
+    for tk in (1, 2):
         got, margin, grid = _prior_sweep(rig, tk, base_drivetrain=SUBSTITUTED_DRIVETRAIN)
         assert got != tk, (
             f"this test is no longer adversarial: on the SUBSTITUTED drivetrain the sweep now lands on the "
             f"truth at {tk * MS_PER_TICK:g} ms too, so there is no body left on which the trap is real and "
             f"`_merge_latency`'s refusal to promote the sweep needs a different justification. grid {grid}")
-        assert margin > floor, (
+        assert margin > 3.0 * DELAY_MIN_MARGIN, (
             f"the WRONG answer must still look convincing on a LOW-DAMPING body -- that is the trap a margin "
-            f"gate would fall into. At {tk * MS_PER_TICK:g} ms it beats the next-best by only {margin:.1%} "
-            f"(measured 79.4% at 10 ms and 47.6% at 20 ms), grid {grid}")
+            f"gate would fall into, and 'convincing' means clearing the {DELAY_MIN_MARGIN:.0%} gate the "
+            f"open-loop estimators claim on three times over. At {tk * MS_PER_TICK:g} ms it beats the next-best "
+            f"by only {margin:.1%} (measured 59.1% at 10 ms and 55.5% at 20 ms on 2026-10-10; 79.4% and 47.6% "
+            f"before the twin carried source inertials), grid {grid}")
 
 
 # =========================================================================================================
@@ -494,6 +629,11 @@ def test_a_fit_at_the_packages_own_default_delay_is_applied(fit_at):
 
     The threshold is untouched at 1.5x; what moved is the quantity it rules on. RE-MEASURED on the declared
     drivetrain: 15.538x here, 29.168x on the full plan (it was 1.789x / 1.683x under the substituted one).
+    RE-MEASURED 2026-10-10 on the twin with source inertials: 13.646x here, 13.2-13.6x on every other
+    hip+thigh pair, and 73.66x on the full plan. Neither rival check fires on it (torque rival 0.079x, inertia
+    rival 0.356x, both far under the 1.0x they would need), which is worth saying because both do fire on the
+    correct fits at 30 and 40 ms. See
+    ``test_past_the_default_delay_the_gate_still_refuses_but_not_always_on_the_merits``.
     """
     from virturoid.services.sysid.fit import MIN_TRACKING_IMPROVEMENT_X
 
@@ -542,6 +682,14 @@ def test_the_gate_is_scored_at_the_identified_delay_and_that_is_what_moved_it(ri
 
     What the scoring change is worth: an ORDER OF MAGNITUDE on the same fit -- 10.3x here, 15.7x on the full
     plan.
+
+    RE-MEASURED 2026-10-10 on the twin with source inertials, and the bracket holds on both plans: the old point
+    reads 1.873x against a reference of 2.001x here (93.6%), and 2.208x against 2.044x on the full plan
+    (108.0%). The reference is beaten from inside the family by more than before (3.062x at armature +0.08 is
+    53% above it here; it was 24%), and the fit's armature still lands high for the same reason, 0.0350 /
+    0.0357 here and 0.0350-0.0363 on the full plan against 0.030 injected. The scoring change is now worth 7.3x
+    on the same fit here and 33.4x on the full plan, so "an order of magnitude" holds on the full plan and not
+    quite here; the 5x this asserts is unchanged.
     """
     from virturoid.services.sysid.fit import MIN_TRACKING_IMPROVEMENT_X
 
@@ -555,7 +703,8 @@ def test_the_gate_is_scored_at_the_identified_delay_and_that_is_what_moved_it(ri
         f"the OLD scoring point is meant to sit CLOSE to the delay-blind score of the true parameters, on "
         f"either side -- that is what makes it a measurement of the delay rather than of the fit. It reads "
         f"{traj['improvement_x_at_zero_delay']}x against a reference of {ref:.3f}x, i.e. {frac:.1%} of it "
-        f"(measured 86.1% on this plan, 103.8% on the full one). Under 80% and the old point has room to "
+        f"(measured 93.6% on this plan and 108.0% on the full one on 2026-10-10; 86.1% / 103.8% before the twin "
+        f"carried source inertials). Under 80% and the old point has room to "
         f"discriminate a fit after all, so this docstring's argument is wrong; over 120% and the estimator is "
         f"buying delay-blind score by MIMICKING the delay far harder than the fit measured here does, which is "
         f"a finding about the estimator and has to be written down rather than absorbed")
@@ -598,6 +747,22 @@ def test_the_old_scoring_points_range_collapses_with_delay_and_the_whole_family_
 
     Cost: 3 x 60 delay-blind replays (~50 s here) on top of the reference sweep. That is the price of turning
     "by construction" into a measurement, and this file already paid it once by believing the argument.
+
+    RE-MEASURED A THIRD TIME, 2026-10-10 (the twin carries the source's link inertials), and every assertion
+    holds; two sentences above do not. The true parameters now score 3.898x / 2.001x / 1.206x / 1.011x at 10 /
+    20 / 30 / 40 ms here and 3.976x / 2.044x / 1.225x / 1.003x on the full plan. The family's envelope is
+    4.362x / 3.062x / 1.345x / 1.023x here and 4.384x / 3.138x / 1.374x / 1.006x on the full plan, so:
+
+      * "at 30 ms and beyond NOTHING in the family reaches the 1.5x threshold" SURVIVES, with far less to spare:
+        1.345x on the 60-point grid here, 1.374x on the full plan, and 1.397x on a finer 112-point grid around
+        the peak (armature 0.05-0.2, damping 0.3-1.5, frictionloss 0-0.15), i.e. 7% under the line where it was
+        31% under. The truth itself is no longer at ~1.0 there (1.206x); it has some range back, just not
+        enough.
+      * "at 40 ms nothing reaches 1.01x" is RETRACTED on this plan: the best is 1.023x (1.024x on the finer
+        grid). It still holds on the full plan (1.006x). The assertion below was always at 1.10 and stands.
+      * the over-shoot of the envelope past the truth at 20 ms grew from 24% to 53% here (3.062x vs 2.001x) and
+        from 27% to 54% on the full plan (3.138x vs 2.044x): the retraction of the "ceiling" made larger, not
+        undone.
     """
     from virturoid.services.sysid.fit import MIN_TRACKING_IMPROVEMENT_X
 
@@ -622,7 +787,8 @@ def test_the_old_scoring_points_range_collapses_with_delay_and_the_whole_family_
         f"the retracted 'ceiling' claim is back in force: the best model in the estimator's own family scores "
         f"{best_20:.3f}x at 20 ms against the true parameters' {at_20:.3f}x ({best_20 / at_20:.3f}x), so on "
         f"this body the truth IS effectively maximal and the by-construction argument this test retracted "
-        f"(measured 2.166x vs 1.745x, at {off_20}) would have to be reinstated -- deliberately, in writing")
+        f"(measured 3.062x vs 2.001x on 2026-10-10 and 2.166x vs 1.745x before it, at {off_20}) would have to "
+        f"be reinstated, deliberately and in writing")
     # THE ADVERSARIAL CLAIM, at the delays where it is true, over the whole family rather than one point.
     assert best_30 < MIN_TRACKING_IMPROVEMENT_X, (
         f"this test is no longer adversarial: at 30 ms the delay-blind metric can still reach {best_30:.3f}x "
@@ -631,7 +797,7 @@ def test_the_old_scoring_points_range_collapses_with_delay_and_the_whole_family_
         f"scoring point did not need to move at all")
     assert best_40 < 1.10, (
         f"at 40 ms the delay-blind metric should have no range left for ANY model in the family; the best is "
-        f"{best_40:.3f}x at {off_40} (measured 1.003x)")
+        f"{best_40:.3f}x at {off_40} (measured 1.023x on 2026-10-10, 1.003x before it)")
     assert best_20 > best_30 > best_40, (
         f"the envelope must fall with delay too: {best_20:.3f} / {best_30:.3f} / {best_40:.3f}")
 
@@ -660,23 +826,78 @@ def test_a_misspecification_is_still_refused_when_the_robot_also_has_delay(fit_a
     excluding the truth. Contract for that: ``tests/test_sysid_stage2.py``, and
     ``docs/calibration_wedge_under_delay.md`` section 13. This test still asserts exactly what it always
     measured; only the sentence claiming it generalised is withdrawn.
+
+    RE-MEASURED 2026-10-10 on the twin with source inertials. The control holds where it is asserted and does
+    NOT hold one rung up, and both halves are now asserted. +30% reads 1.390x here, 1.39-1.45x on every
+    hip+thigh pair at 20 ms, and 1.375x on the full plan (0.999x there with no delay; the 1.001x / 0.996x above
+    were the substituted drivetrain): refused by the tracking gate itself, with 3-8% to spare where it had 28%.
+    +40% and +50% CLEAR the tracking gate at 20 ms, at 1.973x and 1.686x here, and +50% reads 1.645-1.698x on
+    all five selections measured that excite a hip. They are still refused, but by the global-scale rival,
+    which calls them a TORQUE-SCALE error: a refusal for a defensible reason that names the wrong part. It
+    takes the delay and a hip together: +50% reads 0.997x at 0 ms, 1.211x at 30 ms and 1.009x at 40 ms, +60%
+    and +75% read 1.490x and 1.311x at 20 ms, and the FL thigh+calf reads 0.997x, all refused by the tracking
+    gate. So "scoring at the identified delay must not let it through" holds at the VERDICT on this body; at
+    the tracking gate it holds for +30% and not for +40% or +50%, at the package's own default delay. A second,
+    independent check is what keeps this control true, which is the argument ``MIN_TRACKING_IMPROVEMENT_X``
+    already makes for the families it lists, now measured for this one.
+
+    THE SIBLING CONTROL DOES NOT FULLY HOLD, and it is written down here because this test's name reads as the
+    general claim. ``tests/test_sysid_torque_channel.py`` feeds this same plan a motor-current log whose torque
+    constant is 1.35x out and used to assert, at 20 ms, that the fit is refused; on this twin that FAILED.
+    Measured at 0 / 20 / 40 ms the wrong constant tracks 1.024x / 4.974x / 1.239x against 2.652x / 13.646x /
+    2.499x with the constant right, so at 20 ms the tracking gate passes it, neither rival claims it
+    (global-scale 0.727x and link-inertia 0.975x against the 1.0x each needs) and it is APPLIED, the two
+    armature values it writes both with intervals excluding the injected truth. On the same gene with its
+    source inertials removed it reads 1.053x at 20 ms and is refused (16.283x with the constant right), so it
+    is the inertials that opened it, and with the thigh and calf excited instead of the hip it is still
+    refused at 1.010x (3.185x right). That file now keeps the 0 / 40 ms refusals and the thigh-and-calf one as
+    its control, and pins the 20 ms miss as a limit. The ratio still ORDERS the two fits, by 2.7x; the gate's
+    fixed 1.5x no longer separates them at 20 ms on the hip, and nothing here retunes it.
     """
+    from virturoid.services.sysid.fit import MIN_TRACKING_IMPROVEMENT_X
+
     fit = fit_at(2, perturbation={}, link_scale=1.30)
     app = fit["application"]
     assert app["passed"] is False, (
         f"a +30% link mass/inertia error passed the tracking gate at {app['improvement_x']}x -- the gate that "
         f"exists for exactly this case has been opened")
     assert app["provisional"] is True
+    # ...and it is the TRACKING gate that refuses it, which is the gate this control was written about.
+    assert app["refused_by"] is None, (
+        f"a +30% link mass/inertia error at 20 ms was refused by {app['refused_by']} rather than by the tracking "
+        f"gate, i.e. it now clears 1.5x ({fit['trajectory']['improvement_x']}x; measured 1.390x on 2026-10-10). "
+        f"The rung at which the tracking gate opens has come down to the control itself")
+
+    # ONE RUNG UP the tracking gate is open at this delay, and the verdict holds only because a rival claims it.
+    up = fit_at(2, perturbation={}, link_scale=1.50)
+    assert up["application"]["passed"] is False, (
+        f"a +50% link mass/inertia error was APPLIED at 20 ms: {up['application'].get('verdict')}. On 2026-10-10 "
+        f"the tracking gate passed it (1.686x) and the global-scale rival was the only check that refused it")
+    assert up["trajectory"]["improvement_x"] >= MIN_TRACKING_IMPROVEMENT_X, (
+        f"this test is no longer adversarial: +50% link mass/inertia at 20 ms is back under the tracking gate at "
+        f"{up['trajectory']['improvement_x']}x (measured 1.686x here and 1.645-1.698x on every hip selection on "
+        f"2026-10-10), so 'open one rung up' in the docstring is stale")
+    assert up["application"]["refused_by"] == "global_scale", (
+        f"+50% link mass/inertia at 20 ms was measured to be refused by the global-scale rival and no other "
+        f"check; it is now refused by {up['application']['refused_by'] or 'the tracking gate'}: "
+        f"{up['application'].get('verdict')}")
 
 
 def test_nothing_reaches_the_model_when_the_gate_refuses(go2, fit_at):
-    """The refusal has to be load-bearing, not decorative: a withheld fit must change nothing."""
+    """The refusal has to be load-bearing, not decorative: a withheld fit must change nothing.
+
+    Checked on both kinds of refusal since 2026-10-10, because both now happen to a misspecification at this
+    file's default delay: the tracking gate's (+30% links) and a rival's (+50% links, refused as a torque scale).
+    """
     from virturoid.services.sysid import apply_calibration, calibration_of
 
-    fit = fit_at(2, perturbation={}, link_scale=1.30)
-    rec = calibration_of(apply_calibration(go2, fit)) or {}
-    assert not (rec.get("joints") or {}), (
-        "a provisional fit wrote parameters into the model; only allow_provisional=True may do that")
+    for scale in (1.30, 1.50):
+        fit = fit_at(2, perturbation={}, link_scale=scale)
+        rec = calibration_of(apply_calibration(go2, fit)) or {}
+        assert not (rec.get("joints") or {}), (
+            f"a provisional fit (+{(scale - 1.0) * 100:.0f}% links, refused by "
+            f"{fit['application']['refused_by'] or 'the tracking gate'}) wrote parameters into the model; only "
+            f"allow_provisional=True may do that")
 
 
 def test_a_joint_the_experiment_never_moved_reports_no_latency(rig, plan):
@@ -776,14 +997,83 @@ def test_a_heavily_filtered_torque_channel_biases_the_estimate_one_tick_high(rig
     assert "40 Hz biases it a full control tick" in TORQUE_CHANNEL_CAVEAT
 
 
-def test_at_twice_the_realistic_delay_the_metric_regains_range_but_the_gate_still_refuses(fit_at):
-    """40 ms is double the figure Hwangbo et al. name and double this package's own default, and the closure
-    is only partial there. Recorded as a limit, not as a win.
+#: Past the package's default delay, on this file's pair at the DEFAULT injection, measured 2026-10-10. Each row
+#: is ``(delay_ticks, the gate that refuses, does the tracking metric at the identified delay clear the gate?)``.
+PAST_THE_DEFAULT_DELAY = [
+    (3, "link_inertia", True),     # tracks 4.899x; refused as a 15.9x link-inertia scale the harness never set
+    (4, "global_scale", True),     # tracks 2.499x; refused as a 0.53x torque scale the harness never set
+    (5, None, False),              # tracks 1.173x; refused by the tracking gate itself, on the merits
+]
+
+
+@pytest.mark.parametrize("delay_ticks, refused_by, tracking_clears", PAST_THE_DEFAULT_DELAY)
+def test_past_the_default_delay_the_gate_still_refuses_but_not_always_on_the_merits(
+        fit_at, delay_ticks, refused_by, tracking_clears):
+    """What the closure is worth past the package's default delay. Recorded as a limit, not as a win, and the
+    limit is no longer the one this test was written about.
+
+    THIS TEST WAS ``test_at_twice_the_realistic_delay_the_metric_regains_range_but_the_gate_still_refuses`` and
+    pinned one cell, 40 ms, recorded below as it stood. On 2026-10-10, once the twin carried the source's link
+    inertials, it failed on its own adversarial assert: "40 ms now CLEARS the 1.5x gate at 2.499x". That is
+    not a closure, and the evidence is why this is now three cells instead of one.
+
+      * THE METRIC moved, and not everywhere. At the default injection the tracking metric at 40 ms clears on all
+        nine joint selections measured (2.445-2.690x on the six that excite a hip, 41.9-66.7x on the three that
+        do not), at bootstrap seeds 0-3 and sizes 32 / 64 / 256 (2.499x every time) and on an 8 s plan
+        (2.227x). But it clears the full 12-joint plan by 4.6% (1.569x), and at a quarter or double the default
+        injection it reads 1.053x and 1.158x and the tracking gate refuses again (at half, 1.883x). At 40 ms the
+        tracking verdict now depends on the size of the error: a straddle, not a capability. The one-sided limit
+        this test recorded moved OUT, to 50 ms: all nine selections read 1.163-1.193x there and are refused on
+        the merits, with the old scoring point at ~1.0 (60 ms: 1.121x; 50 ms on an 8 s plan, at 256 bootstrap
+        resamples, at half and at double the injection: 1.158x / 1.173x / 1.013x / 1.159x). That is the third
+        cell. One more thing the scoring change does not do, measured at DOUBLE the default injection: there
+        the OLD point would have passed (1.943x at 30 ms, 1.726x at 40 ms) and the new one refuses (1.163x,
+        1.158x). The fit is excellent on the joints this plan excites (FL hip 47x, thigh 72x, calf 40x at 30 ms),
+        but the nine joints on the other three legs are never identified, so their replay keeps our prior's
+        parameters and, handed the delay, rings on its own (0.110 rad RMS at each of those hips, before and
+        after alike). On a two-joint plan that floor is the whole-robot ratio. Not measured on the full plan.
+      * THE VERDICT did not move with the metric. At 30 and 40 ms the tracking gate passes the correct fit and
+        a RIVAL check refuses it by naming a part that is not wrong. At 40 ms the global-scale rival replays our
+        prior with every gear at 0.529x and tracks the log 1.241x better than the fit does (0.0318 against
+        0.0395 rad), and the verdict reads TORQUE SCALE SUSPECTED on a log the harness generated at gear 1.0. At
+        30 ms the link-inertia rival replays our prior with every link's rotational inertia at 15.9x, gets 8.47x
+        closer to the log than the prior does (its threshold is 7.3x) and 1.73x closer than the fit, and the
+        verdict reads LINK INERTIA SUSPECTED on a log generated at inertia scale 1.0. The 40 ms refusal held
+        everywhere a hip was excited: all six such selections, every seed and bootstrap size, the 8 s plan, the
+        full plan (1.569x, g 0.533) and half the injection (1.883x). The 30 ms one depends on the operating
+        point: refused by the link-inertia rival on all five selections that excite a hip with another joint
+        and on the full plan (6.254x), by the global-scale rival at half the injection (1.983x), and APPLIED with
+        the FL hip excited alone (6.851x) and on an 8 s plan (19.473x). The selections without a hip are
+        applied at 30 and at 40 ms.
+
+    WHY THE RIVALS WIN, measured: at these delays our PRIOR's replay rings on its own (handed three and four
+    ticks it departs from its own zero-delay trajectory by 0.068 and 0.096 rad) while the injected hardware,
+    with its extra damping, moves 0.0069 and 0.027. Each rival is a ONE-number model that makes the loop
+    insensitive to the delay: at gear 0.529x the prior departs by 0.0040 / 0.0055 rad, at inertia 15.9x by
+    0.0056 / 0.031. The correct fit is right to within ~20% per parameter, and its replay still carries 0.136 rad
+    RMS of error at the FL hip at 40 ms (0.180 before the fit), so a model that is wrong about everything but
+    quiet beats it on position RMS. How often the rivals refuse a CORRECT fit was sized on composed bodies at
+    delay 0 (the global-scale one has since been checked at 40 ms on a composed rover, against a real
+    torque-scale error), and ``application.what_this_gate_does_not_catch`` lists IMPORTED bodies as not
+    sampled. These are the first false refusals measured on one.
+
+    So the claim this test records changed SHAPE, not direction: the gate still refuses at 30, 40 and 50 ms,
+    and only at 50 ms is the refusal on the merits. A refusal that sends a customer to their gear ratio or their
+    CAD on a correct calibration is the failure this package ranks below a missed catch ("a check that refuses
+    a correct calibration is worse than one that misses a wrong one"), and on this twin it is what a quadruped
+    with 30-40 ms of hip latency is told today. Asserted per cell: the delay is exact, the OLD scoring point
+    refuses, the tracking metric clears (30, 40 ms) or sits between 1.05x and the gate (50 ms), the verdict
+    refuses, which gate refuses, and that the part a rival names is far from the 1.0 the harness used. If a
+    rival stops firing, that cell's verdict may have become a PASS: rewrite this to claim it only after checking
+    it across selections, plans and injection sizes the way this was checked.
+
+    THE 40 ms CELL AS IT STOOD BEFORE 2026-10-10, kept because each restatement moved a claim.
 
     Same fit, two scoring points: at the OLD one the score is pinned at ~1.000x -- and so is every other model
     in the estimator's family (best 1.003x, measured), so the refusal carries no information about the fit at
-    all. At the new one it is 1.148x here and 1.121x on the full 12-joint plan. So the metric gets SOME of its dynamic range back and the gate then refuses ON THE
-    MERITS, which is the honest outcome and the reason this section exists.
+    all. At the new one it is 1.148x here and 1.121x on the full 12-joint plan. So the metric gets SOME of its
+    dynamic range back and the gate then refuses ON THE MERITS, which is the honest outcome and the reason this
+    section exists.
 
     RE-MEASURED, and the verdict got WORSE rather than better. It was 1.484x (full plan) / 1.502x (narrow),
     straddling the 1.5x threshold, and the note here used to be that the verdict at 40 ms depended on which
@@ -799,24 +1089,55 @@ def test_at_twice_the_realistic_delay_the_metric_regains_range_but_the_gate_stil
     """
     from virturoid.services.sysid.fit import MIN_TRACKING_IMPROVEMENT_X
 
-    fit = fit_at(4)
-    traj = fit["trajectory"]
-    assert traj["scored_at_delay_ms"] == pytest.approx(40.0)
-    assert fit["latency"]["delay_ms"] == pytest.approx(40.0)
-    assert fit["latency"]["identified"] is True
-    assert traj["improvement_x_at_zero_delay"] < 1.05, (
-        "the old scoring point should still be pinned at ~1.0 here -- that is the ceiling effect")
-    assert traj["improvement_x"] > 1.05, (
-        f"the new scoring point must still recover SOME dynamic range at 40 ms -- that is the half of the "
-        f"closure that works. Got {traj['improvement_x']}x against {traj['improvement_x_at_zero_delay']}x at "
-        f"the old point; measured 1.148x (this plan) and 1.121x (full plan)")
-    # A LIMIT, asserted as a limit. If this starts passing, the section heading above is wrong.
-    assert traj["improvement_x"] < MIN_TRACKING_IMPROVEMENT_X, (
-        f"this test is no longer adversarial: 40 ms now CLEARS the {MIN_TRACKING_IMPROVEMENT_X}x gate at "
-        f"{traj['improvement_x']}x, so the limit this test records has closed and the docstring must be "
-        f"rewritten to claim it rather than to concede it")
-    assert fit["application"]["passed"] is False, (
-        f"...and the refusal must actually reach the verdict: {fit['application'].get('verdict')}")
+    ms = delay_ticks * MS_PER_TICK
+    fit = fit_at(delay_ticks)
+    traj, app, lat = fit["trajectory"], fit["application"], fit["latency"]
+    # The delay is still recovered exactly, and both replays are scored at it. This half is the wedge.
+    assert lat["identified"] is True, lat.get("not_identified_because")
+    assert lat["delay_ms"] == pytest.approx(ms), f"injected {ms:g} ms, recovered {lat['delay_ms']} ms"
+    assert traj["scored_at_delay_ms"] == pytest.approx(ms)
+    # The OLD scoring point refuses at every one of these delays (that dead zone is what the fix exists for),
+    # and from 40 ms on it is pinned at ~1.0, the bound this test has always held the 40 ms cell to.
+    old_bound = 1.05 if delay_ticks >= 4 else MIN_TRACKING_IMPROVEMENT_X
+    assert traj["improvement_x_at_zero_delay"] < old_bound, (
+        f"at {ms:g} ms the delay-blind score of this fit is {traj['improvement_x_at_zero_delay']}x, not under "
+        f"{old_bound}x (measured 1.194x / 1.012x / 1.008x at 30 / 40 / 50 ms on 2026-10-10), so the old scoring "
+        f"point is no longer in its dead zone here and the module docstring is stale")
+    if tracking_clears:
+        # THE METRIC'S CLOSURE AT THIS OPERATING POINT, asserted as one: if it falls back under the gate it
+        # regressed, and the refusal below is the tracking gate's again rather than a rival's.
+        assert traj["improvement_x"] >= MIN_TRACKING_IMPROVEMENT_X, (
+            f"at {ms:g} ms the tracking metric at the identified delay is back under the "
+            f"{MIN_TRACKING_IMPROVEMENT_X}x gate at {traj['improvement_x']}x (measured 4.899x at 30 ms and 2.499x "
+            f"at 40 ms on 2026-10-10). If the twin moved, re-measure the straddle described in the docstring "
+            f"before deciding which way it went")
+    else:
+        # THE LIMIT, where it moved to: some range back, not enough, refused on the merits.
+        assert 1.05 < traj["improvement_x"] < MIN_TRACKING_IMPROVEMENT_X, (
+            f"this test is no longer adversarial at {ms:g} ms: the tracking metric at the identified delay reads "
+            f"{traj['improvement_x']}x (measured 1.173x on 2026-10-10, 1.163-1.193x on nine joint selections). "
+            f"Over the gate means the one-sided limit moved out again and must be re-found; at or under 1.05x "
+            f"means the scoring change no longer recovers anything here")
+    # THE VERDICT, asserted as a limit at all three delays.
+    assert app["passed"] is False, (
+        f"this test is no longer adversarial: a fit at {ms:g} ms was APPLIED: {app.get('verdict')}. If that is "
+        f"real it is the closure this file has been waiting for: check it across joint selections, the full "
+        f"plan and injection sizes before the docstring claims it")
+    assert app["refused_by"] == refused_by, (
+        f"at {ms:g} ms the refusal was measured to come from {refused_by or 'the tracking gate'}; it now comes "
+        f"from {app['refused_by'] or 'the tracking gate'}: {app.get('verdict')}")
+    # A rival's refusal NAMES a part, and the part it names here is not wrong: the harness injected frictionloss,
+    # damping and armature offsets and nothing else, at gear 1.0 and link inertia 1.0.
+    if refused_by == "global_scale":
+        g = float(fit["global_scale"]["rival"]["torque_scale_g"])
+        assert abs(g - 1.0) > 0.2, (
+            f"the global-scale rival refused at {ms:g} ms naming a torque scale of {g}x, within 20% of the 1.0 "
+            f"the harness used (measured 0.529x on 2026-10-10)")
+    elif refused_by == "link_inertia":
+        s = float(fit["link_inertia"]["rival"]["inertia_scale_s"])
+        assert s > 2.0, (
+            f"the link-inertia rival refused at {ms:g} ms naming an inertia scale of {s}x, near the 1.0 the "
+            f"harness used (measured 15.865x on 2026-10-10)")
 
 
 # =========================================================================================================
@@ -985,6 +1306,13 @@ def test_an_error_the_free_parameters_cannot_express_costs_the_position_only_mar
     and dry friction 0.2 the joint's torque budget is dominated by terms the free columns DO express, so the
     inertial term carrying the +30% error is a smaller share of it and the reconstruction survives. At damping
     0.8 it was not, and it did not.
+
+    RE-MEASURED 2026-10-10 on the twin with source inertials. NEVER CONFIDENTLY WRONG holds in full: all 15
+    configurations return the injected tick, every one of them identified, margins 0.186-0.936. THE COST holds
+    as asserted (0.908 clean, 0.294 at +15%, 0.203 at +30%, monotone, the third rung at 22% of the first),
+    but "+50% 0.178, nearly on the floor" is RETRACTED: +50% now reads 0.884, back near the clean margin, so the
+    cost is monotone through +30% and not beyond it. Nothing asserted here reaches past +30%, and nothing
+    should. The clean margins at 0 / 20 / 40 ms are 0.914 / 0.908 / 0.811.
     """
     from virturoid.services.sysid.gap_report import DELAY_MIN_MARGIN
 

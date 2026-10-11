@@ -61,7 +61,9 @@ def test_mass_and_com_agree_with_mujoco_itself(dog):
     if m.nkey:
         mujoco.mj_resetDataKeyframe(m, d, 0)
     mujoco.mj_forward(m, d)
-    assert rep["total_kg"] == pytest.approx(float(m.body_mass.sum()), rel=1e-6)
+    # The probe reports total_kg to 4 decimals, so the bound is half a unit in that place. rel=1e-6 held only
+    # while the composed dog's mass happened to end in zeros (3.1451); a bigger head made it 3.22141.
+    assert rep["total_kg"] == pytest.approx(float(m.body_mass.sum()), abs=5e-5)
     com = np.sum(m.body_mass[:, None] * d.xipos, axis=0) / float(m.body_mass.sum())
     assert rep["com"] == pytest.approx([float(v) for v in com], abs=1e-4)
 
