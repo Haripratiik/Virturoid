@@ -478,6 +478,19 @@ def main(argv=None) -> int:
               f"(median kp {np.median(_kp):.0f})", flush=True)
     # FEET (anti-shuffle): the lowest BODY geoms at the standing pose (exclude the worldbody/floor plane). The
     # reward pays the policy to lift these above their standing height, so it STEPS instead of dragging its feet.
+    #
+    # NOT THE VERDICT'S FEET, and left so ON PURPOSE: a training reward change needs its own GPU A/B. MEASURED
+    # 2026-10-11 on CPU-MuJoCo mirrors of the models built here (trot-CPG prior, zero residual). The deploy verdict
+    # reads one foot per leg, its lowest point, from where it stands (morph_policy._FootClearance); this set is geom
+    # CENTRES within 5 cm of the lowest at the spawn state, and of that rule's three misreadings physics_only removes
+    # one. DECORATION: gone, but the band still takes a second, collidable segment per leg (the thigh capsule) on
+    # the template, cat and mouse, which reads SWING for 50-55% of the time its leg is planted and STANCE through
+    # 86-100% of a hind foot's real lifts; --mjcf-file keeps visual meshes in the set (Go2 two per leg, ANYmal B
+    # one). CENTRES: every composed and twin foot geom is a shank capsule whose centre is not the foot (--sphere-feet
+    # swaps in a sphere centred where the capsule's centre was). THE SPAWN REFERENCE: foot_z0 is the spawn state,
+    # which is not where a foot stands: the hexapod's box feet spawn 2.1 cm INTO the floor, so its planted feet read
+    # SWING 98-100% of the time with or without sphere feet, and a --gene-json twin spawns at qpos0 (not its rest
+    # keyframe) with its shanks 14-15 cm through the floor.
     _gz0 = _d0.geom_xpos[:, 2]
     _bgeoms = [gi for gi in range(mj.ngeom) if int(mj.geom_bodyid[gi]) != 0]
     _zmin = min(float(_gz0[gi]) for gi in _bgeoms) if _bgeoms else 0.0

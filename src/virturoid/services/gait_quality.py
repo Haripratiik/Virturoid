@@ -175,6 +175,49 @@ _MIN_STRAIGHTNESS = 0.5
 #: such a dict read as MILLS AROUND on a path of exactly 0.00 m.
 _MIN_PATH_M = 0.05
 
+# ---------------------------------------------------------------------------------------------------------
+# STEPPING: did the feet lift, or did the body slide on them?
+# ---------------------------------------------------------------------------------------------------------
+#: Foot lifts per second, over all feet, and the fraction of steps with SOME feet down and SOME up. Both are read
+#: off ``morph_policy._FootClearance``: one foot per leg, its lowest point, up once 2 cm above where it stands.
+#:
+#: RE-DERIVED 2026-10-11 ON THAT MEASURE, not carried over from the geom-centre counter it replaced (which read a
+#: composed body's visual collars as feet). 332 crawl rollouts: the Menagerie Go2, A1, Go1, ANYmal B and C at their
+#: own searched credible points (two seeds each), their imported twins at the same points, 13 composed bodies at
+#: their fitted or shipped points, and each of those bodies (the fanned test quad only knee-held) also with its knee
+#: pulse held, its hip held, tiny, soft and shuffling variants, at 1200 and 6000 steps. Each rollout labelled by
+#: CONTACT ground truth, not by any clearance threshold: a leg STEPS when its flights (>= 20 ms off the floor) carry
+#: its toe at least half as far as the body travelled. On the 74 rollouts that pass every other gate, i.e. the ones
+#: these two numbers alone decide:
+#:
+#:     every leg steps (23 rollouts)               cadence >= 1.83, support >= 0.289 (one exception: a softened
+#:                                                 hexapod, kp/4, flights peaking 1-2 cm, support 0.078)
+#:     no foot ever leaves the floor (1)           0.00 / 0.000
+#:     the knees-locked canonical template at      0.75 / 0.097   (flights 0.3-0.6 cm median: "barely lift")
+#:       6000 steps
+#:
+#: So both thresholds sit inside the measured gap (cadence 0.75..1.83, support 0.097..0.289) and neither moves. The
+#: walking side's support margin is THIN: 0.039, the canonical template at 1200 steps, whose median flight clears
+#: 1.5 cm and whose old reading, 0.977, was collars.
+#:
+#: HOW LOW A STEP MAY SKIM IS A CHOICE, AND THIS IS WHERE IT IS MADE. Re-judging the banked locomotion rows found
+#: five composed gaits the old counter passed on their collars (support 0.40-0.93) whose legs DO carry their travel
+#: through the air, on flights whose median peak is 0.4 to 2.1 cm (p90 0.8 to 3.0 cm): 2 cm reads them SLIDE
+#: (support 0.05 to 0.22); a 1.5 cm bar would keep four of them. There is no gap in the clearance genuine steps
+#: reach, from 0.5 cm skims to 7 cm swings, so no measurement picks the bar; it stays at the crawl's original 2 cm.
+#:
+#: WHAT NO THRESHOLD HERE CAN SEE. 10 of those 74 rollouts lift their feet past 2 cm while making NO leg's progress
+#: in the air: the feet hop in place, or backwards, while the body slides forward on them (the native Go2 at the
+#: point its seed-101 search found, the native Go1's seed-101 point, the Go2 twin at both native points). 9 of the
+#: 10 read CREDIBLE WALK here, and at every clearance bar measured (0.5 to 4 cm, 2.5 to 10% of leg length) they
+#: overlap the stepping rollouts on both numbers (support 0.27 to 0.98). Separating them needs a measure of
+#: progress per flight, not a better clearance threshold; the 40 rollouts in which some legs step and others drag
+#: (most of the natives' own credible points) sit between the two. Measured offline on the 69 rollouts that pass
+#: every gate today, requiring the legs' mean flight share to reach 0.5 would keep all 22 stepping ones and 22 of 38
+#: partial ones and reject all 9 dragging ones; it would also reject 5 of the 10 natives' own credible points.
+_MIN_CADENCE = 1.0
+_MIN_SUPPORT = 0.25
+
 
 def course_summary(r: dict) -> dict | None:
     """WHERE DID IT GO — net displacement, ground actually covered, and how far the heading swung from its start.
@@ -266,7 +309,7 @@ def classify(r: dict) -> str:
                                 or c["heading_dev_max_deg"] >= _HARD_HEADING_DEV)
     milled = c is not None and c["straightness"] is not None and c["straightness"] < _MIN_STRAIGHTNESS
     on_course = c is None or not (turned or milled)
-    scalars_ok = survived and up >= 0.6 and cad >= 1.0 and sup >= 0.25 and fwd >= 0.3
+    scalars_ok = survived and up >= 0.6 and cad >= _MIN_CADENCE and sup >= _MIN_SUPPORT and fwd >= 0.3
     if scalars_ok and level and holds and on_course:
         return "CREDIBLE WALK"
     # not a credible walk: name the DOMINANT fall mode from the orientation trace (if replayable) so the
@@ -298,6 +341,6 @@ def classify(r: dict) -> str:
                 f"rears/rocks, not a clean walk)")
     if up < 0.6 or hr < 0.6:
         return "CROUCH (low/unstable stance)"
-    if cad < 1.0 or sup < 0.25:
+    if cad < _MIN_CADENCE or sup < _MIN_SUPPORT:
         return "SLIDE (feet barely lift / no real stepping)"
     return "FORWARD BUT SHORT / not a credible walk"

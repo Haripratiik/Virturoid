@@ -1475,9 +1475,10 @@ def _run_exported_controller(gene, program: dict, controller_source: str, *, ste
     import mujoco
     import numpy as np
 
+    from virturoid.services.appendage_map import build_appendage_map
     from virturoid.services.gait_quality import classify
     from virturoid.services.morph_graph import encode_robot
-    from virturoid.services.morph_policy import (_reset_to_rest, compiled_model, robot_mjcf,
+    from virturoid.services.morph_policy import (_FootClearance, _reset_to_rest, compiled_model, robot_mjcf,
                                                  upright_height_ratio)
 
     ns: dict = {}
@@ -1516,20 +1517,15 @@ def _run_exported_controller(gene, program: dict, controller_source: str, *, ste
     bq = graph.base_qadr
     x0 = float(data.qpos[bq]); z0 = float(data.qpos[bq + 2]) or 1.0
     frame_every = max(5, int(steps) // 300)
-    tau_up = None
-    # foot set + cadence/support bookkeeping, mirroring recipe_rollout_morph so `classify` reads the same signals
-    gz0 = np.asarray(data.geom_xpos[:, 2], dtype=float)
-    body_g = [gi for gi in range(model.ngeom) if int(model.geom_bodyid[gi]) != 0]
-    if body_g:
-        zmin = min(float(gz0[gi]) for gi in body_g)
-        feet = [gi for gi in body_g if float(gz0[gi]) < zmin + 0.05] or body_g
-    else:
-        feet = []
-    feet_idx = np.asarray(feet, dtype=int)
-    fz0 = gz0[feet_idx] if len(feet_idx) else np.zeros(0)
-    c_prev = (np.asarray(data.geom_xpos[feet_idx, 2]) < fz0 + 0.02) if len(feet_idx) else np.zeros(0, bool)
-    tau_up = upright_height_ratio(len(feet_idx))
-    lifts = up_steps = support_steps = 0
+    # FEET AS FOOT CLEARANCE, by the crawl's own rule (morph_policy._FootClearance): the program this runs is a
+    # frozen crawl or trot, and it must be judged by the measurement the rollout that produced it was judged by. The
+    # geom-centre rule this replaces counted a composed quadruped's visual collars and boots as feet, and the upright
+    # bar below read that count: 12 "feet" held a quadruped to the octopod's 0.50 instead of its own 0.70.
+    feet = _FootClearance(model, data, build_appendage_map(model).legs, act_u)
+    tau_up = upright_height_ratio(feet.n)
+    foot_h = np.empty((int(steps) + 1, feet.n))                  # row 0 = the state the first step starts from
+    foot_h[0] = feet.heights(data)
+    up_steps = 0
     alive = int(steps); hr = 1.0; qpos_frames = []; tgt = None
     for t in range(int(steps)):
         if t % dec == 0:
@@ -1552,12 +1548,8 @@ def _run_exported_controller(gene, program: dict, controller_source: str, *, ste
             alive = t; break
         if z > tau_up * z0 and upr > 0.6:
             up_steps += 1
-        if len(feet_idx):
-            c_now = np.asarray(data.geom_xpos[feet_idx, 2]) < fz0 + 0.02
-            lifts += int(np.sum(c_prev & ~c_now))
-            ng = int(np.sum(c_now))
-            support_steps += int(0 < ng < len(feet_idx))
-            c_prev = c_now
+        foot_h[t + 1] = feet.heights(data)
+    lifts, support_steps = feet.count(foot_h[:alive + 1])
     forward = float(data.qpos[bq] - x0)                          # SIGNED: backward travel is not forward travel
     r = {"finite": True, "forward": round(forward, 3), "height_ratio": round(hr, 3), "alive": alive,
          "survived": bool(alive >= int(steps) and hr > 0.6),
@@ -1565,7 +1557,7 @@ def _run_exported_controller(gene, program: dict, controller_source: str, *, ste
          "cadence": round(lifts / max(1e-9, max(1, alive) * dt), 2),
          "upright_frac": round(up_steps / max(1, alive), 3),
          "support_frac": round(support_steps / max(1, alive), 3),
-         "n_feet": int(len(feet_idx)), "steps": int(steps), "frame_every": frame_every,
+         "n_feet": int(feet.n), "steps": int(steps), "frame_every": frame_every,
          "qpos_frames": qpos_frames}
     r["verdict"] = classify(r)
     r["measured_by"] = {

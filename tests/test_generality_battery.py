@@ -73,6 +73,10 @@ class GeneralityBatteryTests(unittest.TestCase):
         #   centipede forward 0.248 cadence 62.08  support 1.000  -> FORWARD BUT SHORT
         # The octopod and the centipede are NOT credible walks, and this test does not claim they are. What it
         # claims — and what its name claims — is that every legged body STEPS, travels forward, and stays up.
+        # RE-MEASURED 2026-10-11 counting one foot per leg (morph_policy._FootClearance): the 2026-08-09 counter read
+        # every geom near the floor, and on the dog 8 of its 12 were visual collars and boots. Dog cadence 2.50,
+        # support 0.289 (a margin of 0.039 over the 0.25 gate, not 0.727); hexapod 18.33 / 0.984; octopod
+        # 15.42 / 0.982; centipede 19.58 / 0.983. Same rollouts, same forward distances.
         walks = 0
         for p in ("a quadruped robot dog", "a hexapod", "an octopod", "a centipede"):
             g = ensure_walkable_quad(self._build(p), p)

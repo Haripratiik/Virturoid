@@ -131,12 +131,23 @@ class TrotCpgPriorTests(unittest.TestCase):
         # support triangle -> it cannot roll). The diagonal TROT rolls this same tippy body over for want of
         # active balance; the fan (wide stance) + crawl (static support) together give a real open-loop walk.
         from virturoid.services.anatomy_compiler import _generic_legged_graph, build_from_anatomy
+        from virturoid.services.gait_quality import classify
         from virturoid.services.morph_policy import crawl_gait_rollout
         wide = crawl_gait_rollout(build_from_anatomy(_generic_legged_graph(n_pairs=2, girth=0.22, fan=True)),
-                                  steps=1200)
+                                  steps=1200, record_qpos=True)
         self.assertTrue(wide["survived"], "the fanned quad must survive the whole horizon under the crawl")
         self.assertGreater(wide["forward"], 0.3, "must WALK forward (not creep in place)")
-        self.assertGreater(wide["support_frac"], 0.5, "must genuinely STEP (partial support), not slide/stand")
+        # It must genuinely STEP. This line read `support_frac > 0.5`, and the 0.978 that cleared it was mostly
+        # decoration: the step counter took every geom whose centre sat near the floor, and 8 of this body's 12 were
+        # visual collars and boots that ride up whenever a knee bends. Counted one foot per leg at its lowest point
+        # (morph_policy._FootClearance), MEASURED 2026-10-11: support 0.357, 2.92 lifts/s. The steps are real by
+        # contact ground truth: every foot is off the floor 43-55% of the time and its flights carry 70-92% of the
+        # body's travel. The front feet peak at 5-7 cm and the hind feet at about 2 cm (median flight 0.4-0.5 cm),
+        # which is why the honest number is 0.36 and not 0.98. So the bound is the product's own SLIDE gate, which
+        # this body clears by 0.107, with every foot counted once.
+        self.assertEqual(wide["n_feet"], 4, "one foot per leg, not one per geom near the floor")
+        self.assertGreaterEqual(wide["support_frac"], 0.25, "must genuinely STEP (partial support), not slide/stand")
+        self.assertNotIn("SLIDE", classify(wide), "the product's own step gate must not call this a slide")
         self.assertGreater(wide["height_ratio"], 0.6, "must stay TALL/upright, not collapse or roll")
 
     def test_ensure_walkable_quad_is_optin_and_diagnosis_driven(self):
