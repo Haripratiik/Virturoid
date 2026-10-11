@@ -1334,6 +1334,41 @@ def lift_joint_for_leg(model, data, qadr, act_u, leg, hip_tok: int, *, delta: fl
     return pick, disclosure
 
 
+
+def lift_sign_for_leg(model, data, qadr, leg, lift_tok: int, *, delta: float = 0.3) -> float:
+    """WHICH WAY THIS LEG'S LIFT JOINT TURNS TO RAISE THE FOOT: ``+1.0`` or ``-1.0``, measured.
+
+    THE DEFECT. During swing the crawl added ``+knee_amp`` to the lift joint on every body and never asked which
+    way that turns the leg. The stride already had its sign measured (``hip_sign``: "+stride swings the foot
+    FORWARD on some bodies, BACK on others"); the lift's was assumed, and the assumption holds on one family only,
+    the composed walkers, whose knees fold the foot up for a positive angle. MEASURED 2026-10-11 at the rest pose,
+    foot height for +-0.3 rad on the lift joint: on every anatomy-compiled walker tried (the offline dog, cat,
+    horse, crab and ant, the design schema's quadruped and hexapod) and on every Menagerie quadruped tried (Go2,
+    Go1, A1, Spot, Barkour vB) a positive angle LOWERS the foot by 2 to 4 cm, and ANYmal C, whose knees point
+    opposite ways front and rear, lowers two feet and raises two. On those bodies "swing" pressed the foot into
+    the floor while it strode forward, so the leg meant to be in the air was the one pushing, and backwards: the
+    quadrupeds found their way forward only because the probe could reverse the leg wave, and the hexapod, whose
+    wave reversal is the identity (see the direction probe below), walked backwards (the schema's: -2.5 m).
+
+    THE RULE. Perturb the lift joint by +-``delta`` off the rest pose and keep the direction that raises the
+    foot's lowest point more. Unclamped by joint limits, for the reason ``lift_joint_for_leg`` gives. Where +
+    already lifts (every composed walker), this returns 1.0 and the gait is unchanged.
+    """
+    import mujoco
+
+    fg = _foot_geom_id(model, data, int(leg.tip_body))
+
+    def _foot_z() -> float:
+        return float(data.geom_xpos[fg][2]) if fg is not None else float(data.xpos[int(leg.tip_body)][2])
+
+    qa = int(qadr[lift_tok]); q0 = float(data.qpos[qa]); z0 = _foot_z()
+    rise = []
+    for step in (delta, -delta):
+        data.qpos[qa] = q0 + step; mujoco.mj_forward(model, data)
+        rise.append(_foot_z() - z0)
+    data.qpos[qa] = q0; mujoco.mj_forward(model, data)
+    return 1.0 if rise[0] >= rise[1] else -1.0
+
 #: A foot has LEFT THE GROUND once its lowest point is this far above the level it stands at. The crawl's original
 #: 2 cm bar, kept on evidence rather than habit (2026-10-11: 332 traced crawl rollouts judged against CONTACT ground
 #: truth, see ``gait_quality._MIN_SUPPORT``). On the 74 rollouts the step gate alone decides, 1.5 cm and 5% of the
@@ -1649,6 +1684,7 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float | None = None, hi
     xs = sorted({round(lg.tip_xy[0], 2) for lg in legs_list})
     rank_of = {x: i for i, x in enumerate(xs)}
     hip_k: dict = {}; knee_k: dict = {}; seg_of: dict = {}; is_right: dict = {}; hip_sign: dict = {}
+    lift_sign: dict = {}
     lift_choice: dict = {}
     max_seg = max((rank_of[round(lg.tip_xy[0], 2)] for lg in legs_list), default=0)
     for i, lg in enumerate(legs_list):
@@ -1662,6 +1698,7 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float | None = None, hi
         # two-link animal leg and the ANKLE PITCH on a three-joint humanoid leg, leaving the knee frozen.
         # Identical to the old pick whenever the leg offers only one candidate, which is every quadruped.
         knee_k[i], _disc = lift_joint_for_leg(model, data, qadr, act_u, lg, hip_k[i])
+        lift_sign[i] = lift_sign_for_leg(model, data, qadr, lg, knee_k[i])
         if _disc is not None and _disc["changed"]:
             lift_choice[i] = _disc
         # PROPULSION SIGN (general, MEASURED): +stride swings the foot FORWARD (+x) on some bodies, BACK on
@@ -1770,7 +1807,7 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float | None = None, hi
                     lift = 0.5 * (1 - np.cos(2 * np.pi * u / lift_duty)); s = -np.cos(np.pi * u / lift_duty)
                 else:
                     lift = 0.0; s = np.cos(np.pi * (u - lift_duty) / max(1e-3, 1.0 - lift_duty))
-                tgt[knee_k[key]] = _qref[knee_k[key]] + knee_amp * lift
+                tgt[knee_k[key]] = _qref[knee_k[key]] + knee_amp * lift_sign[key] * lift
                 # DIFFERENTIAL-STRIDE STEERING (like a diff-drive rover, but with legs): amplify the LEFT legs'
                 # stride and shrink the RIGHT (or vice-versa) so one side pushes harder -> the body YAWS. turn_bias
                 # 0 = straight; the follower sets it from the heading error to steer along a path.
@@ -1939,7 +1976,8 @@ def crawl_gait_rollout(gene, *, steps: int = 1500, freq: float | None = None, hi
             "kp": float(kp),
             "kd": float(kd),
             "legs": [{"hip_index": int(hip_k[key]), "knee_index": int(knee_k[key]),
-                      "phase": float(best_phd[key]), "hip_sign": float(hip_sign[key])}
+                      "phase": float(best_phd[key]), "hip_sign": float(hip_sign[key]),
+                      "lift_sign": float(lift_sign[key])}
                      for key in sorted(hip_k)],
         }
         if _gain_mode:
@@ -2013,16 +2051,25 @@ def legged_steer_to_goal(gene, goal_xy, *, steps: int = 4000, gain: float = 1.6,
 
     import numpy as np
     gx, gy = float(goal_xy[0]), float(goal_xy[1])
+    # THE CLOSEST APPROACH, not only where the run ended. "Reached" read the final position alone, so a body
+    # that walked THROUGH the goal and kept going failed: measured 2026-10-11, once the crawl's swing lifted
+    # the feet the template passed (2.2, 0) and stopped 0.61 m beyond it. The run does not stop at the goal.
+    seen = {"origin": None, "closest": float("inf")}
 
     def _steer(x, y, yaw):
+        if seen["origin"] is None:
+            seen["origin"] = (x, y)
+        ox, oy = seen["origin"]
+        seen["closest"] = min(seen["closest"], math.hypot((x - ox) - gx, (y - oy) - gy))
         err = math.atan2(math.sin(math.atan2(gy - y, gx - x) - yaw), math.cos(math.atan2(gy - y, gx - x) - yaw))
         return float(np.clip(-gain * err, -cap, cap))          # -err: negative turn_bias -> +yaw (turn left)
 
     r = crawl_gait_rollout(gene, steps=steps, steer_fn=_steer)
     fx, fy = float(r.get("forward", 0.0)), float(r.get("lateral", 0.0))   # net world displacement from the origin
     dist = float(math.hypot(fx - gx, fy - gy))
+    closest = min(dist, seen["closest"])
     r.update({"goal_xy": [gx, gy], "final_xy": [round(fx, 3), round(fy, 3)], "goal_dist": round(dist, 3),
-              "reached_goal": bool(dist < reach_radius)})
+              "closest_m": round(closest, 3), "reached_goal": bool(closest < reach_radius)})
     return r
 
 

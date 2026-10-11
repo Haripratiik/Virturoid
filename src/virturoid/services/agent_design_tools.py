@@ -1282,6 +1282,25 @@ def run_train_gene_job(args: dict, progress=None) -> dict:
                       "max_evals": cap, "budget_s": fit.get("budget_s"),
                       "stopped_by_budget": fit.get("stopped_by_budget"),
                       "stopped_by_eval_budget": fit.get("stopped_by_eval_budget")})
+    elif default_walks and str(((getattr(gene, "metadata", None) or {}).get("imported_from")) or ""):
+        # AN IMPORTED ROBOT GETS THE MEASURED POINT LANDED. verify_robot will not certify our generic default on a
+        # customer's machine (``_reframe_for_imported_body``: "NO LOCOMOTION VERDICT -- we do not have your robot's
+        # controller"); it certifies a controller produced FOR this body. Here the fit measured the shipped default
+        # on this very body and found it a credible walk, which is exactly such a controller, and landing nothing
+        # left the agent at a dead end: measured 2026-10-11 on the Menagerie Go2 once the crawl's swing stopped
+        # pressing its feet, the default walked 5.66 m, this door returned no_output, and verify still said NO
+        # LOCOMOTION VERDICT. A body we composed is certified on the default already and keeps the branch below.
+        from virturoid.services.gait_flywheel import _DEFAULT_GAIT
+        from virturoid.services.trained_controller import apply_trained_gait
+        params = {k: float(_DEFAULT_GAIT[k]) for k in ("freq", "hip_amp", "knee_amp", "kp", "kd")}
+        applied = apply_trained_gait(
+            rid, params, door="train_held", apply=apply_mode, credible=True,
+            verdict=(f"the shipped default operating point, measured a {fit.get('default_verdict')} on this body "
+                     f"at the {horizon}-step horizon a walk is judged at ({fit.get('default_forward_m')} m): kept "
+                     f"as this robot's own, nothing searched"),
+            evidence={"forward_m": fit.get("default_forward_m"), "default_forward_m": fit.get("default_forward_m"),
+                      "credible_walk": True, "beats_default": False, "kept_default": True,
+                      "judged_at_steps": horizon, "n_evals": 0, "max_evals": cap, "budget_s": fit.get("budget_s")})
     elif default_walks:
         applied = _nothing_to_land(rid, apply_mode, (
             f"the shipped default operating point is already a {fit.get('default_verdict')} on this body at the "
@@ -1315,10 +1334,12 @@ def run_train_gene_job(args: dict, progress=None) -> dict:
             # ``solved`` = the run produced a walk AND it entered the shared bank to seed other bodies. A
             # conjunction on the row actually written, so it can never be True while either half is False.
             "solved": credible_walk and bool(banked),
-            "credible": credible_walk,                          # THE claim, and the only key allowed this word
+            # THE claim, and the only key allowed this word. A shipped default the fit measured walking on this body
+            # at the judging horizon is that claim too: nothing was searched because nothing needed to be.
+            "credible": credible_walk or default_walks,
             "credible_reason": _reason or None,                 # the fit's sentence (or this door's, for a budget)
             "survived": survived,                               # the weaker fact; None when nothing was searched
-            "verdict": _named or None,                          # the classify() word for the winner it judged
+            "verdict": _named or (fit.get("default_verdict") if default_walks else None),
             "judged_at_steps": horizon,                         # ...and the horizon it was judged at
             "settling_check": None,                             # nothing shorter to refute: it searched AT 6000
             "n_evals": int(fit.get("n_evals") or 0), "stopped_reason": fit.get("stopped_reason"),
@@ -1327,7 +1348,8 @@ def run_train_gene_job(args: dict, progress=None) -> dict:
             "default_forward_m": fit.get("default_forward_m"), "beats_default": beats_default,
             "default_verdict": fit.get("default_verdict"),      # measured first; when it walks, nothing is searched
             "default_beat_it": default_beat_it,
-            "forward_m": forward, "applied_to_robot": applied,
+            "forward_m": (fit.get("default_forward_m") if (forward is None and default_walks) else forward),
+            "applied_to_robot": applied,
             "controller_now": _now,
             # WHAT THE RUN COST AND WHAT BOUNDED IT, so an agent can size the next call from a number rather than
             # a guess: wall time, the cap and clock in force (None = unbounded), and the fit's whole disclosure.

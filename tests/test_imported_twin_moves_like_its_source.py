@@ -365,6 +365,11 @@ def test_the_twin_walks_like_its_source_under_one_controller(go2):
 
     The operating point is the one the product's own search found for the SOURCE (seed 0), not one tuned for
     the twin, so passing means the twin reproduces the source rather than that a gait exists for it.
+
+    That search ran while the crawl's swing pressed the Go2's feet down instead of lifting them (see
+    ``morph_policy.lift_sign_for_leg``). The point is still a walk for both once the swing lifts: measured
+    2026-10-11, source +2.997 m, twin +3.032 m with the source's ``impratio`` (``robot_import`` now carries it;
+    without it the twin went +2.293 m, 23% short).
     """
     from virturoid.services.gait_search import evaluate_gait
 
@@ -376,3 +381,32 @@ def test_the_twin_walks_like_its_source_under_one_controller(go2):
     assert got["verdict"] == "CREDIBLE WALK", f"the twin did not walk where its source does: {got['verdict']}"
     assert abs(got["forward"] - src["forward"]) < 0.15 * src["forward"], (
         f"the twin travelled {got['forward']:+.3f} m where its source travelled {src['forward']:+.3f} m")
+
+
+#: What the product's search (6000 steps, stop at the first credible) finds for the SOURCE on seeds 0-2 now that
+#: the swing lifts the feet: +11.64, +5.93 and +19.08 m, against +2.36 m on its best seed before.
+_SOURCE_SEARCH_POINTS = (
+    {"freq": 2.075438132656036, "hip_amp": 0.9136711625948919, "knee_amp": 1.1601056626108206,
+     "kp": 137.66460632626413, "kd": 5.75907453722639},
+    {"freq": 2.2073505152388715, "hip_amp": 1.1759449894628184, "knee_amp": 1.0826092690458469,
+     "kp": 61.62950949336451, "kd": 10.442406566687632},
+    {"freq": 2.6864995232223374, "hip_amp": 0.8605087198613482, "knee_amp": 1.1934516466819154,
+     "kp": 147.18537616907307, "kd": 5.7000757816218295},
+)
+
+
+@needs_go2
+@pytest.mark.parametrize("seed", [0, 1, 2])
+def test_the_twin_is_judged_like_its_source_at_the_gaits_its_source_now_finds(go2, seed):
+    """The verdict agrees at every gait the search finds for the source. The DISTANCE does not, yet: at these
+    faster gaits the twin went +15.64 / +9.06 / +14.16 m against the source's +11.64 / +5.93 / +19.08 m (with the
+    source's impratio; its integrator and start height were measured and change nothing). That gap is open and is
+    stated here rather than hidden behind a tolerance wide enough to swallow it."""
+    from virturoid.services.gait_search import evaluate_gait
+
+    _, twin, native = go2
+    p = _SOURCE_SEARCH_POINTS[seed]
+    src = evaluate_gait(native, p, steps=6000)
+    got = evaluate_gait(twin, p, steps=6000)
+    assert src["verdict"] == "CREDIBLE WALK", f"precondition: the source walks at this point ({src['verdict']})"
+    assert got["verdict"] == src["verdict"], f"the twin was judged {got['verdict']!r} where its source walks"

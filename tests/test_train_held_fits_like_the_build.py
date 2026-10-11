@@ -265,8 +265,11 @@ def test_an_ingested_go2_gets_the_walk_its_physics_supports(fresh_bank):
     the candidate it adopts (its fit took 61 s through MCP, and three times that beside other runs), and a test
     that depends on the machine's speed is a test of the machine. The search is seeded, so what it adopts is not.
     MEASURED through MCP: 49 candidates, CREDIBLE WALK +1.542 m, landed as ``tuned_for_this_body::train_held``.
-    The distance bound is loose on purpose: it rules out a degenerate pass at the 0.3 m a credible walk needs,
-    not a particular operating point.
+    Since the crawl's swing lifts the Go2's feet instead of pressing them (2026-10-11) its shipped default walks
+    it 5.66 m, so the fit searches nothing; the door then lands that measured point as the robot's own, because
+    verify will not certify our generic default on an imported body. Without that landing this ended no_output
+    with verify still saying NO LOCOMOTION VERDICT. The distance bound is loose on purpose: it rules out a
+    degenerate pass at the 0.3 m a credible walk needs, not a particular operating point.
     """
     from virturoid.services.agent_tools import call_tool
     env = call_tool("ingest_project", {"project_path": str(_GO2_DIR), "description": "a Unitree Go2 quadruped"})

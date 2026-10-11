@@ -17,8 +17,11 @@ def test_train_held_banks_a_credible_gait(tmp_path, monkeypatch):
     # confine the flywheel DB writes to a temp dir (never the live build/memory)
     monkeypatch.setattr("virturoid.services.agent_tools.safe_build_path", lambda *a, **k: tmp_path)
 
-    g = compose_robot("a sturdy four-legged walking robot", ensure_walkable=True)
-    rid = S.put_robot(g, prompt="a sturdy four-legged walking robot")
+    # A body whose shipped default does NOT walk, so there is a search to bank from. The four-legged template
+    # this used walks on the default since the crawl's swing lifts its feet (2026-10-11), and the fit then
+    # searches nothing; the horse's default still crouches (measured -0.12 m).
+    g = compose_robot("a horse robot", ensure_walkable=False)
+    rid = S.put_robot(g, prompt="a horse robot")
     out = run_train_gene_job({"robot_id": rid, "max_evals": 3})
 
     assert out.get("mode") == "gait_search"

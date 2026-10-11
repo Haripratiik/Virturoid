@@ -1455,6 +1455,17 @@ def _import_robot_uncached(source: str, *, robot_id: str | None = None, species:
             "geom that carries its contact (a leaf's far end, which on a leg is the foot; otherwise its largest "
             "collision geom). The emitted collider carries them, so contacts are solved with the source's model")
 
+    # ...AND THE RATIO IT SOLVES FRICTION WITH. ``impratio`` is a property of the model's contact solve, not of any
+    # one geom, so the rows above cannot carry it: under an elliptic cone it sets how stiff friction is relative
+    # to the normal force, i.e. how much a planted foot slips. The Go2 declares 100 and every compiled body got
+    # MuJoCo's 1. The docstring of ``_collision_radius`` already records the twin reproducing its source "once it
+    # also ... uses the source's impratio", but the twin was never given it. MEASURED 2026-10-11 at the gait the
+    # product's search found for the source: source +2.997 m, twin +2.293 m, twin with the source's impratio
+    # +3.032 m. Only a non-default value under an elliptic cone is recorded (it means nothing on a pyramidal one).
+    if (int(mj.opt.cone) == int(mujoco.mjtCone.mjCONE_ELLIPTIC)
+            and abs(float(mj.opt.impratio) - 1.0) > 1e-9):
+        gene.metadata["source_impratio"] = round(float(mj.opt.impratio), 6)
+
     # THE ROOT'S OWN COLLISION GEOMETRY. A segment's collider runs from its origin along its local +z, which fits a
     # limb (origin at the joint, link toward the next one) and does not fit a trunk, whose origin sits at its
     # centre. The Go2's trunk was drawn as a capsule from its origin to the front-left hip, 0.376 m long and

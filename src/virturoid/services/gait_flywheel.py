@@ -112,7 +112,10 @@ def _deploy_sim_config(gene) -> dict:
     #10: a physics verdict is sim-config-RELATIVE). A recalled 'walks 0.65 m' then carries the timestep, gravity
     and engine it's valid under, so a consumer on a different sim sees the mismatch instead of trusting a stale
     number. Best-effort: derived from the SAME compiler the deploy uses; falls back to the deploy descriptor."""
-    cfg = {"controller": "crawl_gait", "engine": "mujoco"}
+    # ``lift``: the swing raises each foot the way THAT leg's lift joint raises it (``morph_policy.lift_sign_for_leg``).
+    # A row without the key was banked while the swing added +knee on every body, which on anatomy-compiled and
+    # imported legs pressed the foot into the floor; its verdict holds for the composed walkers only.
+    cfg = {"controller": "crawl_gait", "engine": "mujoco", "lift": "measured"}
     try:
         import mujoco
 

@@ -142,6 +142,22 @@ _PHYSICS_OPTION = ('  <option timestep="0.002" gravity="0 0 -9.81" integrator="i
                    ' iterations="20"/>')
 
 
+
+def _physics_option(gene) -> str:
+    """``_PHYSICS_OPTION``, plus the source's ``impratio`` for an imported robot that declares one.
+
+    The solver contract above is shared by every body we compose. A customer's model also brings its own friction
+    ratio (``robot_import`` records it as ``source_impratio``): it describes how their robot's feet grip, which is
+    the robot's, not our contract's, exactly like the per-link contact rows ``source_contacts`` carries."""
+    imp = ((getattr(gene, "metadata", None) or {}).get("source_impratio"))
+    try:
+        imp = float(imp) if imp is not None else None
+    except (TypeError, ValueError):
+        imp = None
+    if imp is None or not (imp > 0.0):
+        return _PHYSICS_OPTION
+    return _PHYSICS_OPTION.replace(' iterations="20"/>', f' iterations="20" impratio="{imp:.6g}"/>')
+
 def _base_z_for(gene: RobotGene) -> float:
     """The fixed base's height: an explicit `base_height_m` when the design gave one, else the named mount.
 
@@ -271,7 +287,7 @@ def compile_gene_to_mjcf(gene: RobotGene, *, include_floor: bool = True, spawn_z
     return (
         f'<mujoco model="{escape(gene.id)}">\n'
         '  <compiler angle="radian" autolimits="true"/>\n'
-        f'{_PHYSICS_OPTION}\n'
+        f'{_physics_option(gene)}\n'
         f'{_VISUAL_XML}'
         '  <default>\n'
         '    <joint damping="0.8" armature="0.01" frictionloss="0.05"/>\n'
@@ -992,7 +1008,7 @@ def compile_gene_with_scene(gene: RobotGene, scene_objects, *, table: bool = Tru
     lines = [
         f'<mujoco model="{escape(gene.id)}">',
         '  <compiler angle="radian" autolimits="true"/>',
-        _PHYSICS_OPTION,
+        _physics_option(gene),
         _VISUAL_XML.rstrip("\n"),
         '  <default>',
         '    <joint damping="0.8" armature="0.01" frictionloss="0.05"/>',

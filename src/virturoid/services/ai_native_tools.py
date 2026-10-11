@@ -2515,6 +2515,12 @@ def _reframe_for_imported_body(res: dict, gene, kind: str) -> None:
             head = _lead
         res["locomotion_verdict"] = None
         res["verdict"] = head
+        # THE CLAIM GOES WITH THE HEADLINE. ``credible_walk`` was set from the generic gait's verdict before this
+        # rewrite and was left standing, which never showed while our crawl could not walk an import: once the
+        # crawl's swing lifted the feet (2026-10-11) the Go2 walked 5.66 m under it and verify returned NO
+        # LOCOMOTION VERDICT beside credible_walk: true. The walk is reported below, as a fact about our gait;
+        # train_held lands it as a controller for this body, and then it is a verdict.
+        res["credible_walk"] = False
         res["measured_without_your_controller"] = facts
         res["under_our_generic_gait"] = {
             "verdict": original,                                 # gait_quality.classify(), byte-identical

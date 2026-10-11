@@ -1379,7 +1379,7 @@ class GaitController:
                 lift = 0.0
                 stride = math.cos(math.pi * (u - self.lift_duty) / max(1e-3, 1.0 - self.lift_duty))
             knee = int(leg["knee_index"]); hip = int(leg["hip_index"])
-            target[knee] = self.default_pose[knee] + self.knee_amp * lift
+            target[knee] = self.default_pose[knee] + self.knee_amp * float(leg.get("lift_sign", 1.0)) * lift
             target[hip] = self.default_pose[hip] + self.hip_amp * float(leg["hip_sign"]) * stride
         return {name: max(limit[0], min(limit[1], value))
                 for name, value, limit in zip(self.joint_names, target, self.limits)}
