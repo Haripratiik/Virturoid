@@ -1,0 +1,1380 @@
+{
+ "id": "anatomy_creature_a445bbed",
+ "species": "quadruped.anatomy",
+ "robot_class": "quadruped",
+ "parent_species": null,
+ "base_mount": "free",
+ "end_effector_type": "none",
+ "base_height_m": null,
+ "design_source": "anatomy_generic",
+ "composition_notes": [
+  "No usable anatomy model was available; the general deterministic anatomy compiler was used."
+ ],
+ "loop_closures": [],
+ "coupled_joints": [],
+ "metadata": {
+  "anatomy_graph": true,
+  "mount_bounds": {
+   "torso": {
+    "x": 0.29,
+    "y": 0.065
+   },
+   "neck": {
+    "x": 0.0638,
+    "y": 0.02925
+   },
+   "head": {
+    "x": 0.03737,
+    "y": 0.03289
+   },
+   "tail": {
+    "x": 0.07,
+    "y": 0.0252
+   },
+   "leg1_l_0": {
+    "x": 0.0525,
+    "y": 0.0189
+   },
+   "leg1_l_1": {
+    "x": 0.0525,
+    "y": 0.0155
+   },
+   "leg1_l_2": {
+    "x": 0.0525,
+    "y": 0.01271
+   },
+   "leg1_l_3": {
+    "x": 0.0504,
+    "y": 0.03
+   },
+   "leg1_r_0": {
+    "x": 0.0525,
+    "y": 0.0189
+   },
+   "leg1_r_1": {
+    "x": 0.0525,
+    "y": 0.0155
+   },
+   "leg1_r_2": {
+    "x": 0.0525,
+    "y": 0.01271
+   },
+   "leg1_r_3": {
+    "x": 0.0504,
+    "y": 0.03
+   },
+   "leg2_l_0": {
+    "x": 0.0525,
+    "y": 0.0189
+   },
+   "leg2_l_1": {
+    "x": 0.0525,
+    "y": 0.0155
+   },
+   "leg2_l_2": {
+    "x": 0.0525,
+    "y": 0.01271
+   },
+   "leg2_l_3": {
+    "x": 0.0504,
+    "y": 0.03
+   },
+   "leg2_r_0": {
+    "x": 0.0525,
+    "y": 0.0189
+   },
+   "leg2_r_1": {
+    "x": 0.0525,
+    "y": 0.0155
+   },
+   "leg2_r_2": {
+    "x": 0.0525,
+    "y": 0.01271
+   },
+   "leg2_r_3": {
+    "x": 0.0504,
+    "y": 0.03
+   }
+  },
+  "rest_pose": {
+   "neck_joint": 0.0,
+   "tail_joint": 0.0,
+   "leg1_l_0_joint": 0.0,
+   "leg1_l_1_joint": 0.12,
+   "leg1_l_2_joint": 0.0,
+   "leg1_r_0_joint": 0.0,
+   "leg1_r_1_joint": 0.12,
+   "leg1_r_2_joint": 0.0,
+   "leg2_l_0_joint": 0.0,
+   "leg2_l_1_joint": 0.12,
+   "leg2_l_2_joint": 0.0,
+   "leg2_r_0_joint": 0.0,
+   "leg2_r_1_joint": 0.12,
+   "leg2_r_2_joint": 0.0
+  },
+  "build_plan": {
+   "prompt": "a four legged robot dog",
+   "robot_class": "quadruped",
+   "task_family": "locomotion",
+   "concept": "four legged",
+   "concept_aliases": [],
+   "environment": "tabletop",
+   "morphology": "legged walker",
+   "objects": [],
+   "action_verbs": [],
+   "buildable": true,
+   "gaps": [],
+   "reasoning": "keyword-routed (no LLM backend)",
+   "source": "heuristic",
+   "routing_confidence": "explicit"
+  },
+  "_actuators_loaded": true,
+  "material_policy": {
+   "requested": null,
+   "skeleton": "aluminum",
+   "honoured": true,
+   "reason": "default structural aluminium (no material specified, no task driver)"
+  },
+  "_mass_materialized": true
+ },
+ "segments": [
+  {
+   "name": "torso",
+   "parent": null,
+   "shape": "box",
+   "length_m": 0.1495,
+   "radius_m": 0.065,
+   "mass_kg": 1.6475436261295178,
+   "joint_type": null,
+   "joint_axis": [
+    0.0,
+    0.0,
+    1.0
+   ],
+   "joint_lower": null,
+   "joint_upper": null,
+   "mount_euler": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "mount_offset": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "actuator_torque_nm": null,
+   "torque_req_nm": null,
+   "is_end_effector": false,
+   "cross_section": [
+    0.29,
+    0.065
+   ],
+   "geometry": {
+    "family": "compound",
+    "parts": [
+     {
+      "family": "extrude",
+      "height": 0.0987,
+      "fillet": 0.013,
+      "profile": [
+       [
+        -0.29,
+        -0.0455
+       ],
+       [
+        -0.2552,
+        -0.065
+       ],
+       [
+        0.2552,
+        -0.065
+       ],
+       [
+        0.29,
+        -0.0455
+       ],
+       [
+        0.29,
+        0.0455
+       ],
+       [
+        0.2552,
+        0.065
+       ],
+       [
+        -0.2552,
+        0.065
+       ],
+       [
+        -0.29,
+        0.0455
+       ]
+      ],
+      "chamfer": 0.0208,
+      "cutouts": [
+       [
+        -0.1641,
+        0.0,
+        0.0598,
+        0.0091,
+        0.156,
+        "y"
+       ],
+       [
+        -0.1094,
+        0.0,
+        0.0598,
+        0.0091,
+        0.156,
+        "y"
+       ],
+       [
+        -0.0547,
+        0.0,
+        0.0598,
+        0.0091,
+        0.156,
+        "y"
+       ],
+       [
+        0.0,
+        0.0,
+        0.0598,
+        0.0091,
+        0.156,
+        "y"
+       ],
+       [
+        0.0547,
+        0.0,
+        0.0598,
+        0.0091,
+        0.156,
+        "y"
+       ],
+       [
+        0.1094,
+        0.0,
+        0.0598,
+        0.0091,
+        0.156,
+        "y"
+       ],
+       [
+        0.1641,
+        0.0,
+        0.0598,
+        0.0091,
+        0.156,
+        "y"
+       ]
+      ]
+     },
+     {
+      "family": "extrude",
+      "height": 0.1495,
+      "fillet": 0.0117,
+      "chamfer": 0.00845,
+      "profile": [
+       [
+        -0.2668,
+        -0.0494
+       ],
+       [
+        0.2668,
+        -0.0494
+       ],
+       [
+        0.2668,
+        0.0494
+       ],
+       [
+        -0.2668,
+        0.0494
+       ]
+      ]
+     },
+     {
+      "family": "extrude",
+      "height": 0.0628,
+      "fillet": 0.0104,
+      "chamfer": 0.0078,
+      "profile": [
+       [
+        -0.1508,
+        -0.0364
+       ],
+       [
+        0.1334,
+        -0.0442
+       ],
+       [
+        0.1334,
+        0.0442
+       ],
+       [
+        -0.1508,
+        0.0364
+       ]
+      ],
+      "at": [
+       0.0,
+       0.0,
+       0.1196
+      ]
+     }
+    ]
+   },
+   "material": "shell"
+  },
+  {
+   "name": "neck",
+   "parent": "torso",
+   "shape": "capsule",
+   "length_m": 0.1276,
+   "radius_m": 0.02925,
+   "mass_kg": 0.1343628,
+   "joint_type": "revolute",
+   "joint_axis": [
+    0.0,
+    1.0,
+    0.0
+   ],
+   "joint_lower": -2.6,
+   "joint_upper": 2.6,
+   "mount_euler": [
+    -0.0,
+    0.9151007005533603,
+    -0.0
+   ],
+   "mount_offset": [
+    0.23779999999999996,
+    0.0,
+    -0.04485
+   ],
+   "actuator_torque_nm": 2.75,
+   "torque_req_nm": null,
+   "is_end_effector": false,
+   "cross_section": null,
+   "geometry": {
+    "family": "tapered",
+    "length": 0.1276,
+    "r0": 0.03071,
+    "r1": 0.02691,
+    "semantic_role": "neck"
+   },
+   "material": "frame"
+  },
+  {
+   "name": "head",
+   "parent": "neck",
+   "shape": "box",
+   "length_m": 0.07475,
+   "radius_m": 0.03289,
+   "mass_kg": 0.08850699000000001,
+   "joint_type": null,
+   "joint_axis": [
+    0.0,
+    1.0,
+    0.0
+   ],
+   "joint_lower": null,
+   "joint_upper": null,
+   "mount_euler": [
+    -0.0,
+    0.6556956262415363,
+    -0.0
+   ],
+   "mount_offset": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "actuator_torque_nm": null,
+   "torque_req_nm": null,
+   "is_end_effector": false,
+   "cross_section": [
+    0.03289,
+    0.03289
+   ],
+   "geometry": {
+    "family": "extrude",
+    "height": 0.0747,
+    "fillet": 0.0132,
+    "chamfer": 0.00987,
+    "profile": [
+     [
+      -0.03289,
+      -0.03289
+     ],
+     [
+      0.03289,
+      -0.027956500000000002
+     ],
+     [
+      0.03289,
+      0.027956500000000002
+     ],
+     [
+      -0.03289,
+      0.03289
+     ]
+    ],
+    "semantic_role": "head",
+    "anatomy_role": "sensor_head"
+   },
+   "material": "shell"
+  },
+  {
+   "name": "tail",
+   "parent": "torso",
+   "shape": "capsule",
+   "length_m": 0.14,
+   "radius_m": 0.0252,
+   "mass_kg": 0.127008,
+   "joint_type": "revolute",
+   "joint_axis": [
+    0.0,
+    1.0,
+    0.0
+   ],
+   "joint_lower": -2.6,
+   "joint_upper": 2.6,
+   "mount_euler": [
+    -0.0,
+    -0.9151007005533603,
+    -3.141592653589793
+   ],
+   "mount_offset": [
+    -0.23779999999999996,
+    0.0,
+    -0.04485
+   ],
+   "actuator_torque_nm": 1.0,
+   "torque_req_nm": null,
+   "is_end_effector": false,
+   "cross_section": null,
+   "geometry": {
+    "family": "tapered",
+    "length": 0.14,
+    "r0": 0.0252,
+    "r1": 0.00882,
+    "semantic_role": "tail"
+   },
+   "material": "frame"
+  },
+  {
+   "name": "leg1_l_0",
+   "parent": "torso",
+   "shape": "capsule",
+   "length_m": 0.105,
+   "radius_m": 0.0189,
+   "mass_kg": 0.071442,
+   "joint_type": "revolute",
+   "joint_axis": [
+    0.0,
+    -1.0,
+    0.0
+   ],
+   "joint_lower": -0.6,
+   "joint_upper": 0.6,
+   "mount_euler": [
+    -3.0916342578678506,
+    0.0,
+    1.5707963267948966
+   ],
+   "mount_offset": [
+    0.23779999999999996,
+    0.0585,
+    -0.0897
+   ],
+   "actuator_torque_nm": 5.64,
+   "torque_req_nm": null,
+   "is_end_effector": false,
+   "cross_section": null,
+   "geometry": {
+    "family": "extrude",
+    "height": 0.105,
+    "fillet": 0.0057,
+    "profile": [
+     [
+      -0.0189,
+      -0.01134
+     ],
+     [
+      0.01701,
+      -0.01134
+     ],
+     [
+      0.01701,
+      0.01134
+     ],
+     [
+      -0.0189,
+      0.01134
+     ]
+    ],
+    "chamfer": 0.00302,
+    "semantic_role": "leg",
+    "anatomy_role": "quad_hip"
+   },
+   "material": "aluminum"
+  },
+  {
+   "name": "leg1_l_1",
+   "parent": "leg1_l_0",
+   "shape": "capsule",
+   "length_m": 0.105,
+   "radius_m": 0.015498,
+   "mass_kg": 0.05858244,
+   "joint_type": "revolute",
+   "joint_axis": [
+    -0.9987523388778448,
+    0.0,
+    0.04993761694389223
+   ],
+   "joint_lower": -1.4,
+   "joint_upper": 1.6,
+   "mount_euler": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "mount_offset": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "actuator_torque_nm": 4.22,
+   "torque_req_nm": null,
+   "is_end_effector": false,
+   "cross_section": null,
+   "geometry": {
+    "family": "extrude",
+    "height": 0.105,
+    "fillet": 0.0046,
+    "profile": [
+     [
+      -0.015498,
+      -0.0092988
+     ],
+     [
+      0.0139482,
+      -0.0092988
+     ],
+     [
+      0.0139482,
+      0.0092988
+     ],
+     [
+      -0.015498,
+      0.0092988
+     ]
+    ],
+    "chamfer": 0.00248,
+    "semantic_role": "leg",
+    "anatomy_role": "quad_thigh"
+   },
+   "material": "aluminum"
+  },
+  {
+   "name": "leg1_l_2",
+   "parent": "leg1_l_1",
+   "shape": "capsule",
+   "length_m": 0.105,
+   "radius_m": 0.012708359999999998,
+   "mass_kg": 0.0480376008,
+   "joint_type": "revolute",
+   "joint_axis": [
+    -0.9987523388778448,
+    0.0,
+    0.04993761694389223
+   ],
+   "joint_lower": -0.2,
+   "joint_upper": 2.4,
+   "mount_euler": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "mount_offset": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "actuator_torque_nm": 2.79,
+   "torque_req_nm": null,
+   "is_end_effector": false,
+   "cross_section": null,
+   "geometry": {
+    "family": "extrude",
+    "height": 0.105,
+    "fillet": 0.004,
+    "profile": [
+     [
+      -0.012708359999999998,
+      -0.008
+     ],
+     [
+      0.011437524,
+      -0.008
+     ],
+     [
+      0.011437524,
+      0.008
+     ],
+     [
+      -0.012708359999999998,
+      0.008
+     ]
+    ],
+    "chamfer": 0.00203,
+    "semantic_role": "leg",
+    "anatomy_role": "quad_calf"
+   },
+   "material": "aluminum"
+  },
+  {
+   "name": "leg1_l_3",
+   "parent": "leg1_l_2",
+   "shape": "capsule",
+   "length_m": 0.1008,
+   "radius_m": 0.03,
+   "mass_kg": 0.10886399999999999,
+   "joint_type": null,
+   "joint_axis": [
+    0.0,
+    1.0,
+    0.0
+   ],
+   "joint_lower": null,
+   "joint_upper": null,
+   "mount_euler": [
+    1.5707963267948966,
+    0.0,
+    1.5208379310729538
+   ],
+   "mount_offset": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "actuator_torque_nm": null,
+   "torque_req_nm": null,
+   "is_end_effector": false,
+   "cross_section": null,
+   "geometry": {
+    "family": "extrude",
+    "height": 0.1008,
+    "fillet": 0.0036,
+    "profile": [
+     [
+      -0.012,
+      -0.015
+     ],
+     [
+      0.012,
+      -0.0135
+     ],
+     [
+      0.012,
+      0.0135
+     ],
+     [
+      -0.012,
+      0.015
+     ]
+    ],
+    "chamfer": 0.00167,
+    "semantic_role": "foot",
+    "anatomy_role": "foot_pad"
+   },
+   "material": "rubber"
+  },
+  {
+   "name": "leg1_r_0",
+   "parent": "torso",
+   "shape": "capsule",
+   "length_m": 0.105,
+   "radius_m": 0.0189,
+   "mass_kg": 0.071442,
+   "joint_type": "revolute",
+   "joint_axis": [
+    0.0,
+    1.0,
+    0.0
+   ],
+   "joint_lower": -0.6,
+   "joint_upper": 0.6,
+   "mount_euler": [
+    3.0916342578678506,
+    0.0,
+    -1.5707963267948966
+   ],
+   "mount_offset": [
+    0.23779999999999996,
+    -0.0585,
+    -0.0897
+   ],
+   "actuator_torque_nm": 5.64,
+   "torque_req_nm": null,
+   "is_end_effector": false,
+   "cross_section": null,
+   "geometry": {
+    "family": "extrude",
+    "height": 0.105,
+    "fillet": 0.0057,
+    "profile": [
+     [
+      -0.0189,
+      -0.01134
+     ],
+     [
+      0.01701,
+      -0.01134
+     ],
+     [
+      0.01701,
+      0.01134
+     ],
+     [
+      -0.0189,
+      0.01134
+     ]
+    ],
+    "chamfer": 0.00302,
+    "semantic_role": "leg",
+    "anatomy_role": "quad_hip"
+   },
+   "material": "aluminum"
+  },
+  {
+   "name": "leg1_r_1",
+   "parent": "leg1_r_0",
+   "shape": "capsule",
+   "length_m": 0.105,
+   "radius_m": 0.015498,
+   "mass_kg": 0.05858244,
+   "joint_type": "revolute",
+   "joint_axis": [
+    0.9987523388778448,
+    0.0,
+    -0.04993761694389223
+   ],
+   "joint_lower": -1.4,
+   "joint_upper": 1.6,
+   "mount_euler": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "mount_offset": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "actuator_torque_nm": 4.22,
+   "torque_req_nm": null,
+   "is_end_effector": false,
+   "cross_section": null,
+   "geometry": {
+    "family": "extrude",
+    "height": 0.105,
+    "fillet": 0.0046,
+    "profile": [
+     [
+      -0.015498,
+      -0.0092988
+     ],
+     [
+      0.0139482,
+      -0.0092988
+     ],
+     [
+      0.0139482,
+      0.0092988
+     ],
+     [
+      -0.015498,
+      0.0092988
+     ]
+    ],
+    "chamfer": 0.00248,
+    "semantic_role": "leg",
+    "anatomy_role": "quad_thigh"
+   },
+   "material": "aluminum"
+  },
+  {
+   "name": "leg1_r_2",
+   "parent": "leg1_r_1",
+   "shape": "capsule",
+   "length_m": 0.105,
+   "radius_m": 0.012708359999999998,
+   "mass_kg": 0.0480376008,
+   "joint_type": "revolute",
+   "joint_axis": [
+    0.9987523388778448,
+    0.0,
+    -0.04993761694389223
+   ],
+   "joint_lower": -0.2,
+   "joint_upper": 2.4,
+   "mount_euler": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "mount_offset": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "actuator_torque_nm": 2.79,
+   "torque_req_nm": null,
+   "is_end_effector": false,
+   "cross_section": null,
+   "geometry": {
+    "family": "extrude",
+    "height": 0.105,
+    "fillet": 0.004,
+    "profile": [
+     [
+      -0.012708359999999998,
+      -0.008
+     ],
+     [
+      0.011437524,
+      -0.008
+     ],
+     [
+      0.011437524,
+      0.008
+     ],
+     [
+      -0.012708359999999998,
+      0.008
+     ]
+    ],
+    "chamfer": 0.00203,
+    "semantic_role": "leg",
+    "anatomy_role": "quad_calf"
+   },
+   "material": "aluminum"
+  },
+  {
+   "name": "leg1_r_3",
+   "parent": "leg1_r_2",
+   "shape": "capsule",
+   "length_m": 0.1008,
+   "radius_m": 0.03,
+   "mass_kg": 0.10886399999999999,
+   "joint_type": null,
+   "joint_axis": [
+    0.0,
+    1.0,
+    0.0
+   ],
+   "joint_lower": null,
+   "joint_upper": null,
+   "mount_euler": [
+    -1.5707963267948966,
+    0.0,
+    -1.5208379310729538
+   ],
+   "mount_offset": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "actuator_torque_nm": null,
+   "torque_req_nm": null,
+   "is_end_effector": false,
+   "cross_section": null,
+   "geometry": {
+    "family": "extrude",
+    "height": 0.1008,
+    "fillet": 0.0036,
+    "profile": [
+     [
+      -0.012,
+      -0.015
+     ],
+     [
+      0.012,
+      -0.0135
+     ],
+     [
+      0.012,
+      0.0135
+     ],
+     [
+      -0.012,
+      0.015
+     ]
+    ],
+    "chamfer": 0.00167,
+    "semantic_role": "foot",
+    "anatomy_role": "foot_pad"
+   },
+   "material": "rubber"
+  },
+  {
+   "name": "leg2_l_0",
+   "parent": "torso",
+   "shape": "capsule",
+   "length_m": 0.105,
+   "radius_m": 0.0189,
+   "mass_kg": 0.071442,
+   "joint_type": "revolute",
+   "joint_axis": [
+    0.0,
+    -1.0,
+    0.0
+   ],
+   "joint_lower": -0.6,
+   "joint_upper": 0.6,
+   "mount_euler": [
+    -3.0916342578678506,
+    0.0,
+    1.5707963267948966
+   ],
+   "mount_offset": [
+    -0.23779999999999996,
+    0.0585,
+    -0.0897
+   ],
+   "actuator_torque_nm": 5.64,
+   "torque_req_nm": null,
+   "is_end_effector": false,
+   "cross_section": null,
+   "geometry": {
+    "family": "extrude",
+    "height": 0.105,
+    "fillet": 0.0057,
+    "profile": [
+     [
+      -0.0189,
+      -0.01134
+     ],
+     [
+      0.01701,
+      -0.01134
+     ],
+     [
+      0.01701,
+      0.01134
+     ],
+     [
+      -0.0189,
+      0.01134
+     ]
+    ],
+    "chamfer": 0.00302,
+    "semantic_role": "leg",
+    "anatomy_role": "quad_hip"
+   },
+   "material": "aluminum"
+  },
+  {
+   "name": "leg2_l_1",
+   "parent": "leg2_l_0",
+   "shape": "capsule",
+   "length_m": 0.105,
+   "radius_m": 0.015498,
+   "mass_kg": 0.05858244,
+   "joint_type": "revolute",
+   "joint_axis": [
+    -0.9987523388778448,
+    0.0,
+    0.04993761694389223
+   ],
+   "joint_lower": -1.4,
+   "joint_upper": 1.6,
+   "mount_euler": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "mount_offset": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "actuator_torque_nm": 4.22,
+   "torque_req_nm": null,
+   "is_end_effector": false,
+   "cross_section": null,
+   "geometry": {
+    "family": "extrude",
+    "height": 0.105,
+    "fillet": 0.0046,
+    "profile": [
+     [
+      -0.015498,
+      -0.0092988
+     ],
+     [
+      0.0139482,
+      -0.0092988
+     ],
+     [
+      0.0139482,
+      0.0092988
+     ],
+     [
+      -0.015498,
+      0.0092988
+     ]
+    ],
+    "chamfer": 0.00248,
+    "semantic_role": "leg",
+    "anatomy_role": "quad_thigh"
+   },
+   "material": "aluminum"
+  },
+  {
+   "name": "leg2_l_2",
+   "parent": "leg2_l_1",
+   "shape": "capsule",
+   "length_m": 0.105,
+   "radius_m": 0.012708359999999998,
+   "mass_kg": 0.0480376008,
+   "joint_type": "revolute",
+   "joint_axis": [
+    -0.9987523388778448,
+    0.0,
+    0.04993761694389223
+   ],
+   "joint_lower": -0.2,
+   "joint_upper": 2.4,
+   "mount_euler": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "mount_offset": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "actuator_torque_nm": 2.79,
+   "torque_req_nm": null,
+   "is_end_effector": false,
+   "cross_section": null,
+   "geometry": {
+    "family": "extrude",
+    "height": 0.105,
+    "fillet": 0.004,
+    "profile": [
+     [
+      -0.012708359999999998,
+      -0.008
+     ],
+     [
+      0.011437524,
+      -0.008
+     ],
+     [
+      0.011437524,
+      0.008
+     ],
+     [
+      -0.012708359999999998,
+      0.008
+     ]
+    ],
+    "chamfer": 0.00203,
+    "semantic_role": "leg",
+    "anatomy_role": "quad_calf"
+   },
+   "material": "aluminum"
+  },
+  {
+   "name": "leg2_l_3",
+   "parent": "leg2_l_2",
+   "shape": "capsule",
+   "length_m": 0.1008,
+   "radius_m": 0.03,
+   "mass_kg": 0.10886399999999999,
+   "joint_type": null,
+   "joint_axis": [
+    0.0,
+    1.0,
+    0.0
+   ],
+   "joint_lower": null,
+   "joint_upper": null,
+   "mount_euler": [
+    1.5707963267948966,
+    0.0,
+    1.5208379310729538
+   ],
+   "mount_offset": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "actuator_torque_nm": null,
+   "torque_req_nm": null,
+   "is_end_effector": false,
+   "cross_section": null,
+   "geometry": {
+    "family": "extrude",
+    "height": 0.1008,
+    "fillet": 0.0036,
+    "profile": [
+     [
+      -0.012,
+      -0.015
+     ],
+     [
+      0.012,
+      -0.0135
+     ],
+     [
+      0.012,
+      0.0135
+     ],
+     [
+      -0.012,
+      0.015
+     ]
+    ],
+    "chamfer": 0.00167,
+    "semantic_role": "foot",
+    "anatomy_role": "foot_pad"
+   },
+   "material": "rubber"
+  },
+  {
+   "name": "leg2_r_0",
+   "parent": "torso",
+   "shape": "capsule",
+   "length_m": 0.105,
+   "radius_m": 0.0189,
+   "mass_kg": 0.071442,
+   "joint_type": "revolute",
+   "joint_axis": [
+    0.0,
+    1.0,
+    0.0
+   ],
+   "joint_lower": -0.6,
+   "joint_upper": 0.6,
+   "mount_euler": [
+    3.0916342578678506,
+    0.0,
+    -1.5707963267948966
+   ],
+   "mount_offset": [
+    -0.23779999999999996,
+    -0.0585,
+    -0.0897
+   ],
+   "actuator_torque_nm": 5.64,
+   "torque_req_nm": null,
+   "is_end_effector": false,
+   "cross_section": null,
+   "geometry": {
+    "family": "extrude",
+    "height": 0.105,
+    "fillet": 0.0057,
+    "profile": [
+     [
+      -0.0189,
+      -0.01134
+     ],
+     [
+      0.01701,
+      -0.01134
+     ],
+     [
+      0.01701,
+      0.01134
+     ],
+     [
+      -0.0189,
+      0.01134
+     ]
+    ],
+    "chamfer": 0.00302,
+    "semantic_role": "leg",
+    "anatomy_role": "quad_hip"
+   },
+   "material": "aluminum"
+  },
+  {
+   "name": "leg2_r_1",
+   "parent": "leg2_r_0",
+   "shape": "capsule",
+   "length_m": 0.105,
+   "radius_m": 0.015498,
+   "mass_kg": 0.05858244,
+   "joint_type": "revolute",
+   "joint_axis": [
+    0.9987523388778448,
+    0.0,
+    -0.04993761694389223
+   ],
+   "joint_lower": -1.4,
+   "joint_upper": 1.6,
+   "mount_euler": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "mount_offset": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "actuator_torque_nm": 4.22,
+   "torque_req_nm": null,
+   "is_end_effector": false,
+   "cross_section": null,
+   "geometry": {
+    "family": "extrude",
+    "height": 0.105,
+    "fillet": 0.0046,
+    "profile": [
+     [
+      -0.015498,
+      -0.0092988
+     ],
+     [
+      0.0139482,
+      -0.0092988
+     ],
+     [
+      0.0139482,
+      0.0092988
+     ],
+     [
+      -0.015498,
+      0.0092988
+     ]
+    ],
+    "chamfer": 0.00248,
+    "semantic_role": "leg",
+    "anatomy_role": "quad_thigh"
+   },
+   "material": "aluminum"
+  },
+  {
+   "name": "leg2_r_2",
+   "parent": "leg2_r_1",
+   "shape": "capsule",
+   "length_m": 0.105,
+   "radius_m": 0.012708359999999998,
+   "mass_kg": 0.0480376008,
+   "joint_type": "revolute",
+   "joint_axis": [
+    0.9987523388778448,
+    0.0,
+    -0.04993761694389223
+   ],
+   "joint_lower": -0.2,
+   "joint_upper": 2.4,
+   "mount_euler": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "mount_offset": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "actuator_torque_nm": 2.79,
+   "torque_req_nm": null,
+   "is_end_effector": false,
+   "cross_section": null,
+   "geometry": {
+    "family": "extrude",
+    "height": 0.105,
+    "fillet": 0.004,
+    "profile": [
+     [
+      -0.012708359999999998,
+      -0.008
+     ],
+     [
+      0.011437524,
+      -0.008
+     ],
+     [
+      0.011437524,
+      0.008
+     ],
+     [
+      -0.012708359999999998,
+      0.008
+     ]
+    ],
+    "chamfer": 0.00203,
+    "semantic_role": "leg",
+    "anatomy_role": "quad_calf"
+   },
+   "material": "aluminum"
+  },
+  {
+   "name": "leg2_r_3",
+   "parent": "leg2_r_2",
+   "shape": "capsule",
+   "length_m": 0.1008,
+   "radius_m": 0.03,
+   "mass_kg": 0.10886399999999999,
+   "joint_type": null,
+   "joint_axis": [
+    0.0,
+    1.0,
+    0.0
+   ],
+   "joint_lower": null,
+   "joint_upper": null,
+   "mount_euler": [
+    -1.5707963267948966,
+    0.0,
+    -1.5208379310729538
+   ],
+   "mount_offset": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "actuator_torque_nm": null,
+   "torque_req_nm": null,
+   "is_end_effector": true,
+   "cross_section": null,
+   "geometry": {
+    "family": "extrude",
+    "height": 0.1008,
+    "fillet": 0.0036,
+    "profile": [
+     [
+      -0.012,
+      -0.015
+     ],
+     [
+      0.012,
+      -0.0135
+     ],
+     [
+      0.012,
+      0.0135
+     ],
+     [
+      -0.012,
+      0.015
+     ]
+    ],
+    "chamfer": 0.00167,
+    "semantic_role": "foot",
+    "anatomy_role": "foot_pad"
+   },
+   "material": "rubber"
+  }
+ ]
+}

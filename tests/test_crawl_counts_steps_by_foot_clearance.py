@@ -80,9 +80,17 @@ def _feet(xml):
     return m, d, _FootClearance(m, d, build_appendage_map(m).legs, encode_robot(m).act_u)
 
 
+#: THE CANONICAL TEMPLATE THESE COUNTS WERE MEASURED ON, frozen (``compose_robot("a robot dog", ensure_walkable=True)``
+#: as of 2026-10-11, id anatomy_creature_91b931bf, head 0.1035 m). On 2026-10-11 the anatomy compiler stopped capping
+#: a head at half the torso's HEIGHT and the composed template changed under this file; see the knees-locked test.
+_TEMPLATE = Path(__file__).resolve().parent / "fixtures" / "walkable_template_v1.json"
+
+
 def _template():
-    from virturoid.services.morphology_composer import compose_robot
-    return compose_robot("a robot dog", llm=None, ensure_walkable=True)
+    import json
+
+    from virturoid.schemas.gene import RobotGene
+    return RobotGene.from_dict(json.loads(_TEMPLATE.read_text(encoding="utf-8")))
 
 
 @needs_mujoco
@@ -212,7 +220,14 @@ def test_a_knees_locked_template_does_not_read_as_a_walk():
 
     NOT A CLAIM ABOUT LOCKED KNEES IN GENERAL. On bodies whose hip stride swings the foot through a high arc a
     stiff-legged gait is a real walk, and the counter says so: the composed mouse with ``knee_amp=0`` carries
-    92-104% of its travel through the air on every leg and reads CREDIBLE WALK (6.92 lifts/s, support 0.668)."""
+    92-104% of its travel through the air on every leg and reads CREDIBLE WALK (6.92 lifts/s, support 0.668).
+
+    PINNED TO THE TEMPLATE IT WAS MEASURED ON. Today's template (head sized against the trunk's length, 0.139 m)
+    driven the same way reads CREDIBLE WALK 4.48 m (5.17 lifts/s, support 0.631): measured 2026-10-11, its front
+    feet clear 4.5 cm at the 90th percentile above where they stand and its rear feet 2.1 cm, against the 2 cm the
+    counter calls a lift. That is the case the paragraph above allows for, a body that rocks its feet clear,
+    reached by a heavier head; whether a rear foot that barely clears 2 cm is stepping is the open drag-gait
+    question, not something this test can settle."""
     from virturoid.services.gait_quality import classify
     from virturoid.services.morph_policy import crawl_gait_rollout
 

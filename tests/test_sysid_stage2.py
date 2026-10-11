@@ -19,6 +19,8 @@ from __future__ import annotations
 import importlib.util
 import os
 
+from pathlib import Path
+
 import pytest
 
 os.environ.setdefault("VIRTUROID_NO_LOCAL_ENV", "1")
@@ -33,10 +35,24 @@ DELAY_TICKS = 2
 BUDGET_S = 35.0
 
 
+#: THE DOG THESE MEASUREMENTS WERE TAKEN ON, frozen. ``compose_robot("a four legged robot dog")`` changed under them
+#: on 2026-10-11, when the anatomy compiler stopped capping a head at half the torso's HEIGHT: the dog's head grew
+#: 0.075 -> 0.139 m and its rotational-inertia span 1.547x -> 2.48x, which moved the adversarial cases this suite
+#: is built on (a x1.2 torque error now scores 1.481x and is caught by the first gate instead of breaching it).
+#: The method's claims are about this body, so this body is the fixture.
+_REFERENCE_DOG = Path(__file__).resolve().parent / "fixtures" / "sysid_reference_dog_v1.json"
+
+
+def _reference_dog():
+    import json
+
+    from virturoid.schemas.gene import RobotGene
+    return RobotGene.from_dict(json.loads(_REFERENCE_DOG.read_text(encoding="utf-8")))
+
+
 @pytest.fixture(scope="module")
 def dog():
-    from virturoid.services.morphology_composer import compose_robot
-    return compose_robot("a four legged robot dog", llm=None)
+    return _reference_dog()
 
 
 @pytest.fixture(scope="module")

@@ -74,9 +74,15 @@ class AnatomyCompilerTests(unittest.TestCase):
         torso = next(s for s in g.segments if s.name == "torso")
         head = next(s for s in g.segments if "head" in s.name)
         neck = next(s for s in g.segments if "neck" in s.name)
+        # The trunk's LENGTH is its front-back extent (the box collider's cross-section), not ``length_m``: the
+        # anatomy trunk is built along +z = height, so ``torso.length_m`` is how TALL it is. This test used to
+        # bound the head by that height (1.06 x 0.221 m), which is the misreading the compiler's cap had; it
+        # passed only because the cap made the same mistake.
+        trunk_len = 2.0 * float(torso.cross_section[0])
+        self.assertAlmostEqual(trunk_len, 0.6, places=6)
+        self.assertAlmostEqual(head.length_m, 0.5 * trunk_len, places=6)   # the 0.9 m head is held to half
         ext = head.length_m + 2.0 * head.radius_m                # capsule visible extent
-        self.assertLessEqual(ext, 1.06 * torso.length_m,
-                             f"head extent {ext:.3f} must not rival torso length {torso.length_m:.3f}")
+        self.assertLess(ext, trunk_len, f"head extent {ext:.3f} must not rival the trunk's {trunk_len:.3f} m length")
         self.assertLess(neck.radius_m, torso.radius_m, "a torso-fat neck must be slimmed below the trunk")
 
     def test_morphology_gate_flags_a_head_that_rivals_the_trunk(self):
@@ -87,10 +93,12 @@ class AnatomyCompilerTests(unittest.TestCase):
         rep0 = validate_morphology(g)
         self.assertIn("head_torso_ext", rep0.measured)           # the band is measured on a normal dog
         self.assertLessEqual(rep0.measured["head_torso_ext"], 1.05)
-        # Inflate the head past the trunk and re-check: the gate must catch it.
+        # Inflate the head past the trunk and re-check: the gate must catch it. Past the trunk's LENGTH (its
+        # cross-section), not past ``length_m``, which on an anatomy trunk is the torso's height.
         head = next(s for s in g.segments if "head" in s.name.lower())
         torso = next(s for s in g.segments if s.parent is None)
-        head.length_m = 1.4 * float(torso.length_m)
+        trunk_len = 2.0 * float(torso.cross_section[0])
+        head.length_m = 1.4 * trunk_len
         head.radius_m = 0.5 * float(torso.length_m)
         rep1 = validate_morphology(g)
         self.assertGreater(rep1.measured["head_torso_ext"], 1.05)

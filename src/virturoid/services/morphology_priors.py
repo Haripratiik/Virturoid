@@ -224,13 +224,24 @@ def validate_morphology(gene) -> MorphReport:
                 issues.append(f"foot radius {fr:.2f}x the shank radius (giant ball feet)")
         # Head must not rival the trunk. Compare the head's visible extent (capsule length + both hemispherical
         # caps = len + 2r) to the torso length; a ratio > ~1 is the "second body" render defect. torso length =
-        # the base box core (base.length_m), which is the trunk's long axis even for compound-geometry trunks.
+        # the trunk's largest box extent (below), NOT base.length_m alone, which on a compound-geometry anatomy
+        # trunk is its height.
         heads = _seg_by(gene, lambda s: any(k in s.name.lower() for k in ("head", "skull", "snout", "muzzle")))
         # Reference the torso's LARGEST dimension (length_m OR the 2*radius_m footprint), not length_m alone: a
         # composed/loft trunk stores its long front-back axis in the loft geometry while its box collider length_m
         # is the THIN (thickness) axis — measuring the head against that thin axis false-flagged a fine hexapod
         # head at 1.55x. max() picks the real trunk scale for both a long box (anatomy dog) and a flat slab.
-        torso_ref = max(float(base.length_m), 2.0 * float(base.radius_m)) if base is not None else 0.0
+        #
+        # ...and the anatomy dog is NOT a long box in length_m. ``anatomy_compiler`` builds its trunk along +z =
+        # HEIGHT, so the root's length_m is how TALL the torso is and its front-back extent lives in the box
+        # collider's ``cross_section`` (half-length, half-width). Without it this measured every anatomy head
+        # against the torso's height, the same misreading the compiler's own head cap had, which held the
+        # offline dog's 0.139 m head to 0.075 m. With that cap corrected, the dog's head extent is 1.37x its
+        # torso's 0.150 m height and 0.35x its 0.58 m length, so this gate would have rejected every anatomy
+        # quadruped with a properly sized head (on the LLM path, a rejected anatomy falls back to a generic
+        # body). The cross-section is the collider the physics uses, so it can only ever LENGTHEN the reference.
+        _cs = [2.0 * float(v) for v in (getattr(base, "cross_section", None) or ())] if base is not None else []
+        torso_ref = max([float(base.length_m), 2.0 * float(base.radius_m)] + _cs) if base is not None else 0.0
         if heads and torso_ref > 1e-6:
             ext = max(float(h.length_m) + 2.0 * float(h.radius_m) for h in heads)
             ratio = ext / torso_ref

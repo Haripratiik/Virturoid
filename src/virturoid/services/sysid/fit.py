@@ -90,7 +90,9 @@ and both were refused, sending a customer to re-check CAD tensors that are corre
 The mechanism the file gave for why it could not happen was FALSE, and its own output said so one field away:
 "an inertia scalar adds a term proportional to each joint's own rotational inertia, and those span ~40x across
 this body". MEASURED via ``mj_fullM``, that span is **1.547x on the dog and 1.528x on the hexapod** -- which is
-what ``rotational_inertia_span_x`` has been reporting as 1.55 all along. At a span of 1.55 a single scalar CAN
+what ``rotational_inertia_span_x`` has been reporting as 1.55 all along. (Every "dog" figure in this module is
+that dog, frozen for the tests as ``tests/fixtures/sysid_reference_dog_v1.json``. The dog composed since
+2026-10-11 has its head sized against its trunk's length rather than its height, and spans 2.48x.) At a span of 1.55 a single scalar CAN
 imitate a uniform armature offset to within about +/-20%, which is exactly why the naive rival wins near the
 gate. See ``LINK_INERTIA_RIVAL_IMPROVEMENT_X`` for the statistic that survives and the three-body sweep that
 sized it -- and for the reason SPAN is not the variable that predicts how sharp this check is, which was the
