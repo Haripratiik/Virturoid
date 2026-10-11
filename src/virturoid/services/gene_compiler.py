@@ -512,6 +512,33 @@ def _pose_keyframe(gene: RobotGene, base_z: float) -> str:
             f'    <key name="rest" qpos="{qstr}"/>\n  </keyframe>\n')
 
 
+def _scene_keyframe(gene: RobotGene, base_z: float, scene_xml: str) -> str:
+    """The robot's rest keyframe, carried over the scene's movable objects at the poses the scene gave them.
+
+    ``_pose_keyframe`` covers the robot's own joints, and in a scene every movable object adds a free joint after
+    them. MuJoCo fills the rest of a short key with ZEROS, not with the objects' starting poses: measured
+    2026-10-11, resetting a sort scene to ``home`` put both blocks at the world origin, inside the arm's base,
+    with a zero quaternion, and every exported scene file carried that key. The tail is now the compiled scene's
+    own ``qpos0``, which is where the scene put each object. The robot comes first in the worldbody, so its
+    joints are the head of the vector.
+    """
+    key = _pose_keyframe(gene, base_z)
+    found = re.search(r'qpos="([^"]*)"', key)
+    if not found:
+        return key
+    robot_q = found.group(1).split()
+    try:
+        import mujoco
+        qpos0 = mujoco.MjModel.from_xml_string(scene_xml).qpos0
+    except Exception:  # noqa: BLE001 - no MuJoCo here, or the scene does not compile on its own: keep the robot's key
+        return key
+    if len(qpos0) <= len(robot_q):
+        return key
+    qstr = " ".join(robot_q + [f"{v:.5f}" for v in qpos0[len(robot_q):]])
+    return (f'  <keyframe>\n    <key name="home" qpos="{qstr}"/>\n'
+            f'    <key name="rest" qpos="{qstr}"/>\n  </keyframe>\n')
+
+
 def gene_to_meshed_mjcf(gene: RobotGene, cache_dir: str = str(anchored("build/_viewmesh")), *,
                         include_floor: bool = True, spawn_z: float | None = None,
                         kitbash: bool = False, synth: bool = False, show_actuators: bool = True,
@@ -1036,9 +1063,11 @@ def compile_gene_with_scene(gene: RobotGene, scene_objects, *, table: bool = Tru
         _equality_xml(gene).rstrip("\n"),          # closed loops, in the scene path too — see _equality_xml
         _actuator_xml(gene).rstrip("\n") or "  <actuator></actuator>",
         *( [] if physics_only else [_sensor_xml(gene).rstrip("\n")] ),
-        _pose_keyframe(gene, base_z).rstrip("\n"),
         '</mujoco>',
     ]
+    key = _scene_keyframe(gene, base_z, "\n".join(lines) + "\n")
+    if key:
+        lines.insert(len(lines) - 1, key.rstrip("\n"))
     return "\n".join(lines) + "\n"
 
 

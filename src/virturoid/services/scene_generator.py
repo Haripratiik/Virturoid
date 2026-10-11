@@ -425,13 +425,21 @@ def _generate_navigation_scene(task: TaskGraph, index: int, purpose: str, robot_
     lane_offset = round(rng.uniform(-0.25, 0.25), 3)
     obstacle_count = max(1, min(2, difficulty))    # at most 2 obstacles, so there's always a navigable lane
     cx = round(route_length / 2.0, 4)
+    hx = round(route_length / 2.0 + 0.4, 3)        # the room's half-extents: the floor and the walls share them
+    hy = round(route_length / 2.0 + 0.35, 3)       # near-square room (a 0.8 m half-width was too narrow)
     objects = [
         # the floor arena the mobile base drives on — marks this a FLOOR scene (the tabletop is dropped) and
         # gives the goal/obstacles a ground to sit on instead of floating at table height.
+        # IT SPANS THE ROOM. The walls were moved out to +-hy while the floor kept its old 0.8 m half-width
+        # (carried in ``friction``), and a floor scene has no ground plane: measured 2026-10-11 on a generated
+        # course, walls at +-1.53 m over a floor reaching +-0.8 m left 0.7 m of void inside each long wall. The
+        # navigator takes its room from the walls
+        # (``navigation_controller._visibility_waypoints``), so a detour it planned there left the world.
+        # ``size_xyz`` now covers the walls; ``friction`` keeps the legacy aspect in step.
         SceneObject(name="arena_floor", object_type="floor",
                     pose_xyz_rpy=(cx, 0.0, 0.0, 0.0, 0.0, 0.0), material="matte_gray",
-                    scale=round(route_length / 2.0 + 0.4, 3),
-                    friction=round(0.8 / (route_length / 2.0 + 0.4), 3)),
+                    scale=hx, friction=round((hy + 0.05) / hx, 3),
+                    size_xyz=(round(2 * hx, 3), round(2 * (hy + 0.05), 3), 0.04)),
         SceneObject(name="start_zone", object_type="zone",
                     pose_xyz_rpy=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0), material="matte_blue", scale=0.7),
         SceneObject(name="goal_zone", object_type="zone",
@@ -440,8 +448,6 @@ def _generate_navigation_scene(task: TaskGraph, index: int, purpose: str, robot_
     # A perimeter ROOM ("...indoors"): four walls flush with the arena edges so the rover stays IN the scene
     # instead of driving off a wall-less floor when it overshoots the goal -- the same containment maze_nav
     # relies on, and what makes "indoors" actually read as a room.
-    hx = round(route_length / 2.0 + 0.4, 3)        # floor X half-extent (matches arena_floor scale)
-    hy = round(route_length / 2.0 + 0.35, 3)       # near-square room: walls sit just inside the arena floor (was a too-narrow 0.8)
     _HALF = round(math.pi / 2.0, 4)
     objects += [
         SceneObject(name="wall_bottom", object_type="wall", pose_xyz_rpy=(cx, -hy, 0.0, 0.0, 0.0, 0.0),
