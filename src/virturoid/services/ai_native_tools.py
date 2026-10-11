@@ -525,6 +525,20 @@ def _fit_margin_for(gene, params: dict) -> dict | None:
             "steps": fit.get("horizon_steps"), "per_param_rel": fit.get("robustness_per_param")}
 
 
+def _same_controller(a, b) -> bool:
+    """True when ``a`` and ``b`` are the same crawl operating point, bit for bit on all five parameters.
+
+    The identity ``_fit_margin_for`` applies, for evidence that does not live on ``metadata['gait_fit']``. Anything
+    missing or malformed is not the same controller, so no margin is attached on a guess."""
+    from virturoid.services.gait_flywheel import _FIT_PARAMS
+    if not (isinstance(a, dict) and isinstance(b, dict)):
+        return False
+    try:
+        return all(float(a[k]) == float(b[k]) for k in _FIT_PARAMS)
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
 #: Why the ordinary build path banks without an error bar, recorded ON the row (``bank_gate_reason``) so a later
 #: mining run can exclude it by fact rather than by inference. Measuring here is not a rounding error: the
 #: fragility ladder is 4-12 rollouts at the settling horizon (~10-60 s), on EVERY verify_robot call.
@@ -1051,9 +1065,20 @@ def _honest_gait(gene, *, steps: int = 1200, render: bool = False, tag: str = "g
     if _s is not None:
         out["travel_rate_m_per_1000"] = {int(k): round(v, 3) for k, v in _s["rates"].items()}
         out["holds_rate"] = bool(_s["holds_rate"])
+    # WHOSE ERROR BAR. A margin describes one operating point, to the last bit of its floats (see
+    # ``_fit_margin_for``). This used to quote ``metadata['gait_fit']`` whenever the verdict ran a tuned controller,
+    # and a training door that lands over a body create_robot already fitted leaves that record in place.
+    # MEASURED 2026-10-10: a controller landed through train_held, whose own margin was 0.001, verified beside the
+    # earlier fit's 0.1 and that fit's note, an error bar a hundred times wider than the one measured for what was
+    # run. So the fit's margin is quoted only when the fit measured exactly these parameters, the landing's own
+    # margin when the door that landed exactly these parameters measured one, and otherwise the verdict says that
+    # no margin was measured for this controller rather than borrowing one.
     _fit = (getattr(gene, "metadata", None) or {}).get("gait_fit") or {}
-    if str(out.get("gait_source") or "").startswith("tuned_for_this_body") and "robustness_rel" in _fit:
+    _tuned = str(out.get("gait_source") or "").startswith("tuned_for_this_body")
+    _landing = gait_provenance if isinstance(gait_provenance, dict) else {}
+    if _tuned and "robustness_rel" in _fit and _fit_margin_for(gene, deployed_params) is not None:
         out["robustness_rel"] = _fit["robustness_rel"]
+        out["robustness_measured_by"] = "gait_fit"
         out["robustness_probes"] = _fit.get("robustness_probes")
         # PER PARAMETER, because that is the half a reader can act on. The joint scalar says "how far can
         # everything move at once" and averages the axes together; measured (task #267) the grounded authored
@@ -1072,6 +1097,21 @@ def _honest_gait(gene, *, steps: int = 1200, render: bool = False, tag: str = "g
             out["robustness_note"] = ("FRAGILE operating point: no perturbed copy of it survives even a "
                                       "0.001 relative change, so this verdict is not reproducible on hardware "
                                       "and the gait is not banked for reuse")
+    elif _tuned and _same_controller(_landing.get("params"), deployed_params) and (
+            "robustness_rel" in _landing or _landing.get("fragile")):
+        # The door that landed these parameters measured them (train_held's per-body fit does), and
+        # ``trained_controller`` records which parameters that evidence describes, so it is read only for them.
+        out["robustness_rel"] = _landing.get("robustness_rel")
+        out["robustness_measured_by"] = str(_landing.get("door") or "")
+        if _landing.get("robustness_note"):
+            out["robustness_note"] = _landing["robustness_note"]
+        if _landing.get("fragile"):
+            out["robustness_note"] = ("FRAGILE operating point: no perturbed copy of it survives even a "
+                                      "0.001 relative change, so this verdict is not reproducible on hardware")
+    elif _tuned and "robustness_rel" in _fit:
+        out["robustness_note"] = ("no robustness margin was measured for this controller: the per-body fit on "
+                                  "record measured a different operating point, so its margin does not describe "
+                                  "the one run here")
     if render and r.get("qpos_frames"):
         gif = _render_gait_gif(gene, r["qpos_frames"], tag)
         if gif:
@@ -2554,6 +2594,39 @@ def simulate_gait(args: dict) -> dict:
     return {"ok": True, **res}
 
 
+def _calibration_disclosure(gene, rid: str) -> dict | None:
+    """The actuator calibration a verdict on ``gene`` ran on, when one is applied to the model, or ``None``.
+
+    ``fit_actuators`` (apply: true) rewrites each identified joint's damping, reflected inertia and dry friction,
+    and every verdict afterwards runs on those values. MEASURED 2026-10-10 through the MCP server on an ingested
+    Go2: following the calibration journey's no-hardware path, a fit to ``simulate_bench_log``'s SIMULATED
+    stand-in (perturbed by the tool itself) was applied, the default crawl's travel went from 0.482 m to 0.003 m,
+    and verify_robot said nothing about why. So the verdict names the calibration, says whether its log was
+    measured on hardware, and gives the one call that takes it back out."""
+    try:
+        from virturoid.services.sysid.calibration import calibration_of
+        rec = calibration_of(gene)
+    except Exception:  # noqa: BLE001 - a disclosure must never cost the verdict it rides on
+        return None
+    if not rec or not rec.get("applied_to_model"):
+        return None
+    prov = rec.get("provenance") if isinstance(rec.get("provenance"), dict) else {}
+    cls = str(prov.get("class") or "unstated")
+    joints = rec.get("joints") if isinstance(rec.get("joints"), dict) else {}
+    out = {"applied_to_model": True, "log_measured_on": cls, "fitted_at": rec.get("fitted_at"),
+           "n_parameters_changed": sum(len(v) for v in joints.values() if isinstance(v, dict)),
+           "undo": f"calibration_status {{robot_id:'{rid}', revert:true}}"}
+    if cls == "hardware":
+        out["note"] = ("this verdict ran on joint damping, reflected inertia and dry friction fitted to a log "
+                       "measured on your hardware")
+    else:
+        out["note"] = ("this verdict ran on joint damping, reflected inertia and dry friction fitted to a log that "
+                       f"was NOT measured on your robot ({prov.get('why') or 'its provenance is not stated'}). "
+                       "What was simulated here is that log's dynamics, not your machine's; revert the "
+                       "calibration to verify the robot as it was before")
+    return out
+
+
 def verify_robot(args: dict) -> dict:
     """The anti-hallucination gate as a tool: an honest motion verdict FOR THE BODY'S KIND (B1), so an agent
     never gets a bogus gait verdict on a rover or an arm. Dispatches on structural ``robot_kind``: legged ->
@@ -2637,6 +2710,9 @@ def verify_robot(args: dict) -> dict:
         except Exception:  # noqa: BLE001 - the reframe is a disclosure; never let it swallow a measured verdict
             pass
         _flag_physics_envelope(res, (S.robot_meta(args["robot_id"]) or {}).get("prompt", ""), kind)
+        _calib = _calibration_disclosure(gene, args["robot_id"])
+        if _calib:
+            res["calibration"] = _calib
         # a camera-equipped robot's ONBOARD camera + CV is exercised here (not just the rangefinder): render its
         # own functional robot_cam (FOV + resolution from the real camera part) at a target and report what it SEES.
         if not quick:

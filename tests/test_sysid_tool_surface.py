@@ -380,6 +380,26 @@ def test_the_fit_reaches_the_model_and_comes_back_out(held_arm, synthetic):
     assert back["revert"]["reverted"] is True and back["calibrated"] is False
 
 
+@pytest.mark.skipif(not _MUJOCO, reason="fitting and verifying need MuJoCo")
+def test_every_verdict_after_an_applied_fit_names_it(held_arm, synthetic):
+    """An applied fit changes the joints every later verdict runs on, so every later verdict says so.
+
+    MEASURED 2026-10-10 through the MCP server on an ingested Go2: the no-hardware path (simulate_bench_log,
+    then fit_actuators with apply: true) wrote the simulated stand-in's perturbed dynamics into the robot, the
+    default crawl's travel went from 0.482 m to 0.003 m, and verify_robot never mentioned a calibration."""
+    _result("calibration_status", {"robot_id": held_arm, "revert": True})
+    assert "calibration" not in _result("verify_robot", {"robot_id": held_arm, "mode": "quick"})
+    _result("fit_actuators", {"robot_id": held_arm, "log_path": synthetic["log_path"],
+                              "plan_path": synthetic["plan_path"], "apply": True})
+    c = _result("verify_robot", {"robot_id": held_arm, "mode": "quick"})["calibration"]
+    assert c["applied_to_model"] is True and c["log_measured_on"] == "sim2sim", c
+    assert c["n_parameters_changed"] >= 1, c
+    assert "NOT measured on your robot" in c["note"] and "revert:true" in c["undo"], c
+    _result("calibration_status", {"robot_id": held_arm, "revert": True})
+    assert "calibration" not in _result("verify_robot", {"robot_id": held_arm, "mode": "quick"}), (
+        "a reverted calibration must leave nothing for the verdict to name")
+
+
 @pytest.mark.skipif(not _MUJOCO, reason="needs MuJoCo")
 def test_the_fit_is_not_applied_unless_it_is_asked_for(held_arm, synthetic):
     """`apply` defaults to false, and the assertion is on the MODEL rather than on whether a record exists: a

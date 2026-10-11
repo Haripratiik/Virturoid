@@ -209,9 +209,15 @@ def actuator_fidelity_level(gene) -> dict:
     if level == 2:
         note = ("the actuator is bench-identified against a hardware log and every L2 requirement is met.")
     elif level == 1 and bench.get("n_joints"):
+        # BENCH-IDENTIFIED only when the log came off a bench. A fit to the no-hardware path's simulated
+        # stand-in is applied on request too, and until 2026-10-10 this line called it bench-identified.
+        _fitted = (f"BENCH-IDENTIFIED on {bench['n_joints']} joint(s) from a system-identification fit"
+                   if bench.get("log_measured_on") == "hardware" else
+                   f"FITTED on {bench['n_joints']} joint(s) to a log that was NOT measured on hardware "
+                   f"({bench.get('log_measured_on') or 'none'}), so they describe that log rather than this "
+                   f"machine")
         note = ("the verdict was earned with joints clamped to their datasheet torque limits (L1), and "
-                f"{', '.join(bench.get('parameters') or [])} are BENCH-IDENTIFIED on "
-                f"{bench['n_joints']} joint(s) from a system-identification fit. The rung stays at L1 "
+                f"{', '.join(bench.get('parameters') or [])} are {_fitted}. The rung stays at L1 "
                 f"because: {'; '.join(l2.get('blocked_by') or [])}.")
     elif level == 1:
         note = ("the verdict was earned with joints clamped to their datasheet torque limits (L1). URDF-only "

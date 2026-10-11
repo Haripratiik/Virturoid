@@ -1288,7 +1288,18 @@ def test_a_sim2sim_fit_does_not_earn_the_bench_identified_rung(calibrated):
     act = actuator_fidelity_level(calibrated)
     assert act["level"] == 1, "a sim2sim fit was promoted to L2"
     assert act["bench_identified"]["n_joints"] > 0, "the fit is invisible on the certificate"
-    assert "BENCH-IDENTIFIED" in act["note"], "the certificate does not say what the fit bought"
+    # NAMED FOR WHAT IT IS. This asserted "BENCH-IDENTIFIED" until 2026-10-10: the certificate calling a fit to
+    # a simulated stand-in a bench identification, the over-claim this test's own docstring rules out. The line
+    # that gets quoted now says what the values were fitted to, and keeps the word for a log off a bench.
+    assert "FITTED on" in act["note"] and "NOT measured on hardware" in act["note"], act["note"]
+    assert "BENCH-IDENTIFIED" not in act["note"], act["note"]
+    assert act["bench_identified"]["log_measured_on"] == "sim2sim"
+
+    from dataclasses import replace
+    rec = calibrated.metadata["calibration"]
+    on_a_bench = replace(calibrated, metadata={**calibrated.metadata, "calibration": {
+        **rec, "provenance": {**(rec.get("provenance") or {}), "class": "hardware"}}})
+    assert "BENCH-IDENTIFIED" in actuator_fidelity_level(on_a_bench)["note"], "the same fit off a bench lost its word"
 
 
 def test_the_two_requirements_we_cannot_meet_are_named_as_ours(calibrated):

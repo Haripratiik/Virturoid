@@ -167,9 +167,12 @@ def apply_trained_gait(robot_id: str, params, *, door: str, apply: str = "auto",
         fresh = RobotGene.from_dict(gene.to_dict())              # a COPY: the undo entry must not alias the new gene
         md = dict(getattr(fresh, "metadata", None) or {})
         md["gait_params"] = dict(clean)
+        # ``params`` LAST, so the record always names the controller its evidence describes: verify quotes a door's
+        # robustness margin only for these exact floats (``ai_native_tools._same_controller``).
         md["gait_provenance"] = {"door": str(door), "applied_at": round(time.time(), 3),
                                  "credible": bool(credible), "verdict": str(verdict or ""),
-                                 **{k: v for k, v in (evidence or {}).items() if v is not None}}
+                                 **{k: v for k, v in (evidence or {}).items() if v is not None},
+                                 "params": dict(clean)}
         fresh.metadata = md
         if not S.commit_robot(rid, fresh, label=f"trained::{door}"):
             return {**base, "reason": f"no held robot '{rid}' to apply the trained controller to"}
