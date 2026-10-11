@@ -199,9 +199,21 @@ def get_design_schema(args: dict) -> dict:
     exemplars the self-manufactured corpus holds for the roles this design will use (pass ``roles`` and/or
     ``robot_class`` to target them) — so the agent adapts a proven precedent, not just the static dimension bands."""
     schema = {"ok": True, "format": "anatomy_graph",
-            "top_level": {"robot_class": "quadruped|hexapod|humanoid|biped|legged", "name": "str", "parts": "[part...]"},
+            # THE CLASS DECIDES THE BASE, which this line used to leave out while three of the examples below used
+            # classes it did not list ("manipulator", "mobile_base"). A class in body_kind.FLOATING_BASE_CLASSES
+            # compiles with a free base; every other class is bolted to a table.
+            "top_level": {"robot_class": ("quadruped | hexapod | octopod | legged | humanoid | biped | mobile_base | "
+                                          "mobile_manipulator | aerial | aquatic for a robot that moves (a FREE base "
+                                          "that walks, drives, flies or swims), or manipulator (or any other class) "
+                                          "for one BOLTED to a table, like an arm"),
+                          "name": "str", "parts": "[part...]"},
             "part_fields": {
-                "name": "unique str (required)", "role": f"one of {_ROLES} (required)",
+                "name": "unique str (required)",
+                "role": f"one of {_ROLES} (required), or any other name together with `like`",
+                "like": ("for a role outside that list: the built-in role it behaves like structurally (a gantry "
+                         "column or a turret is like a 'neck', a boom or a SCARA quill like an 'arm', a track like a "
+                         "'wheel'). The part compiles as that role and keeps your name; without `like` an unknown "
+                         "role is refused rather than guessed at"),
                 "parent": "another part's name; omit for the root body",
                 "attach": f"where on the parent it mounts: {_ATTACH}",
                 "aim": (f"the direction it points: {_AIM} — or an explicit [x, y, z] vector for anything those "
@@ -209,10 +221,13 @@ def get_design_schema(args: dict) -> dict:
                         "come in mirrored pairs (see `symmetry`), so a single part pointing at -y, or a RADIAL "
                         "fan like three delta arms at 120 degrees, needs the vector. An unrecognised token is "
                         "refused, never silently treated as 'forward'"),
-                "size": "length in metres (the segment's long axis)", "girth": "radius in metres",
+                "size": "length in metres (the segment's long axis)",
+                "girth": ("for a limb, wheel or other part: its radius in metres. For the ROOT body: its full WIDTH "
+                          "side to side, not a radius (a torso with girth 0.14 is 0.14 m wide)"),
                 "aspect": "BODY shape (root part only): 'deck'/'chassis' = a flat rectangular slab for a "
                           "rover/AGV (wheels mount at its corners); 'wide' = a broad low pod; 'round' = a "
-                          "bulbous sac; omit for the default sleek barrel torso",
+                          "bulbous sac; omit for the default sleek barrel torso, which is at most 0.32 x its "
+                          "length wide whatever girth asks for (use 'wide' for a broader body)",
                 "segments": "int; a leg with 4 = 3 actuated joints + a welded foot (Go2-class)",
                 "symmetry": "'left_right' mirrors the part to a +y/-y PAIR (so one leg entry = two legs)",
                 "joint": "'revolute' to actuate it, 'prismatic' for a SLIDING axis (a gantry ram, a rail "
@@ -250,9 +265,12 @@ def get_design_schema(args: dict) -> dict:
                                          "profile": [[0.0, 0.0], [0.06, 0.0], [0.055, 0.05], [0.0, 0.08]]}}},
             # T8: real dimension bands (metres) grounded in production robots (Go2/Spot legs, UR5e links,
             # rover wheels) so the agent authors CREDIBLE sizes, not a tiny/toy or absurd body. size = the
-            # part's long axis; girth = its radius (half-width). Stay within these unless the prompt is explicit.
+            # part's long axis; girth = a limb's radius, or the root body's full width (the compiler halves a body
+            # girth into its half-width, and the rover example's 0.34 is a 0.34 m wide deck). This band used to be
+            # labelled "girth(half_width)", so an agent sizing a body by it built one half as wide as it meant.
+            # Stay within these unless the prompt is explicit.
             "typical_dimensions_m": {
-                "body": {"size(length)": "0.3-1.2", "girth(half_width)": "0.08-0.30",
+                "body": {"size(length)": "0.3-1.2", "girth(full_width)": "0.08-0.30 (a deck may be wider)",
                          "note": "the torso/chassis; a dog ~0.5, a humanoid torso ~0.5, a rover chassis 0.6-1.0"},
                 "leg": {"size(length)": "0.25-0.6", "girth": "0.02-0.05", "segments": "4 (=3 DOF + foot)",
                         "note": "SLENDER: length/diameter >= ~2.5 (a real leg, not a sausage stub)"},
@@ -273,8 +291,8 @@ def get_design_schema(args: dict) -> dict:
                       "is laid lateral automatically, so a mobile_base with wheel pairs DRIVES (not walks)",
                       "symmetry:'left_right' counts as TWO of the part — 2 leg parts = a quadruped, 3 = a hexapod, "
                       "3 wheel parts = a six-wheeled rover",
-                      "roles MUST come from the roles list above; an unknown role is rejected with a teaching "
-                      "error (it is NOT silently compiled into a limb)",
+                      "a role outside the roles list needs `like` (the built-in role it behaves like); without it "
+                      "the part is rejected with a teaching error, never silently compiled into a limb",
                       "the compiler + validity gates run on submit; a broken graph returns a teaching error"],
             # Every example here used to be a CREATURE, so the machine half of the vocabulary had no precedent.
             "examples": {"quadruped": _EXAMPLE_QUAD, "hexapod": _EXAMPLE_HEX, "rover": _EXAMPLE_ROVER,
@@ -283,11 +301,13 @@ def get_design_schema(args: dict) -> dict:
             # HONEST out-of-box capability of each example (measured, not assumed): so the agent knows what
             # walks/drives immediately vs what needs training. The scripted wave gait is a strong PRIOR for a
             # 4-leg body but marginal for 6+ legs (a known frontier — the learned residual/train_held closes it).
+            # Re-measured 2026-10-11 with a full verify_robot (the 6000-step horizon a walk is judged at); the figures
+            # this replaced (~1.7 m, ~0.4 m, "~0 net") had gone stale in both directions. The hexapod's changed most:
+            # it walked 1.9 m BACKWARD until the crawl's swing stopped pressing its feet into the floor.
             "example_capability": {
-                "quadruped": "VERIFIED walker out of the box (scripted crawl gait, ~1.7 m in verify)",
-                "rover": "VERIFIED driver out of the box (torque wheels, ~0.4 m in verify)",
-                "hexapod": "compiles + is structurally correct (6 legs), but the SCRIPTED gait is marginal for "
-                           "6+ legs (~0 net) — call train_held to find a credible gait, or expect a weak verdict"}}
+                "quadruped": "VERIFIED walker out of the box: the shipped crawl gait walks it 8.64 m in a full verify",
+                "rover": "VERIFIED driver out of the box: its wheel motors drive it 3.80 m in a full verify",
+                "hexapod": "VERIFIED walker out of the box: the shipped crawl gait walks it 3.10 m in a full verify"}}
     g = _corpus_grounding(args or {})                          # Thesis A: retrieved verified exemplars for the roles
     if g:
         schema["corpus_grounding"] = g

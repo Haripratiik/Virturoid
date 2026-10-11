@@ -35,11 +35,15 @@ class WalkableDefaultTests(unittest.TestCase):
         self.assertGreater(v["forward_m"], 0.1)
 
     def test_example_capability_is_honestly_labeled(self):
-        # the schema must NOT pretend the hexapod walks — it tells the agent to train it.
+        # Every claim in the schema is one a full verify makes. The hexapod used to be labelled as needing
+        # train_held (it walked 1.9 m backwards); since the crawl's swing lifts its feet it walks out of the box.
         cap = self._call("get_design_schema")["example_capability"]
         self.assertIn("VERIFIED", cap["quadruped"])
         self.assertIn("VERIFIED", cap["rover"])
-        self.assertIn("train_held", cap["hexapod"])            # honest: needs training for a credible gait
+        self.assertIn("VERIFIED", cap["hexapod"])
+        rid = self._call("submit_design", {"graph": self._call("get_design_schema")["examples"]["hexapod"]})["robot_id"]
+        v = self._call("verify_robot", {"robot_id": rid, "mode": "full"})
+        self.assertTrue(v["verdict"].startswith("CREDIBLE WALK"), f"the schema says VERIFIED, verify says {v['verdict']}")
 
 
 if __name__ == "__main__":

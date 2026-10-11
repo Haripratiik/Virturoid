@@ -112,7 +112,7 @@ Virturoid is a simulation home for robots you already have, and this is the door
 
 **Where your robot goes.** Ingest runs locally: no upload, and no network access during the project scan. Everything the flywheel banks is written to your own local build directory and nothing is transmitted. Imported models stay yours, and derivatives exported from them inherit your license rather than ours — an import is never used as source material for the "original" bodies the composer generates. Stated honestly in the other direction: tenant isolation, deletion controls and private-retrieval filters are **not implemented**, so this is a single-tenant local posture, not a multi-tenant guarantee, and it is not a compliance claim.
 
-**What it will refuse.** An imported robot is verified at its real scale, and when the scripted gait cannot walk it, the product says *"no credible gait yet at this scale"* and offers to learn one for the real body rather than substituting a template or inflating the verdict. Measured: an ingested Go2 now walks like its source. Under one shared gait the twin travels 2.572 m where the source model travels 2.353 m, and the product's own gait fit adopts a credible walk for it (1.5 m at 6000 steps; by floor contact its front legs step and its hind feet slide), though its search still finds a walk on fewer seeds than it does on the source. Scope of the front door itself: URDF and MJCF load; a xacro template must be expanded first and the importer prints the one-line command to do it; SDF and USD are recognized and named rather than silently ignored; log and bag formats are detected but not yet used to calibrate the simulation. An imported bill of materials is unit-normalized, deduplicated and carried as the cost and parts record. Reconciling its masses into the simulated model's link inertials is not yet applied, so the sim-mass-equals-BOM-mass result quoted later is about generated bodies, not imports.
+**What it will refuse.** An imported robot is verified at its real scale, and when the scripted gait cannot walk it, the product says *"no credible gait yet at this scale"* and offers to learn one for the real body rather than substituting a template or inflating the verdict. Measured: an ingested Go2 walks like its source. Under one shared gait the twin travels 3.03 m where the source model travels 3.00 m, and the shipped crawl walks it 5.66 m with all four feet stepping, before any fitting. At the faster gaits the product's search finds for the source (5.9 to 19.1 m over three seeds) the twin earns the same verdict on all three, though its distance still differs from the source's by 26 to 53%. Scope of the front door itself: URDF and MJCF load; a xacro template must be expanded first and the importer prints the one-line command to do it; SDF and USD are recognized and named rather than silently ignored; log and bag formats are detected but not yet used to calibrate the simulation. An imported bill of materials is unit-normalized, deduplicated and carried as the cost and parts record. Reconciling its masses into the simulated model's link inertials is not yet applied, so the sim-mass-equals-BOM-mass result quoted later is about generated bodies, not imports.
 
 ### 2. From a prompt to a body
 
@@ -354,8 +354,10 @@ python -m virturoid.mcp_server
 claude mcp add virturoid -- python -m virturoid.mcp_server
 ```
 
-The server advertises a lean workflow menu (`create_robot`, `edit_robot`, `verify_robot`, `export_held`,
-`ingest_project`, …); `ingest_project` is the gateway for bringing in an existing robot/BOM/policy/dataset.
+The server advertises a lean workflow menu of 16 tools (`get_design_schema` and `submit_design` for a robot your
+agent designs, `ingest_project` for one you already have, then `edit_robot`, `verify_robot`, `train_held`,
+`run_task`, `export_held` and the rest); every other tool, `create_robot` among them, stays callable by name.
+`ingest_project` is the gateway for bringing in an existing robot/BOM/policy/dataset.
 
 **The zero-token claim is checkable, not just stated.** `llm_spend` reports the per-role count of internal
 language-model calls for the session, so you can read the number yourself rather than trusting this paragraph;
@@ -424,9 +426,17 @@ product then re-measured the untrained one. Every training door (`train_held`, `
 `adapt_gait`, `apply_gait`, `adopt_control_script`) now lands its result — gated on the run's own un-gameable
 verdict, disclosed when it declines, and undoable. A job that produced nothing reports `no_output` rather than
 `succeeded`. `train_held` runs the build path's own per-body fit, judged over the same 6000 steps a walk is
-judged at: through MCP, an ingested Go2 trained this way carries a credible walk (+1.542 m). The old door
+judged at: through MCP, one `train_held` call leaves an ingested Go2 carrying a credible walk of +5.66 m (the
+shipped crawl already walks it, and the door lands that measured point as the robot's own). The old door
 judged every candidate over 600 steps, which can certify only a walk faster than 0.25 m/s, and found none at
 8 or 96 evaluations.
+
+**The gait lifts the foot it means to lift.** The crawl gait added the same knee offset during swing on every
+body, and on every anatomy-compiled walker and every Menagerie quadruped tried, that pressed the foot into the
+floor instead of lifting it. Each leg's lift direction is now measured, as its stride direction already was.
+The product's search on the native Go2 went from 2.4 m to between 5.9 and 19.1 m over three seeds, and the
+design schema's hexapod from 2.5 m backwards to walking forwards. Fitting their own operating points, the
+offline dog, cat and horse reach credible walks of 6.0 to 7.1 m.
 
 **Amending keeps what you brought.** Adding a limb adds that limb's mass and nothing else
 (`n_existing_links_remassed: 0`), mounts where the request says, and names any finding it refuses on.
