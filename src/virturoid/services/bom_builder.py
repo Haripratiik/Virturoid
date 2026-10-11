@@ -102,7 +102,7 @@ class BomLine:
 _MATERIAL_KEY_TO_CATALOG = {
     "shell": "Polycarbonate shell", "aluminum": "Aluminum 6061-T6", "skeleton": "Aluminum 7075-T6",
     "frame": "Aluminum 6061-T6", "steel": "Steel 4140", "carbon_fiber": "Carbon-fiber composite",
-    "titanium": "Titanium Ti-6Al-4V", "metal": "Hardened steel (gripper)", "rubber": "TPU (rubber)",
+    "titanium": "Titanium Ti-6Al-4V", "metal": "Hardened steel", "rubber": "TPU (rubber)",
 }
 # TASK -> the load-bearing SKELETON material. Heavy work wants steel; flight/agility wants carbon-fibre;
 # precision/medical wants titanium; otherwise aircraft-grade aluminium. (The outer shell, contact metal, etc.
@@ -664,13 +664,20 @@ def _select_compute_line(robot_class: str, n_actuators: int, task: str, capabili
 
 
 def _mobile_drive(gene: RobotGene) -> list[tuple[str, int, str]]:
-    """Wheels + drive motors for a mobile base (count from the gene's wheel-ish segments, else a 2+caster default)."""
+    """The wheels (tyre + hub) of a mobile base, and a caster only where the body has one.
+
+    NO SECOND MOTOR FOR A WHEEL. A driven wheel is an actuated joint, and section 1 already buys a motor for every
+    actuated joint, so the gearmotor this used to add billed each wheel's drive twice. Measured 2026-10-11:
+    "a six-wheeled rover" shipped 6x T-Motor AK80-9 for its wheel joints AND 6x Pololu 37D gearmotors (1.29 kg the
+    body then carried as well), plus a "passive balance caster" on a body that has six wheels and no caster. The
+    caster is listed for the bodies that have one (the two-wheeled base is composed with a ``caster``).
+    """
     if (gene.robot_class or "").lower() not in ("mobile_base", "mobile", "rover"):
         return []
     wheels = sum(1 for s in gene.segments if "wheel" in s.name.lower()) or 2
-    return [("Pololu 37Dx70L 12V gearmotor + encoder", wheels, "differential drive"),
-            ("100mm rubber drive wheel + hub", wheels, "driven wheels"),
-            ("Caster wheel 2in", 1, "passive balance caster")]
+    casters = sum(1 for s in gene.segments if "caster" in s.name.lower())
+    return ([("100mm rubber drive wheel + hub", wheels, "driven wheels")]
+            + ([("Caster wheel 2in", casters, "passive balance caster")] if casters else []))
 
 
 # --- ACTUATOR SKU POLICY ------------------------------------------------------------------------------------

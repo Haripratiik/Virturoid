@@ -1569,6 +1569,21 @@ def _joint_dynamics_prior(gene: RobotGene, seg) -> tuple[float, float, float]:
     if seg.joint_type == "prismatic":
         return _out(1.2, 0.02, 0.12)
     if _segment_role(seg) == "wheel" or "wheel" in name or "drive" in name:
+        # A WHEEL'S VISCOUS LOSS IS ITS MOTOR'S BACK-EMF, the slope of the torque-speed line: stall torque over
+        # no-load speed, read off the part grounding picked (``wheel_motor_speed_radps``). The fixed 0.25 N.m.s
+        # it replaces was right for no motor in particular: measured 2026-10-11, once a 0.36 m rover stopped being
+        # sized as a 70 kg warehouse robot it was fitted with 0.52 N.m servos (no-load 12.6 rad/s), and 0.25 held
+        # their wheels to 1.6 rad/s, a rover crawling 0.14 m in the drive test. On that slope the same command
+        # turns the wheel at 0.85 of the motor's own no-load speed, which is what the motor does. A body with no
+        # grounded motor (or a customer's declared damping) keeps what it had.
+        speed = ((getattr(gene, "metadata", None) or {}).get("wheel_motor_speed_radps") or {}).get(seg.name)
+        cap = abs(float(getattr(seg, "actuator_torque_nm", 0.0) or 0.0))
+        try:
+            speed = float(speed) if speed is not None else 0.0
+        except (TypeError, ValueError):
+            speed = 0.0
+        if speed > 0.0 and cap > 0.0:
+            return _out(max(0.005, cap / speed), 0.02, 0.05)
         return _out(0.25, 0.02, 0.05)
     if mount in ("table", "floor", "torso"):
         # Scale reflected inertia/friction with the selected actuator instead of

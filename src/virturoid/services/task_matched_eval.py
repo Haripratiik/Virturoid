@@ -58,6 +58,10 @@ def robot_capabilities(gene: RobotGene) -> set[str]:
     return caps
 
 
+#: The goals a wheeled base is scored on. Its BOM certificate grades the motion of driving to these same goals.
+NAVIGATION_GOALS = ((1.0, 0.0), (0.0, -0.9), (-0.7, 0.4), (0.7, 0.5))
+
+
 def evaluate_robot(gene: RobotGene, *, prompt: str = "", controller_params: dict | None = None,
                    scene_params: dict | None = None) -> dict:
     """Evaluate ``gene`` on its morphology-implied task (dispatched by STRUCTURE — see ``robot_kind`` — so
@@ -114,7 +118,7 @@ def evaluate_robot(gene: RobotGene, *, prompt: str = "", controller_params: dict
     if kind == "mobile":
         from virturoid.services.navigation_controller import run_navigation_episode
         mj = mujoco.MjModel.from_xml_string(compile_gene_to_mjcf(gene))
-        goals = [(1.0, 0.0), (0.0, -0.9), (-0.7, 0.4), (0.7, 0.5)]
+        goals = list(NAVIGATION_GOALS)
         results = [run_navigation_episode(mj, g, [], horizon=3000) for g in goals]
         reached = sum(1 for r in results if r["status"] == "reached")
         return {"task": "navigation", "metric": "goal_reach_rate", "value": round(reached / len(goals), 3),

@@ -611,9 +611,13 @@ def build_gene_package(gene: RobotGene, prompt: str, output_dir: Path, scene_cou
         _rep_dir = output_dir / "reports"
         _rep_dir.mkdir(parents=True, exist_ok=True)
         (_rep_dir / "grounding_report.json").write_text(_json.dumps(_ground_report, indent=2), encoding="utf-8")
-        from virturoid.services.bom_certificate import certify_policy_on_bom
-        certify_policy_on_bom(gene, None, steps=250, n_seeds=1,
-                              out_path=str(_rep_dir / "bom_certificate.json"))
+        from virturoid.services.bom_certificate import (certify_drive_on_bom, certify_policy_on_bom,
+                                                        drives_on_wheels)
+        if drives_on_wheels(gene):                         # a wheeled base: graded under its own navigation drive
+            certify_drive_on_bom(gene, out_path=str(_rep_dir / "bom_certificate.json"))
+        else:
+            certify_policy_on_bom(gene, None, steps=250, n_seeds=1,
+                                  out_path=str(_rep_dir / "bom_certificate.json"))
     except Exception:  # noqa: BLE001 - the certificate is a report, never a build blocker
         pass
     try:                                                   # G6: design-time morphology gate (report, ledger-visible)

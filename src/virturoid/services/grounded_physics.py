@@ -75,6 +75,25 @@ _QUADRUPED_PRIOR = PhysicalPrior("legged.quadruped", (12.0, 15.0), "commercial m
 _COBOT_PRIOR = PhysicalPrior("manipulator.cobot", (17.0, 21.0), "6/7-axis collaborative-arm envelope")
 _AMR_PRIOR = PhysicalPrior("mobile.amr", (70.0, 150.0), "warehouse autonomous-mobile-robot envelope")
 
+#: THE ENVELOPE DESCRIBES A MACHINE OF A SIZE. The warehouse AMRs behind (70, 150) kg are bases 0.8-0.9 m long
+#: (the MiR100 / MiR250 class). Applied to every body with four wheels, it lifted the composed rover -- a 0.36 m
+#: deck on 6 cm wheels -- from its own 13 kg (structure, motors, battery, compute, sensors, all itemised) to the
+#: 70 kg floor, 57 kg of it an "estimate" of wiring, fasteners and covers (measured 2026-10-11 on "a six-wheeled
+#: rover", "a four-wheeled warehouse rover" and "a mobile base robot that navigates around obstacles"). Half a
+#: metre is well under the smallest machine the envelope was drawn from; below it a base keeps its own mass.
+_AMR_MIN_CHASSIS_M = 0.5
+
+
+def _chassis_span_m(gene) -> float:
+    """The root's widest horizontal extent, read off the collider the compiler builds for it."""
+    root = gene.root()
+    if root is None:
+        return 0.0
+    if root.shape == "box":
+        hx, hy = root.cross_section or (root.radius_m, root.radius_m)
+        return 2.0 * max(float(hx), float(hy))
+    return max(2.0 * float(root.radius_m), float(root.length_m))
+
 
 def _leg_branches(gene) -> list:
     root = gene.root()
@@ -204,7 +223,7 @@ def physical_prior_for(gene) -> PhysicalPrior | None:
     branches = _leg_branches(gene)
     if len(branches) == 4 and _stands_on_four(gene, branches):
         return _QUADRUPED_PRIOR
-    if len(wheels) >= 4 and len(_leg_branches(gene)) == 0:
+    if len(wheels) >= 4 and len(branches) == 0 and _chassis_span_m(gene) >= _AMR_MIN_CHASSIS_M:
         return _AMR_PRIOR
     if len(arm_joints) in (6, 7) and len(branches) == 0:
         return _COBOT_PRIOR
@@ -482,6 +501,7 @@ def ground_gene(gene, *, material: str = "aluminum", fill: float = 0.3, margin: 
     derived_loads = _required_joint_loads(gene, structural_mass, total_mass_hint=target_mass)
     total = 0.0
     embodied_actuator: dict[str, float] = {}
+    wheel_speed: dict[str, float] = {}
     for s in gene.segments:
         struct = structural_mass[s.name]
         act_mass = 0.0
@@ -540,6 +560,8 @@ def ground_gene(gene, *, material: str = "aluminum", fill: float = 0.3, margin: 
             act_mass = act.mass_kg
             if not keep:
                 s.actuator_torque_nm = act.peak_torque_nm      # joint limit = peak (transients); duty rides on rated
+                if s.shape == "cylinder" and float(act.max_speed_radps or 0.0) > 0.0:
+                    wheel_speed[s.name] = float(act.max_speed_radps)   # the compiler's wheel damping reads it
             bom.append({"role": s.name, "part": act.name, "mass_kg": act.mass_kg,
                         "stall_nm": act.peak_torque_nm, "rated_nm": act.rated_torque_nm,
                         "max_speed_radps": act.max_speed_radps, "required_nm": round(required, 2),
@@ -548,6 +570,13 @@ def ground_gene(gene, *, material: str = "aluminum", fill: float = 0.3, margin: 
             s.mass_kg = round(max(0.02, struct + act_mass), 3)  # grounded mass = structure + actuator
             embodied_actuator[s.name] = act_mass
         total += s.mass_kg
+    # THE SPEED OF EACH WHEEL'S MOTOR, for ``gene_compiler._joint_dynamics``: a wheel's viscous loss is its motor's
+    # back-EMF (stall torque over no-load speed), which only the part that was picked can say. Replaced, not
+    # merged, so a re-ground that re-sizes a wheel never leaves the old motor's speed behind.
+    if wheel_speed:
+        gene.metadata["wheel_motor_speed_radps"] = {k: round(v, 6) for k, v in wheel_speed.items()}
+    else:
+        gene.metadata.pop("wheel_motor_speed_radps", None)
     # WHAT THIS CALL FOLDED INTO WHICH LINK, so the parts list can stop selling the same motor twice. Each
     # ``s.mass_kg`` above is structure + its actuator, and ``bom_builder`` groups those link masses into the
     # "material" lines while ALSO listing every motor as an actuator line -- so the BOM totals counted the
@@ -765,6 +794,24 @@ def _component_host(gene, category: str) -> str:
     return root_name
 
 
+
+def _component_hosts(gene, category: str, part: str = "") -> list[str]:
+    """Every link a BOM line's mass rides on: one per wheel for the wheel hardware, else :func:`_component_host`.
+
+    A line bought per wheel is one part on EACH wheel. All of it used to go on the first wheel: measured
+    2026-10-11, "a six-wheeled rover" carried six motors and six wheel hubs (2.27 kg) on ``wheel_0`` alone, which
+    made one wheel 4.4x as heavy as its five siblings. A caster rides on the caster, never on the drive wheels.
+    """
+    cat = str(category or "").lower()
+    if cat in _WHEEL_CATEGORIES:
+        rolling = [s.name for s in gene.segments if s.shape == "cylinder" and s.joint_type == "revolute"]
+        casters = [n for n in rolling if "caster" in n.lower()]
+        drives = [n for n in rolling if n not in casters]
+        pick = casters if ("caster" in str(part or "").lower() and casters) else drives
+        if pick:
+            return pick
+    return [_component_host(gene, category)]
+
 def _align_actuator_masses(gene, bom: dict) -> float:
     """Move each link's embodied motor mass onto the part the BOM's ``actuator_map`` actually ORDERS.
 
@@ -880,12 +927,16 @@ def embody_component_masses(gene, bom: dict | None = None, *, task: str = "") ->
                     continue
                 if not (math.isfinite(kg) and kg > 0.0):
                     continue
-                host = _component_host(gene, str(ln.get("category") or ""))
-                if host not in by_name:
+                hosts = [h for h in _component_hosts(gene, str(ln.get("category") or ""), str(ln.get("part") or ""))
+                         if h in by_name]
+                if not hosts:
                     continue
-                added[host] = added.get(host, 0.0) + kg
-                manifest.append({"part": str(ln.get("part") or ""), "category": str(ln.get("category") or ""),
-                                 "qty": int(ln.get("qty") or 1), "mass_kg": round(kg, 4), "link": host})
+                qty = int(ln.get("qty") or 1)
+                for host in hosts:                      # a per-wheel line is spread evenly, one share per wheel
+                    added[host] = added.get(host, 0.0) + kg / len(hosts)
+                    manifest.append({"part": str(ln.get("part") or ""), "category": str(ln.get("category") or ""),
+                                     "qty": (qty if len(hosts) == 1 else round(qty / len(hosts), 4)),
+                                     "mass_kg": round(kg / len(hosts), 4), "link": host})
             for host, kg in added.items():
                 by_name[host].mass_kg = round(float(by_name[host].mass_kg or 0.0) + kg, 3)
             rec["component_kg"] = {n: round(v, 6) for n, v in added.items()}
@@ -903,11 +954,12 @@ def embody_component_masses(gene, bom: dict | None = None, *, task: str = "") ->
                 break
             bom = recheck                            # the suite moved with the mass -- settle on the new one
         after = round(sum(float(s.mass_kg or 0.0) for s in gene.segments), 3)
-        out.update({"applied": True, "components_kg": round(itemised, 3), "n_parts": len(manifest),
+        n_parts = len({(m["part"], m["category"]) for m in manifest})     # a per-wheel part is one part
+        out.update({"applied": True, "components_kg": round(itemised, 3), "n_parts": n_parts,
                     "parts": manifest, "total_mass_kg": [before, after], "delta_kg": round(after - before, 3),
                     "hosts": {n: round(v, 3) for n, v in sorted(added.items())},
                     "actuator_realigned_kg": round(realigned, 3),
-                    "reason": (f"{len(manifest)} parts from the bill of materials ({round(itemised, 3)} kg of "
+                    "reason": (f"{n_parts} parts from the bill of materials ({round(itemised, 3)} kg of "
                                f"battery, compute, sensors and drive hardware) now ride on the links that "
                                f"carry them, so the simulated body weighs what the built robot weighs")})
     except Exception as exc:  # noqa: BLE001 - a body that cannot be embodied is reported, never silently light

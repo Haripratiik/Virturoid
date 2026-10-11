@@ -1245,15 +1245,37 @@ def _honest_drive(gene, *, steps: int = 800, world_xml: str | None = None) -> di
     hi, lo = model.actuator_ctrlrange[:, 1], model.actuator_ctrlrange[:, 0]
     frc = model.actuator_forcerange[:, 1]
     drive = np.where(hi > lo, 0.85 * hi, np.where(frc > 0, 0.7 * frc, 2.0))
+    # DRIVE THE WHEELS, HOLD THE REST. Every actuator used to get the same constant command, so a mobile
+    # manipulator's ARM was torqued out of the stowed pose this function resets to while its wheels turned.
+    # Measured 2026-10-11 on "a mobile manipulator": TIPPED at 70 kg and SPINS IN PLACE at 13 kg, either way
+    # with the arm swinging; held where it ships, it drives. A non-wheel actuator now holds its joint at the rest
+    # pose (PD to the keyframe, saturating at its own limit); a body whose actuators are all wheels is unchanged.
+    # Wheel SPIN is read on the wheels too, not averaged with joints that are only holding a pose.
+    _wheel_bodies = {int(model.geom_bodyid[g]) for g in wheel_geoms}
+    is_wheel = np.array([int(model.jnt_bodyid[int(model.actuator_trnid[u, 0])]) in _wheel_bodies
+                         for u in range(model.nu)], bool)
+    if not is_wheel.any():
+        is_wheel[:] = True                                          # no named wheels: drive everything, as before
+    qadr = [int(model.jnt_qposadr[int(model.actuator_trnid[u, 0])]) for u in range(model.nu)]
+    q_hold = np.array([float(data.qpos[a]) for a in qadr])
+    lim = np.where(frc > 0, frc, np.where(hi > lo, np.maximum(np.abs(hi), np.abs(lo)), 2.0))
+    kp_hold, kd_hold = lim / 0.1, lim / 2.0                         # full effort at 0.1 rad of droop
+    wheel_dofs = [d for d, w in zip(dofs, is_wheel) if w]
     contact_steps, spins = 0, []
     for _ in range(steps):
-        data.ctrl[:] = drive
+        if is_wheel.all():
+            data.ctrl[:] = drive
+        else:
+            q = np.array([float(data.qpos[a]) for a in qadr])
+            qd = np.array([float(data.qvel[d]) for d in dofs])
+            hold = np.clip(kp_hold * (q_hold - q) - kd_hold * qd, -lim, lim)
+            data.ctrl[:] = np.where(is_wheel, drive, hold)
         mujoco.mj_step(model, data)
         up_min = min(up_min, float(data.xmat[bid].reshape(3, 3)[2, 2]))
         touching = any((c.geom1 in wheel_geoms and c.geom2 in floor_geoms) or
                        (c.geom2 in wheel_geoms and c.geom1 in floor_geoms) for c in data.contact[:data.ncon])
         contact_steps += int(touching)
-        spins.append(float(np.mean(np.abs([data.qvel[j] for j in dofs]))))
+        spins.append(float(np.mean(np.abs([data.qvel[j] for j in wheel_dofs]))))
     p1 = np.array(data.xpos[bid])
     fwd = float(np.hypot(p1[0] - p0[0], p1[1] - p0[1]))
     dz = float(p1[2] - z0)
