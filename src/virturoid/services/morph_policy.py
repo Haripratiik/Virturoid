@@ -1957,25 +1957,48 @@ def extract_crawl_gait_params(gene, *, tune_steps: int = 500, verify_steps: int 
     token map, and return it only when the same controller clears the shared
     credibility gate.  A non-credible crawl is intentionally not exported.
     """
+    import math
+
     from virturoid.services.gait_quality import classify
 
-    tuned = tune_crawl_gait(gene, steps=tune_steps, cache=True)
-    result = crawl_gait_rollout(
-        gene, steps=verify_steps, freq=tuned["freq"], hip_amp=tuned["hip_amp"],
-        knee_amp=tuned["knee_amp"], return_control_plan=True,
-    )
-    plan = result.get("control_plan") or {}
-    verdict = classify(result)
-    if not plan.get("exportable") or not verdict.startswith("CREDIBLE"):
-        return None
-    return {
-        **plan,
-        "verified_walk": True,
-        "sim_forward_m": round(float(result.get("forward", 0.0)), 3),
-        "sim_verdict": verdict,
-        "sim_cadence_hz": round(float(result.get("cadence", 0.0)), 3),
-        "sim_upright_frac": round(float(result.get("upright_frac", 0.0)), 3),
-    }
+    # THE BODY'S OWN OPERATING POINT FIRST. This used to run its own ``tune_crawl_gait`` grid at export time and
+    # ignore the operating point the body carries, so a body fitted by create_robot or trained by a training door
+    # shipped a controller nobody had verified: the grid's freq/amplitudes, with ``crawl_gait_rollout`` reading
+    # kp/kd off ``metadata['gait_params']``. ``verdict_certificate`` has measured and disclosed the mismatch since
+    # (freq 2.056 / hip 0.746 / knee 0.770 deployed, 2.55 / 0.9 / 1.0 shipped). MEASURED 2026-10-11 through the
+    # MCP server on a composed quadruped that train_held had fitted to a 10.5 m CREDIBLE WALK: the export grid
+    # found no credible crawl, so the package fell back to the trot starter, which crouched backwards (-0.254 m).
+    # So the body's own point is frozen and checked here, and the grid runs only for a body that has none, or
+    # whose own point no longer walks (an amend can outdate it), where it remains an honest starting point.
+    own = {k: float(v) for k, v in (((getattr(gene, "metadata", None) or {}).get("gait_params")) or {}).items()
+           if k in ("freq", "hip_amp", "knee_amp", "kp", "kd") and isinstance(v, (int, float))
+           and not isinstance(v, bool) and math.isfinite(float(v))}
+    attempts = ([("held", own)] if own else []) + [("export_tune", None)]
+    for source, params in attempts:
+        if params is None:
+            tuned = tune_crawl_gait(gene, steps=tune_steps, cache=True)
+            params = {"freq": tuned["freq"], "hip_amp": tuned["hip_amp"], "knee_amp": tuned["knee_amp"]}
+        result = crawl_gait_rollout(gene, steps=verify_steps, return_control_plan=True, **params)
+        plan = result.get("control_plan") or {}
+        verdict = classify(result)
+        if plan.get("exportable") and verdict.startswith("CREDIBLE"):
+            return {
+                **plan,
+                "verified_walk": True,
+                "operating_point_source": source,
+                # THE POINT THE PROGRAM WAS FROZEN FROM, which ``frequency_hz`` above is not: the crawl probes a
+                # frequency ladder (freq / 1.7, freq, freq x 1.7, ...) and freezes the one that travels furthest, so
+                # a 2.49 Hz operating point ships a 4.23 Hz wave. The certificate compares THIS with the point the
+                # verdict ran, and could only answer "cannot tell" while the program recorded the derived number.
+                "operating_point": {"freq": float(params["freq"]), "hip_amp": float(params["hip_amp"]),
+                                    "knee_amp": float(params["knee_amp"]), "kp": float(plan["kp"]),
+                                    "kd": float(plan["kd"])},
+                "sim_forward_m": round(float(result.get("forward", 0.0)), 3),
+                "sim_verdict": verdict,
+                "sim_cadence_hz": round(float(result.get("cadence", 0.0)), 3),
+                "sim_upright_frac": round(float(result.get("upright_frac", 0.0)), 3),
+            }
+    return None
 
 
 def legged_steer_to_goal(gene, goal_xy, *, steps: int = 4000, gain: float = 1.6, cap: float = 0.75,

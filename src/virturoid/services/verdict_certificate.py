@@ -123,7 +123,13 @@ def _controller_parity(gene, verdict: dict, shipped: dict | None) -> dict:
                            "controller named in measured_controller and nothing else.")}
     shipped_law = str(shipped.get("policy_type") or "") or None
     law_match = bool(measured_law and shipped_law and measured_law == shipped_law)
-    shipped_op = {k: shipped[p] for p, k in _OP_KEYS if shipped.get(p) is not None} or None
+    # The point the shipped program was FROZEN FROM when it records one (a crawl program does: its own
+    # ``frequency_hz`` is the probe's pick from a ladder around ``freq``, so it never equals the point it came
+    # from); otherwise the program's own fields, spelled as the deploy path spells them.
+    _frozen = shipped.get("operating_point")
+    shipped_op = ({k: float(_frozen[k]) for _, k in _OP_KEYS if isinstance(_frozen.get(k), (int, float))}
+                  if isinstance(_frozen, dict) else
+                  {k: shipped[p] for p, k in _OP_KEYS if shipped.get(p) is not None}) or None
     op_match: bool | None
     if not law_match:
         op_match = None                      # a different law makes the parameter comparison meaningless

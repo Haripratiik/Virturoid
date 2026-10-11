@@ -331,10 +331,19 @@ def ground_and_repair(gene: RobotGene, *, task: str = "") -> dict:
     _g = grounding_config(gene)
     _mat, _fill, _keep = _g["material"], _g["fill"], _g["preserve_mass"]
     _hold_shape = bool(_g["preserve_geometry"])
+    # A STATED MASS IS NOT OURS TO RE-DERIVE, on the way out any more than on the way in. ``set_payload`` records
+    # the load it put on the robot (``metadata['embodied_mass']['payload_kg']``) and every amend protects it, but
+    # these calls did not: they re-derived the payload link from its volume x density like any structural link.
+    # MEASURED 2026-10-11 through the MCP server: a composed quadruped given a 2 kg payload was verified and
+    # trained at 36.98 kg, then exported with that payload at 3.925 kg (38.905 kg). The trained crawl gait no
+    # longer walked the heavier body, so the package shipped the fallback trot controller, which crouched
+    # backwards, and the certificate said DEPLOY != MEASURE.
+    _stated = {str(n) for n in ((((getattr(gene, "metadata", None) or {}).get("embodied_mass") or {})
+                                 .get("payload_kg")) or {})}
     _findings: dict = {}
     try:
         from virturoid.services.grounded_physics import ground_gene
-        report = ground_gene(gene, material=_mat, fill=_fill, preserve_mass=_keep)
+        report = ground_gene(gene, material=_mat, fill=_fill, preserve_mass=_keep, preserve_mass_links=_stated)
         from virturoid.services.structural_validation import validate_structure
         for _ in range(3):
             _st = validate_structure(gene)
@@ -357,7 +366,7 @@ def ground_and_repair(gene: RobotGene, *, task: str = "") -> dict:
                         and float(_s.length_m) > 0):
                     _r = min(_r, float(_s.length_m) / 4.5)
                 _s.radius_m = round(max(float(_s.radius_m), _r), 5)
-            report = ground_gene(gene, material=_mat, fill=_fill, preserve_mass=_keep)
+            report = ground_gene(gene, material=_mat, fill=_fill, preserve_mass=_keep, preserve_mass_links=_stated)
         # A LINK MUST BE BIG ENOUGH TO HOUSE THE MOTOR THAT DRIVES IT (visual-fidelity defect T1). Actuator
         # housings are drawn at their true datasheet envelope, which is right -- but nothing forced the LIMB to
         # be able to carry that part, so the compiler emitted a 5.6 mm rod mounting a 98 mm-diameter T-Motor
@@ -398,7 +407,7 @@ def ground_and_repair(gene: RobotGene, *, task: str = "") -> dict:
             if _over:
                 _findings["housing_over_limb"] = _over[:12]
             if _grew:
-                report = ground_gene(gene, material=_mat, fill=_fill, preserve_mass=_keep)
+                report = ground_gene(gene, material=_mat, fill=_fill, preserve_mass=_keep, preserve_mass_links=_stated)
         except Exception:  # noqa: BLE001 - housing fit is a fidelity pass, never a build blocker
             pass
     except Exception as _ge:  # noqa: BLE001
@@ -1430,6 +1439,7 @@ def _stamp_exported_controller(gene, program: dict | None) -> None:
                 "program_fingerprint": program.get("program_fingerprint"),
                 "control_frequency_hz": program.get("control_frequency_hz"),
                 "pd_gains": program.get("pd_gains"),
+                "operating_point": program.get("operating_point"),
                 "verified_walk": program.get("verified_walk"),
                 "sim_forward_m": program.get("sim_forward_m"),
                 "sim_verdict": program.get("sim_verdict"),
