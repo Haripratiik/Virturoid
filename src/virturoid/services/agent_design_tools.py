@@ -1000,9 +1000,20 @@ def train_held(args: dict) -> dict:
     as the other three (``trained_controller``): ``apply='auto'`` commits when the run's own un-gameable verdict
     is a credible walk, ``'never'`` is artifact-only, ``'always'`` lands it loudly, and every commit goes
     through ``session_state.commit_robot`` so ``edit_robot op:'undo'`` reverts it.
+
+    THE TWO BUDGETS ARE VALIDATED HERE, at the call, not in the job. The CPU run is now the product's own
+    per-body fit (see ``run_train_gene_job``), which takes as long as the body needs up to its ceiling, so the
+    agent sets the bounds it can afford: ``budget_s`` bounds the WAIT (seconds of search; omitted = the fit's
+    own default ceiling, ``0`` = unbounded) and ``max_evals`` bounds the WORK (gait candidates for the whole
+    run, a unit the physics owns, so the same cap stops the same search on any machine; omitted or ``0`` = the
+    full search). A malformed value is refused before a job exists rather than surfacing minutes later as a
+    failed job, and a garbage cap is never quietly turned into the full search or into no search at all.
     """
+    import math
+
     from virturoid.services import job_registry as J
     from virturoid.services import session_state as S
+    from virturoid.services.gait_flywheel import _budget_from_env
     from virturoid.services.trained_controller import APPLY_MODES
     rid = args.get("robot_id")
     if not rid or S.get_robot(rid) is None:
@@ -1010,23 +1021,53 @@ def train_held(args: dict) -> dict:
     mode = str(args.get("apply") or "auto").lower()
     if mode not in APPLY_MODES:
         return {"ok": False, "error": f"apply must be one of {', '.join(APPLY_MODES)} (got {mode!r})"}
+    try:
+        _mev = args.get("max_evals")
+        max_evals = None if _mev is None else int(_mev)
+        _bud = args.get("budget_s")
+        budget_s = None if _bud is None else float(_bud)
+        seed = int(args.get("seed", 0))
+    except (TypeError, ValueError):
+        return {"ok": False, "error": ("max_evals must be a whole number of gait candidates (omit it, or pass 0, "
+                                       "for the full search), budget_s a number of seconds (omit it for the "
+                                       "default ceiling, 0 for unbounded) and seed an integer")}
+    if budget_s is not None and not math.isfinite(budget_s):
+        return {"ok": False, "error": "budget_s must be a finite number of seconds (0 means unbounded)"}
+    max_evals = max_evals if (max_evals is not None and max_evals > 0) else None
     from virturoid.services.agent_tools import safe_build_path  # H2: confine writes under build/
     job = J.create("train_gene", {"robot_id": rid, "mode": args.get("mode", "gait_search"),
-                                  "max_evals": int(args.get("max_evals", 8)), "iters": int(args.get("iters", 200)),
-                                  "apply": mode},
+                                  "max_evals": max_evals, "budget_s": budget_s, "seed": seed,
+                                  "iters": int(args.get("iters", 200)), "apply": mode},
                    safe_build_path(args.get("build_root"), "agent_builds"))
+    _clock = _budget_from_env(budget_s)
     return {"ok": True, "job_id": job.get("id"), "status": job.get("status"), "apply": mode,
             "applies_to_robot": mode != "never",
-            "note": ("poll get_job(job_id, since) for progress + the honest gait verdict. The trained controller "
-                     "is COMMITTED to this robot when the run's own verdict is a credible walk (apply='auto'); "
-                     "the job result carries applied_to_robot saying whether it landed and why, and the job "
-                     "status is 'no_output' — never 'succeeded' — when nothing landed. Undo: edit_robot "
-                     "{robot_id, ops:[{op:'undo'}]}.")}
+            # THE BOUNDS IN FORCE, echoed before the agent starts polling, so it can decide how long to wait
+            # without reading a docstring: ``budget_s`` None = no time limit, ``max_evals`` None = full search.
+            "budget_s": _clock, "max_evals": max_evals,
+            "note": ("poll get_job(job_id, since) for progress and the honest gait verdict. The CPU run is the "
+                     "per-body fit create_robot uses: candidates are judged over the 6000-step horizon a walk "
+                     "is judged at, so it takes "
+                     + (f"up to about {_clock:.0f} s of search" if _clock else "as long as the search needs")
+                     + (f", at most {max_evals} gait evaluations" if max_evals else "")
+                     + "; get_job events state what one rollout costs on this body up front and tick while "
+                       "it runs. The trained controller is COMMITTED to this robot when the run's own verdict "
+                       "is a credible walk (apply='auto'); the job result carries applied_to_robot saying "
+                       "whether it landed and why, and the job status is 'no_output', never 'succeeded', when "
+                       "nothing landed. Undo: edit_robot {robot_id, ops:[{op:'undo'}]}.")}
 
 
 def run_train_gene_job(args: dict, progress=None) -> dict:
     """The train_gene job WORKER (called by job_registry). Reads the held gene, runs the search/train, and
-    returns the honest best verdict. In-process, so it reads session_state directly."""
+    returns the honest best verdict. In-process, so it reads session_state directly.
+
+    The CPU arm (``mode='gait_search'``, and the ``gpu_rl`` fallback when the box is down) is the product's own
+    per-body fit, ``gait_flywheel.fit_gait_for_body``, run on a COPY of the held gene and bounded by
+    ``budget_s`` (seconds) and ``max_evals`` (gait candidates for the whole run). Whatever it adopts goes through
+    ``trained_controller.apply_trained_gait`` with this door's name, so the apply modes, the commit-with-undo and
+    the credible gate are the same ones every training door shares. See the comment at the top of that branch
+    for the measurement that replaced the 600-step search it used to run.
+    """
     from virturoid.services import session_state as S
     def say(stage, msg):
         if progress:
@@ -1059,146 +1100,352 @@ def run_train_gene_job(args: dict, progress=None) -> dict:
             return {"mode": "gpu_rl", "policy": npz, "trained": bool(npz),
                     "applied_to_robot": _land_gpu_policy(rid, gene, npz, apply=apply_mode, say=say)}
         say("train", "GPU not reachable — falling back to the CPU gait search")
-    # One gait path owns recall, bounded search, classify()-credible early-stop, deploy comparison and banking.
-    say("search", "recalling prior gait hints, then physics-evaluating a bounded per-body search")
+    # ONE GAIT PATH, AND IT IS THE PRODUCT'S. Until 2026-10-10 this branch ran a quick search of its own,
+    # ``learn_gait_flywheel(..., steps=600, deploy_steps=600)``, scoring and comparing every candidate over 600 steps
+    # (1.2 s of simulated time). ``gait_quality.classify`` asks a CREDIBLE WALK for forward >= 0.3 m, so at that horizon
+    # nothing slower than 0.25 m/s could ever be certified, whatever the budget, and the walk the fit finds for the
+    # Menagerie Unitree Go2 covers about 0.13 m/s. MEASURED through the MCP server (ingest_project -> train_held, apply
+    # 'auto'): the default max_evals=8 searched 8 configs in ~10 s and max_evals=96 searched 96 in ~60 s, both ending
+    # LURCHES with nothing applied, while ``gait_flywheel.fit_gait_for_body`` on the same twin ADOPTS a credible walk at
+    # its default seed (49 evaluations, CREDIBLE WALK +1.542 m at 6000 steps, holding its rate, surviving a 1e-2
+    # perturbation). The physics supported a walk; this door could not see it.
+    #
+    # Both ``gait_search.evaluate_gait`` and ``fit_gait_for_body`` already said why: an optimiser may never be
+    # scored at a shorter horizon than the one its answer is judged at, and screening cheaply then judging
+    # honestly "just spends the whole budget rediscovering drift". This door did exactly that, and it is the
+    # training door the MCP menu advertises. (The folded doors still search shorter: adapt_gait 600 steps,
+    # learn_gait 900/1500, train_reward 800. They are not this change.)
+    #
+    # So the branch now runs THE fit, the one ``create_robot`` runs on every legged build: search AND judgement
+    # at the 6000-step settling horizon, a structural prior recalled from the flywheel and screened, up to three
+    # decorrelated seed restarts, robustness-aware ranking and the margin ladder, re-verification of the exact
+    # floats it stores, and a wall-clock ceiling. It searches nothing for a body whose shipped default already
+    # walks, and nothing for a body the leg crawl never drives. MEASURED AFTER, same MCP flow, same Go2, default
+    # arguments: 49 candidates / 88 rollouts / 61 s of fitting, CREDIBLE WALK +1.542 m landed, and the next
+    # verify_robot reports CREDIBLE WALK, gait_source 'tuned_for_this_body::train_held', rate held, where it had
+    # said NO LOCOMOTION VERDICT before.
+    #
+    # ON A COPY. ``fit_gait_for_body`` writes onto the gene it is handed (``gait_params`` on adoption,
+    # ``gait_fit`` always) and ``session_state.get_robot`` hands back the LIVE held gene, so fitting it in place
+    # would change the customer's robot outside ``commit_robot``: no undo entry, nothing persisted, and a
+    # controller installed before its own verdict was read. The copy is fitted; the held robot changes only
+    # through ``apply_trained_gait`` below, with the same gate, modes and undo as before.
+    import time
+
+    from virturoid.schemas.gene import RobotGene
+    from virturoid.services import build_progress as P
     from virturoid.services.agent_tools import safe_build_path
-    from virturoid.services.gait_flywheel import learn_gait_flywheel
+    from virturoid.services.gait_flywheel import _SETTLE_STEPS, _budget_from_env, fit_gait_for_body
     from virturoid.services.memory_db import MemoryDB
-    max_evals = max(1, int(args.get("max_evals", 8)))
+    # THE TWO BUDGETS, re-read here because this worker is also called directly (``train_held`` validates them
+    # for the agent). ``max_evals`` WAS the candidate count of that 600-step search and defaulted to 8; it is now
+    # the cap on gait candidates for the WHOLE run (the warm pass, the cold re-run and every seed restart
+    # together), enforced through the same evaluation ledger as ``create_robot``'s ``gait_max_evals`` so a run it
+    # stops says it was stopped instead of reporting a decline. Omitted or 0 is the full search. ``budget_s``
+    # resolves exactly as ``create_robot``'s ``gait_budget_s`` does: omitted = ``VIRTUROID_GAIT_FIT_BUDGET_S`` or
+    # the fit's own ``_DEFAULT_FIT_BUDGET_S`` ceiling, 0 = unbounded.
+    _mev = args.get("max_evals")
+    cap = None if _mev is None else int(_mev)
+    cap = cap if (cap is not None and cap > 0) else None
+    budget = _budget_from_env(args.get("budget_s"))
+    seed = int(args.get("seed", 0))
+    work = RobotGene.from_dict(gene.to_dict())
+    say("search", ("fitting this body's own operating point with the per-body fit create_robot runs: every "
+                   f"candidate is judged over the {_SETTLE_STEPS}-step horizon a walk is judged at, with up to 3 "
+                   "decorrelated seed restarts, and the shipped default is measured first (nothing is searched if "
+                   "it already walks). Bounds: "
+                   + (f"{budget:.0f} s of search" if budget else "no time limit")
+                   + (f", at most {cap} gait evaluations" if cap else ", the full evaluation budget")
+                   + ". The held robot is untouched until the result is judged."))
     mem = safe_build_path(None, "memory")
     mem.mkdir(parents=True, exist_ok=True)
-    with MemoryDB(mem / "virturoid_memory.db") as db:
-        learned = learn_gait_flywheel(
-            gene, db, generations=max_evals, pop=min(8, max_evals), steps=600, deploy_steps=600,
-            seed=int(args.get("seed", 0)), workers=1, max_evals=max_evals, stop_on_credible=True,
-        )
-    # THREE DIFFERENT FACTS, THREE DIFFERENT NAMES. ``gait_flywheel`` reports them separately because they are
-    # not the same claim and this door had been collapsing them:
-    #   survived        the body was still up when the rollout stopped. The weakest fact a rollout produces.
-    #   credible_walk   THE CLAIM: ``classify()`` said CREDIBLE WALK, at a horizon a walk can be judged at (the
-    #                   flywheel re-runs the winner at the settling horizon when the deploy horizon — 600 here —
-    #                   is too short to settle, and ``credible_walk_reason`` is the sentence that justifies it).
-    #   beats_default   a BANK criterion: credible AND further than the free shipped default. It is a question
-    #                   about the shared corpus — whether this row should seed OTHER bodies' warm starts.
-    #
-    # MEASURED 2026-08-10 on a real Menagerie Unitree Go2 through ``agent_tools.call_tool``, this door returned
-    # all of this in ONE object::
-    #
-    #     credible: true    forward_m: 0.233    default_forward_m: 0.067    beats_default: false
-    #     reason: "...did not produce a credible walk (max_evals; survived=True, beats_default=False ...)"
-    #
-    # ``credible: true`` was ``survived`` wearing the wrong word, while the gate consulted the real verdict. The
-    # flywheel's actual answer for that run was ``CROUCH (low/unstable stance)`` — for the searched winner AND
-    # for the default. The refusal was RIGHT; only the boolean printed beside it was wrong, and it was wrong in
-    # the dangerous direction: an agent reading ``credible: true`` next to a refusal reaches for
-    # ``apply='always'``, so the payload was arguing for landing a crouch on a customer's Go2.
-    survived = bool(learned.get("survived"))
-    credible_walk = bool(learned.get("credible_walk"))
-    beats_default = bool(learned.get("beats_default"))
-    say("done", f"searched {learned['n_evals']} configs; credible walk={credible_walk} "
-                f"({learned.get('credible_walk_reason')}); beats the shipped default={beats_default}")
-    if learned.get("banked_skill"):
-        # SIGNED. ``forward_m`` is world-frame delta-x and it is signed at every producer, so ``abs`` scored a
-        # body that walked 0.5 m BACKWARD as a 1.0 success — the same unsigned-distance defect this pass fixed
-        # in the flywheel's own deploy-select. Latent here (banking already requires a credible walk, which
-        # requires forward >= 0.3) and written signed anyway, because latent is how it gets copied.
+    t_fit = time.monotonic()
+    # ``build_progress`` CARRIES BOTH BUDGETS INTO THE FIT, the way ``create_robot`` hands them down: the clock
+    # starts at the first real search (a body whose default already walks never starts it) and the evaluation
+    # ledger is shared by every seed attempt. The heartbeat turns the fit's own up-front cost statement and a
+    # periodic "still fitting" line into job events, so an agent polling get_job sees the clock move.
+    with MemoryDB(mem / "virturoid_memory.db") as db, \
+            P.build_progress("train_held", budget_s=budget, evals_budget=cap) as rep, \
+            _FitHeartbeat(rep, progress, budget=budget) as beat:
+        fit = fit_gait_for_body(work, db=db, bank=True, seed=seed)
+    # THE COOPERATIVE CANCEL POINT. A cancel requested mid-fit cannot stop the fit (it checks its budgets at
+    # evaluation boundaries, not a job flag), so it takes effect HERE, at the first emit after the fit returns
+    # and before anything is landed or written to the design flywheel. The worst-case delay is the fit's own
+    # ceiling, which is what ``budget_s`` is for.
+    beat.flush(say)
+    fit_s = round(time.monotonic() - t_fit, 1)
+    if not fit.get("ok", True):
+        # A CRASH IS AN ERROR, NOT A FINDING, and the job says so at the status level: ``error`` makes
+        # ``job_registry._terminal_status`` read FAILED, as the old search's exception did. ``fit_gait_for_body``
+        # turns an exception into ``ok=False`` precisely so it can never read as "searched, adopted nothing".
+        say("done", f"the per-body gait fit FAILED after {fit_s} s ({fit.get('error')}); nothing was measured")
+        return {"mode": "gait_search", "credible": False, "fit_s": fit_s, "fit": dict(fit),
+                "error": (f"the per-body gait fit crashed ({fit.get('error')}): this is an error, not a finding, "
+                          f"and the body was never measured"),
+                "applied_to_robot": _nothing_to_land(rid, apply_mode, "the per-body gait fit crashed, so no "
+                                                                      "operating point was ever measured")}
+    # THREE DIFFERENT FACTS, THREE DIFFERENT NAMES, still. The fit reports them separately and this door must not
+    # collapse them (it once printed ``survived`` under the word ``credible`` next to a refusal, which argued for
+    # ``apply='always'`` on a crouching Go2):
+    #   survived        the searched winner was still up when its rollout stopped. The weakest fact.
+    #   credible_walk   THE CLAIM: the fit ADOPTED an operating point, which it does only for a CREDIBLE WALK at
+    #                   the 6000-step horizon a walk is judged at, re-measured from the exact floats it stores.
+    #                   There is no shorter horizon to refute it at any more, so there is no settling check.
+    #   beats_default   a BANK criterion: credible and better than the free shipped default at that horizon.
+    adopted = bool(fit.get("adopted"))
+    searched = bool(fit.get("searched"))
+    survived = bool(fit.get("survived")) if searched else None
+    credible_walk = adopted
+    beats_default = bool(fit.get("beats_default"))
+    banked = fit.get("banked_skill")
+    horizon = int(fit.get("horizon_steps") or _SETTLE_STEPS)
+    # THE OPERATING POINT TO HAND OVER: the adopted one, else the search's own best (``searched_params``), so
+    # apply='never' still returns an artifact and apply='always' still lands it loudly. ``None`` only when
+    # nothing was searched at all, and then there is nothing to land in any mode.
+    params = (fit.get("params") if adopted else fit.get("searched_params")) or None
+    # THE FINAL MEASUREMENT OF THOSE PARAMETERS. When the fit re-measured the floats it would store (it does for
+    # every winner that beat the default), that rollout is the last word on them, adopted or not, the way the
+    # old door's settling check was; otherwise it is the winner's own rollout at the judging horizon.
+    _confirmed = fit.get("confirm_verdict") is not None
+    forward = fit.get("confirm_forward_m") if _confirmed else fit.get("forward_m")
+    default_walks = (not searched and not fit.get("skipped") and not fit.get("degenerate_search")
+                     and str(fit.get("default_verdict") or "").startswith("CREDIBLE"))
+    say("done", f"fit finished in {fit_s} s: " + (
+        f"searched {fit.get('n_evals')} gait candidates ({fit.get('n_rollouts')} physics rollouts) over "
+        f"{fit.get('seed_attempts')} seed attempt(s); credible walk at the {horizon}-step horizon={credible_walk}; "
+        f"beats the shipped default={beats_default}" if searched else
+        f"nothing searched, because the shipped default is already a {fit.get('default_verdict')} at the "
+        f"{horizon}-step horizon ({fit.get('default_forward_m')} m)" if default_walks else
+        "nothing searched (the reason follows)"))
+    if adopted and banked:
+        # SIGNED, and on the distance the walk was CONFIRMED at. ``forward_m`` is world-frame delta-x, signed at
+        # every producer, so ``abs`` would score a body that walked 0.5 m BACKWARD as a 1.0 success. Latent here
+        # (an adopted walk has forward >= 0.3 by construction) and written signed anyway, because latent is how
+        # it gets copied. The scale is unchanged (0.5 m reads as 1.0) and is now read at 6000 steps instead of
+        # 600, so a confirmed walk reads 0.6 or more and most saturate at 1.0: the row records "a walk was
+        # trained here", which is what ``succeeded`` (>= 0.5) has always meant for this door.
         _bank_to_flywheel(gene, prompt=f"[agent-trained] {gene.robot_class}", task="locomotion",
-                          success_rate=min(1.0, max(0.0, float(learned["forward_m"]) / 0.5)),
+                          success_rate=min(1.0, max(0.0, float(forward or 0.0) / 0.5)),
                           source="agent_trained")
-    # ...AND ONTO THE ROBOT. Banking the winner into the flywheel (above) made it available to the NEXT body and
-    # left THIS one untouched: the gene was byte-identical after a 15 s train_held on a real Go2, and the next
-    # verify_robot honestly reported it was still running ``flywheel_hint``. See ``trained_controller`` for the
-    # contract; ``door='train_held'`` is what the verdict's ``gait_source`` names afterwards.
-    from virturoid.services.trained_controller import apply_trained_gait
-    # WHAT THE GATE IS FOR: "is this a controller we can stand behind on this body?" — not "does it win a
-    # distance race?". ``apply_trained_gait``'s ``credible=`` is documented as "the training run's OWN
-    # un-gameable verdict", and its refusal sentence is worded for exactly that one question. This door was
-    # handing it ``survived and beats_default``, and both halves are the wrong question to answer with it:
-    #
-    #   * ``survived`` is not a walk. On the Go2 above it was True for a crouch.
-    #   * ``beats_default`` is a race against an alternative VERIFY RE-RUNS ANYWAY. ``ai_native_tools._honest_gait``
-    #     deploy-selects: it runs the shipped default alongside whatever is landed, keeps whichever is credible,
-    #     and (since a body with no op-point deploys the mined hint, not the default) puts that hint back in the
-    #     race too, disclosing the loser. Settling that race here protects nothing the customer is not already
-    #     protected from — while making it possible to print "did not produce a credible walk" about a credible
-    #     walk that merely came second, which is this defect again with the operands swapped. It is also measured
-    #     at ``deploy_steps`` = 600, the horizon ``trained_controller``'s docstring records an authored horse
-    #     "beating the default, 0.868 vs 0.471" at, right before it verified FELL at 6000.
-    #
-    # So the gate is ``credible_walk`` — confirmed at the horizon a walk is judged at — and nothing else, which
-    # makes the refusal sentence TRUE whenever it fires. ``beats_default`` stays what ``gait_flywheel`` uses it
-    # for (whether the row enters the shared bank) and is REPORTED either way, including the case where a
-    # credible walk lands that the default out-travelled: ``default_beat_it`` says so out loud rather than
-    # dressing it up as a run that failed.
+    # WHAT THE GATE IS FOR: "is this a controller we can stand behind on this body?", not "does it win a distance
+    # race?". The gate is ``credible_walk`` and nothing else, so the refusal sentence is TRUE whenever it fires.
+    # ``beats_default`` stays a bank criterion and is REPORTED either way; the fit only adopts a point that beats
+    # the default, so ``default_beat_it`` cannot fire on a real run, and the branch stays so that a change in the
+    # fit's adoption rule could never turn this door back into a distance race without saying so.
     landed_claim = credible_walk
     default_beat_it = credible_walk and not beats_default
-    # NAME THE VERDICT. This string is the ONLY thing ``apply_trained_gait`` quotes — into the auto-refusal
-    # ("did not produce a credible walk (<verdict>)") and into the ``apply='always'`` override ("landed an
-    # operating point whose own verdict was <verdict>") — and the verdict is the single most useful word in
-    # either sentence: it is what tells an engineer WHY, and whether to spend more budget or change the body.
-    # Written as ``credible_walk_reason`` alone it degraded to "did not produce a credible walk" with an EMPTY
-    # parenthetical the moment that one key was absent — and a door that can only be honest when every upstream
-    # field is present is a door that goes quiet exactly when something upstream is wrong.
-    #
-    # ``credible_walk_reason`` already embeds the ``classify()`` string on every branch that builds it, so the
-    # verdict is prepended only when the sentence does NOT already contain it: real runs read unchanged, and a
-    # degraded result still names a verdict instead of shrugging. ``stopped_reason`` is the last resort — it is
-    # not a verdict ("max_evals"), but "we stopped on max_evals" beats saying nothing at all.
-    #
-    # WHICH verdict: the one from the horizon the DECISION was made at. A winner refuted by the settling check
-    # carries TWO classify() strings — "CREDIBLE WALK" at 600 steps and "FELL by ROLL-OVER" at 6000 — and naming
-    # the 600-step one would print "did not produce a credible walk (CREDIBLE WALK)", which is this whole defect
-    # again one field over. ``settling_check['verdict']`` is the final word whenever one was taken.
-    _sc = learned.get("settling_check") or {}
-    _reason = str(learned.get("credible_walk_reason") or "").strip()
-    _named = (str(_sc.get("verdict") or "").strip() or str(learned.get("verdict") or "").strip()
-              or str(learned.get("stopped_reason") or "").strip())
+    # NAME THE VERDICT. This string is the ONLY thing ``apply_trained_gait`` quotes, into the auto-refusal ("did
+    # not produce a credible walk (<verdict>)") and into the apply='always' override, and the classify() word is
+    # what tells an engineer WHY. The fit's ``reason`` is the sentence (it names the horizon, the count and what
+    # stopped the search); its ``confirm_verdict`` / ``verdict`` is the word, prepended when the sentence does not
+    # already carry it so a degraded result still names something instead of printing an empty parenthetical.
+    # WHICH word: the confirm rollout's whenever one was taken, because that is the measurement the decision was
+    # made on. A winner the search scored CREDIBLE and the re-measurement refuted carries both strings, and
+    # quoting the first would print "did not produce a credible walk (CREDIBLE WALK)".
+    _named = str((fit.get("confirm_verdict") if _confirmed else fit.get("verdict")) or "").strip()
+    if not adopted and fit.get("stopped_by_eval_budget"):
+        # THIS DOOR'S KNOBS, NOT create_robot'S. The fit's own budget sentences tell the reader to raise
+        # ``gait_max_evals`` / ``gait_budget_s``, which are create_robot arguments; an agent here can only act on
+        # ``max_evals`` / ``budget_s``. Same rule as the fit's: a search a budget stopped is a search that did
+        # not finish, and it must never read as a finding about the body.
+        _reason = (f"THE SEARCH WAS STOPPED BY max_evals={cap}, not by an answer: it evaluated "
+                   f"{fit.get('n_evals')} gait candidates over {fit.get('seed_attempts')} seed attempt(s) at the "
+                   f"{horizon}-step horizon a walk is judged at and had not found one that beats the shipped "
+                   f"default. NOTHING HERE SAYS THIS BODY CANNOT WALK: the candidates past the cap were never "
+                   f"drawn. Re-run train_held with a larger max_evals, or omit it for the full search")
+    elif not adopted and fit.get("stopped_by_budget"):
+        _reason = (f"THE SEARCH WAS STOPPED BY THE {fit.get('budget_s') or budget or 0:.0f} s TIME BUDGET, not by "
+                   f"an answer: it evaluated {fit.get('n_evals')} gait candidates over "
+                   f"{fit.get('seed_attempts')} seed attempt(s) at the {horizon}-step horizon a walk is judged at "
+                   f"and had not found one that beats the shipped default. NOTHING HERE SAYS THIS BODY CANNOT "
+                   f"WALK: the rest of the search never ran. One rollout costs {fit.get('rollout_s')} s on this "
+                   f"body and the full search may need about {(fit.get('estimated_worst_case_s') or 0) / 60:.0f} "
+                   f"min, so re-run train_held with a larger budget_s, or 0 for unbounded")
+    else:
+        _reason = str(fit.get("reason") or "").strip()
     _verdict = _reason if (_named and _named in _reason) else "; ".join(x for x in (_named, _reason) if x)
-    _verdict = _verdict or "the search reported no verdict for its own winner"
+    _verdict = _verdict or "the fit reported no verdict for its own winner"
     if default_beat_it:
-        _verdict += (f" — but the shipped default measured further at the {learned.get('horizon_steps')}-step "
-                     f"horizon ({learned.get('default_forward_m')} m vs {learned.get('forward_m')} m), so this "
-                     f"point is NOT banked and verify's deploy-select may well report the default")
-    applied = apply_trained_gait(
-        rid, learned.get("params") or {}, door="train_held", apply=apply_mode,
-        credible=landed_claim, verdict=_verdict,
-        evidence={"forward_m": learned.get("forward_m"), "default_forward_m": learned.get("default_forward_m"),
-                  "credible_walk": credible_walk, "beats_default": beats_default,
-                  "judged_at_steps": learned.get("horizon_steps"), "settling_check": learned.get("settling_check"),
-                  "n_evals": learned.get("n_evals"), "robustness_rel": learned.get("robustness_rel"),
-                  "banked_gait": learned.get("banked_skill")})
-    say("apply", (f"committed to the held robot — verify_robot now reports "
+        _verdict += (f"; but the shipped default measured further at the {horizon}-step horizon "
+                     f"({fit.get('default_forward_m')} m vs {forward} m), so this point is NOT banked and "
+                     f"verify's deploy-select may well report the default")
+    from virturoid.services.trained_controller import apply_trained_gait
+    if params:
+        applied = apply_trained_gait(
+            rid, params, door="train_held", apply=apply_mode, credible=landed_claim, verdict=_verdict,
+            evidence={"forward_m": forward, "default_forward_m": fit.get("default_forward_m"),
+                      "credible_walk": credible_walk, "beats_default": beats_default,
+                      "judged_at_steps": horizon, "holds_rate": fit.get("holds_rate"),
+                      "n_evals": fit.get("n_evals"), "seed_attempts": fit.get("seed_attempts"),
+                      "robustness_rel": fit.get("robustness_rel"), "fragile": fit.get("fragile"),
+                      "robustness_note": fit.get("robustness_note"), "banked_gait": banked,
+                      "max_evals": cap, "budget_s": fit.get("budget_s"),
+                      "stopped_by_budget": fit.get("stopped_by_budget"),
+                      "stopped_by_eval_budget": fit.get("stopped_by_eval_budget")})
+    elif default_walks:
+        applied = _nothing_to_land(rid, apply_mode, (
+            f"the shipped default operating point is already a {fit.get('default_verdict')} on this body at the "
+            f"{horizon}-step horizon a walk is judged at ({fit.get('default_forward_m')} m), so the fit searched "
+            f"nothing and there is no trained controller to land. verify_robot already runs the shipped default "
+            f"beside whatever this robot carries and keeps the better walk"))
+    else:
+        applied = _nothing_to_land(rid, apply_mode, _verdict)
+    say("apply", (f"committed to the held robot: verify_robot now reports "
                   f"gait_source '{applied.get('gait_source_after')}'") if applied.get("applied")
         else f"NOT applied: {applied.get('reason')}")
-    # THE CONTROLLER THE ROBOT ENDS UP WITH, named — because "we refused to land ours" does not say what it is
-    # now running, and on the Go2 the answer was a gait that is not a walk either. Read off the held robot rather
-    # than inferred: ``applied`` reports the write, ``held_gait`` reports the state.
+    # THE CONTROLLER THE ROBOT ENDS UP WITH, named, because "we refused to land ours" does not say what it is now
+    # running. Read off the held robot rather than inferred: ``applied`` reports the write, ``held_gait`` the state.
     from virturoid.services.trained_controller import held_gait
     _held = held_gait(rid)
     _door_now = ((_held.get("provenance") or {}) if isinstance(_held.get("provenance"), dict) else {}).get("door")
-    _now = ("the shipped default, or this body's mined flywheel hint — verify_robot names which" if not
+    _now = ("the shipped default, or this body's mined flywheel hint (verify_robot names which)" if not
             _held.get("params") else
             f"tuned_for_this_body{f'::{_door_now}' if _door_now else ''}")
+    if banked:
+        _not_banked = None
+    elif not adopted:
+        _not_banked = ("the shipped default already walks, so nothing was searched or banked" if default_walks
+                       else "nothing was adopted, so nothing was banked")
+    elif fit.get("fragile"):
+        _not_banked = (f"the adopted operating point is FRAGILE ({fit.get('robustness_note')}); a bank of "
+                       f"controllers must not hold one lucky float, which a later body would recall as a warm start")
+    else:
+        _not_banked = "the fit adopted a sturdy credible walk and the bank returned no row for it"
     return {"mode": "gait_search",
-            # ``solved`` = the run produced a walk AND it is good enough to seed other bodies. It is the
-            # conjunction, so it can never be True while either half below is False.
-            "solved": credible_walk and beats_default,
+            # ``solved`` = the run produced a walk AND it entered the shared bank to seed other bodies. A
+            # conjunction on the row actually written, so it can never be True while either half is False.
+            "solved": credible_walk and bool(banked),
             "credible": credible_walk,                          # THE claim, and the only key allowed this word
-            "credible_reason": learned.get("credible_walk_reason"),
-            "survived": survived,                               # the weaker fact, no longer wearing the word
-            "verdict": learned.get("verdict"),                  # the classify() string for the searched winner
-            "judged_at_steps": learned.get("horizon_steps"),    # ...and the horizon it was judged at
-            "settling_check": learned.get("settling_check"),    # None = the horizon was already long enough
-            "n_evals": learned["n_evals"], "stopped_reason": learned["stopped_reason"],
-            "reused_prior": learned["reused_prior"], "banked_gait": learned["banked_skill"],
-            "not_banked_reason": learned.get("not_banked_reason"),
-            "default_forward_m": learned["default_forward_m"], "beats_default": beats_default,
-            "default_verdict": learned.get("default_verdict"),  # the default is not automatically a walk either
+            "credible_reason": _reason or None,                 # the fit's sentence (or this door's, for a budget)
+            "survived": survived,                               # the weaker fact; None when nothing was searched
+            "verdict": _named or None,                          # the classify() word for the winner it judged
+            "judged_at_steps": horizon,                         # ...and the horizon it was judged at
+            "settling_check": None,                             # nothing shorter to refute: it searched AT 6000
+            "n_evals": int(fit.get("n_evals") or 0), "stopped_reason": fit.get("stopped_reason"),
+            "reused_prior": fit.get("reused_prior"), "banked_gait": banked,
+            "not_banked_reason": _not_banked,
+            "default_forward_m": fit.get("default_forward_m"), "beats_default": beats_default,
+            "default_verdict": fit.get("default_verdict"),      # measured first; when it walks, nothing is searched
             "default_beat_it": default_beat_it,
-            "forward_m": learned["forward_m"], "applied_to_robot": applied,
+            "forward_m": forward, "applied_to_robot": applied,
             "controller_now": _now,
-            "best": {"params": learned["params"], "forward_m": learned["forward_m"],
-                     "height_ratio": learned["height_ratio"]}}
+            # WHAT THE RUN COST AND WHAT BOUNDED IT, so an agent can size the next call from a number rather than
+            # a guess: wall time, the cap and clock in force (None = unbounded), and the fit's whole disclosure.
+            "fit_s": fit_s, "max_evals": cap, "budget_s": budget,
+            "fit": dict(fit),
+            "best": {"params": params, "forward_m": forward, "height_ratio": fit.get("height_ratio")}}
+
+
+def _nothing_to_land(rid: str, apply_mode: str, why: str) -> dict:
+    """The ``applied_to_robot`` report for a run that produced NO operating point to hand over at all.
+
+    Same shape as ``trained_controller.apply_trained_gait``'s report, because ``job_registry._terminal_status``
+    and every agent reading the job key off ``applied`` / ``apply_mode`` / ``reason``. It is built here rather
+    than by calling ``apply_trained_gait`` with nothing: that would answer "nothing to apply: gait params must be
+    an object carrying freq, ...", a sentence about a malformed input, when the truth is about the run (the
+    default already walks, the leg crawl never drives this body, every probe collapsed, the fit crashed). There
+    is no ``apply_with`` route either, since there are no parameters to force onto the robot.
+    """
+    from virturoid.services.trained_controller import held_gait
+    return {"applied": False, "robot_id": str(rid), "door": "train_held", "apply_mode": str(apply_mode),
+            "params": None, "previous_params": held_gait(rid)["params"] or None, "undo": None,
+            "reason": f"nothing to land: {why}"}
+
+
+#: Seconds between "still fitting" job events. Same cadence as ``build_progress``'s console heartbeat: short
+#: enough that an agent polling get_job never waits long enough to doubt, long enough that a three-minute fit is
+#: a dozen events rather than hundreds.
+_TRAIN_HEARTBEAT_S = 15.0
+
+
+class _FitHeartbeat:
+    """Job events while ``fit_gait_for_body`` runs, from a daemon thread, without touching the fit.
+
+    A LONG CALL THAT PRINTS NOTHING IS INDISTINGUISHABLE FROM A HANG (``build_progress``'s own first line), and
+    the per-body fit takes as long as the body needs, up to its ceiling. Two kinds of event:
+
+    * the fit's OWN notes (``build_progress.say``), forwarded as soon as they appear. The one that matters is
+      the up-front cost statement, "one 6000-step rollout costs X s here, and the search may run up to N of
+      them", which is measured on THIS body and is what lets an agent decide whether to wait;
+    * every ``_TRAIN_HEARTBEAT_S``, a "still fitting" line with the time spent and what is left of the clock.
+
+    It never raises into the fit. ``job_registry``'s progress callback raises ``JobCancelled`` when a cancel is
+    pending, and that exception on THIS thread would only kill the heartbeat, while inside the fit it would be
+    swallowed by the fit's own crash handler and reported as a failed fit. So the thread stops talking and the
+    worker meets the cancel at its next emit (``flush`` / the "done" event), before anything lands.
+    """
+
+    def __init__(self, rep, progress, *, budget: float | None, every: float | None = None,
+                 poll: float = 1.0) -> None:
+        import threading
+
+        self.rep, self.progress, self.budget = rep, progress, budget
+        # READ AT CONSTRUCTION, not bound as a default argument, so the module constant is the one knob.
+        self.every = float(_TRAIN_HEARTBEAT_S if every is None else every)
+        self.poll = float(poll)
+        self.sent = 0
+        self._stop = threading.Event()
+        self._thread = (threading.Thread(target=self._run, daemon=True, name="train_held-heartbeat")
+                        if progress is not None else None)
+        self._t0 = 0.0
+
+    def __enter__(self):
+        import time
+
+        self._t0 = time.monotonic()
+        if self._thread is not None:
+            self._thread.start()
+        return self
+
+    def __exit__(self, *exc) -> bool:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=30)
+        return False
+
+    def _emit(self, msg: str) -> bool:
+        try:
+            self.progress({"stage": "search", "message": msg})
+            return True
+        except Exception:  # noqa: BLE001 - a pending cancel (JobCancelled) or a dead job: stop, never fail the fit
+            return False
+
+    def _run(self) -> None:
+        import time
+
+        next_beat = self._t0 + self.every
+        while not self._stop.wait(self.poll):
+            notes = list(self.rep.notes)
+            while self.sent < len(notes):
+                if not self._emit(notes[self.sent]):
+                    return
+                self.sent += 1
+            now = time.monotonic()
+            if now >= next_beat:
+                next_beat = now + self.every
+                if not self._emit(self._status(now)):
+                    return
+
+    def _status(self, now: float) -> str:
+        line = f"still fitting: {now - self._t0:.0f} s so far"
+        deadline = getattr(self.rep, "deadline", None)
+        if deadline is not None:
+            line += f", about {max(0.0, deadline - now):.0f} s of the {self.budget:.0f} s search budget left"
+        elif self.budget:
+            line += f"; the {self.budget:.0f} s search budget starts with the first searched candidate"
+        else:
+            line += "; no time limit, the search runs until its evaluation budget is spent"
+        spent = int(getattr(self.rep, "evals_spent", 0) or 0)
+        if spent:
+            line += f"; {spent} gait evaluations charged by finished seed attempts"
+        return line
+
+    def flush(self, say) -> None:
+        """Forward any note the thread had not sent yet, on the WORKER's thread, where a cancel may surface."""
+        notes = list(self.rep.notes)
+        for msg in notes[self.sent:]:
+            say("search", msg)
+        self.sent = len(notes)
 
 
 def _land_gpu_policy(rid: str, gene, npz: str | None, *, apply: str, say) -> dict:
@@ -1356,21 +1603,41 @@ AGENT_DESIGN_TOOLS: dict[str, dict] = {
                      "handler": export_isaac, "parameters": {"type": "object", "required": ["robot_id"],
                      "properties": {"robot_id": {"type": "string"},
                                     "robot_name": {"type": "string", "description": "name for the generated cfg/files"}}}},
+    # THE DESCRIPTION IS ALL A CONNECTED AGENT SEES, so it says what the run now IS and what bounds it. Before
+    # 2026-10-10 'gait_search' was a 600-step quick search that could not certify a walk slower than 0.25 m/s at
+    # any budget (the Menagerie Go2 walks at ~0.13 m/s), and an agent that raised max_evals from 8 to 96 bought
+    # 96 configs and the same LURCHES; nothing in this text could have told it why.
     "train_held": {"description": "Optimize/train a controller for the HELD robot; returns a job_id (poll "
-                   "get_job). mode 'gait_search'(CPU, default) or 'gpu_rl'(MJX PPO when the box is up). The "
-                   "result LANDS: the searched controller is committed to the held robot when the run's own "
-                   "un-gameable verdict is a credible walk, so the next verify_robot measures what you trained "
-                   "and reports gait_source 'tuned_for_this_body::train_held' (gpu_rl banks a policy instead, "
-                   "gait_source 'learned_policy'). Undo with edit_robot op:'undo'; apply:'never' for a dry run. "
-                   "The job result's applied_to_robot says whether it landed and why, and the job finishes "
-                   "'no_output' rather than 'succeeded' when nothing landed.", "heavy": False,
+                   "get_job). mode 'gait_search' (CPU, default) runs the same per-body gait fit create_robot "
+                   "uses: every candidate is judged over the 6000-step horizon a walk is judged at, with up to "
+                   "3 decorrelated seed restarts, and nothing is searched when the shipped default already walks "
+                   "or the body is not driven by a leg gait (an arm, a wheeled base, a limbless spine); 'gpu_rl' "
+                   "is MJX PPO when the box is up. The fit takes as long as the body needs, bounded by budget_s "
+                   "(seconds of search, default 180, 0 = unbounded) and optionally max_evals (gait candidates for "
+                   "the whole run, the bound that stops at the same candidate on any machine); a run a bound "
+                   "stopped says so and is never reported as a finding about the body. get_job events state the "
+                   "measured cost of one rollout on this body up front and tick while it runs. The result LANDS: "
+                   "the fitted controller is committed to the held robot when the run's own un-gameable verdict "
+                   "is a credible walk, so the next verify_robot measures what you trained and reports "
+                   "gait_source 'tuned_for_this_body::train_held' (gpu_rl banks a policy instead, gait_source "
+                   "'learned_policy'). Undo with edit_robot op:'undo'; apply:'never' for a dry run. The job "
+                   "result's applied_to_robot says whether it landed and why, and the job finishes 'no_output' "
+                   "rather than 'succeeded' when nothing landed.", "heavy": False,
                    "handler": train_held, "parameters": {"type": "object", "required": ["robot_id"], "properties": {
-                       "robot_id": {"type": "string"}, "mode": {"type": "string"}, "max_evals": {"type": "integer"},
+                       "robot_id": {"type": "string"}, "mode": {"type": "string"},
+                       "max_evals": {"type": "integer", "minimum": 0,
+                                     "description": "cap on gait candidates for the WHOLE run, every seed restart "
+                                                    "together. The reproducible bound: the same cap stops the "
+                                                    "same search at the same candidate on any machine. Omit it "
+                                                    "(or 0) for the full search. A run the cap stops reports "
+                                                    "stopped_by_eval_budget and says the search did not finish; "
+                                                    "it is never a verdict that the body cannot walk"},
                        "apply": {"type": "string", "enum": ["auto", "always", "never"], "default": "auto",
-                                 "description": "'auto' commits the trained controller when this run produced a "
-                                                "credible walk that beat the default; 'never' returns it as an "
-                                                "artifact and touches nothing; 'always' commits it regardless "
-                                                "and reports the verdict it overrode"}}}},
+                                 "description": "'auto' commits the trained controller when this run's own "
+                                                "verdict is a credible walk at the 6000-step judging horizon; "
+                                                "'never' returns it as an artifact and touches nothing; "
+                                                "'always' commits it regardless and reports the verdict it "
+                                                "overrode"}}}},
     "list_skills": {"description": "The general TASK vocabulary: skills you can sequence + the predicate ops a "
                     "goal scores. Call before run_task/submit_task. No args.", "heavy": False,
                     "handler": list_skills, "parameters": {"type": "object", "properties": {}}},

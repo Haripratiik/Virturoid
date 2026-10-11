@@ -298,65 +298,79 @@ def test_train_reward_rejects_a_bad_reward_before_running_any_physics(held_dog):
 # So the tests below go through ``call_tool`` and the JOB, not through ``apply_trained_gait``: a test that
 # called the write side directly passed at HEAD while the product discarded the result.
 
-#: A canned ``learn_gait_flywheel`` result for a run that GENUINELY PASSES the gate — the shape of a body that
-#: walked. Every field the door reads is present and mutually consistent, which is not decoration:
+#: A canned ``gait_flywheel.fit_gait_for_body`` disclosure for a run that GENUINELY PASSES the gate: the shape of
+#: a body that walked. Every field the door reads is present and mutually consistent, which is not decoration:
 #:
-#: ON 2026-08-10 THIS DICT WENT STALE AND TOOK TWO TESTS WITH IT. ``train_held``'s gate moved from ``survived and
-#: beats_default`` to ``credible_walk`` (survived is not a walk — measured True for a CROUCH on a real Go2), the
-#: canned result was never taught the new key, ``learned.get("credible_walk")`` read None, and the two tests
-#: NAMED for the commit and the undo started passing through the refusal branch. They asserted nothing: both
-#: would have gone green against a ``train_held`` that could not commit at all. A stub that answers fewer
-#: questions than the door asks does not fail — it silently changes which branch is under test, which is why
-#: ``test_the_canned_flywheel_result_answers_every_question_the_door_asks`` now holds it to the door's reads.
-_LEARNED = {"params": dict(_GOOD), "forward_m": 1.4, "default_forward_m": 0.2, "beats_default": True,
-            "survived": True, "n_evals": 2, "stopped_reason": "credible_walk", "reused_prior": False,
-            "banked_skill": None, "height_ratio": 0.9, "robustness_rel": 0.2,
-            # THE GATE, and the sentence that justifies it. ``credible`` is classify() at the 600-step horizon
-            # train_held searches over; ``credible_walk`` is that verdict CONFIRMED at the 6000-step horizon a
-            # walk is judged at, which is what may be landed on a customer's robot.
-            "credible": True, "verdict": "CREDIBLE WALK", "credible_walk": True,
-            "credible_walk_reason": "CREDIBLE WALK at 6000 steps (1.4 m)",
-            "horizon_steps": 600,
-            "settling_check": {"steps": 6000, "credible": True, "survived": True, "forward_m": 1.4,
-                               "verdict": "CREDIBLE WALK", "judged_at": 600},
-            "default_verdict": "CROUCH (low/unstable stance)", "not_banked_reason": None}
+#: ON 2026-08-10 THE CANNED RESULT WENT STALE AND TOOK TWO TESTS WITH IT. ``train_held``'s gate moved from
+#: ``survived and beats_default`` to ``credible_walk`` (survived is not a walk: measured True for a CROUCH on a
+#: real Go2), the canned result was never taught the new key, the door read None, and the two tests NAMED for the
+#: commit and the undo started passing through the refusal branch. They asserted nothing: both would have gone
+#: green against a ``train_held`` that could not commit at all. A stub that answers fewer questions than the door
+#: asks does not fail, it silently changes which branch is under test, which is why
+#: ``test_the_canned_flywheel_result_answers_every_question_the_door_asks`` holds it to the door's reads.
+#:
+#: WHY IT IS A FIT AND NO LONGER A ``learn_gait_flywheel`` RESULT (2026-10-10). The door used to call
+#: ``learn_gait_flywheel`` itself, at a 600-step search-and-deploy horizon where nothing slower than 0.25 m/s can
+#: be certified (the Menagerie Go2 walks at ~0.13 m/s, and measured through MCP it ended LURCHES at max_evals 8
+#: and 96 alike). It now runs ``fit_gait_for_body``, the per-body fit ``create_robot`` uses, so that is the seam
+#: these tests stub; stubbing the inner search would leave the fit's real 6000-step default probe and
+#: re-measurement running on the fixture body, and the subject here is where the result GOES. The gate is
+#: ``adopted``: the fit adopts only a CREDIBLE WALK at the 6000-step judging horizon, re-measured from the exact
+#: floats it stores (``confirm_*``), so there is no shorter horizon left to refute it at.
+_FIT = {"ok": True, "searched": True, "adopted": True, "params": dict(_GOOD), "searched_params": dict(_GOOD),
+        "forward_m": 1.4, "confirm_forward_m": 1.4, "confirm_verdict": "CREDIBLE WALK", "verdict": "CREDIBLE WALK",
+        "credible": True, "survived": True, "beats_default": True, "holds_rate": True, "height_ratio": 0.9,
+        "default_forward_m": 0.2, "default_verdict": "CROUCH (low/unstable stance)",
+        "n_evals": 2, "n_rollouts": 9, "seed_attempts": 1, "stopped_reason": "credible_walk",
+        "reused_prior": False, "banked_skill": None, "robustness_rel": 0.1, "fragile": False,
+        "robustness_note": "survives a 0.1 relative perturbation of all 5 parameters at once (4/4 probes)",
+        "horizon_steps": 6000, "budget_s": None, "rollout_s": 0.7, "estimated_worst_case_s": 252.0,
+        "stopped_by_budget": False, "stopped_by_eval_budget": False, "skipped": False,
+        "degenerate_search": False, "error": None,
+        "reason": ("searched 2 gaits (9 physics rollouts) for this body over 1 seed attempt(s); adopted one that "
+                   "is still walking at step 6000 (1.4 m, rate +0.25 -> +0.23 m/1000 steps) vs the default's "
+                   "0.2 m")}
 
-#: The same result for the run MEASURED 2026-08-10 on the real Menagerie Go2 through ``call_tool`` (ingested from
-#: ``mujoco_menagerie/unitree_go2``, ``max_evals=4``): the body was still up at 600 steps and it was not walking.
-#: ``survived`` True beside ``credible_walk`` False is the exact pair the old gate collapsed into one word.
-_CROUCHED = {"survived": True, "credible": False, "credible_walk": False, "beats_default": False,
-             "forward_m": 0.141, "default_forward_m": 0.067, "stopped_reason": "max_evals",
-             "verdict": "CROUCH (low/unstable stance)", "settling_check": None,
-             "credible_walk_reason": "CROUCH (low/unstable stance) — the winning operating point survived its "
-                                     "600-step rollout but is not a walk (0.141 m)"}
+#: A search that ran and adopted nothing, carrying the verdict of the run MEASURED 2026-08-10 on the real
+#: Menagerie Go2 through ``call_tool`` (the old 600-step door, ``max_evals=4``): the body was still up and it was
+#: not walking. ``survived`` True beside an adopted-nothing fit is the exact pair the old gate collapsed into one
+#: word. Every key the adopted fit above sets and a decline does not is cleared, so nothing leaks from it.
+_CROUCHED = {"adopted": False, "params": None, "searched_params": dict(_GOOD), "survived": True,
+             "credible": False, "beats_default": False, "forward_m": 0.141, "default_forward_m": 0.067,
+             "confirm_forward_m": None, "confirm_verdict": None, "holds_rate": None, "robustness_rel": None,
+             "fragile": None, "robustness_note": None, "stopped_reason": "max_evals", "n_evals": 360,
+             "seed_attempts": 3, "verdict": "CROUCH (low/unstable stance)",
+             "reason": ("searched 360 gaits (412 physics rollouts) for this body over 3 seed attempt(s); none "
+                        "was still walking at the 6000-step horizon (the deepest rollout reached step 6000 of "
+                        "6000)")}
 
 
-def _stub_flywheel(monkeypatch, tmp_path, **over):
-    """Replace the physics search with a canned result: the SUBJECT is where the result goes, not the search."""
-    learned = {**_LEARNED, **over}
-    monkeypatch.setattr("virturoid.services.gait_flywheel.learn_gait_flywheel",
-                        lambda *a, **k: dict(learned))
+def _stub_fit(monkeypatch, tmp_path, **over):
+    """Replace the per-body fit with a canned disclosure: the SUBJECT is where the result goes, not the search."""
+    fit = {**_FIT, **over}
+    monkeypatch.setattr("virturoid.services.gait_flywheel.fit_gait_for_body", lambda *a, **k: dict(fit))
     monkeypatch.setattr("virturoid.services.agent_tools.safe_build_path", lambda *a, **k: tmp_path)
-    return learned
+    return fit
 
 
 def test_the_canned_flywheel_result_answers_every_question_the_door_asks():
     """The guard on the stub itself, because the stub going stale is how two commit tests went hollow.
 
-    ``run_train_gene_job`` reads the search result by name. A key it reads that the canned result does not carry
-    comes back None — no error, no skip, just a different branch under test — so every ``learned[...]`` and
-    ``learned.get(...)`` in the door must be answerable here. Derived from the door's SOURCE so it cannot drift
-    back out of date the next time the gate moves.
+    ``run_train_gene_job`` reads the fit's disclosure by name. A key it reads that the canned result does not
+    carry comes back None (no error, no skip, just a different branch under test), so every ``fit[...]`` and
+    ``fit.get(...)`` in the door must be answerable here. Derived from the door's SOURCE so it cannot drift back
+    out of date the next time the gate moves. (It read ``learned`` until the door stopped running its own
+    600-step search and started running the product's fit; the variable, and so the regex, followed it.)
     """
     import inspect
     import re
     from virturoid.services.agent_design_tools import run_train_gene_job
     src = inspect.getsource(run_train_gene_job)
-    asked = set(re.findall(r"""learned(?:\.get\(|\[)["']([a-z_]+)["']""", src))
-    assert asked, "the door reads the search result by name; this regex found none of those reads"
-    missing = sorted(asked - set(_LEARNED))
-    assert not missing, (f"the canned flywheel result cannot answer {missing}, which train_held reads — every "
-                         f"test using it silently tests whatever branch None selects")
+    asked = set(re.findall(r"""\bfit(?:\.get\(|\[)["']([a-z_]+)["']""", src))
+    assert asked, "the door reads the fit's disclosure by name; this regex found none of those reads"
+    missing = sorted(asked - set(_FIT))
+    assert not missing, (f"the canned fit result cannot answer {missing}, which train_held reads: every test "
+                         f"using it silently tests whatever branch None selects")
 
 
 def _await_job(job_id: str, timeout: float = 60.0) -> dict:
@@ -382,7 +396,7 @@ def test_train_held_commits_its_controller_to_the_held_robot(held_dog, tmp_path,
     """
     from virturoid.services import session_state as S
     from virturoid.services.agent_tools import call_tool
-    _stub_flywheel(monkeypatch, tmp_path)
+    _stub_fit(monkeypatch, tmp_path)
     before = dict((getattr(S.get_robot(held_dog), "metadata", None) or {}).get("gait_params") or {})
     env = call_tool("train_held", {"robot_id": held_dog, "max_evals": 2})
     assert env["ok"], env
@@ -402,7 +416,7 @@ def test_train_held_commits_its_controller_to_the_held_robot(held_dog, tmp_path,
 def test_train_held_is_an_edit_so_undo_gives_the_previous_controller_back(held_dog, tmp_path, monkeypatch):
     from virturoid.services import session_state as S
     from virturoid.services.agent_tools import call_tool
-    _stub_flywheel(monkeypatch, tmp_path)
+    _stub_fit(monkeypatch, tmp_path)
     view = _await_job(call_tool("train_held", {"robot_id": held_dog})["result"]["job_id"])
     # Same guard: an undo test on a run that never applied is an undo test with nothing to undo.
     assert view["result"]["applied_to_robot"]["applied"] is True, view["result"]["applied_to_robot"]
@@ -417,13 +431,13 @@ def test_a_train_held_run_that_changed_nothing_does_not_finish_succeeded(held_do
     non-credible run keeps the old controller (correct) — and must SAY so at the job level, where the engineer
     was reading a green chip.
 
-    The canned result is the REAL Go2 measurement: ``survived`` True, ``credible_walk`` False, a CROUCH. Written
+    The canned result carries the REAL Go2 verdict: ``survived`` True, nothing adopted, a CROUCH. Written
     with ``survived=False`` it could not have caught the defect it was closest to — the two facts had been
     collapsed into one word, and the collapse is only visible when they DISAGREE.
     """
     from virturoid.services import session_state as S
     from virturoid.services.agent_tools import call_tool
-    _stub_flywheel(monkeypatch, tmp_path, **_CROUCHED)
+    _stub_fit(monkeypatch, tmp_path, **_CROUCHED)
     view = _await_job(call_tool("train_held", {"robot_id": held_dog})["result"]["job_id"])
     rep = view["result"]["applied_to_robot"]
     assert view["result"]["survived"] is True                 # the weak fact...
@@ -438,10 +452,11 @@ def test_a_train_held_run_that_changed_nothing_does_not_finish_succeeded(held_do
 def test_train_held_honours_never_and_always_like_every_other_door(held_dog, tmp_path, monkeypatch):
     from virturoid.services import session_state as S
     from virturoid.services.agent_tools import call_tool
-    _stub_flywheel(monkeypatch, tmp_path, **{**_CROUCHED, "verdict": "FELL by ROLL-OVER (roll 139 deg)",
-                                             "credible_walk_reason": "the winning operating point did not "
-                                             "survive its own 600-step rollout (FELL by ROLL-OVER (roll 139 "
-                                             "deg))", "survived": False})
+    _stub_fit(monkeypatch, tmp_path, **{**_CROUCHED, "verdict": "FELL by ROLL-OVER (roll 139 deg)",
+                                        "reason": "searched 360 gaits (380 physics rollouts) for this body over 3 "
+                                                  "seed attempt(s); none was still walking at the 6000-step "
+                                                  "horizon (the deepest rollout reached step 2114 of 6000)",
+                                        "survived": False})
     dry = _await_job(call_tool("train_held", {"robot_id": held_dog, "apply": "never"})["result"]["job_id"])
     assert dry["result"]["applied_to_robot"]["params"] == _GOOD
     assert dry["status"] == "succeeded", "apply='never' asked for an artifact and got one — that is a success"
@@ -464,10 +479,14 @@ def test_a_run_that_survived_and_beat_the_default_but_is_not_a_walk_still_does_n
     shuffled further than a shipped default which also is not a walk — so the old rule would have committed it
     to the customer's robot while printing a verdict that says CROUCH. Nothing else in the file covers this:
     every other refusal case fails ``survived`` too, so they pass under either rule.
+
+    The door now reads the gate off the product's fit (``adopted``: a CREDIBLE WALK at the 6000-step judging
+    horizon, re-measured), and the case survives the move as a disclosure that says ``beats_default`` beside an
+    adoption that did not happen. Whatever the fit says about the race, only the walk may land.
     """
     from virturoid.services import session_state as S
     from virturoid.services.agent_tools import call_tool
-    _stub_flywheel(monkeypatch, tmp_path, **{**_CROUCHED, "beats_default": True})
+    _stub_fit(monkeypatch, tmp_path, **{**_CROUCHED, "beats_default": True})
     view = _await_job(call_tool("train_held", {"robot_id": held_dog})["result"]["job_id"])
     rep = view["result"]["applied_to_robot"]
     assert view["result"]["survived"] is True and view["result"]["beats_default"] is True
@@ -487,14 +506,21 @@ def test_a_credible_walk_that_lost_the_distance_race_still_lands_and_says_so(hel
     re-runs the shipped default (and this body's mined hint) against whatever is landed and keeps the credible
     winner, so refusing at this door protects nothing the customer is not already protected from, while making
     the refusal sentence false. The run now lands, and the race is DISCLOSED rather than dressed up as a failure.
+
+    A REAL RUN CANNOT REACH THIS STATE ANY MORE, and the test is kept for what it pins rather than for how often
+    it fires. Since 2026-10-10 the door runs the product's per-body fit, which measures the shipped default
+    first and searches nothing when it already walks, and adopts only a point that beats it. So "a credible walk
+    that came second" is unreachable through ``fit_gait_for_body`` today; what this holds is that the DOOR's
+    gate is still the walk and never the race, so a change in the fit's adoption rule could not quietly turn it
+    back into one.
     """
     from virturoid.services import session_state as S
     from virturoid.services.agent_tools import call_tool
-    _stub_flywheel(monkeypatch, tmp_path, beats_default=False, forward_m=0.369, default_forward_m=0.471,
-                   default_verdict="CREDIBLE WALK",
-                   credible_walk_reason="CREDIBLE WALK at 6000 steps (0.369 m)",
-                   settling_check={"steps": 6000, "credible": True, "survived": True, "forward_m": 0.369,
-                                   "verdict": "CREDIBLE WALK", "judged_at": 600})
+    _stub_fit(monkeypatch, tmp_path, beats_default=False, forward_m=0.369, confirm_forward_m=0.369,
+              default_forward_m=0.471, default_verdict="CREDIBLE WALK",
+              reason=("searched 40 gaits (52 physics rollouts) for this body over 1 seed attempt(s); adopted one "
+                      "that is still walking at step 6000 (0.369 m, rate +0.06 -> +0.06 m/1000 steps) vs the "
+                      "default's 0.471 m"))
     view = _await_job(call_tool("train_held", {"robot_id": held_dog})["result"]["job_id"])
     r, rep = view["result"], view["result"]["applied_to_robot"]
     assert r["credible"] is True and r["beats_default"] is False
@@ -509,25 +535,27 @@ def test_a_credible_walk_that_lost_the_distance_race_still_lands_and_says_so(hel
 
 @pytest.mark.skipif(not _MUJOCO, reason="composing a body needs MuJoCo")
 def test_a_refusal_names_the_verdict_from_the_horizon_it_was_judged_at(held_dog, tmp_path, monkeypatch):
-    """A winner refuted by the settling check carries TWO classify() strings, and quoting the wrong one prints
+    """A winner refuted by a later rollout carries TWO classify() strings, and quoting the wrong one prints
     "did not produce a credible walk (CREDIBLE WALK)".
 
-    MEASURED on the real Go2: the same operating point reads ``CREDIBLE WALK, +0.233 m`` at 600 steps and
-    ``FELL by ROLL-OVER, -0.279 m`` at 6000 — the sign of the headline number flips. The refusal has to quote the
-    6000-step verdict, because that is the horizon the decision was taken at.
+    MEASURED on the real Go2 through the old 600-step door: the same operating point read ``CREDIBLE WALK,
+    +0.233 m`` at 600 steps and ``FELL by ROLL-OVER, -0.279 m`` at 6000, the sign of the headline number flipping.
+    That door's two horizons are gone (since 2026-10-10 it runs the product's fit, which searches AT 6000), but
+    the shape survives one step later: the fit re-measures the exact floats it would store, and a winner the
+    search scored credible that the re-measurement refutes carries both strings again. The refusal has to quote
+    the re-measurement, because that is the rollout the decision was taken on.
     """
     from virturoid.services.agent_tools import call_tool
-    _stub_flywheel(monkeypatch, tmp_path, survived=True, credible=True, credible_walk=False,
-                   beats_default=True, verdict="CREDIBLE WALK", forward_m=0.233,
-                   settling_check={"steps": 6000, "credible": False, "survived": False, "forward_m": -0.279,
-                                   "verdict": "FELL by ROLL-OVER (roll 139 / pitch 82 deg)", "judged_at": 600},
-                   credible_walk_reason="FELL by ROLL-OVER (roll 139 / pitch 82 deg) at the 6000-step horizon a "
-                                        "walk is judged at (-0.279 m) — it read credible only at the 600-step "
-                                        "horizon it was searched over (0.233 m)")
+    _stub_fit(monkeypatch, tmp_path, adopted=False, params=None, survived=True, credible=True,
+              beats_default=True, verdict="CREDIBLE WALK", forward_m=0.233,
+              confirm_verdict="FELL by ROLL-OVER (roll 139 / pitch 82 deg)", confirm_forward_m=-0.279,
+              reason="searched 64 gaits; the winner did not reproduce as a credible walk when re-measured from "
+                     "the stored parameters (FELL by ROLL-OVER (roll 139 / pitch 82 deg)), not adopted")
     view = _await_job(call_tool("train_held", {"robot_id": held_dog})["result"]["job_id"])
     said = view["result"]["applied_to_robot"]["reason"]
     assert "FELL by ROLL-OVER" in said, said
-    assert "(CREDIBLE WALK)" not in said, "the 600-step verdict is not the verdict this refusal was taken on"
+    assert "(CREDIBLE WALK)" not in said, "the search's score is not the verdict this refusal was taken on"
+    assert view["result"]["forward_m"] == -0.279, "the headline distance is the re-measurement's, sign and all"
 
 
 @pytest.mark.skipif(not _MUJOCO, reason="composing a body needs MuJoCo")
@@ -536,14 +564,14 @@ def test_a_refusal_never_degrades_to_a_verdict_free_sentence(held_dog, tmp_path,
     wrong and the engineer most needs the verdict. Written as ``credible_walk_reason`` alone it rendered "did not
     produce a credible walk ()" against any result that did not carry that one key."""
     from virturoid.services.agent_tools import call_tool
-    _stub_flywheel(monkeypatch, tmp_path, survived=True, credible_walk=False, beats_default=False,
-                   settling_check=None, credible_walk_reason=None, verdict="CROUCH (low/unstable stance)")
+    _stub_fit(monkeypatch, tmp_path, **{**_CROUCHED, "survived": True, "beats_default": False, "reason": None,
+                                        "verdict": "CROUCH (low/unstable stance)"})
     said = _await_job(call_tool("train_held", {"robot_id": held_dog})["result"]["job_id"]
                       )["result"]["applied_to_robot"]["reason"]
     assert "CROUCH" in said and "()" not in said, said
     # ...and with no verdict reported AT ALL, it says so instead of printing an empty parenthetical.
-    _stub_flywheel(monkeypatch, tmp_path, survived=False, credible_walk=False, beats_default=False,
-                   settling_check=None, credible_walk_reason=None, verdict=None, stopped_reason=None)
+    _stub_fit(monkeypatch, tmp_path, **{**_CROUCHED, "survived": False, "beats_default": False, "reason": None,
+                                        "verdict": None, "stopped_reason": None})
     said = _await_job(call_tool("train_held", {"robot_id": held_dog})["result"]["job_id"]
                       )["result"]["applied_to_robot"]["reason"]
     assert "no verdict" in said and "()" not in said, said

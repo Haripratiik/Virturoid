@@ -157,7 +157,17 @@ class HeldChainTests(unittest.TestCase):
             self.assertFalse(applied["applied"])
             self.assertTrue(applied.get("reason"),
                             f"a no_output job must say why it landed nothing: {applied}")
-            self.assertEqual(applied["apply_with"]["tool"], "apply_gait")
+            # ...WHEN THERE IS SOMETHING TO FORCE. Since 2026-10-10 the door runs the product's per-body
+            # fit, which measures the shipped default first and searches nothing when it already walks,
+            # and THIS body is such a body: the schema's quadruped example measures CREDIBLE WALK +7.246 m
+            # on the shipped default at the 6000-step judging horizon. There are then no parameters, so
+            # there is no apply_gait call to hand back, and the reason has to say why instead. The
+            # unconditional route this asserted held only because the old 600-step door searched whatever
+            # it was handed, a body that already walked included.
+            if applied.get("params"):
+                self.assertEqual(applied["apply_with"]["tool"], "apply_gait")
+            else:
+                self.assertIn("nothing to land", applied["reason"])
 
 
 @unittest.skipUnless(_MUJOCO, "needs MuJoCo")

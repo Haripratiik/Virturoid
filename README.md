@@ -423,7 +423,10 @@ multi-root models whose editable twin was silently broken — and three of them 
 product then re-measured the untrained one. Every training door (`train_held`, `train_reward`, `learn_gait`,
 `adapt_gait`, `apply_gait`, `adopt_control_script`) now lands its result — gated on the run's own un-gameable
 verdict, disclosed when it declines, and undoable. A job that produced nothing reports `no_output` rather than
-`succeeded`.
+`succeeded`. `train_held` runs the build path's own per-body fit, judged over the same 6000 steps a walk is
+judged at: through MCP, an ingested Go2 trained this way carries a credible walk (+1.542 m). The old door
+judged every candidate over 600 steps, which can certify only a walk faster than 0.25 m/s, and found none at
+8 or 96 evaluations.
 
 **Amending keeps what you brought.** Adding a limb adds that limb's mass and nothing else
 (`n_existing_links_remassed: 0`), mounts where the request says, and names any finding it refuses on.

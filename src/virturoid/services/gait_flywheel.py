@@ -1526,9 +1526,9 @@ def fit_gait_for_body(gene, *, deploy_steps: int = _SETTLE_STEPS, search_steps: 
         _P.say(f"fitting an operating point to this body: one {deploy_steps}-step rollout costs {_t_roll:.1f}s "
                f"here, and the search may run up to {(warm_evals + max_evals) * attempts} of them "
                f"(~{_worst / 60:.0f} min)"
-               + (f", capped at {budget:.0f}s by the build budget" if budget is not None
-                  else " — UNBOUNDED (no build budget set)")
-               + (f"; and at {_evb} evaluations for the whole build"
+               + (f", capped at {budget:.0f}s by the search budget" if budget is not None
+                  else ", UNBOUNDED (no search budget set)")
+               + (f"; and at {_evb} evaluations for the whole run"
                   if getattr(_build, "evals_budget", None) else ""))
         out["estimated_worst_case_s"] = round(_worst, 1)
         attempts_run = 0
@@ -1586,6 +1586,21 @@ def fit_gait_for_body(gene, *, deploy_steps: int = _SETTLE_STEPS, search_steps: 
                                                 "search_robust_frac", "search_robust_rel")})
         out["n_evals"] = n_evals
         out["n_rollouts"] = n_rollouts
+        # THE SEARCH'S OWN WINNER, NAMED WHETHER OR NOT IT IS ADOPTED. ``params`` (below) is written only on
+        # adoption, because it is the controller this body now CARRIES. A caller that fits a COPY of a held
+        # robot (``train_held``, through ``agent_design_tools.run_train_gene_job``) owes its agent the apply
+        # contract every training door shares: apply='never' hands back the searched operating point as an
+        # artifact and apply='always' lands it with the verdict it overrode, and neither is possible from a
+        # disclosure that keeps the winner's numbers to itself. ``verdict`` is the winner's ``classify()`` string
+        # at the judging horizon, the one word that says WHY a search declined (measured through ``train_held`` on
+        # a composed "a quadruped robot dog" that this fit declined after 328 candidates: FELL by ROLL-OVER).
+        # Reported, never deployed: nothing that builds or verifies a robot reads either key, and
+        # ``searched_params`` holds the exact floats the search measured, rounding being what flipped the
+        # grounded authored cat from CREDIBLE WALK to ROLL-OVER (see the next comment).
+        out["verdict"] = learned.get("verdict")
+        out["height_ratio"] = learned.get("height_ratio")
+        _won = learned.get("params") or {}
+        out["searched_params"] = {k: float(_won[k]) for k in _FIT_PARAMS if k in _won} or None
         if learned.get("beats_default"):
             # STORE WHAT WAS VERIFIED. This used to round to 4 decimals on the way into the cache, so the body
             # deployed a controller the fitter had never measured. MEASURED 2026-08-01 on the grounded authored
@@ -1643,7 +1658,7 @@ def fit_gait_for_body(gene, *, deploy_steps: int = _SETTLE_STEPS, search_steps: 
                              f"{out.get('seed_attempts')} seed attempt(s); adopted one that is still walking at "
                              f"step {deploy_steps} ({out['confirm_forward_m']} m, rate {_rate_str(confirm)}) vs "
                              f"the default's {out['default_forward_m']} m; it {_rob}"
-                             + (" — and the search was cut short by the build budget, so a longer one may find "
+                             + ("; and the search was cut short by its budget, so a longer one may find "
                                 "a better point (this one is verified either way)"
                                 if out.get("stopped_by_budget") or out.get("stopped_by_eval_budget") else ""))
         else:

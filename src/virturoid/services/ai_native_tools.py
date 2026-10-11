@@ -2529,9 +2529,14 @@ def _reframe_for_imported_body(res: dict, gene, kind: str) -> None:
                "dimensions, limits) — but neither deploys it: we cannot read the observation layout, joint "
                "order or action convention off the file, so re-verifying afterwards still measures OUR "
                "controller. Their `deployment` block names what to do instead"},
+        # train_held's CPU mode is the product's full per-body fit since 2026-10-10 (measured on an imported
+        # Menagerie Go2, a body this route is printed for: CREDIBLE WALK +1.542 m at 6000 steps, landed, after
+        # about a minute of fitting), so it leads; adapt_gait is the short warm-started search and says so.
         {"if": "you want US to produce one for this body",
-         "do": "adapt_gait fits an operating point to this specific gene, and train_held learns a policy on it. "
-               "Either makes the verdict a claim about a controller measured on YOUR robot"},
+         "do": "train_held fits an operating point to this specific gene with the per-body fit the build path "
+               "uses, judged over the 6000-step horizon (mode 'gpu_rl' learns a policy instead), and "
+               "adapt_gait runs a shorter fit warm-started from the corpus's mined hints. Either makes the "
+               "verdict a claim about a controller measured on YOUR robot"},
         {"if": "you only need the structural facts",
          "do": "probe_robot (mass / torque margins / clearance / self-collision through the joint ranges) and "
                "render_view(view='collision') — none of those need a controller at all"},
